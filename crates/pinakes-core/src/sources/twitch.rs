@@ -206,7 +206,9 @@ impl Source for Twitch {
     }
     /// A video's title is its creator's own text, as a TikTok's or a reel's is.
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "VideoObject" || crate::changes::gone_post_type(doc)
+        // A video, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "VideoObject" | "Person")
+            || crate::changes::gone_post_type(doc)
     }
     fn e2e(&self) -> Option<super::E2e> {
         use super::{E2e, E2eAnswer, E2eSample};
@@ -271,12 +273,28 @@ impl Source for Twitch {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a Twitch link")?;
         let doc = cx.card(uri, self);
+        // A clip's page is the site's shell to a request without a browser, so it is never
+        // asked: the card is the link's (its root, its shape and the channel it spells).
+        if let Target::Clip { channel, .. } = &target {
+            let mut doc = Shape::Video.card(doc, SITE);
+            social::fact(&mut doc, "author", channel.clone());
+            doc.source_root = Some(target.root());
+            return Ok(doc);
+        }
         let mut doc = match social::page(cx, &target.root()).await? {
-            Page::Read { doc: page, .. } => match &target {
-                Target::Channel(login) => channel_card(doc.clone(), login, &page)
-                    .unwrap_or_else(|| social::shape_only(plain_channel(doc, login))),
-                _ => video_card(doc, &target, &page),
-            },
+            Page::Read { doc: page, url } => {
+                // Only the object's own page names it: a fetch that ended at another address
+                // read another page.
+                let own = Target::of_uri(url.as_str()).as_ref() == Some(&target);
+                match &target {
+                    Target::Channel(login) => own
+                        .then_some(&page)
+                        .and_then(|page| channel_card(doc.clone(), login, page))
+                        .unwrap_or_else(|| social::shape_only(plain_channel(doc, login))),
+                    _ if own => video_card(doc, &target, &page),
+                    _ => social::shape_only(Shape::Video.card(doc, SITE)),
+                }
+            }
             Page::Missing => cx.missing(uri, self),
             Page::Blocked => social::blocked(doc, target.shape(), SITE),
         };
@@ -414,15 +432,15 @@ mod tests {
         assert_eq!(doc.source_root.as_deref(), Some(channel));
     }
 
-    /// A video's card quotes its creator (social, purged when the video goes); a channel's is
-    /// the channel's.
+    /// A video's card quotes its creator, and a channel's its bio: both are social content
+    /// (purged when gone).
     #[test]
-    fn videos_are_social_content() {
+    fn videos_and_channels_are_social_content() {
         let mut doc = ResourceMeta::new("https://www.twitch.tv/videos/1", "twitch", 60);
         doc.set_type("VideoObject");
         assert!(Twitch.social(&doc));
         doc.set_type("Person");
-        assert!(!Twitch.social(&doc));
+        assert!(Twitch.social(&doc));
     }
 
     #[test]

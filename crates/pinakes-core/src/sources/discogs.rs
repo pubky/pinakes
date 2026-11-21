@@ -68,29 +68,42 @@ pub fn credential(config: &crate::config::Config) -> Option<Credential> {
 
 /// Discogs' record of one object, `None` when it has none, and whether the credential was used.
 /// A record whose `id` is not the one asked for is an error.
-/// The answer is shared for an hour, so the card and the also-on lookup ask once. A credential
-/// Discogs refuses (401, 403: expired, revoked or mistyped) is dropped, with one warning: that
-/// request is asked again without it, and later ones go without it from the start, so cards
-/// still work without images.
+/// The answer is shared for an hour, so the card and the also-on lookup ask once. A request
+/// Discogs answers 401 or 403 with the credential is asked again without it; when that answer is
+/// the record (or its 404), the credential was what Discogs refused (expired, revoked or
+/// mistyped): it is dropped for an hour (`Refusals`), with one warning, and requests go without
+/// it meanwhile, so cards still work without images. A 401 or 403 the request gets without the
+/// credential too is no refusal of it.
 pub async fn record(
     egress: &Egress,
     kind: Kind,
     id: u64,
     credential: Option<&Credential>,
 ) -> Result<(Option<Value>, bool)> {
-    let header = credential.map(Credential::header).filter(|h| !refused(h));
+    record_with(egress, kind, id, credential, &REFUSALS).await
+}
+async fn record_with(
+    egress: &Egress,
+    kind: Kind,
+    id: u64,
+    credential: Option<&Credential>,
+    refusals: &super::Refusals,
+) -> Result<(Option<Value>, bool)> {
+    let header = credential
+        .filter(|_| !refusals.latched())
+        .map(Credential::header);
     let mut f = fetch(egress, kind, id, header.as_deref()).await?;
     let mut authenticated = header.is_some();
-    if let (Some(header), 401 | 403) = (header.as_deref(), f.status) {
-        super::token_refused("discogs");
-        if refuse(header) {
-            tracing::warn!(
-                status = f.status,
-                "Discogs refused the configured credential; reading without it (no images)"
-            );
-        }
+    if let (Some(_), 401 | 403) = (header.as_deref(), f.status) {
+        let status = f.status;
         f = fetch(egress, kind, id, None).await?;
         authenticated = false;
+        if matches!(f.status, 200 | 404) && refusals.refused() {
+            tracing::warn!(
+                status,
+                "Discogs refused the configured credential; reading without it (no images) for an hour"
+            );
+        }
     }
     match f.status {
         200 => {
@@ -110,25 +123,8 @@ pub async fn record(
         status => anyhow::bail!("Discogs answered {status}"),
     }
 }
-/// The credentials Discogs has refused since the daemon started, by the hash of their header
-/// (never the credential itself).
-static REFUSED: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
-fn refused(header: &str) -> bool {
-    let hash = *blake3::hash(header.as_bytes()).as_bytes();
-    REFUSED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(&hash)
-}
-/// Remember a refused credential; true the first time.
-fn refuse(header: &str) -> bool {
-    let hash = *blake3::hash(header.as_bytes()).as_bytes();
-    let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
-    !refused.contains(&hash) && {
-        refused.push(hash);
-        true
-    }
-}
+/// Discogs' refusals of the configured credential.
+static REFUSALS: super::Refusals = super::Refusals::new("discogs");
 async fn fetch(
     egress: &Egress,
     kind: Kind,
@@ -654,14 +650,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(!format!("{error:?}").contains("s3cret"), "{error:?}");
-        // The refusal is counted where an alert reads it (`REFUSING` keeps the other refusing
-        // test out of the count); a rate limit is not.
-        assert_eq!(refusals(), before + 1);
+        // A 403 the request gets without the token too (a wall in front of the API) is no
+        // refusal of the token (`REFUSING` keeps the other refusing test out of the count); a
+        // rate limit is none either.
+        assert_eq!(refusals(), before);
         let other = Credential::Token("other-token".into());
         assert!(record(&egress, Kind::Artist, 2, Some(&other))
             .await
             .is_err());
-        assert_eq!(refusals(), before + 1);
+        assert_eq!(refusals(), before);
         // Refused with the token, then without it.
         assert_eq!(
             recorded.asked(),
@@ -818,7 +815,8 @@ mod tests {
         );
     }
 
-    /// A token Discogs refuses (expired, mistyped) is dropped: the record comes without it.
+    /// A token Discogs refuses (expired, mistyped) is dropped for an hour: the record comes
+    /// without it, it is not sent meanwhile, and it is sent again after the hour.
     #[tokio::test(start_paused = true)]
     async fn a_refused_token_falls_back_to_reading_without_it() {
         let _refusing = REFUSING.lock().await;
@@ -877,16 +875,26 @@ mod tests {
             api.clone(),
         );
         let expired = Credential::Token("expired".into());
-        let (master, authenticated) = record(&egress, Kind::Master, 21491, Some(&expired))
-            .await
-            .unwrap();
+        let latch = crate::sources::Refusals::new("discogs");
+        let (master, authenticated) =
+            record_with(&egress, Kind::Master, 21491, Some(&expired), &latch)
+                .await
+                .unwrap();
         assert_eq!(master.unwrap()["title"], "OK Computer");
         assert!(!authenticated);
-        // Once refused, the token is not sent again.
-        let (_, authenticated) = record(&egress, Kind::Master, 21492, Some(&expired))
+        assert!(latch.latched());
+        // Once refused, the token is not sent for an hour.
+        tokio::time::advance(std::time::Duration::from_secs(3599)).await;
+        let (_, authenticated) = record_with(&egress, Kind::Master, 21492, Some(&expired), &latch)
             .await
             .unwrap();
         assert!(!authenticated);
         assert_eq!(api.authorized.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // After the hour it is sent again.
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        record_with(&egress, Kind::Master, 21493, Some(&expired), &latch)
+            .await
+            .unwrap();
+        assert_eq!(api.authorized.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }

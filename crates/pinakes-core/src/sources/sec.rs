@@ -485,82 +485,15 @@ fn cik_of(value: &str) -> Option<u64> {
     cik(value)
 }
 
-/// The Federal Register's documents filed under a docket, by release number.
-pub fn docket_url(release: &str) -> String {
-    format!(
-        "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bdocket_id%5D={release}\
-         &fields%5B%5D=document_number&fields%5B%5D=docket_ids&per_page=20"
-    )
-}
-/// The one Federal Register document whose docket ids name `Release No. {release}` exactly.
-/// The search matches loosely, so every result is checked; a release number is unique.
-pub fn docket_document(body: &[u8], release: &str) -> Result<Option<String>> {
-    let v: Value = serde_json::from_slice(body)?;
-    let wanted = format!("release no. {release}");
-    let named = |d: &Value| {
-        d["docket_ids"].as_array().is_some_and(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .any(|id| id.trim().eq_ignore_ascii_case(&wanted))
-        })
-    };
-    let mut numbers: Vec<String> = v["results"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|d| named(d))
-        .filter_map(|d| document_number(d["document_number"].as_str()?))
-        .collect();
-    numbers.sort();
-    numbers.dedup();
-    Ok(match numbers.as_slice() {
-        [one] => Some(one.clone()),
-        _ => None,
-    })
-}
-
-/// A Federal Register document number (`2026-18291`, `E9-12345`, `R1-2026-00123`), in upper
-/// case: the identifier `fr:{number}` names the document.
-fn document_number(value: &str) -> Option<String> {
-    let value = value.trim().to_ascii_uppercase();
-    let parts: Vec<&str> = value.split('-').collect();
-    let ok = (2..=3).contains(&parts.len())
-        && !parts[0].is_empty()
-        && parts[0].len() <= 4
-        && parts[0].bytes().all(|b| b.is_ascii_alphanumeric())
-        && parts[1..]
-            .iter()
-            .all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit()));
-    ok.then_some(value)
-}
-
-/// The card of an SRO release, from the card of the Federal Register document that publishes it
-/// (`document`, its number and card), else a plain release card.
-pub fn release_card(
-    mut doc: ResourceMeta,
-    release: &str,
-    file: &str,
-    document: Option<(String, ResourceMeta)>,
-) -> ResourceMeta {
-    let number = document.as_ref().map(|(n, _)| n.clone());
-    match document {
-        Some((_, document)) => {
-            doc.set_type(&document.type_name);
-            doc.name = document.name;
-            doc.description = document.description;
-            doc.attributes.extend(document.attributes);
-        }
-        None => {
-            doc.set_type("Report");
-            doc.name = Some(format!("Release No. {release}"));
-        }
-    }
+/// The card of an SRO release, from its link alone: a `Report` named by its release number. The
+/// Federal Register document that publishes it joins it through that source's also-on half,
+/// which finds it by its docket id.
+pub fn release_card(mut doc: ResourceMeta, release: &str, file: &str) -> ResourceMeta {
+    doc.set_type("Report");
+    doc.name = Some(format!("Release No. {release}"));
     doc.site = "www.sec.gov".into();
     doc.attributes.insert("release".into(), release.into());
     doc.attributes.insert("document".into(), file.into());
-    if let Some(number) = number {
-        doc.attributes.insert("federal_register".into(), number);
-    }
     doc
 }
 
@@ -641,18 +574,6 @@ impl Source for Sec {
             "state_of_incorporation",
             "lei",
             "release",
-            "federal_register",
-            // A release's card carries its Federal Register document's facts.
-            "document_type",
-            "agencies",
-            "citation",
-            "publication_date",
-            "docket_ids",
-            "regulation_id_numbers",
-            "comments_close_on",
-            "effective_on",
-            "cfr_references",
-            "page_count",
         ]
     }
     fn budgets(&self) -> &'static [Budget] {
@@ -676,25 +597,15 @@ impl Source for Sec {
             },
             Example {
                 uri: "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf",
-                card_type: "Legislation",
+                card_type: "Report",
             },
         ]
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not an EDGAR link")?;
-        // A release is read from the Federal Register: nothing is asked of EDGAR.
+        // A release's card is its link's: nothing is asked (its PDF is never fetched).
         if let Target::Release { release, file } = &target {
-            let json = FetchOptions::json();
-            let f = cx.fetch(&docket_url(release), &json).await?;
-            anyhow::ensure!(f.status == 200, "Federal Register answered {}", f.status);
-            // The document's card from whichever switched-on source reads `fr:` documents.
-            let document = match docket_document(&f.body, release)? {
-                Some(number) => super::card_of(cx, &format!("fr:{number}"))
-                    .await?
-                    .map(|card| (number, card)),
-                None => None,
-            };
-            return Ok(release_card(cx.card(uri, self), release, file, document));
+            return Ok(release_card(cx.card(uri, self), release, file));
         }
         // EDGAR refuses requests whose User-Agent has no email address: wait for one.
         if cx.contact().is_none() {
@@ -1005,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn sro_releases_join_their_federal_register_document() {
+    fn an_sro_release_is_a_report_of_its_own() {
         let uri = "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf";
         assert_eq!(
             Target::of_uri(uri),
@@ -1026,31 +937,13 @@ mod tests {
         ] {
             assert_eq!(Target::of_uri(bad), None, "{bad}");
         }
-        let found = read("fr-docket-34-106268.json");
-        assert_eq!(
-            docket_document(&found, "34-106268").unwrap().as_deref(),
-            Some("2026-18291")
-        );
-        // The search matches loosely; only an exact `Release No.` docket id counts.
-        assert_eq!(docket_document(&found, "34-10626").unwrap(), None);
-        let none = read("fr-docket-34-999999.json");
-        assert_eq!(docket_document(&none, "34-999999").unwrap(), None);
-        // The document's card, as a source reading `fr:` documents makes it.
-        let mut fr = ResourceMeta::new("fr:2026-18291", "federal_register", 3600);
-        fr.set_type("Legislation");
-        fr.name = Some("Self-Regulatory Organizations; Nasdaq Texas, LLC".into());
-        fr.attributes
-            .insert("citation".into(), "91 FR 57392".into());
-        let document = Some(("2026-18291".to_owned(), fr));
-        let doc = release_card(base(uri), "34-106268", "34-106268.pdf", document);
-        assert_eq!(doc.type_name, "Legislation");
-        assert_eq!(doc.site, "www.sec.gov");
-        assert_eq!(doc.attributes["federal_register"], "2026-18291");
-        assert_eq!(doc.attributes["citation"], "91 FR 57392");
-        assert_eq!(doc.attributes["release"], "34-106268");
-        let doc = release_card(base(uri), "34-106268", "34-106268.pdf", None);
+        // Always a `Report` of its own, whatever the Federal Register publishes.
+        let doc = release_card(base(uri), "34-106268", "34-106268.pdf");
         assert_eq!(doc.type_name, "Report");
+        assert_eq!(doc.site, "www.sec.gov");
         assert_eq!(doc.name.as_deref(), Some("Release No. 34-106268"));
+        assert_eq!(doc.attributes["release"], "34-106268");
+        assert!(!doc.attributes.contains_key("federal_register"));
     }
 
     /// A release is its own address: it has no root, and no empty one.
@@ -1079,19 +972,11 @@ mod tests {
         assert!(header.starts_with("https://www.sec.gov/"), "{header}");
     }
 
-    /// A release is read from the Federal Register: its link does not wait for a contact, and
-    /// nothing is asked of EDGAR.
+    /// A release's card is its link's: its link does not wait for a contact, and nothing is
+    /// asked of EDGAR or the Federal Register.
     #[tokio::test(start_paused = true)]
     async fn a_release_does_not_wait_for_a_contact() {
-        let docket = url::Url::parse(&docket_url("34-999999"))
-            .unwrap()
-            .to_string();
-        let (egress, recorded) = crate::sources::fixture::egress(vec![(
-            docket.as_str(),
-            200,
-            "application/json",
-            read("fr-docket-34-999999.json"),
-        )]);
+        let (egress, recorded) = crate::sources::fixture::egress(vec![]);
         assert_eq!(egress.contact(), None);
         let cx = Context {
             egress: &egress,
@@ -1106,7 +991,8 @@ mod tests {
             .unwrap();
         assert_eq!(doc.status, crate::model::Status::Ok);
         assert_eq!(doc.name.as_deref(), Some("Release No. 34-999999"));
-        assert_eq!(recorded.asked(), [docket]);
+        assert_eq!(doc.type_name, "Report");
+        assert!(recorded.asked().is_empty());
     }
 
     #[tokio::test]

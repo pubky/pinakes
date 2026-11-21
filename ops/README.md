@@ -102,13 +102,14 @@ the share answered 429; both need twenty requests in five minutes.
 `source`: the key is mistyped, expired, revoked or its account lost access (Spotify answers 403
 while the app owner has no Premium plan). Check or rotate that provider's key
 ([api-keys](../docs/api-keys.md)); keys are read only at start, so a new key needs a restart.
-Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster keep asking with the key, so their alert
-holds while lookups keep being refused and clears six hours after the last refusal (a provider
-that takes a key back, a one-off refusal, or no lookup for that provider in six hours). A refusal
-before Prometheus first scrapes a new target is its starting value, so the alert shows only at
-the next refusal. GitHub, CourtListener and Discogs stop sending a refused key
-until restart (the first two then give their links web cards), so theirs holds until a restart
-resets the count.
+Spotify, TIDAL, TMDB, Ticketmaster and the podcasts also-on lookups keep asking with the key;
+GitHub, CourtListener, Discogs and the Podcast Index card source stop sending a refused key for
+an hour (GitHub's, CourtListener's and Podcast Index's links get web cards meanwhile, Discogs
+reads without it) and then send it again. So every
+provider's alert holds while its key keeps being refused and clears six hours after the last
+refusal (a provider that takes a key back, a one-off refusal, or no lookup for that provider in
+six hours). A refusal before Prometheus first scrapes a new target is its starting value, so the
+alert shows only at the next refusal.
 
 Run `scripts/check-ops`: it runs the test that parses the rules and the dashboard and checks
 every metric they name, and every fetch outcome a rule matches, against an initialized registry,

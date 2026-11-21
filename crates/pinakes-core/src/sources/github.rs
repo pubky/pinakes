@@ -2,14 +2,14 @@
 //! operator's token (`[sources.github] token`, or `PINAKES_GITHUB_TOKEN`). Without a token the
 //! source is off and repository links get ordinary web cards. The token goes only to
 //! `api.github.com`, never through a redirect, and never appears in logs, errors or cards. A token
-//! GitHub refuses (401) turns the source off until the daemon restarts: the links get web cards
-//! again, and `pinakes_source_token_refusals_total{source="github"}` counts it.
+//! GitHub refuses (401, or a 403 saying "Bad credentials") turns the source off for an hour
+//! (`Refusals`): the links get web cards meanwhile, and
+//! `pinakes_source_token_refusals_total{source="github"}` counts it.
 use super::{list, text, web_url, Budget, Context, Declined, Example, Source};
 use crate::{model::ResourceMeta, resolver::egress::FetchOptions};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Github;
 
@@ -17,8 +17,8 @@ const API: &str = "https://api.github.com";
 
 use super::kit::GITHUB_RESERVED as RESERVED;
 
-/// Whether GitHub has refused the configured token since the daemon started.
-static REFUSED: AtomicBool = AtomicBool::new(false);
+/// GitHub's refusals of the configured token.
+static REFUSALS: super::Refusals = super::Refusals::new("github");
 
 fn owner_name(value: &str) -> bool {
     (1..=39).contains(&value.len())
@@ -59,7 +59,7 @@ pub enum Answer {
     Card(Box<ResourceMeta>),
     /// A repository the token reads but the public cannot: no public object.
     Missing,
-    /// The token was refused (401): read without it.
+    /// The token was refused (401, or a 403 saying "Bad credentials").
     Refused,
     /// Moved or renamed (a redirect, not followed with the token): its web card follows it.
     Moved,
@@ -81,6 +81,8 @@ fn options(token: &str) -> FetchOptions {
         // An error answer keeps its JSON body: a 403's `message` says whether it is the rate
         // limit. A 429 comes as it is, for `read` to class.
         error_json: true,
+        // A refusal belongs to the token sent, not to the URL: never replayed from the cache.
+        uncached: &[401],
         ..Default::default()
     }
 }
@@ -89,12 +91,21 @@ fn options(token: &str) -> FetchOptions {
 /// exceeded for …", "You have exceeded a secondary rate limit. …", "… an abuse detection
 /// mechanism …"). Any other 403, and one with no message to read, is no wait.
 fn rate_limit(body: &[u8]) -> bool {
+    message_names(body, &["rate limit", "abuse detection"])
+}
+
+/// Whether an error answer's JSON `message` says the token itself is bad ("Bad credentials").
+fn bad_credentials(body: &[u8]) -> bool {
+    message_names(body, &["bad credentials"])
+}
+
+fn message_names(body: &[u8], words: &[&str]) -> bool {
     serde_json::from_slice::<Value>(body)
         .ok()
         .and_then(|v| text(&v["message"]))
         .is_some_and(|message| {
             let message = message.to_ascii_lowercase();
-            message.contains("rate limit") || message.contains("abuse detection")
+            words.iter().any(|w| message.contains(w))
         })
 }
 
@@ -138,6 +149,7 @@ pub async fn read(
         // GitHub's rate limit (the token's quota) answers 429, or 403 with a message that names it.
         429 => wait("quota"),
         403 if rate_limit(&f.body) => wait("quota"),
+        403 if bad_credentials(&f.body) => Ok(Answer::Refused),
         403 => Err(Declined.into()),
         408 | 500..=599 => wait("upstream"),
         status => anyhow::bail!("GitHub answered {status}"),
@@ -238,23 +250,35 @@ impl Source for Github {
     }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let (owner, repo) = repository(uri).context("not a GitHub repository")?;
-        let Some(token) = super::token(self.name()).filter(|_| !REFUSED.load(Ordering::Relaxed))
-        else {
+        let Some(token) = super::token(self.name()) else {
             return Err(Declined.into());
         };
-        match read(cx, cx.card(uri, self), &owner, &repo, &token).await? {
-            Answer::Card(doc) => Ok(*doc),
-            Answer::Missing => Ok(cx.missing(uri, self)),
-            Answer::Moved => Err(Declined.into()),
-            Answer::Refused => {
-                super::token_refused(self.name());
-                if !REFUSED.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        "GitHub refused the configured token; GitHub links get web cards until restart"
-                    );
-                }
-                Err(Declined.into())
+        resolve_with(cx, uri, &owner, &repo, &token, &REFUSALS).await
+    }
+}
+
+/// The card of repository `owner/repo` at `uri` with `token`, `Declined` while `refusals` holds
+/// the token off.
+async fn resolve_with(
+    cx: &Context<'_>,
+    uri: &str,
+    owner: &str,
+    repo: &str,
+    token: &str,
+    refusals: &super::Refusals,
+) -> Result<ResourceMeta> {
+    refusals.check()?;
+    match read(cx, cx.card(uri, &Github), owner, repo, token).await? {
+        Answer::Card(doc) => Ok(*doc),
+        Answer::Missing => Ok(cx.missing(uri, &Github)),
+        Answer::Moved => Err(Declined.into()),
+        Answer::Refused => {
+            if refusals.refused() {
+                tracing::warn!(
+                    "GitHub refused the configured token; GitHub links get web cards for an hour"
+                );
             }
+            Err(Declined.into())
         }
     }
 }
@@ -421,6 +445,12 @@ mod tests {
                 ("/repos/down/repo", _) => (503, b"{}".to_vec(), None),
                 // A 403 with no message to read.
                 ("/repos/mute/repo", _) => (403, b"{}".to_vec(), None),
+                // A 403 that says the token itself is bad.
+                ("/repos/bad/credentials", _) => (
+                    403,
+                    br#"{"message":"Bad credentials","documentation_url":"https://docs.github.com/rest"}"#.to_vec(),
+                    None,
+                ),
                 _ => (404, fixture::read("github", "repo-missing.json"), None),
             };
             Ok(crate::resolver::egress::Fetched {
@@ -673,6 +703,7 @@ mod tests {
                 Switch {
                     enabled: true,
                     token: Some("github_pat_x".into()),
+                    key: None,
                 },
             )]
             .into(),
@@ -693,10 +724,97 @@ mod tests {
                 Switch {
                     enabled: true,
                     token: Some("x".into()),
+                    key: None,
                 },
             )]
             .into(),
         );
         assert!(other.validate().is_err());
+    }
+
+    /// A 401, or a 403 saying "Bad credentials", switches the token off for an hour: links are
+    /// declined (web cards) and nothing is asked meanwhile; after the hour it is sent again.
+    /// Another 403 (access to one repository blocked) declines that link alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_token_is_off_for_an_hour() {
+        let api = std::sync::Arc::new(Api {
+            seen: Default::default(),
+        });
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            std::sync::Arc::new(fixture::PublicDns),
+            api.clone(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let declined = |r: Result<ResourceMeta>| r.is_err_and(|e| e.is::<Declined>());
+        let ripgrep = "https://github.com/BurntSushi/ripgrep";
+        let refusals = crate::sources::Refusals::new("github");
+        assert!(declined(
+            resolve_with(
+                &cx,
+                "https://github.com/blocked/repo",
+                "blocked",
+                "repo",
+                "good-token",
+                &refusals
+            )
+            .await
+        ));
+        assert!(!refusals.latched());
+        assert!(declined(
+            resolve_with(
+                &cx,
+                "https://github.com/bad/credentials",
+                "bad",
+                "credentials",
+                "good-token",
+                &refusals
+            )
+            .await
+        ));
+        assert!(refusals.latched());
+        let asked = api.seen.lock().unwrap().len();
+        tokio::time::advance(std::time::Duration::from_secs(3599)).await;
+        assert!(declined(
+            resolve_with(
+                &cx,
+                ripgrep,
+                "BurntSushi",
+                "ripgrep",
+                "good-token",
+                &refusals
+            )
+            .await
+        ));
+        assert_eq!(api.seen.lock().unwrap().len(), asked);
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        let doc = resolve_with(
+            &cx,
+            ripgrep,
+            "BurntSushi",
+            "ripgrep",
+            "good-token",
+            &refusals,
+        )
+        .await
+        .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        // A 401 latches too.
+        let refusals = crate::sources::Refusals::new("github");
+        assert!(declined(
+            resolve_with(
+                &cx,
+                ripgrep,
+                "BurntSushi",
+                "ripgrep",
+                "stale-token",
+                &refusals
+            )
+            .await
+        ));
+        assert!(refusals.latched());
     }
 }

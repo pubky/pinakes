@@ -273,6 +273,8 @@ pub enum ItemBy<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeedRead {
     pub guid: Option<String>,
+    /// The channel's `<link>`: the page the feed names as the show's.
+    pub channel_link: Option<String>,
     /// The wanted item's `<link>`, when it is that item's own page (`episodes::own_page`): a
     /// page several items link, the channel's own link or a site's root is the show's, never
     /// one episode's.
@@ -355,6 +357,7 @@ pub fn read_feed(body: &[u8], feed: &url::Url, item: Option<ItemBy<'_>>) -> Resu
     let wanted = wanted.filter(|_| own_page || !matches!(item, Some(ItemBy::Link(_))));
     Ok(FeedRead {
         guid: own,
+        channel_link: field(channel, "link"),
         item_link: wanted.filter(|_| own_page).and_then(|n| field(n, "link")),
         item_guid: wanted
             .and_then(|n| field(n, "guid"))
@@ -785,10 +788,11 @@ impl Podcasts {
         };
         let options = pi_options(key, secret);
         let fetched = cx.egress.fetch_with(url, &options).await?;
-        crate::podcast_index_api::note_refusal(fetched.status);
-        // A refused key lasts: a refusal of the credentials, which brings no run back early and
-        // leaves what this source recorded with Podcast Index's answers where it is (`Deferred`).
-        if matches!(fetched.status, 401 | 403) {
+        // A refused key lasts: a refusal of the credentials, counted, which brings no run back
+        // early and leaves what this source recorded with Podcast Index's answers where it is
+        // (`Deferred`).
+        if crate::podcast_index_api::refuses_the_pair(&fetched) {
+            crate::sources::token_refused("podcast_index");
             return Err(RetryLater {
                 class: "podcast_index_auth",
                 seconds: cx.config.also_on.refusal_hold_secs,
@@ -1224,9 +1228,17 @@ impl Podcasts {
                 let pi_guid = indexed.as_ref().and_then(|f| f.guid.clone());
                 match item {
                     None => {
-                        let own = deferred
-                            .take("feed", Self::feed(cx, url, None).await)
-                            .and_then(|r| r.guid);
+                        let read = deferred.take("feed", Self::feed(cx, url, None).await);
+                        // A page that names a show's feed (a player's page, not the feed's own
+                        // card) takes the show's keys only when the feed names it as its page,
+                        // as an episode's page is keyed only when its item's `<link>` names it.
+                        let named = subject.doc.as_ref().is_some_and(|d| d.source == "media")
+                            || read
+                                .as_ref()
+                                .and_then(|r| r.channel_link.as_deref())
+                                .is_some_and(|link| same_page(link, page));
+                        let own = read.and_then(|r| r.guid);
+                        let before = (found.keys.len(), found.links.len());
                         match (apple, indexed) {
                             (Some(show), Some(feed)) => {
                                 let given = Some((feed, vouched.clone()));
@@ -1237,6 +1249,13 @@ impl Podcasts {
                                 index_show(&mut found, &feed, vouched.as_deref(), None)
                             }
                             _ => {}
+                        }
+                        if !named {
+                            // Its links stay, as links: none of them keys the page.
+                            found.keys.truncate(before.0);
+                            for link in &mut found.links[before.1..] {
+                                link.key = None;
+                            }
                         }
                         // The fact: the feed's own GUID, then Podcast Index's, then the derived one.
                         if let Some(g) = own.or(pi_guid).or_else(|| derived_guid(url)) {

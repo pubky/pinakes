@@ -4,7 +4,7 @@
 //!
 //! Normalization uses `url` parsing: lowercase scheme and host, strip default HTTP(S) ports,
 //! userinfo and fragments, and keep the parsed path and query order. Opaque schemes keep their
-//! opaque path without the fragment. When URL parsing fails, a valid RFC 3986 scheme is
+//! opaque path without the fragment, and a `bitcoin:` payment request also without its query. When URL parsing fails, a valid RFC 3986 scheme is
 //! lowercased and the remainder kept exactly. The ID is the first 16 bytes of BLAKE3 of the
 //! normalized URI, as lowercase hex.
 use url::Url;
@@ -66,6 +66,15 @@ fn normalize_parsed_url(parsed: &Url) -> String {
         let without_fragment = match full.find('#') {
             Some(pos) => &full[..pos],
             None => full,
+        };
+        // A Bitcoin payment request (`bitcoin:{address}?amount=…&label=…&lightning=…&pj=…`) names
+        // its address; the query is the payer's request (amounts, labels, invoices, PayJoin
+        // endpoints), never part of the link that is stored and listed.
+        let without_fragment = match without_fragment.split_once('?') {
+            Some((address, _)) if scheme == "bitcoin" && address.len() > "bitcoin:".len() => {
+                address
+            }
+            _ => without_fragment,
         };
         // A space before the fragment would be cut when the result is read again: cut it here,
         // so a normalized URI normalizes to itself.
@@ -158,6 +167,29 @@ mod tests {
         let (uri, scheme) = normalize_uri("nostr:note1abc123...").unwrap();
         assert_eq!(uri, "nostr:note1abc123...");
         assert_eq!(scheme, "nostr");
+    }
+
+    /// A `bitcoin:` payment request is the address it names: its query is never stored.
+    #[test]
+    fn a_bitcoin_payment_request_is_its_address() {
+        let addr = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+        for uri in [
+            format!("{addr}?amount=0.5&label=Rent%20Alice"),
+            format!("{addr}?lightning=lnbc1pexample&pj=https://payjoin.example/x"),
+            format!("BITCOIN:{}?amount=1", &addr["bitcoin:".len()..]),
+        ] {
+            assert_eq!(normalize_uri(&uri).unwrap().0, addr, "{uri}");
+        }
+        // Without an address there is nothing to keep but the request.
+        assert_eq!(
+            normalize_uri("bitcoin:?lightning=lnbc1pexample").unwrap().0,
+            "bitcoin:?lightning=lnbc1pexample"
+        );
+        // Other schemes keep their query.
+        assert_eq!(
+            normalize_uri("nostr:note1abc?x=1").unwrap().0,
+            "nostr:note1abc?x=1"
+        );
     }
 
     /// A normalized URI normalizes to itself, also when a space came before its fragment.

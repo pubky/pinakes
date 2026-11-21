@@ -655,8 +655,8 @@ pub fn page(target: &Target) -> String {
 }
 
 /// Where a request goes: mempool.space, or the Esplora API at blockstream.info, the fallback
-/// reader for on-chain objects on mainnet, testnet and signet (`esplora_base`); testnet4 and
-/// Lightning objects have no fallback. Esplora's records have the shapes of mempool.space's, so
+/// reader for on-chain objects on every network (`esplora_base`); Lightning objects have no
+/// fallback. Esplora's records have the shapes of mempool.space's, so
 /// the same parsers read them, with the same roots and pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Api {
@@ -664,14 +664,14 @@ pub enum Api {
     Esplora,
 }
 
-/// The Esplora API base at blockstream.info for a network the fallback reads: mainnet, testnet
-/// and signet. `None` for testnet4, which is read from mempool.space only.
+/// The Esplora API base at blockstream.info for a network the fallback reads: mainnet, testnet,
+/// testnet4 and signet.
 fn esplora_base(network: Network) -> Option<&'static str> {
     match network {
         Network::Mainnet => Some("https://blockstream.info/api"),
         Network::Testnet => Some("https://blockstream.info/testnet/api"),
+        Network::Testnet4 => Some("https://blockstream.info/testnet4/api"),
         Network::Signet => Some("https://blockstream.info/signet/api"),
-        Network::Testnet4 => None,
     }
 }
 
@@ -1434,6 +1434,10 @@ async fn read(
                 Some(Err(e)) if by_height => return Err(e),
                 _ => None,
             };
+            // A block its status puts outside the best chain is stale (orphaned).
+            if place.as_ref().is_some_and(|p| !p.best) {
+                card.detail("stale", true);
+            }
             let next = place.as_ref().and_then(|p| p.next.clone());
             let tip = if by_height {
                 Some(read_tip(cx, to, n).await?)
@@ -1589,6 +1593,7 @@ impl Source for Mempool {
             "total_fees",
             "reward",
             "median_fee_rate",
+            "stale",
             // Transactions
             "confirmed",
             "block_height",
@@ -2372,6 +2377,62 @@ mod tests {
             ttl: 3600,
         };
         Mempool.resolve(&cx, uri).await
+    }
+
+    /// A block whose status puts it outside the best chain carries `stale: true`; one in the best
+    /// chain does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_block_outside_the_best_chain_is_stale() {
+        let api = "https://mempool.space/api";
+        let answers = |status: &[u8]| {
+            vec![
+                (
+                    format!("{api}/v1/block/{HASH}"),
+                    200,
+                    "application/json",
+                    read("block-481824.json"),
+                ),
+                (
+                    format!("{api}/block/{HASH}/status"),
+                    200,
+                    "application/json",
+                    status.to_vec(),
+                ),
+            ]
+        };
+        let uri = format!("btc:block/{HASH}");
+        let stale = br#"{"in_best_chain":false,"height":481824,"next_best":null}"#;
+        let doc = resolve(&uri, &answers(stale)).await.unwrap();
+        assert_eq!(doc.attributes["stale"], "true");
+        let best = read("block-481824-status.json");
+        let doc = resolve(&uri, &answers(&best)).await.unwrap();
+        assert!(!doc.attributes.contains_key("stale"));
+    }
+
+    /// When mempool.space fails a testnet4 object, blockstream.info's testnet4 API reads it.
+    #[tokio::test(start_paused = true)]
+    async fn testnet4_falls_back_to_blockstream() {
+        let txid = "5c5d91f2e7251501dccfe0e7ae684a865f499e77620e483760d9f70d1259e958";
+        let answers = vec![
+            (
+                format!("https://mempool.space/testnet4/api/tx/{txid}"),
+                503,
+                "text/plain",
+                b"Service Unavailable".to_vec(),
+            ),
+            (
+                format!("https://blockstream.info/testnet4/api/tx/{txid}"),
+                200,
+                "application/json",
+                read("esplora/testnet4-tx-coinbase-1000.json"),
+            ),
+        ];
+        let doc = resolve(&format!("btc-testnet4:tx/{txid}"), &answers)
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "BitcoinTransaction");
+        assert_eq!(doc.attributes["coinbase"], "true");
     }
 
     /// A transaction's record and an address's list of transactions are parsed in a parse slot,
@@ -3196,7 +3257,10 @@ mod tests {
                     "https://mempool.space/testnet/block/1000".into(),
                     Some("https://blockstream.info/testnet/api/block-height/1000".into()),
                 ),
-                (format!("https://mempool.space/testnet4/tx/{PIZZA}"), None),
+                (
+                    format!("https://mempool.space/testnet4/tx/{PIZZA}"),
+                    Some(format!("https://blockstream.info/testnet4/api/tx/{PIZZA}")),
+                ),
                 (
                     "https://mempool.space/lightning/channel/892785849701564416".into(),
                     None,
@@ -3276,7 +3340,13 @@ mod tests {
                     .as_str(),
                 format!("https://blockstream.info/signet/api/block/{HASH}/status")
             );
-            assert!(coinbase_request(Api::Esplora, Network::Testnet4, HASH).is_none());
+            assert_eq!(
+                coinbase_request(Api::Esplora, Network::Testnet4, HASH)
+                    .unwrap()
+                    .url
+                    .as_str(),
+                format!("https://blockstream.info/testnet4/api/block/{HASH}/txid/0")
+            );
             assert_eq!(
                 parse_txid(200, &read("block-481824-txid-0.txt")).unwrap(),
                 "da917699942e4a96272401b534381a75512eeebe8403084500bd637bd47168b3"

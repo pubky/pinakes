@@ -1,10 +1,10 @@
-//! TikTok videos and profiles, from TikTok's oEmbed endpoint: a video's title, author and
-//! thumbnail when TikTok names them to a request without a browser (often it names only the
-//! video's id), a profile's name. No key, no account. Every spelling (a capitalised handle, the
+//! TikTok videos and profiles. A profile's name comes from TikTok's oEmbed endpoint; a video is
+//! a link rule (TikTok names a video to a request without a browser by its id alone): its card
+//! is the link's root and shape, with the author the link spells, and nothing is asked. No key, no account. Every spelling (a capitalised handle, the
 //! host without `www.`) is one resource at `https://www.tiktok.com/@{handle}[/video/{id}]`.
 use super::{
     social::{self, Oembed, Shape},
-    text, web_url, Context, Example, Source,
+    text, Context, Example, Source,
 };
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
@@ -80,36 +80,6 @@ fn author_of(v: &Value) -> Option<String> {
     }
 }
 
-/// The card of a video from its oEmbed answer: its title, author and thumbnail when the
-/// answer names them, else the plain card with the author the link spells.
-pub fn video_card(doc: ResourceMeta, target: &Target, v: &Value) -> Result<ResourceMeta> {
-    let Target::Video { author, id } = target else {
-        anyhow::bail!("not a video");
-    };
-    if let Some(product) = text(&v["embed_product_id"]) {
-        anyhow::ensure!(&product == id, "TikTok answered for another video");
-    }
-    let mut doc = Shape::Video.card(doc, SITE);
-    let by = text(&v["author_name"]);
-    if let Some(title) = text(&v["title"]) {
-        doc.name = Some(social::excerpt(&title, 120));
-        doc.description = Some(social::excerpt(&title, 200));
-    }
-    doc.image = text(&v["thumbnail_url"]).filter(|u| web_url(u).is_some());
-    social::fact(
-        &mut doc,
-        "author",
-        Some(
-            text(&v["author_unique_id"])
-                .map(|h| h.to_ascii_lowercase())
-                .or_else(|| author_of(v))
-                .unwrap_or_else(|| author.clone()),
-        ),
-    );
-    social::fact(&mut doc, "author_name", by);
-    Ok(doc)
-}
-
 /// The card of a profile from its oEmbed answer (`TikTok's Creator Profile`, by its name).
 pub fn profile_card(doc: ResourceMeta, handle: &str, v: &Value) -> ResourceMeta {
     let mut doc = Shape::Profile.card(doc, SITE);
@@ -142,27 +112,14 @@ impl Source for TikTok {
                     group_with: None,
                 },
             ],
-            answers: &[
-                E2eAnswer {
-                    host: "www.tiktok.com",
-                    path: "/oembed",
-                    query: &[(
-                        "url",
-                        "https://www.tiktok.com/@scout2015/video/6718335390845095173",
-                    )],
-                    header: None,
-                    content_type: "application/json",
-                    file: "oembed-video-6718335390845095173.json",
-                },
-                E2eAnswer {
-                    host: "www.tiktok.com",
-                    path: "/oembed",
-                    query: &[("url", "https://www.tiktok.com/@tiktok")],
-                    header: None,
-                    content_type: "application/json",
-                    file: "oembed-profile.json",
-                },
-            ],
+            answers: &[E2eAnswer {
+                host: "www.tiktok.com",
+                path: "/oembed",
+                query: &[("url", "https://www.tiktok.com/@tiktok")],
+                header: None,
+                content_type: "application/json",
+                file: "oembed-profile.json",
+            }],
         })
     }
     fn reads(&self, uri: &str) -> bool {
@@ -174,11 +131,14 @@ impl Source for TikTok {
         (root != normalized).then_some(root)
     }
     fn facts(&self) -> &'static [&'static str] {
-        &["author", "author_name", "handle", "blocked"]
+        &["author", "handle", "blocked"]
     }
-    /// A video's card quotes its author's caption (`title`).
+    /// A video and a profile are social content (a video is its author's, a profile's name its
+    /// owner's own).
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "VideoObject" || crate::changes::gone_post_type(doc)
+        // A video, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "VideoObject" | "Person")
+            || crate::changes::gone_post_type(doc)
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -195,10 +155,18 @@ impl Source for TikTok {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a TikTok link")?;
         let doc = cx.card(uri, self);
+        // A video's oEmbed answer names no more than the link does, so it is never asked: the
+        // card is the link's (its root, its shape and the handle the link spells).
+        if let Target::Video { author, .. } = &target {
+            let mut doc = Shape::Video.card(doc, SITE);
+            social::fact(&mut doc, "author", Some(author.clone()));
+            doc.source_root = Some(target.root());
+            return Ok(doc);
+        }
         let mut doc = match social::oembed(cx, OEMBED, &target.root()).await? {
             Oembed::Found(v) => match &target {
                 Target::Profile(handle) => profile_card(doc, handle, &v),
-                Target::Video { .. } => video_card(doc, &target, &v)?,
+                Target::Video { .. } => unreachable!("a video is answered above"),
             },
             Oembed::Missing => cx.missing(uri, self),
             Oembed::Blocked => social::blocked(doc, target.shape(), SITE),
@@ -250,41 +218,6 @@ mod tests {
             Some("https://www.tiktok.com/@tiktok")
         );
         assert_eq!(TikTok.alias_root("https://www.tiktok.com/@tiktok"), None);
-    }
-
-    #[test]
-    fn a_video_from_its_oembed_answer() {
-        let target = Target::Video {
-            author: "scout2015".into(),
-            id: "6718335390845095173".into(),
-        };
-        let base = ResourceMeta::new(&target.root(), "tiktok", 3600);
-        // What TikTok names to a request without a browser: the video's id alone.
-        let doc = video_card(
-            base.clone(),
-            &target,
-            &read("oembed-video-6718335390845095173.json"),
-        )
-        .unwrap();
-        assert_eq!(doc.type_name, "VideoObject");
-        assert_eq!(doc.name.as_deref(), Some("Video on tiktok.com"));
-        assert_eq!(doc.attributes["author"], "scout2015");
-        assert!(video_card(base.clone(), &target, &read("oembed-video-1.json")).is_err());
-        let full = serde_json::json!({
-            "type": "video", "title": "A title", "author_name": "Scout", "author_unique_id": "Scout2015",
-            "author_url": "https://www.tiktok.com/@scout2015", "thumbnail_url": "https://p16.tiktokcdn.com/a.jpg",
-            "embed_product_id": "6718335390845095173"
-        });
-        let doc = video_card(base, &target, &full).unwrap();
-        assert_eq!(doc.name.as_deref(), Some("A title"));
-        assert_eq!(doc.attributes["author"], "scout2015");
-        assert_eq!(doc.attributes["author_name"], "Scout");
-        assert_eq!(
-            doc.image.as_deref(),
-            Some("https://p16.tiktokcdn.com/a.jpg")
-        );
-        // Its title is the author's caption: social content.
-        assert!(TikTok.social(&doc));
     }
 
     #[test]

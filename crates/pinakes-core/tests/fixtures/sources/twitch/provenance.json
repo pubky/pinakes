@@ -26,6 +26,15 @@
     "status": 200,
     "url": "https://www.twitch.tv/twitch/clip/BoldRelievedElephantTwitchRPG-LcSvPfVEjpg_OTrK"
   },
+  "own-page-channel-twitch": {
+    "bytes": 236928,
+    "content_type": "text/html",
+    "file": "own-page-channel-twitch.html.gz",
+    "recorded_at": "2026-11-21T18:47:55+00:00",
+    "sha256": "8f64684e69ed38fea322fe436b43cd93a6f193eac667e1d2c8131905b1a05b37",
+    "status": 200,
+    "url": "https://www.twitch.tv/twitch"
+  },
   "video-2896433713": {
     "bytes": 222479,
     "content_type": "text/html",

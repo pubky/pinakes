@@ -17,7 +17,7 @@ async fn a_switched_off_sources_aliases_stay_through_reextract(pool: PgPool) {
         "reddit".into(),
         pinakes_core::sources::Switch {
             enabled: false,
-            token: None,
+            ..Default::default()
         },
     );
     pinakes_core::configure_sources(&config);

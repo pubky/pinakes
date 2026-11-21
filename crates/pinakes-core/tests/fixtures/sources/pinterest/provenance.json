@@ -17,6 +17,15 @@
     "status": 200,
     "url": "https://www.pinterest.com/oembed.json?url=https://www.pinterest.com/pin/99360735500167749/"
   },
+  "own-page-profile-pinterest": {
+    "bytes": 1550860,
+    "content_type": "text/html; charset=utf-8",
+    "file": "own-page-profile-pinterest.html.gz",
+    "recorded_at": "2026-11-21T18:47:53+00:00",
+    "sha256": "0abec16beee8e70b781e271f80d5ccd0be7c0227280fd73c660b6727d1804895",
+    "status": 200,
+    "url": "https://www.pinterest.com/pinterest/"
+  },
   "profile-missing": {
     "bytes": 1333652,
     "content_type": "text/html; charset=utf-8",

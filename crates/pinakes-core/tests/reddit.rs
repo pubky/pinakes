@@ -81,9 +81,9 @@ async fn history(pool: &sqlx::PgPool, id: &str) -> Vec<Value> {
         .unwrap()
 }
 
-/// A post read, then refused (Reddit's 403: the blocked card), then confirmed gone: the stored
-/// card is the blocked one when the deletion is confirmed, and it is still social content, so
-/// the post's history, text and all, is purged.
+/// A post read, then refused (Reddit's 403: the blocked card, which keeps the read card in its
+/// place), then confirmed gone: it is social content, so the post's history, text and all, is
+/// purged.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_refused_then_deleted_post_leaves_no_text_in_the_history(pool: sqlx::PgPool) {
     let id = store::ensure_resource(&pool, POST).await.unwrap();
@@ -96,10 +96,11 @@ async fn a_refused_then_deleted_post_leaves_no_text_in_the_history(pool: sqlx::P
     .unwrap()
     .unwrap();
     store::save_document(&pool, &id, 0, &read).await.unwrap();
+    // A refusal on the refresh keeps the read card (a wall never replaces it).
     let mut refused = reddit::blocked(ResourceMeta::new(POST, "reddit", 3600), &target);
     refused.fetched_at = read.fetched_at + 1;
     assert_eq!(refused.type_name, read.type_name);
-    store::save_document(&pool, &id, 0, &refused).await.unwrap();
+    assert!(store::save_document(&pool, &id, 0, &refused).await.is_err());
     assert!(
         history(&pool, &id)
             .await

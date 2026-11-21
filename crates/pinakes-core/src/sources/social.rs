@@ -4,7 +4,7 @@
 //! redirect, a challenge page, a 401 or 403, a 451, or a status of its own that its source names)
 //! still gets a card, of the link's shape alone, marked `blocked`: the link resolves, groups and
 //! counts while the platform shows the object to accounts only or withholds it where the request
-//! came from.
+//! came from. A refusal on a refresh keeps the card read before, as a wall on the web route does.
 pub use super::excerpt;
 use super::Context;
 use crate::{
@@ -59,7 +59,9 @@ pub fn shape_only(mut doc: ResourceMeta) -> ResourceMeta {
     doc
 }
 
-/// The card of a link whose platform refused the request: its shape alone, marked `blocked`.
+/// The card of a link whose platform refused the request: its shape alone, marked `blocked`. It
+/// is the card of a link never read: on a stored card read before, the save treats it as a wall
+/// and keeps that card (`changes::save`).
 pub fn blocked(doc: ResourceMeta, shape: Shape, site: &str) -> ResourceMeta {
     let mut doc = shape.card(doc, site);
     doc.description = Some("Blocked by the site.".into());
@@ -201,6 +203,17 @@ pub struct OpenGraph {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
+    /// The address the page gives itself (`og:url`).
+    pub url: Option<String>,
+}
+impl OpenGraph {
+    /// The address of the page that was read: the one it gives itself (`og:url`), or without one
+    /// the address the fetch ended at. A fetch may end on another page than the one asked for (a
+    /// redirect, another page answered in its place), so a source takes a page's name and text
+    /// only when its own link parser reads this address as the object the link names.
+    pub fn address<'a>(&'a self, ended_at: &'a url::Url) -> &'a str {
+        self.url.as_deref().unwrap_or(ended_at.as_str())
+    }
 }
 
 /// The Open Graph tags of a page. Run under a parse slot (`html::blocking`).
@@ -222,6 +235,7 @@ pub fn open_graph(body: &str) -> Result<OpenGraph> {
             "og:title" => &mut tags.title,
             "og:description" => &mut tags.description,
             "og:image" => &mut tags.image,
+            "og:url" => &mut tags.url,
             _ => continue,
         };
         if slot.is_none() {

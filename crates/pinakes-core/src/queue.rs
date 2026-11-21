@@ -563,7 +563,8 @@ async fn run_job_inner(
     job: &Job,
 ) -> Result<()> {
     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
-    let result = resolve(resolver, &job.uri, confirming).await;
+    let stored = crate::sources::stored(pool, std::slice::from_ref(job)).await?;
+    let result = crate::sources::with_stored(stored, resolve(resolver, &job.uri, confirming)).await;
     guarded_finish_job(
         pool,
         resolver,
@@ -609,7 +610,9 @@ async fn guarded_finish_job(
                         .execute(pool)
                         .await?;
                     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
-                    match resolve(resolver, &job.uri, confirming).await {
+                    let stored = crate::sources::stored(pool, std::slice::from_ref(job)).await?;
+                    let read = resolve(resolver, &job.uri, confirming);
+                    match crate::sources::with_stored(stored, read).await {
                         Err(error) if error.is::<crate::resolver::NotModified>() => Ok(doc),
                         other => other,
                     }
@@ -766,7 +769,11 @@ async fn finish_job(
                 | "doi"
                 | "nostr"
                 | "activitypub"
-        ) {
+                | "official"
+        ) && (resolver.name() != "official" || doc.status == Status::Ok)
+        {
+            // On the official route only a card read whole is scheduled by its dates (and final
+            // once they passed): a missing answer keeps the `missing_ttl_secs` re-read.
             let now = chrono::Utc::now();
             let mut manifest = resolver.manifest_for(&job.uri);
             if resolver.name() == "osm" {
@@ -808,7 +815,10 @@ async fn finish_job(
                         crate::scheduler::next(&manifest, &doc, now, refresh)
                     }
                 };
-                doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+                // An official card keeps its route's lifetime until its date makes it final.
+                if resolver.name() != "official" || next.is_none() {
+                    doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+                }
             } else if resolver.name() != "osm" {
                 doc.ttl_secs = doc.ttl_secs.max(3600);
             }
@@ -1051,6 +1061,7 @@ async fn run_batch_within(
             resolve.await
         }
     };
+    let resolve = crate::sources::with_stored(crate::sources::stored(pool, jobs).await?, resolve);
     let results = tokio::time::timeout(deadline, resolve).await;
     let late = results.is_err();
     let results = match results {

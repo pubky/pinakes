@@ -2784,7 +2784,7 @@ pub async fn search(
     }
     sql.push(" WHERE true");
     if related.is_some() {
-        // A post whose author opted out of indexing is never suggested, as it is never found by
+        // A post whose author has not opted in to search is never suggested, as it is never found by
         // its text, nor counts toward its group (`eligible` reads the rows that pass).
         sql.push(" AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
@@ -2875,7 +2875,7 @@ pub async fn search(
                     .push_bind(text.clone());
             }
         }
-        // A post whose author opted out of search indexing is never found by its text.
+        // A post whose author has not opted in to search is never found by its text.
         sql.push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
     if related.is_none() {

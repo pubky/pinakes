@@ -458,6 +458,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
             pinakes_core::sources::Switch {
                 enabled: true,
                 token: Some("e2e-token".into()),
+                ..Default::default()
             },
         );
     }

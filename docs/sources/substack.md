@@ -2,7 +2,7 @@
 
 Substack publications, posts and profiles, from their pages' Open Graph tags and JSON-LD. No
 key and no account. A publication's card names its RSS feed; a link to the feed itself
-(`https://{name}.substack.com/feed`) is not this source's and is read as any feed link is.
+(`https://{name}.substack.com/feed`) is not this source's and is read as any feed link is. A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
@@ -20,8 +20,9 @@ subdomain are aliases of them. A publication on its own domain is read as an ord
 - A profile: `GET https://substack.com/@{handle}`, its JSON-LD person. A handle that does not
   exist sends the fetch to Substack's search: `missing`.
 
-A request Substack refuses (a challenge, 401 or 403) gives the card of the link's shape alone
-with the `blocked` fact: the link still resolves, groups and counts.
+A request Substack refuses (a challenge, 401 or 403) gives the card of the link's shape alone with
+the `blocked` fact: the link still resolves, groups and counts. A refusal on a refresh keeps the
+card read before, as a wall on a web page does.
 
 ## Card
 
