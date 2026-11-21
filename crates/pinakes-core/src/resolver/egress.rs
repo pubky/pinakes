@@ -48,6 +48,16 @@ pub const BODY_CAP: usize = 1024 * 1024;
 /// The longest a request waits for its host's next slot, queue included. It leaves the request
 /// at least half of the ten-second fetch timeout.
 pub const MAX_SLOT_WAIT: Duration = Duration::from_secs(5);
+/// The Fetch standard's bad ports (<https://fetch.spec.whatwg.org/#port-blocking>): ports of
+/// services other than the web (mail, SSH, DNS, IRC, …). No request or relay connection is made
+/// to one, whoever names it (a link, a redirect, a homeserver's PKARR record).
+pub const BAD_PORTS: &[u16] = &[
+    0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101,
+    102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427,
+    465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+    993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+    6668, 6669, 6679, 6697, 10080,
+];
 pub const USER_AGENT: &str = concat!(
     "pinakes/",
     env!("CARGO_PKG_VERSION"),
@@ -813,10 +823,11 @@ impl Egress {
             if !self.allows_host(&host) {
                 bail!("relay denied by egress policy");
             }
-            let addresses = self
-                .dns
-                .lookup(&host, url.port_or_known_default().context("relay port")?)
-                .await?;
+            let port = url.port_or_known_default().context("relay port")?;
+            if BAD_PORTS.contains(&port) {
+                bail!("relay port blocked by egress policy");
+            }
+            let addresses = self.dns.lookup(&host, port).await?;
             if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
                 bail!("relay DNS resolved to non-public address");
             }
@@ -1180,6 +1191,9 @@ impl Egress {
                 return Err(refused("Amazon is never fetched"));
             }
             let port = url.port_or_known_default().context("missing port")?;
+            if BAD_PORTS.contains(&port) {
+                return Err(refused("port blocked by egress policy"));
+            }
             let addresses = match url.host().context("missing host")? {
                 Host::Ipv4(v) => vec![SocketAddr::new(IpAddr::V4(v), port)],
                 Host::Ipv6(v) => vec![SocketAddr::new(IpAddr::V6(v), port)],
@@ -2645,6 +2659,45 @@ mod tests {
             ),
             "<meta http-equiv=content-type content='text/html;charset=utf-16'>é"
         );
+    }
+
+    /// The Fetch standard's bad ports are refused before any lookup or request, on a link, a
+    /// redirect's target and a relay connection; other ports (a homeserver's 6286) are asked.
+    #[tokio::test]
+    async fn bad_ports_are_never_asked() {
+        let transport = Arc::new(Redirect {
+            calls: AtomicUsize::new(0),
+            target: "https://example.org:25/",
+        });
+        let egress = Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(FakeDns),
+            transport.clone(),
+        );
+        for uri in [
+            "http://example.org:22/",
+            "https://example.org:25/",
+            "http://example.org:6667/",
+            "http://example.org:0/",
+        ] {
+            let error = egress.fetch(uri).await.unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "policy", "{uri}");
+            assert!(
+                format!("{error:#}").contains("port blocked"),
+                "{uri}: {error:#}"
+            );
+        }
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+        // A redirect to a bad port is refused at that hop.
+        let error = egress.fetch("https://example.org:6286/").await.unwrap_err();
+        assert!(format!("{error:#}").contains("port blocked"), "{error:#}");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        let error = egress
+            .nostr_request_inner("wss://relay.example:25", serde_json::json!({}), 1000)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("port blocked"), "{error:#}");
+        assert!(BAD_PORTS.windows(2).all(|w| w[0] < w[1]));
     }
 
     /// A hub's published limit lowers its host's default pace; an operator's entry sets it.
