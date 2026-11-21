@@ -822,6 +822,19 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (url, server)
     }
+    /// Moves the held answer's sighting back by the whole wait, as if the wait had passed: the
+    /// tests set a one-minute wait and never sleep.
+    fn backdate(resets: &mut Resets) {
+        let wait = resets.wait;
+        let seen = resets
+            .seen
+            .as_mut()
+            .expect("an answer waits for its confirmation");
+        seen.2 = seen
+            .2
+            .checked_sub(wait)
+            .expect("the clock reaches back by the wait");
+    }
     /// The references, and the resets the cursor row counts.
     async fn projection(pool: &PgPool) -> (Vec<String>, i64) {
         let resets = sqlx::query_scalar("SELECT resets FROM feed_cursor")
@@ -839,8 +852,7 @@ mod tests {
         let (url, server) = feed_with_epoch(epoch.clone()).await;
         let nexus = Nexus::new(&url, None).unwrap();
         let (metrics, limits) = (Metrics::new().unwrap(), IngestConfig::default());
-        let wait = std::time::Duration::from_secs(2);
-        let mut resets = Resets::new(wait);
+        let mut resets = Resets::new(std::time::Duration::from_secs(60));
         macro_rules! poll {
             () => {
                 poll_once(&pool, &url, &nexus, &limits, &metrics, &mut resets)
@@ -864,7 +876,7 @@ mod tests {
         // The same answer again before the wait is over confirms nothing yet.
         assert_eq!(poll!(), idle);
         assert_eq!(projection(&pool).await, kept);
-        tokio::time::sleep(wait).await;
+        backdate(&mut resets);
         assert_eq!(poll!(), idle);
         assert_eq!(projection(&pool).await, (vec![], 1));
         let saved = cursor(&pool, &url).await.unwrap();
@@ -881,8 +893,7 @@ mod tests {
         let (url, server) = feed_with_epoch(epoch.clone()).await;
         let nexus = Nexus::new(&url, None).unwrap();
         let (metrics, limits) = (Metrics::new().unwrap(), IngestConfig::default());
-        let wait = std::time::Duration::from_secs(2);
-        let mut resets = Resets::new(wait);
+        let mut resets = Resets::new(std::time::Duration::from_secs(60));
         macro_rules! poll {
             () => {
                 poll_once(&pool, &url, &nexus, &limits, &metrics, &mut resets)
@@ -894,7 +905,7 @@ mod tests {
         let kept = (vec!["https://example.org/epoch".to_owned()], 0);
         *epoch.lock().unwrap() = "odd";
         poll!();
-        tokio::time::sleep(wait).await;
+        backdate(&mut resets);
         *epoch.lock().unwrap() = "first";
         let idle = Poll {
             lines: 0,
