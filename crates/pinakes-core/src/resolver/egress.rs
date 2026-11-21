@@ -1168,14 +1168,15 @@ impl Egress {
         let requested = Url::parse(uri)?;
         let mut url = requested.clone();
         let mut permanent = true;
-        // A redirect within the same host keeps the slots it has; a slow host's next slot is
+        // A redirect within the same host keeps the host's slot; a slow host's next slot is
         // further away than a fetch may wait, so a new one would always answer RetryLater. Each
-        // request holds its host's slot and its first pinned address's, so many names on one
-        // server are paced together.
+        // request holds its host's slot and its first pinned address's (the address with its
+        // slot), so many names on one server are paced together; a same-host hop to another
+        // address takes that address's turn.
         type Slots = (
             String,
             OwnedMutexGuard<Instant>,
-            Option<OwnedMutexGuard<Instant>>,
+            Option<(String, OwnedMutexGuard<Instant>)>,
         );
         let mut permit: Option<Slots> = None;
         for redirects in 0..=3 {
@@ -1218,12 +1219,27 @@ impl Egress {
                     .context("egress refused non-public address"));
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
-            let address = (!options.host_slot_only).then(|| address_slot(addresses[0].ip()));
+            // A service's own host, which no link can multiply, is paced by its name alone.
+            let address = (!options.host_slot_only && !self.service_host(&host))
+                .then(|| address_slot(addresses[0].ip()));
             match &mut permit {
                 Some((held, guard, at_address)) if *held == host => {
                     **guard = Instant::now() + self.host_interval(&host);
-                    if let (Some(at_address), Some(address)) = (at_address, &address) {
-                        **at_address = Instant::now() + self.address_interval(address, &host);
+                    match (at_address.as_mut(), &address) {
+                        (Some((held_address, at)), Some(address)) if held_address == address => {
+                            **at = Instant::now() + self.address_interval(address, &host);
+                        }
+                        (_, Some(address)) => {
+                            // A new DNS answer: the other address's slot goes before this
+                            // one's turn is waited for.
+                            *at_address = None;
+                            let wait = options
+                                .slot_wait
+                                .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
+                            let at = self.address_permit_within(address, &host, wait).await?;
+                            *at_address = Some((address.clone(), at));
+                        }
+                        (_, None) => *at_address = None,
                     }
                 }
                 _ => {
@@ -1238,7 +1254,7 @@ impl Egress {
                         Some(address) => {
                             let left = deadline.saturating_duration_since(Instant::now());
                             match self.address_permit_within(address, &host, left).await {
-                                Ok(at_address) => Some(at_address),
+                                Ok(at_address) => Some((address.clone(), at_address)),
                                 Err(error) => {
                                     // No request is sent: the host's turn is not used up.
                                     *guard = Instant::now();
@@ -1370,6 +1386,16 @@ impl Egress {
     ) -> Result<OwnedMutexGuard<Instant>> {
         self.slot_permit_within(address, self.address_interval(address, host), wait)
             .await
+    }
+    /// Whether `host` is a service's own, named in the code with its pace: a source's or an
+    /// also-on source's (`budgets`, in `source_rates`) or a published one (`PUBLISHED_RATES`, an
+    /// exact rule: a `*.` rule's names are as many as links make). The fixed API hosts sources
+    /// call are one name each, so they take their host's slot only, as the PKARR relays do
+    /// (`FetchOptions::host_slot_only`). Every other host (a link's, a redirect's, a discovered
+    /// endpoint's) is paced by its address too.
+    fn service_host(&self, host: &str) -> bool {
+        self.cfg.source_rates.contains_key(host)
+            || PUBLISHED_RATES.iter().any(|(rule, _)| *rule == host)
     }
     /// The least time between two requests to one address: the default pace, or the host's when
     /// the operator set it faster. A slow host's own pace never slows the other names on its
@@ -2764,7 +2790,8 @@ mod tests {
     }
 
     /// Two names on one address are paced together: their requests never overlap. Names on two
-    /// addresses do.
+    /// addresses do, and so do two services' own hosts on one address (a source's API host, a
+    /// published one), which no link multiplies; a `*.` rule's names are paced by address.
     #[tokio::test(start_paused = true)]
     async fn two_names_on_one_address_do_not_overlap() {
         struct Shared(bool);
@@ -2799,28 +2826,103 @@ mod tests {
                 ))
             }
         }
-        for (shared, most) in [(true, 1), (false, 2)] {
+        for (shared, a, b, most) in [
+            (true, "a.example.org", "b.example.org", 1),
+            (false, "a.example.org", "b.example.org", 2),
+            (true, "api.one.example", "api.two.example", 2),
+            (true, "www.wikidata.org", "commons.wikimedia.org", 2),
+            (true, "de.wikipedia.org", "fr.wikipedia.org", 1),
+        ] {
             let transport = Arc::new(Slow::default());
             let egress = Egress::with_backends(
                 EgressConfig {
                     host_requests_per_second: 1000.0,
+                    source_rates: [
+                        ("api.one.example".to_owned(), 1000.0),
+                        ("api.two.example".to_owned(), 1000.0),
+                    ]
+                    .into(),
                     ..Default::default()
                 },
                 Arc::new(Shared(shared)),
                 transport.clone(),
             );
-            let (a, b) = tokio::join!(
-                egress.fetch("https://a.example.org/"),
-                egress.fetch("https://b.example.org/")
-            );
-            a.unwrap();
-            b.unwrap();
+            let (a_url, b_url) = (format!("https://{a}/"), format!("https://{b}/"));
+            let (one, two) = tokio::join!(egress.fetch(&a_url), egress.fetch(&b_url));
+            one.unwrap();
+            two.unwrap();
             assert_eq!(
                 transport.most.load(Ordering::SeqCst),
                 most,
-                "shared {shared}"
+                "{a} {b} shared {shared}"
             );
         }
+    }
+
+    /// A same-host redirect whose new DNS answer is another address takes that address's slot:
+    /// it never overlaps another name's request to that address.
+    #[tokio::test(start_paused = true)]
+    async fn a_redirect_to_another_address_takes_its_slot() {
+        #[derive(Default)]
+        struct Moving(AtomicUsize);
+        #[async_trait]
+        impl Dns for Moving {
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                // a.example.org answers 8.8.8.8 first, then 8.8.4.4 (b.example.org's).
+                let ip = if host == "a.example.org" && self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    "8.8.8.8"
+                } else {
+                    "8.8.4.4"
+                };
+                Ok(vec![SocketAddr::new(ip.parse()?, port)])
+            }
+        }
+        #[derive(Default)]
+        struct Slow {
+            at: std::sync::Mutex<HashMap<IpAddr, usize>>,
+            most: AtomicUsize,
+        }
+        #[async_trait]
+        impl Transport for Slow {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                let ip = addresses[0].ip();
+                let now = {
+                    let mut at = self.at.lock().unwrap();
+                    let now = at.entry(ip).or_default();
+                    *now += 1;
+                    *now
+                };
+                self.most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                *self.at.lock().unwrap().get_mut(&ip).unwrap() -= 1;
+                Ok(if url.path() == "/" && url.host_str() == Some("a.example.org") {
+                    Fetched {
+                        location: Some("/next".into()),
+                        ..Fetched::answer(url.clone(), 302, "text/plain".into(), vec![])
+                    }
+                } else {
+                    Fetched::answer(url.clone(), 200, "text/plain".into(), b"ok".to_vec())
+                })
+            }
+        }
+        let transport = Arc::new(Slow::default());
+        let egress = Egress::with_backends(
+            EgressConfig {
+                host_requests_per_second: 1000.0,
+                ..Default::default()
+            },
+            Arc::new(Moving::default()),
+            transport.clone(),
+        );
+        // a's first hop runs 0–500 ms on 8.8.8.8, its second 500–1000 ms on 8.8.4.4; b asks
+        // 8.8.4.4 at 600 ms.
+        let (a, b) = tokio::join!(egress.fetch("https://a.example.org/"), async {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            egress.fetch("https://b.example.org/").await
+        });
+        assert_eq!(a.unwrap().url.path(), "/next");
+        b.unwrap();
+        assert_eq!(transport.most.load(Ordering::SeqCst), 1);
     }
 
     /// A hub's published limit lowers its host's default pace; an operator's entry sets it.
