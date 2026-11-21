@@ -52,10 +52,12 @@ other exact source of a track's YouTube video is known.
 ## Operations
 
 Per label upload, while Deezer or `tidal_isrc` runs: one watch page (about 1.4 MB, refused above
-`limits.also_on_watch_page_bytes`, 3 MiB, shared for `limits.discovery_cache_secs`, an hour) at the host's default pace (`limits.host_requests_per_second`, one
-request at a time), then one Deezer search and one TIDAL search, each shared for an hour. A
-rate limit or an outage of YouTube or Deezer (`youtube_busy`, Deezer's quota) is retried, keeping
-the links an earlier run found. A watch page over 3 MB gives nothing and is not retried. TIDAL failing (a rate limit, an unexpected
+`limits.also_on_watch_page_bytes`, 3 MiB by default) at the host's default pace
+(`limits.host_requests_per_second`, one request at a time), then one Deezer search and one TIDAL
+search; each answer is shared for `limits.discovery_cache_secs` (an hour by default). A rate limit
+or an outage of YouTube or Deezer (`youtube_busy`, Deezer's quota) is retried, keeping the links an
+earlier run found. A watch page over `limits.also_on_watch_page_bytes` gives nothing and is not
+retried. TIDAL failing (a rate limit, an unexpected
 answer) fails the run, which keeps every link an earlier run found, unless the run has a Deezer
 match: that is recorded beside the links an earlier run found (a TIDAL one too), and
 the run comes back after the wait TIDAL named, else after five minutes. TIDAL refusing the credentials brings no run back early: a Deezer match is recorded, the links an earlier run found stay (a TIDAL one too), and the video is read again at its usual time. After an upgrade that adds

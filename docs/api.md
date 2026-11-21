@@ -1578,7 +1578,8 @@ seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
 `films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
 `pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
-`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
+`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over
+`limits.hub_body_bytes` (8 MiB by default) is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A
 source's exact keys
@@ -1635,9 +1636,9 @@ An article's card comes from its Wikipedia's REST summary (`Article`, the title,
 paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long article
 whose page exceeds the page cap still gets one; a page the summary does not cover (a special page)
 is read as a web page. A MusicBrainz page's card ([its spellings](#aliases)) comes from
-MusicBrainz's web service (the entity it names), not from the page (unless that answer is over its
-8 MB cap: then the page is read as any page, and the sources record only what its URL proves, the
-MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
+MusicBrainz's web service (the entity it names), not from the page (unless that answer is over
+`limits.hub_body_bytes`, 8 MiB by default: then the page is read as any page, and the sources
+record only what its URL proves, the MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
 MusicBrainz calls a person), the artist credit and a recording's length as its description (an
 enriched description below takes the place of this line; the resource read's `facts` still give
 them as `artist` and `duration`, in seconds, from the card itself as soon as it is read, and from

@@ -196,8 +196,8 @@ impl Source for YoutubeMatch {
     }
 }
 
-/// A video's watch page through the egress, shared for an hour; YouTube's sign-in page, which the
-/// egress refuses as a wall, is [`Watch::LoginRequired`].
+/// A video's watch page through the egress, shared for `limits.discovery_cache_secs`; YouTube's
+/// sign-in page, which the egress refuses as a wall, is [`Watch::LoginRequired`].
 async fn watch(cx: &Context, id: &str) -> Result<Watch> {
     let url = format!("https://www.youtube.com/watch?v={id}");
     let options = FetchOptions {
