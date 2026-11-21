@@ -25,7 +25,10 @@ Nothing beyond the page the web route fetched.
 The page's card, typed `PodcastSeries` (a show) or `PodcastEpisode` (an episode), with its feed
 as `podcast_feed` and an episode's item GUID as `podcast_guid`: the facts a podcast feed's own
 card carries. The podcasts also-on source then reads the feed (and the item), and finds the show
-or episode on Apple Podcasts, Podcast Index and the services Wikidata names. An episode's card
+or episode on Apple Podcasts, Podcast Index and the services Wikidata names. The page is no
+service's own record of the show: a show's page is keyed with the show's keys only when the feed
+names it as the show's page (the channel's `<link>`), and an episode's page only when the item's
+`<link>` names it; otherwise the page lists those links without joining them. An episode's card
 names its show in `related` (`rel: "show"`, the feed, unless its address carries a credential).
 `details.from` is `fountain`.
 

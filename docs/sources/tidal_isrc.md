@@ -4,7 +4,8 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 
 `tidal_isrc` (on by default; it runs only with the operator's TIDAL credentials, `[tidal]
 client_id` and `client_secret` or `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`, the
-same as `tidal`'s; `[also_on.sources.tidal_isrc] enabled = false` turns it off): for a track (or a
+same as `tidal`'s; `[also_on.sources.tidal_isrc] enabled = false` turns it off; [which
+cards](README.md#lookups-by-isrc-or-barcode)): for a track (or a
 video of a recording) on another service with an `isrc:` key (Deezer's or Spotify's own record, a
 vouching page's, a hub's), the TIDAL tracks that carry exactly that ISRC, from TIDAL's API
 (`GET /v2/tracks?countryCode={[tidal] country}&filter[isrc]=…`); for an album on another service

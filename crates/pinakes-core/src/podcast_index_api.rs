@@ -115,16 +115,22 @@ pub fn pi_options(key: &str, secret: &str) -> FetchOptions {
     FetchOptions {
         headers: pi_headers(key, secret, chrono::Utc::now().timestamp()),
         sensitive: true,
+        // A 403's JSON says whether the pair is what was refused.
+        error_json: true,
         ..FetchOptions::json()
     }
 }
-/// Count Podcast Index refusing the operator's key and secret (401 or 403 to a signed request:
-/// a wrong, revoked or expired pair) in `pinakes_source_token_refusals_total{source=
-/// "podcast_index"}`; a rate limit or an outage is not a refusal.
-pub(crate) fn note_refusal(status: u16) {
-    if matches!(status, 401 | 403) {
-        crate::sources::token_refused("podcast_index");
-    }
+/// The card source's refusals of the operator's key and secret: each is counted in
+/// `pinakes_source_token_refusals_total{source="podcast_index"}` and switches the pair off for
+/// the card source for an hour (`sources::Refusals`). The also-on lookups count theirs and hold
+/// each lookup back on their own (`also_on::podcasts`).
+pub(crate) static REFUSALS: crate::sources::Refusals =
+    crate::sources::Refusals::new("podcast_index");
+/// Whether an answer to a signed request refuses the pair: a 401, or a 403 whose `description`
+/// names the key (a wrong, revoked or expired pair). A rate limit, an outage or another 403 is
+/// none.
+pub(crate) fn refuses_the_pair(f: &crate::resolver::egress::Fetched) -> bool {
+    f.status == 401 || (f.status == 403 && crate::sources::names_the_key(&f.body, "description"))
 }
 
 #[cfg(test)]

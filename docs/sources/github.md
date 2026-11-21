@@ -18,10 +18,11 @@ marks `private` (or with any `visibility` but `public`) gives no card and no key
 cache at once instead of staying for its hour.
 
 GitHub allows 5,000 requests an hour with a token; Pinakes keeps its default host pace (1 a
-second), below that. A token GitHub refuses (401: expired, revoked or mistyped) turns the source
-off until the daemon restarts: GitHub links get web cards again, one warning is logged, and
-`pinakes_source_token_refusals_total{source="github"}` counts each refusal. A lookup never fails
-on it.
+second), below that. A token GitHub refuses (401, or a 403 whose `message` says "Bad
+credentials": expired, revoked or mistyped) turns the source off for an hour: GitHub links get
+web cards meanwhile, one warning is logged, and
+`pinakes_source_token_refusals_total{source="github"}` counts each refusal. After the hour the
+token is sent again. A lookup never fails on it.
 
 ## Links
 

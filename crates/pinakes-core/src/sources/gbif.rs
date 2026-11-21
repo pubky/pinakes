@@ -235,16 +235,13 @@ pub fn parse_occurrence(status: u16, raw: &[u8], key: u64) -> Result<Option<Card
     let mut card = Card::new("Observation", identifier(object), page(object));
     card.name = text(&v["scientificName"]);
     card.point = occurrence_point(&v);
+    // An occurrence can still change (re-identified, withdrawn): its time is a fact.
     let date = text(&v["eventDate"]);
-    if let Some(date) = &date {
-        match date.split_once('/') {
-            Some((from, to)) => {
-                card.start = event_time(from, None);
-                card.end = event_time(to, None);
-            }
-            None => card.start = event_time(date, v["eventTime"].as_str()),
-        }
-    }
+    let observed = date
+        .as_deref()
+        .filter(|d| !d.contains('/'))
+        .and_then(|d| event_time(d, v["eventTime"].as_str()));
+    card.detail("observed_at", observed.map(|t| t.to_rfc3339()));
     card.detail("event_date", date);
     card.detail("basis_of_record", text(&v["basisOfRecord"]));
     card.detail("occurrence_status", text(&v["occurrenceStatus"]));
@@ -340,6 +337,7 @@ impl Source for Gbif {
             "published_in",
             "dataset_key",
             // Occurrences
+            "observed_at",
             "event_date",
             "basis_of_record",
             "occurrence_status",
@@ -530,10 +528,8 @@ mod tests {
         let p = card.point.unwrap();
         assert_eq!((p.lat, p.lon), (33.19534, -117.384758));
         // eventDate is local time; eventTime carries the offset (-08:00).
-        assert_eq!(
-            card.start.unwrap().to_rfc3339(),
-            "2026-01-01T23:09:23+00:00"
-        );
+        assert_eq!(card.start, None);
+        assert_eq!(card.details["observed_at"], "2026-01-01T23:09:23+00:00");
         assert_eq!(card.details["basis_of_record"], "HUMAN_OBSERVATION");
         assert_eq!(card.details["recorded_by"], "ramchop");
         assert_eq!(card.details["country_code"], "US");

@@ -36,10 +36,11 @@ the scientific name it was identified as.
   increased to 27816m"), the coordinates are uncertain by more than 1,000 metres
   (`coordinateUncertaintyInMeters`), or GBIF flags them as invalid or mismatched. Then the card
   has no point.
-- **Start:** `eventDate` when it is a full date or date-time. GBIF gives the time in local time
-  with no offset; it is exact when `eventTime` carries the offset (as iNaturalist records do),
-  otherwise the card keeps the date alone. A range of two full dates is a start and an end. A
-  year or month alone stays in `event_date`.
+- **Time:** an occurrence has no start (it can still be re-identified or withdrawn, so its card
+  refreshes). `observed_at` is `eventDate` as a time when it is one full date or date-time. GBIF
+  gives the time in local time with no offset; it is exact when `eventTime` carries the offset
+  (as iNaturalist records do), otherwise it is the date at midnight UTC. A range, a year or a
+  month alone stays in `event_date`.
 - An occurrence published from iNaturalist (its `occurrenceID` an iNaturalist observation link)
   names that observation in the `inat_observation` fact.
 
@@ -51,6 +52,7 @@ the scientific name it was identified as.
 | `vernacular_name` | The common name GBIF gives the taxon |
 | `accepted_key`, `accepted_name` | A synonym's accepted taxon |
 | `parent_key`, `published_in`, `dataset_key` | The parent taxon, the original publication, the checklist |
+| `observed_at` | When it was observed (RFC 3339), for one full date or date-time |
 | `event_date` | The occurrence's date as GBIF gives it |
 | `basis_of_record`, `occurrence_status` | E.g. `HUMAN_OBSERVATION`, `PRESENT` |
 | `dataset_name`, `publisher` | The dataset and the publishing organisation's key |

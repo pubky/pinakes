@@ -38,11 +38,12 @@ A `SocialMediaPosting` named by the start of its text (or its content warning, w
 the text it hides), with its first attachment's preview unless it is marked sensitive (else the
 author's avatar).
 
-An author whose posts are not for search (the account has not opted in to full-text search of
-its public posts, `indexable: false`, or asked search engines not to index its profile,
-`noindex: true`, the flag behind the profile's `robots` `noindex` tag) keeps a normal card, the link preview
-Mastodon itself shows, with the `opted_out` fact. Its text is never found by search (`q=`), and
-its change history keeps no text: what was kept before the opt-out goes, and its change lines
+An author who has not opted in to search (the account has not opted in to full-text search of
+its public posts, `indexable: false`, which is Mastodon's default, or it asked search engines not
+to index its profile, `noindex: true`, the flag behind the profile's `robots` `noindex` tag) keeps
+a normal card, the link preview Mastodon itself shows, with the `opted_out` fact ("not opted in
+to search"). Its text is never found by search (`q=`), and
+its change history keeps no text: what was kept before the card was marked goes, and its change lines
 carry only their kind, fields and time. The spellings of the post saved before they became its
 aliases, whenever they become one, keep only the line naming the post. A deleted post keeps
 nothing of itself: no name, text, image or fact (its content warning included), no history,

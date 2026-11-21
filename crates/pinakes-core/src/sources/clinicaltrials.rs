@@ -63,10 +63,10 @@ pub fn request(nct: &str) -> Option<Request> {
     ))
 }
 
-/// The NCT number of a root (`nct:NCT04368728`, in upper case).
+/// The NCT number of a root (`nct:NCT04368728`, in upper case). A root in another letter case
+/// (`nct:nct04368728`) is a spelling of it: its alias.
 pub fn from_root(uri: &str) -> Option<String> {
-    let id = uri.strip_prefix("nct:")?;
-    nct(id).filter(|n| n == id)
+    nct(uri.strip_prefix("nct:")?)
 }
 
 /// The NCT number of a root or a ClinicalTrials.gov link.
@@ -118,8 +118,16 @@ pub fn parse(status: u16, raw: &[u8], asked: &str) -> Result<Option<Card>> {
 
     let status = &p["statusModule"];
     let (start, completion) = (&status["startDateStruct"], &status["completionDateStruct"]);
-    card.start = full_date(&start["date"]);
-    card.end = full_date(&completion["date"]);
+    // A trial's dates make its card final once past (`kit::DATED`), so only a trial that has
+    // ended carries them; a running one's dates (often estimates, often a month alone) are facts.
+    let ended = matches!(
+        status["overallStatus"].as_str(),
+        Some("COMPLETED" | "TERMINATED" | "WITHDRAWN")
+    );
+    if ended {
+        card.start = full_date(&start["date"]);
+        card.end = full_date(&completion["date"]);
+    }
     card.detail("overall_status", text(&status["overallStatus"]));
     card.detail("start_date", text(&start["date"]));
     card.detail("start_date_type", text(&start["type"]));
@@ -308,6 +316,25 @@ mod tests {
         }
     }
 
+    /// A running trial's dates are facts, never a start and end: its card would be final once
+    /// they passed (`kit::DATED`), and a running trial still changes.
+    #[test]
+    fn a_running_trial_has_no_start_or_end() {
+        let raw = read("search-NCT04368728.json.gz");
+        let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let study = if v["studies"].is_array() {
+            &mut v["studies"][0]
+        } else {
+            &mut v
+        };
+        study["protocolSection"]["statusModule"]["overallStatus"] = "RECRUITING".into();
+        let card = parse(200, &serde_json::to_vec(&v).unwrap(), PFIZER)
+            .unwrap()
+            .unwrap();
+        assert_eq!((card.start, card.end), (None, None));
+        assert_eq!(card.details["start_date"], "2020-04-29");
+    }
+
     #[test]
     fn study() {
         let card = parse(200, &read("search-NCT04368728.json.gz"), PFIZER)
@@ -426,7 +453,13 @@ mod tests {
                 .as_deref(),
             Some("nct:NCT04368728")
         );
-        for uri in ["nct:nct04368728", "nct:NCT0436872", "nct:04368728", "nct:"] {
+        // A root in another letter case is a spelling of the root.
+        assert_eq!(
+            c.alias_root("nct:nct04368728").as_deref(),
+            Some("nct:NCT04368728")
+        );
+        assert!(!c.invalid("nct:nct04368728"));
+        for uri in ["nct:NCT0436872", "nct:04368728", "nct:"] {
             assert!(c.invalid(uri), "{uri}");
             assert!(!c.reads(uri), "{uri}");
         }

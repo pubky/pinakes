@@ -3,7 +3,7 @@
 Pinterest pins and profiles. No key and no account: a pin comes from Pinterest's oEmbed
 endpoint, a profile from its page's Open Graph tags. Pins are social content: the card quotes at
 most 120 characters of the pin's title (its name; a pin's card has no description), refreshes
-within the hour and is removed once the pin is gone.
+within the hour and is removed once the pin is gone. A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
@@ -25,8 +25,11 @@ capitalised name are aliases of them. Boards and `pin.it` short links are not re
 
 A request Pinterest refuses (a challenge, 401 or 403) gives the card of the link's shape alone,
 "Post on pinterest.com" or "Profile on pinterest.com", with the `blocked` fact: the link still
-resolves, groups and counts. So does a profile page Pinterest withholds where the request came
-from (451): it is not `missing`.
+resolves, groups and counts. So does a profile page Pinterest withholds where the request came from
+(451): it is not `missing`. A refusal on a refresh keeps the card read before, as a wall on a web
+page does.
+
+A card takes its name, text and picture only from the object's own page: when the page read (the address the fetch ended at) names another object, as after a redirect, the card is the plain one of the link's shape, as for a page without tags.
 
 ## Card
 

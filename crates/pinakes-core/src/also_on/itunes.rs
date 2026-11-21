@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::music_sources::*;
 
-/// Apple Music's album for an album's barcode keys, and an Apple Music track's preview, from
-/// iTunes.
+/// Apple Music's album for an album's barcode keys (possibly the same album: a maybe link), and
+/// an Apple Music track's preview, from iTunes.
 pub struct ItunesSource;
 #[async_trait]
 impl Source for ItunesSource {
@@ -22,9 +22,8 @@ impl Source for ItunesSource {
     }
     fn applies(&self, subject: &Subject) -> bool {
         apple_track(&subject.uri).is_some()
-            || music::parse(&subject.uri).is_some_and(|l| {
-                join_level(&l) == Some(Level::Album) && l.service != Service::AppleMusic
-            }) && subject.keys_in("upc").next().is_some()
+            || reverse_subject(subject, Service::AppleMusic)
+                .is_some_and(|(level, _)| level == Level::Album)
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let mut found = Found::default();
@@ -34,9 +33,14 @@ impl Source for ItunesSource {
             }
             return Ok(found);
         }
+        if reverse_subject(subject, Service::AppleMusic).map(|(level, _)| level)
+            != Some(Level::Album)
+        {
+            return Ok(found);
+        }
         for upc in subject.keys_in("upc").take(2) {
             if let Some(apple) = itunes_album(cx, upc).await? {
-                found.links.push(apple.keyed(format!("upc:{upc}")));
+                found.links.push(apple.maybe());
             }
         }
         Ok(found)
@@ -46,7 +50,7 @@ impl Source for ItunesSource {
 /// Apple Music's album for a barcode: iTunes `lookup?upc=` in the configured storefront, when
 /// exactly one album answers (an unknown code can return unrelated albums). Its results carry no
 /// UPC, so unlike Deezer's the answer can't be read back against the code asked: exactly one
-/// album is the only check, and `upc` is no single-object namespace that would catch a wrong one.
+/// album is the only check, so the album is possibly the same ([`Link::maybe`]), never a key.
 async fn itunes_album(cx: &Context, barcode: &str) -> Result<Option<Link>> {
     let storefront = &cx.config.also_on.apple_storefront;
     let url =
@@ -114,6 +118,52 @@ mod tests {
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
         serde_json::from_slice(std::fs::read(path).unwrap().trim_ascii()).unwrap()
+    }
+
+    /// A MusicBrainz release page with a `upc:` key is asked as every lookup by barcode asks it
+    /// (`reverse_subject`): iTunes' one album for the barcode (its recorded answer), a maybe.
+    #[tokio::test]
+    async fn a_musicbrainz_release_with_a_barcode_gets_the_apple_music_album() {
+        let body = std::fs::read(format!(
+            "{}/tests/fixtures/hubs/itunes-upc.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            "https://itunes.apple.com/lookup?upc=0634904078164&entity=album&country=us",
+            200,
+            "text/javascript; charset=utf-8",
+            body,
+        )]);
+        let cx = Context {
+            egress,
+            config: Default::default(),
+        };
+        let subject = Subject {
+            id: "x".into(),
+            uri: "https://musicbrainz.org/release/30702389-5c67-4438-9ea0-2351c8de0f1d".into(),
+            status: "ok".into(),
+            type_name: Some("MusicRelease".into()),
+            doc: None,
+            keys: vec![("upc:0634904078164".into(), "musicbrainz_entity".into())],
+            first_seen_at: None,
+            candidates: vec![],
+        };
+        assert!(ItunesSource.applies(&subject));
+        let found = ItunesSource.lookup(&cx, &subject).await.unwrap();
+        let links: Vec<(&str, Option<&str>, Option<&str>)> = found
+            .links
+            .iter()
+            .map(|l| (l.uri.as_str(), l.kind.as_deref(), l.key.as_deref()))
+            .collect();
+        assert_eq!(
+            links,
+            [(
+                "https://music.apple.com/album/1097861387",
+                Some("maybe"),
+                None
+            )]
+        );
     }
 
     /// iTunes' real answer (`text/javascript`) passes the egress checks: the lookup admits that

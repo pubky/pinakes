@@ -1741,8 +1741,9 @@ async fn member_embeds(pool: &PgPool, cards: &mut [&mut Card]) -> Result<(), Api
 /// A card's `maybe_same` as SQL, over a unit's ID and type path and the two hints' switches (SQL
 /// expressions): with `events`, the same-event hint for an event and, for an app's store card, up
 /// to `n` other store cards with its `app_match` fact (the same website host and name), each with
-/// score 1, by URI; with `recordings`, the same-recording hint for a recording (`maybe_same_hint`);
-/// else `NULL`. An alias, a missing card and a member of the card's own group are never named.
+/// score 1, by URI; with `recordings`, the same-recording hint for a recording
+/// ([`same_recording_sql`]); else `NULL`. An alias, a missing card and a member of the card's own
+/// group are never named.
 pub(crate) fn maybe_same_sql(
     unit: &str,
     type_path: &str,
@@ -1750,8 +1751,9 @@ pub(crate) fn maybe_same_sql(
     events: &str,
     recordings: &str,
 ) -> String {
+    let recordings = same_recording_sql(unit, type_path, n, recordings);
     format!(
-        "coalesce(maybe_same_hint({unit},{type_path},{n},{events},{recordings}),CASE WHEN {events} THEN (SELECT jsonb_agg(jsonb_build_object('id',same_app.id,'uri',same_app.uri,'host',same_app.host,'site',same_app.site,'start',NULL,'score',1) ORDER BY same_app.uri) \
+        "coalesce(maybe_same_hint({unit},{type_path},{n},{events},false),{recordings},CASE WHEN {events} THEN (SELECT jsonb_agg(jsonb_build_object('id',same_app.id,'uri',same_app.uri,'host',same_app.host,'site',same_app.site,'start',NULL,'score',1) ORDER BY same_app.uri) \
          FROM (SELECT DISTINCT same_r.id,same_r.uri,same_r.host,same_r.doc->>'site' AS site FROM resource_fact same_f \
          JOIN resource_fact same_g ON same_g.name='app_match' AND same_g.value=same_f.value AND same_g.resource_id<>same_f.resource_id AND same_g.expires_at>now() AND same_g.source NOT IN (SELECT source FROM also_on_source_off) \
          JOIN resource same_r ON same_r.id=same_g.resource_id \
@@ -1759,6 +1761,27 @@ pub(crate) fn maybe_same_sql(
          AND NOT EXISTS (SELECT 1 FROM resource_alias same_alias WHERE same_alias.alias_id=same_r.id) \
          AND NOT EXISTS (SELECT 1 FROM group_unit same_a JOIN group_unit same_b ON same_b.group_id=same_a.group_id WHERE same_a.unit_id={unit} AND same_b.unit_id=same_r.id AND same_a.group_id IS NOT NULL) \
          ORDER BY same_r.uri LIMIT {n}) same_app) END)"
+    )
+}
+/// A recording card's same-recording hint as SQL (with `recordings` on, else `NULL`): of its
+/// stored pairs (`same_recording_hint`, best first), up to `n`, those whose other recording's
+/// artist and length (when it has one) are facts a source states come first, then those whose
+/// own page states them. Any page may copy a track's title, artist and length into its markup;
+/// that never puts it ahead of a recording a service vouches for.
+fn same_recording_sql(unit: &str, type_path: &str, n: u32, recordings: &str) -> String {
+    let fact = |name: &str| {
+        format!(
+            "EXISTS(SELECT 1 FROM resource_fact same_rf WHERE same_rf.resource_id=same_rec.e->>'id' AND same_rf.name='{name}' AND same_rf.expires_at>now() AND same_rf.source NOT IN (SELECT source FROM also_on_source_off))"
+        )
+    };
+    let (artist, duration) = (fact("artist"), fact("duration"));
+    format!(
+        "CASE WHEN {recordings} AND coalesce({type_path} @> ARRAY['MusicRecording'],false) THEN \
+         (SELECT coalesce(jsonb_agg(same_top.e ORDER BY same_top.vouched DESC,same_top.n),'[]'::jsonb) FROM \
+         (SELECT same_rec.e,same_rec.n,({artist} AND ({duration} OR NOT EXISTS(SELECT 1 FROM resource same_rr WHERE same_rr.id=same_rec.e->>'id' AND same_rr.doc#>>'{{attributes,duration}}' IS NOT NULL)))::int AS vouched \
+         FROM jsonb_array_elements(same_recording_hint({unit},{kept})) WITH ORDINALITY AS same_rec(e,n) \
+         ORDER BY vouched DESC,same_rec.n LIMIT {n}) same_top) END",
+        kept = crate::same_recording::KEPT,
     )
 }
 /// Whether event cards (and apps' store cards) carry the same-event hint.
@@ -2840,7 +2863,7 @@ pub async fn search(
     }
     sql.push(" WHERE true");
     if related.is_some() {
-        // A post whose author opted out of indexing is never suggested, as it is never found by
+        // A post whose author has not opted in to search is never suggested, as it is never found by
         // its text, nor counts toward its group (`eligible` reads the rows that pass).
         sql.push(" AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
@@ -2931,7 +2954,7 @@ pub async fn search(
                     .push_bind(text.clone());
             }
         }
-        // A post whose author opted out of search indexing is never found by its text.
+        // A post whose author has not opted in to search is never found by its text.
         sql.push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
     if related.is_none() {
@@ -4110,7 +4133,10 @@ fn byte_range(value: &str, len: u64) -> Range {
 
 pub fn admin_router(state: AppState) -> Router {
     let routes = Router::new()
-        .route("/v1/groups/{id}", axum::routing::put(curate_group))
+        .route(
+            "/v1/groups/{id}",
+            axum::routing::put(curate_group).delete(uncurate_group),
+        )
         .route("/v1/resources/{id}/document", get(admin_document))
         .route("/metrics", get(metrics))
         .route("/v1/info", get(admin_info))
@@ -4380,6 +4406,40 @@ pub async fn curate_group(
     .await?
     .map(Json)
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "group not found".into()))
+}
+/// `DELETE /v1/groups/{id}` (admin listener only): undo a curation ([`crate::groups::uncurate`]).
+/// 204 when it was a curated group, 404 when it is no curated group, 400 for an invalid ID or
+/// with groups off, 503 while the group writer is busy.
+pub async fn uncurate_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let undone = crate::groups::uncurate(&state.pool, &id, &state.config.groups)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error=%crate::resolver::log_error(&e),"undoing a group curation failed");
+            if e.is::<crate::groups::GroupBusy>() {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "group writer busy; retry later".into(),
+                )
+            } else if e.is::<crate::groups::CurationError>() {
+                ApiError::bad("invalid group curation")
+            } else {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "group curation unavailable".into(),
+                )
+            }
+        })?;
+    if undone {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "no curated group with this ID".into(),
+        ))
+    }
 }
 #[cfg(test)]
 mod tests {

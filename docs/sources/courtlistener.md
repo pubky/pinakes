@@ -12,10 +12,12 @@ the source: "Source: CourtListener, Free Law Project".
 `PINAKES__SOURCES__COURTLISTENER__TOKEN`, which wins over the config file, which wins over the
 short name): the API token of a CourtListener account. It is a secret: it is sent only to
 `www.courtlistener.com`, as `Authorization: Token …`, never through a redirect, and never appears
-in logs, errors, metrics, `Debug` output or cards. A token CourtListener refuses (401 or 403:
-revoked or mistyped) turns the source off until the daemon restarts: opinion links get web cards
-again, one warning is logged, and `pinakes_source_token_refusals_total{source="courtlistener"}`
-counts each refusal.
+in logs, errors, metrics, `Debug` output or cards. A token CourtListener refuses (401, or a 403
+whose JSON `detail` names the token, such as "Invalid token.": revoked or mistyped) turns the
+source off for an hour: opinion links get web cards meanwhile, one warning is logged, and
+`pinakes_source_token_refusals_total{source="courtlistener"}` counts each refusal. After the hour
+the token is sent again. Any other 403 (a forbidden object, a firewall's page) is a failure of
+that link alone.
 
 Pinakes asks at most five requests a minute, the limit CourtListener set for anonymous use, so
 cards arrive slowly when many opinions are new: a link whose request would wait more than a few

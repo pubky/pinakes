@@ -142,6 +142,29 @@ impl Transport for Scripted {
             (Some("pubchem.ncbi.nlm.nih.gov"), path) if path.starts_with("/rest/pug/compound/cid/2244/property/") => Ok(
                 answer(u, 200, r#"{"PropertyTable":{"Properties":[{"CID":2244,"MolecularFormula":"C9H8O4","Title":"Aspirin","InChIKey":"BSYNRYMUTXBXSQ-UHFFFAOYSA-N"}]}}"#.into()),
             ),
+            // The US storefront does not sell the app; Switzerland does; `zz` is no storefront.
+            (Some("itunes.apple.com"), "/lookup") => {
+                let file = match u.query() {
+                    Some("id=1225135057") => "lookup-1225135057.json",
+                    Some("id=1225135057&country=ch") => "lookup-1225135057-ch.json",
+                    Some("id=1225135057&country=zz") => "lookup-1225135057-zz.json",
+                    _ => anyhow::bail!("no script for {u}"),
+                };
+                let body = std::fs::read(format!(
+                    "{}/tests/fixtures/sources/app_store/{file}",
+                    env!("CARGO_MANIFEST_DIR")
+                ))?;
+                let status = if file.ends_with("-zz.json") { 400 } else { 200 };
+                let mut lookup = answer(u, status, String::from_utf8(body)?);
+                lookup.content_type = "text/javascript; charset=utf-8".into();
+                Ok(lookup)
+            }
+            // X walls every profile page.
+            (Some("x.com"), _) => {
+                let mut page = answer(u, 403, "<html>Sign in to X</html>".into());
+                page.content_type = "text/html".into();
+                Ok(page)
+            }
             (Some("pubchem.ncbi.nlm.nih.gov"), "/compound/glucose") => {
                 let mut page = answer(u, 200, "<title>Glucose</title>".into());
                 page.content_type = "text/html".into();
@@ -306,4 +329,243 @@ async fn a_part_refused_for_good_is_not_read_again_soon() {
         .unwrap();
     assert_eq!(tip.status, Status::Ok);
     assert!(tip.refresh_by.is_some());
+}
+
+/// After a job, a card of a thing that happened (a mined block, its time long past) is final,
+/// and a card of a thing with no time of its own (a compound) is read again at the route's
+/// lifetime.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_past_dated_official_card_is_final_after_its_job(pool: sqlx::PgPool) {
+    use pinakes_core::{queue, store};
+    if !has("mempool") || !has("pubchem") {
+        return;
+    }
+    let resolver = official();
+    let mut rows = vec![];
+    for uri in [
+        format!("btc:block/{DEEP}"),
+        "https://pubchem.ncbi.nlm.nih.gov/compound/aspirin".into(),
+    ] {
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let job = queue::Job {
+            id: id.clone(),
+            uri,
+            attempts: 0,
+            generation: 0,
+        };
+        queue::run_job(&pool, &resolver, &Default::default(), &job)
+            .await
+            .unwrap();
+        let row: (String, bool, f64) = sqlx::query_as(
+            "SELECT status,final,coalesce(extract(epoch FROM refresh_at-now()),0)::float8 FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        rows.push(row);
+    }
+    assert_eq!((rows[0].0.as_str(), rows[0].1), ("ok", true), "the block");
+    assert_eq!(
+        (rows[1].0.as_str(), rows[1].1),
+        ("ok", false),
+        "the compound"
+    );
+    // The official route's lifetime (a day), not the dateless page's week.
+    assert!((82_800.0..=86_400.0).contains(&rows[1].2), "{}", rows[1].2);
+}
+
+/// A social site that walls a refresh keeps the last good card, as a wall on the web route does,
+/// and the link keeps refreshing (never dead-lettered); a link never read gets the placeholder of
+/// its shape.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_walled_refresh_keeps_the_last_good_card(pool: sqlx::PgPool) {
+    use pinakes_core::{model::ResourceMeta, queue, store};
+    if !has("x") {
+        return;
+    }
+    let resolver = official();
+    let job = |id: &str, uri: &str| queue::Job {
+        id: id.into(),
+        uri: uri.into(),
+        attempts: 0,
+        generation: 0,
+    };
+    let row = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>, String)>(
+                "SELECT doc->>'name', doc->'attributes'->>'blocked', status FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let read = "https://x.com/someone";
+    let id = store::ensure_resource(&pool, read).await.unwrap();
+    let mut good = ResourceMeta::new(read, "x", 3600);
+    good.set_type("Person");
+    good.name = Some("Some One".into());
+    good.description = Some("Builds bridges.".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    // Walls again and again: the card stays, and the link is never counted toward dead letter.
+    for _ in 0..6 {
+        queue::run_job(&pool, &resolver, &Default::default(), &job(&id, read))
+            .await
+            .unwrap();
+    }
+    let (name, blocked, status) = row(id.clone()).await;
+    assert_eq!((name.as_deref(), blocked), (Some("Some One"), None));
+    assert_eq!(status, "ok");
+    let (attempts, dead, error): (i32, bool, Option<String>) =
+        sqlx::query_as("SELECT attempts, dead_letter, last_error FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((attempts, dead, error.as_deref()), (0, false, Some("wall")));
+
+    let never = "https://x.com/someone_else";
+    let id = store::ensure_resource(&pool, never).await.unwrap();
+    queue::run_job(&pool, &resolver, &Default::default(), &job(&id, never))
+        .await
+        .unwrap();
+    let (name, blocked, status) = row(id).await;
+    assert_eq!(
+        (name.as_deref(), blocked.as_deref(), status.as_str()),
+        (Some("Profile on x.com"), Some("true"), "ok")
+    );
+}
+
+/// A profile is social content: once it is gone it keeps nothing of itself (no name, bio or
+/// picture), as a gone post does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_gone_profile_is_purged_like_a_post(pool: sqlx::PgPool) {
+    use pinakes_core::{model::ResourceMeta, store};
+    if !has("x") {
+        return;
+    }
+    let uri = "https://x.com/someone";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut good = ResourceMeta::new(uri, "x", 3600);
+    good.set_type("Person");
+    good.name = Some("Some One".into());
+    good.description = Some("Builds bridges.".into());
+    good.image = Some("https://pbs.twimg.com/profile_images/1/a.jpg".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    // Gone, and confirmed by a second fresh read.
+    for later in [1, 2] {
+        let mut gone = ResourceMeta::new(uri, "x", 3600);
+        gone.status = Status::Missing;
+        gone.fetched_at = good.fetched_at + later;
+        store::save_document(&pool, &id, 0, &gone).await.unwrap();
+    }
+    let (status, name, description, image): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT status, doc->>'name', doc->>'description', doc->>'image' FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "missing");
+    assert_eq!((name, description, image), (None, None, None));
+}
+
+/// An App Store card read from the storefront a link named keeps that storefront with the stored
+/// card: the daemon's next jobs, with nothing in memory naming it (as after a restart), read the
+/// same record, and a link tagged with a code that is no storefront leaves the card ok.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_app_store_card_keeps_its_storefront_across_restarts(pool: sqlx::PgPool) {
+    use pinakes_core::{queue, sources, store};
+    let Some(app_store) = sources::by_name("app_store") else {
+        return;
+    };
+    let resolver = official();
+    let root = "https://apps.apple.com/app/id1225135057";
+    let id = store::ensure_resource(&pool, root).await.unwrap();
+    let job = queue::Job {
+        id: id.clone(),
+        uri: root.into(),
+        attempts: 0,
+        generation: 0,
+    };
+    let row = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                "SELECT status, doc->>'name', doc->'attributes'->>'storefront' FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let ok = (
+        "ok".to_owned(),
+        Some("PostFinance TWINT".to_owned()),
+        Some("ch".to_owned()),
+    );
+    // A link names the storefront; the root's job reads it there.
+    app_store.alias_root("https://apps.apple.com/ch/app/postfinance-twint/id1225135057");
+    queue::run_job(&pool, &resolver, &Default::default(), &job)
+        .await
+        .unwrap();
+    assert_eq!(row().await, ok);
+    // The latest link names a made-up code: nothing in memory names Switzerland any more, only
+    // the stored card does, and the card stays ok.
+    app_store.alias_root("https://apps.apple.com/zz/app/id1225135057");
+    for _ in 0..3 {
+        queue::run_job(&pool, &resolver, &Default::default(), &job)
+            .await
+            .unwrap();
+        assert_eq!(row().await, ok);
+    }
+}
+
+/// An official card whose date passed is final only when it was read whole: a "not found" for
+/// it (a transaction the service lost track of) keeps the `missing_ttl_secs` re-read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_past_dated_official_card_found_missing_is_read_again(pool: sqlx::PgPool) {
+    use pinakes_core::{model::ResourceMeta, queue, store};
+    if !has("mempool") {
+        return;
+    }
+    let resolver = official();
+    let uri = format!("btc:tx/{GONE}");
+    let id = store::ensure_resource(&pool, &uri).await.unwrap();
+    let mut good = ResourceMeta::new(&uri, "mempool", 86_400);
+    good.set_type("Event");
+    good.name = Some("Transaction".into());
+    good.start = Some("2020-01-03T18:15:05Z".parse().unwrap());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    let job = queue::Job {
+        id: id.clone(),
+        uri,
+        attempts: 0,
+        generation: 0,
+    };
+    // Not found twice: missing, confirmed.
+    for _ in 0..2 {
+        queue::run_job(&pool, &resolver, &Default::default(), &job)
+            .await
+            .unwrap();
+    }
+    let (status, last, refresh): (String, bool, f64) = sqlx::query_as(
+        "SELECT status,final,coalesce(extract(epoch FROM refresh_at-now()),0)::float8 FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), last), ("missing", false));
+    assert!((3_000.0..=3_600.0).contains(&refresh), "{refresh}");
 }

@@ -6,7 +6,8 @@ UniProt; no key; no published rate limit (one request per second).
 ## Links
 
 `uniprot:{ACC}` and every UniProt address of an entry are one resource, with `uniprot:{ACC}` as
-the root (the accession in upper case, e.g. `uniprot:P69905`):
+the root (the accession in upper case, e.g. `uniprot:P69905`; the root in another letter case,
+`uniprot:p69905`, is an alias of it):
 
 - `https://www.uniprot.org/uniprotkb/{acc}` and its tabs: `/entry`, `/feature-viewer`,
   `/variant-viewer`, `/publications`, `/external-links`, `/history`, `/genomic-coordinates`;

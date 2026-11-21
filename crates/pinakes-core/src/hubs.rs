@@ -94,9 +94,10 @@ impl std::fmt::Display for Gone {
 }
 impl std::error::Error for Gone {}
 
-/// A hub's answer as JSON: `None` for 404, a retry for 429/503 (and other 5xx) and for an API
-/// error Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), [`Gone`]
-/// for 410, an error for anything else that is not 200 JSON.
+/// A hub's answer as JSON: `None` for 404, a retry for 503 (and other 5xx) and for an API error
+/// Wikidata sends with 200 (`ratelimited`, `maxlag`; an unknown ID is an answer), [`Gone`] for
+/// 410, an error for anything else that is not 200 JSON. A 429 never reaches it: the egress
+/// answers it as a retry under its own class (`http_4xx`) with the hub's wait.
 fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
     let busy = || -> anyhow::Error {
         RetryLater {
@@ -119,30 +120,31 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
         }
         404 => Ok(None),
         410 => Err(Gone { hub }.into()),
-        429 | 500..=599 => Err(busy()),
+        500..=599 => Err(busy()),
         status => bail!("{hub} answered {status}"),
     }
 }
-/// The body cap for Wikidata entities: a much-edited item carries megabytes of claims (Signal's
-/// is 2.6 MB), above the egress default of 1 MB.
-pub const WIKIDATA_CAP: usize = 8 * 1024 * 1024;
-/// The body cap for MusicBrainz answers: an artist or release with very many URL relations
-/// exceeds the egress default too.
-pub const MUSICBRAINZ_CAP: usize = 8 * 1024 * 1024;
-fn options(hub: &str) -> FetchOptions {
+/// The body cap of a hub's answer (`limits.hub_body_bytes`): a much-edited Wikidata item carries
+/// megabytes of claims (Signal's is 2.6 MB), and so does a MusicBrainz artist or release with very
+/// many URL relations, above the egress default of 1 MB.
+pub fn body_cap(egress: &Egress) -> usize {
+    egress.config().hub_body_bytes
+}
+/// The default of `limits.hub_body_bytes`.
+pub const DEFAULT_BODY_CAP: usize = 8 * 1024 * 1024;
+fn options(egress: &Egress, hub: &str) -> FetchOptions {
     FetchOptions {
         accept: Some("application/json".into()),
-        body_cap: match hub {
-            "wikidata" => Some(WIKIDATA_CAP),
-            "musicbrainz" => Some(MUSICBRAINZ_CAP),
-            _ => None,
-        },
+        body_cap: matches!(hub, "wikidata" | "musicbrainz").then(|| body_cap(egress)),
         ..Default::default()
     }
 }
 async fn get(egress: &Egress, url: &str, hub: &'static str) -> Result<Option<Value>> {
-    // Shared flights and a short cache: two sources asking the same thing ask once.
-    let fetched = egress.discover(url, &options(hub), 3600).await?;
+    // Shared flights and a short cache (`limits.discovery_cache_secs`): two sources asking the
+    // same thing ask once.
+    let fetched = egress
+        .discover(url, &options(egress, hub), egress.config().discovery_secs)
+        .await?;
     let answer = json(&fetched, hub);
     // A busy answer (Wikidata's `maxlag` comes with 200) is no answer to keep for an hour: the
     // next ask fetches again.
@@ -151,7 +153,9 @@ async fn get(egress: &Egress, url: &str, hub: &'static str) -> Result<Option<Val
         .err()
         .is_some_and(|e| e.downcast_ref::<RetryLater>().is_some())
     {
-        egress.shorten_discovery(url, &options(hub), 1).await?;
+        egress
+            .shorten_discovery(url, &options(egress, hub), 1)
+            .await?;
     }
     answer
 }
@@ -168,7 +172,14 @@ async fn seed(egress: &Egress, url: &str, hub: &str, answer: Option<&Value>) -> 
         content_type: "application/json".into(),
         body: serde_json::to_vec(answer.unwrap_or(&serde_json::json!({"error": "Not Found"})))?,
     };
-    egress.seed(url, &options(hub), 3600, fetched).await
+    egress
+        .seed(
+            url,
+            &options(egress, hub),
+            egress.config().discovery_secs,
+            fetched,
+        )
+        .await
 }
 
 pub mod musicbrainz {
@@ -1019,12 +1030,15 @@ pub mod cover_art {
         }
     }
     /// The front cover of release or release group `mbid` ([`read_front`]), in one request; an
-    /// answer is kept an hour. `None` for another kind of entity, without a request.
+    /// answer is kept for `limits.discovery_cache_secs`. `None` for another kind of entity,
+    /// without a request.
     pub async fn front(egress: &Egress, kind: MbKind, mbid: &str) -> Result<Option<Front>> {
         let Some(url) = front_500(kind, mbid) else {
             return Ok(None);
         };
-        let fetched = egress.discover(&url, &options(), 3600).await?;
+        let fetched = egress
+            .discover(&url, &options(), egress.config().discovery_secs)
+            .await?;
         let front = read_front(kind, mbid, &fetched);
         if front
             .as_ref()
@@ -1476,6 +1490,33 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A hub's answer is kept for `limits.discovery_cache_secs`: asked once within it, asked
+    /// again after it.
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_answer_is_kept_for_the_discovery_cache_secs() {
+        let url = "https://www.wikidata.org/wiki/Special:EntityData/Q1.json";
+        let (_, recorded) = crate::sources::fixture::egress(vec![(
+            url,
+            200,
+            "application/json",
+            br#"{"entities":{}}"#.to_vec(),
+        )]);
+        let egress = Egress::with_backends(
+            crate::config::EgressConfig {
+                discovery_secs: 7200,
+                ..Default::default()
+            },
+            std::sync::Arc::new(crate::sources::fixture::PublicDns),
+            recorded.clone(),
+        );
+        get(&egress, url, "wikidata").await.unwrap().unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(7199)).await;
+        get(&egress, url, "wikidata").await.unwrap().unwrap();
+        assert_eq!(recorded.asked().len(), 1);
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        get(&egress, url, "wikidata").await.unwrap().unwrap();
+        assert_eq!(recorded.asked().len(), 2);
+    }
     /// An item's pages leave out a sitelink to a redirect; its English description is trimmed,
     /// and an empty one is none.
     #[test]

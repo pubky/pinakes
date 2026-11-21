@@ -17,6 +17,15 @@
     "status": 404,
     "url": "https://www.linkedin.com/company/thiscompanydoesnotexist12345x"
   },
+  "own-page-company-linkedin": {
+    "bytes": 455301,
+    "content_type": "text/html; charset=utf-8",
+    "file": "own-page-company-linkedin.html.gz",
+    "recorded_at": "2026-11-21T18:47:46+00:00",
+    "sha256": "92877310f394b9599067237f48e46b5df8381fd743d8d58f13ef3231e3c64ccd",
+    "status": 200,
+    "url": "https://www.linkedin.com/company/linkedin"
+  },
   "person-missing": {
     "bytes": 1530,
     "content_type": "text/html",

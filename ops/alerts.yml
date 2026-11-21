@@ -91,6 +91,6 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "Pinakes refused new previews ({{ $labels.limit }}) for fifteen minutes: the hourly preview capacity or a client's share is taken"}
       - alert: ProviderKeyRefused
-        expr: (increase(pinakes_source_token_refusals_total{source!~"courtlistener|discogs|github"}[6h]) > 0) or (pinakes_source_token_refusals_total{source=~"courtlistener|discogs|github"} > 0)
+        expr: increase(pinakes_source_token_refusals_total[6h]) > 0
         labels: {severity: warning}
-        annotations: {summary: "{{ $labels.source }} refused the configured key: check or rotate the {{ $labels.source }} key (courtlistener, discogs and github then need a Pinakes restart)"}
+        annotations: {summary: "{{ $labels.source }} refused the configured key: check or rotate the {{ $labels.source }} key (a new key needs a Pinakes restart)"}

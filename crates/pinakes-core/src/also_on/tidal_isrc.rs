@@ -16,8 +16,8 @@ use super::{
     Context, Found, Source, Subject,
 };
 use crate::{
-    music::{self, Level, Service},
-    music_sources::{derived, join_level, key_values, mb_level, Kind},
+    music::{Level, Service},
+    music_sources::{derived, key_values, reverse_subject, Kind},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -28,27 +28,14 @@ const MAX_LINKS: usize = 5;
 /// The most ISRC or barcode keys of one track or album asked (a track's own ISRC first).
 const MAX_VALUES: usize = 2;
 
-/// Another service's track (asked by its ISRC) or album (asked by its barcode).
-fn kind_of(link: &music::Link) -> Option<Kind> {
-    if link.service == Service::Tidal {
-        return None;
-    }
-    match join_level(link)? {
+/// The kind asked for `subject` (`reverse_subject`): another service's track or album, or a
+/// MusicBrainz recording or release, with a key of that kind.
+fn kind_of_subject(subject: &Subject) -> Option<Kind> {
+    match reverse_subject(subject, Service::Tidal)?.0 {
         Level::Album => Some(Kind::Album),
         Level::Track => Some(Kind::Track),
         _ => None,
     }
-}
-/// The kind asked for `subject`: another service's track or album, or a MusicBrainz recording or
-/// release.
-fn kind_of_subject(subject: &Subject) -> Option<Kind> {
-    music::parse(&subject.uri)
-        .and_then(|l| kind_of(&l))
-        .or_else(|| match mb_level(&subject.uri) {
-            Some(Level::Track) => Some(Kind::Track),
-            Some(Level::Album) => Some(Kind::Album),
-            _ => None,
-        })
 }
 fn level(kind: Kind) -> Level {
     match kind {
@@ -98,8 +85,7 @@ impl Source for TidalIsrc {
         config.section::<TidalConfig>().pair().is_some()
     }
     fn applies(&self, subject: &Subject) -> bool {
-        kind_of_subject(subject)
-            .is_some_and(|kind| subject.keys_in(kind.namespace()).next().is_some())
+        kind_of_subject(subject).is_some()
     }
     async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
         let Some(kind) = kind_of_subject(subject) else {
@@ -197,27 +183,6 @@ mod tests {
             env!("CARGO_MANIFEST_DIR")
         );
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
-    }
-
-    #[test]
-    fn only_other_services_tracks_and_albums_apply() {
-        let kind = |uri: &str| music::parse(uri).and_then(|l| kind_of(&l));
-        assert_eq!(
-            kind("https://www.deezer.com/track/1171872"),
-            Some(Kind::Track)
-        );
-        assert_eq!(
-            kind("https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa"),
-            Some(Kind::Album)
-        );
-        // A video counts as its recording.
-        assert_eq!(
-            kind("https://www.youtube.com/watch?v=bSnlKl_PoQU"),
-            Some(Kind::Track)
-        );
-        assert_eq!(kind("https://tidal.com/track/3524506"), None);
-        assert_eq!(kind("https://tidal.com/album/3524504"), None);
-        assert_eq!(kind("https://www.deezer.com/artist/27"), None);
     }
 
     /// Walking Disaster's ISRC: eight TIDAL tracks carry it; those TIDAL streams come first.

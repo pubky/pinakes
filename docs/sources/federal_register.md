@@ -47,8 +47,16 @@ A number the API does not know is `missing`.
 
 `federal_register`: a document gets its GovInfo PDF (`kind: "pdf"`) and details page, its
 regulations.gov document and its public-inspection PDF (`kind: "pdf"` too) from its API record, and the key
-`fr:{number}`; a GovInfo copy of it someone tags gets the same key from its address alone, so the
-two join.
+`fr:{number}`. Two other copies someone tags get the same key, so they join the document:
+
+- a GovInfo copy (`https://www.govinfo.gov/content/pkg/FR-{date}/pdf/{number}.pdf` or
+  `https://www.govinfo.gov/app/details/FR-{date}/{number}`), only when the day of its package is
+  the document's `publication_date` in the API record (read once an hour); an address with
+  another day gets no key;
+- the SEC's PDF of a self-regulatory organization's rule-change release
+  (`https://www.sec.gov/files/rules/sro/{org}/{year}/{release}.pdf`; an exhibit,
+  `{release}-{exhibit}.pdf`, is part of the filing and gets no key), when exactly one document's
+  docket ids name `Release No. {release}`: `GET https://www.federalregister.gov/api/v1/documents.json?conditions[docket_id]={release}&fields[]=document_number&fields[]=docket_ids&per_page=20`.
 
 ### Keys
 

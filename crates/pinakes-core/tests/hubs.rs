@@ -112,7 +112,7 @@ impl Transport for Recorded {
                 .push(format!("musicbrainz.org{}", url.path()));
             if url.path().starts_with("/ws/2/") {
                 return Err(pinakes_core::resolver::egress::BodyTooLarge {
-                    cap: pinakes_core::hubs::MUSICBRAINZ_CAP,
+                    cap: pinakes_core::hubs::DEFAULT_BODY_CAP,
                 }
                 .into());
             }
@@ -199,9 +199,9 @@ impl Transport for Recorded {
         // Much-edited Wikidata items and MusicBrainz entities with many links exceed the default
         // cap; their reads may be larger.
         let cap = match url.host_str() {
-            Some("www.wikidata.org") => Some(pinakes_core::hubs::WIKIDATA_CAP),
+            Some("www.wikidata.org") => Some(pinakes_core::hubs::DEFAULT_BODY_CAP),
             Some("musicbrainz.org" | "mb-mirror.example") => {
-                Some(pinakes_core::hubs::MUSICBRAINZ_CAP)
+                Some(pinakes_core::hubs::DEFAULT_BODY_CAP)
             }
             _ => None,
         };
@@ -534,7 +534,7 @@ impl Transport for Recorded {
             // An item over Wikidata's cap.
             "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q999999999" => {
                 return Err(pinakes_core::resolver::egress::BodyTooLarge {
-                    cap: pinakes_core::hubs::WIKIDATA_CAP,
+                    cap: pinakes_core::hubs::DEFAULT_BODY_CAP,
                 }
                 .into())
             }
@@ -693,13 +693,13 @@ async fn musicbrainz_answers_known_unknown_and_busy() {
         .unwrap_err();
     let retry = busy.downcast_ref::<RetryLater>().expect("retry later");
     assert_eq!((retry.class, retry.seconds), ("musicbrainz_busy", 120));
-    // A rate limit (429) is a retry after the hub's own wait too (the egress answers every 429
-    // so, under its own class).
+    // A rate limit (429) is a retry after the hub's own wait too: the egress answers every 429
+    // so, under its own class, before the hub reads it.
     let limited = musicbrainz::url(&e, musicbrainz::BASE, "https://limited.example/x")
         .await
         .unwrap_err();
     let retry = limited.downcast_ref::<RetryLater>().expect("retry later");
-    assert_eq!(retry.seconds, 120);
+    assert_eq!((retry.class, retry.seconds), ("http_4xx", 120));
     // A malformed MBID asks nothing.
     let before = t.seen.lock().unwrap().len();
     assert!(
@@ -2217,7 +2217,7 @@ async fn an_apple_music_track_plays_its_itunes_preview(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
+async fn a_deezer_barcode_names_the_apple_album_as_a_maybe(pool: sqlx::PgPool) {
     // Deezer's barcode and iTunes' album for it are the two sources' work.
     if !has(&["deezer", "itunes"]) {
         return;
@@ -2310,18 +2310,18 @@ async fn a_deezer_barcode_names_the_apple_album_that_joins(pool: sqlx::PgPool) {
         .await,
         ["upc:0602557656527 deezer"]
     );
+    // iTunes' one answer for the barcode carries no barcode to read back: a maybe, no key, and
+    // the tagged Apple album does not join through it.
     assert_eq!(
         rows(
-            "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 AND key IS NOT NULL",
+            "SELECT uri||' '||via||' '||coalesce(key,kind) FROM derived_link WHERE resource_id=$1 AND source='itunes'",
             ids[0].clone()
         )
         .await,
-        ["https://music.apple.com/album/1445304934 itunes upc:0602557656527"]
+        ["https://music.apple.com/album/1445304934 itunes maybe"]
     );
-    let group = "SELECT coalesce(group_id,'-') FROM group_unit WHERE resource_id=$1";
-    let album = rows(group, ids[0].clone()).await;
-    assert_ne!(album, ["-"]);
-    assert_eq!(rows(group, ids[1].clone()).await, album);
+    common::drain_groups(&pool, &Default::default()).await;
+    assert!(!common::one_group(&pool, &[&ids[0], &ids[1]]).await);
     assert_eq!(
         rows(
             "SELECT uri||' '||via||' '||key FROM derived_link WHERE resource_id=$1 AND source='deezer'",

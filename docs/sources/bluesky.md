@@ -2,7 +2,7 @@
 
 Bluesky posts and profiles, read from the public AppView (`public.api.bsky.app`). No key; one
 request per second. Posts are social content: the card quotes at most 200 characters, refreshes
-within the hour and is removed once the post is gone.
+within the hour and is removed once the post is gone. A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
