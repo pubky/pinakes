@@ -42,8 +42,6 @@ struct Answers {
     deezer_none: bool,
     /// TIDAL's search answers this status instead.
     tidal_status: Option<u16>,
-    /// YouTube's watch page is over the read's cap.
-    too_large: bool,
 }
 /// Answers YouTube's watch pages, Deezer's search and TIDAL's (with its token) from the
 /// recordings; records each request.
@@ -61,7 +59,7 @@ impl Transport for Recorded {
         &self,
         url: &url::Url,
         _: &[SocketAddr],
-        _: &FetchOptions,
+        options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
         let host = url.host_str().unwrap_or("");
         self.seen.lock().unwrap().push(format!(
@@ -69,12 +67,6 @@ impl Transport for Recorded {
             url.path(),
             url.query().unwrap_or("")
         ));
-        if self.answers.too_large && host == "www.youtube.com" {
-            return Err(pinakes_core::resolver::egress::BodyTooLarge {
-                cap: 3 * 1024 * 1024,
-            }
-            .into());
-        }
         let answer = |body: Vec<u8>, content_type: &str| Fetched {
             retry_after_secs: 120,
             ..common::fetched(url.clone(), 200, content_type.into(), body)
@@ -92,10 +84,12 @@ impl Transport for Recorded {
                 } else {
                     query("v")
                 };
-                answer(
-                    fixture(&format!("watch-{video}.html.gz")),
-                    "text/html; charset=utf-8",
-                )
+                let page = fixture(&format!("watch-{video}.html.gz"));
+                // As the real read does: a page over the read's cap is refused.
+                if let Some(cap) = options.body_cap.filter(|cap| page.len() > *cap) {
+                    return Err(pinakes_core::resolver::egress::BodyTooLarge { cap }.into());
+                }
+                answer(page, "text/html; charset=utf-8")
             }
             ("api.deezer.com", "/search") => {
                 let body = match query("q").as_str() {
@@ -286,8 +280,8 @@ async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
     assert!(seconds > 5.0 * 3600.0, "{seconds}");
 }
 
-/// A watch page over the cap stays over it: nothing is read, no run fails, and the video is read
-/// again at the source's lifetime, not after a failed run's wait.
+/// A watch page over `limits.also_on_watch_page_bytes` stays over it: nothing is read, no run
+/// fails, and the video is read again at the source's lifetime, not after a failed run's wait.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_watch_page_over_the_cap_is_not_retried(pool: sqlx::PgPool) {
     // Deezer is the one service this test's configuration searches.
@@ -295,15 +289,11 @@ async fn a_watch_page_over_the_cap_is_not_retried(pool: sqlx::PgPool) {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
-    let seen = run(
-        &pool,
-        config(true, true, None),
-        Answers {
-            too_large: true,
-            ..Default::default()
-        },
-    )
-    .await;
+    // The recorded page is 1.3 MB, within the default cap and over the least one.
+    let mut capped = config(true, true, None);
+    capped.also_on.watch_page_bytes = 1024 * 1024;
+    capped.validate().unwrap();
+    let seen = run(&pool, capped, Answers::default()).await;
     assert!(
         !seen.is_empty()
             && seen

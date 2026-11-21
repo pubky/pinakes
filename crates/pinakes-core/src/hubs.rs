@@ -1490,6 +1490,33 @@ pub mod wikidata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A hub's answer is kept for `limits.discovery_cache_secs`: asked once within it, asked
+    /// again after it.
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_answer_is_kept_for_the_discovery_cache_secs() {
+        let url = "https://www.wikidata.org/wiki/Special:EntityData/Q1.json";
+        let (_, recorded) = crate::sources::fixture::egress(vec![(
+            url,
+            200,
+            "application/json",
+            br#"{"entities":{}}"#.to_vec(),
+        )]);
+        let egress = Egress::with_backends(
+            crate::config::EgressConfig {
+                discovery_secs: 7200,
+                ..Default::default()
+            },
+            std::sync::Arc::new(crate::sources::fixture::PublicDns),
+            recorded.clone(),
+        );
+        get(&egress, url, "wikidata").await.unwrap().unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(7199)).await;
+        get(&egress, url, "wikidata").await.unwrap().unwrap();
+        assert_eq!(recorded.asked().len(), 1);
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        get(&egress, url, "wikidata").await.unwrap().unwrap();
+        assert_eq!(recorded.asked().len(), 2);
+    }
     /// An item's pages leave out a sitelink to a redirect; its English description is trimmed,
     /// and an empty one is none.
     #[test]
