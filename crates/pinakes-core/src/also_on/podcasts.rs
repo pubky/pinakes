@@ -743,7 +743,11 @@ impl Heard {
 impl Podcasts {
     async fn itunes(cx: &Context, url: &str) -> Result<crate::resolver::egress::Fetched> {
         cx.egress
-            .discover(url, &super::itunes_api::options(), 3600)
+            .discover(
+                url,
+                &super::itunes_api::options(),
+                cx.egress.config().discovery_secs,
+            )
             .await
     }
     /// iTunes' record of the show, if it knows it.
@@ -787,7 +791,7 @@ impl Podcasts {
         if matches!(fetched.status, 401 | 403) {
             return Err(RetryLater {
                 class: "podcast_index_auth",
-                seconds: super::client_credentials::REFUSAL_HOLD,
+                seconds: cx.config.also_on.refusal_hold_secs,
             }
             .into());
         }
@@ -829,7 +833,11 @@ impl Podcasts {
             feed_cap: Some(PODCAST_FEED_CAP),
             ..Default::default()
         };
-        let f = match cx.egress.discover(url, &options, 3600).await {
+        let f = match cx
+            .egress
+            .discover(url, &options, cx.egress.config().discovery_secs)
+            .await
+        {
             Ok(f) => f,
             Err(e) if e.is::<RetryLater>() => return Err(e),
             Err(e) => {

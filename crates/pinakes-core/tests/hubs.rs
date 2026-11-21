@@ -112,7 +112,7 @@ impl Transport for Recorded {
                 .push(format!("musicbrainz.org{}", url.path()));
             if url.path().starts_with("/ws/2/") {
                 return Err(pinakes_core::resolver::egress::BodyTooLarge {
-                    cap: pinakes_core::hubs::MUSICBRAINZ_CAP,
+                    cap: pinakes_core::hubs::DEFAULT_BODY_CAP,
                 }
                 .into());
             }
@@ -199,9 +199,9 @@ impl Transport for Recorded {
         // Much-edited Wikidata items and MusicBrainz entities with many links exceed the default
         // cap; their reads may be larger.
         let cap = match url.host_str() {
-            Some("www.wikidata.org") => Some(pinakes_core::hubs::WIKIDATA_CAP),
+            Some("www.wikidata.org") => Some(pinakes_core::hubs::DEFAULT_BODY_CAP),
             Some("musicbrainz.org" | "mb-mirror.example") => {
-                Some(pinakes_core::hubs::MUSICBRAINZ_CAP)
+                Some(pinakes_core::hubs::DEFAULT_BODY_CAP)
             }
             _ => None,
         };
@@ -534,7 +534,7 @@ impl Transport for Recorded {
             // An item over Wikidata's cap.
             "/w/api.php" if query("action") == "wbgetentities" && query("ids") == "Q999999999" => {
                 return Err(pinakes_core::resolver::egress::BodyTooLarge {
-                    cap: pinakes_core::hubs::WIKIDATA_CAP,
+                    cap: pinakes_core::hubs::DEFAULT_BODY_CAP,
                 }
                 .into())
             }

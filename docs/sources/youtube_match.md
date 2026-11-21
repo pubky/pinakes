@@ -52,7 +52,7 @@ other exact source of a track's YouTube video is known.
 ## Operations
 
 Per label upload, while Deezer or `tidal_isrc` runs: one watch page (about 1.4 MB, refused above
-3 MB, shared for an hour) at the host's default pace (`limits.host_requests_per_second`, one
+`limits.also_on_watch_page_bytes`, 3 MiB, shared for `limits.discovery_cache_secs`, an hour) at the host's default pace (`limits.host_requests_per_second`, one
 request at a time), then one Deezer search and one TIDAL search, each shared for an hour. A
 rate limit or an outage of YouTube or Deezer (`youtube_busy`, Deezer's quota) is retried, keeping
 the links an earlier run found. A watch page over 3 MB gives nothing and is not retried. TIDAL failing (a rate limit, an unexpected

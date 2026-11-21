@@ -493,7 +493,11 @@ impl Books {
     async fn edition(cx: &Context, book: &Book) -> Result<Found> {
         let f = cx
             .egress
-            .discover(&edition_request(book), &FetchOptions::json(), 3600)
+            .discover(
+                &edition_request(book),
+                &FetchOptions::json(),
+                cx.egress.config().discovery_secs,
+            )
             .await?;
         let Some(edition) = parse_edition(f.status, &f.body, book)? else {
             return Ok(Found::default());
@@ -516,7 +520,11 @@ impl Books {
             let apple = async {
                 let f = cx
                     .egress
-                    .discover(&itunes_request(isbn, storefront), &itunes, 3600)
+                    .discover(
+                        &itunes_request(isbn, storefront),
+                        &itunes,
+                        cx.egress.config().discovery_secs,
+                    )
                     .await?;
                 parse_itunes(f.status, &f.body, storefront)
             };
@@ -596,7 +604,11 @@ impl Books {
         for _ in 0..3 {
             let f = cx
                 .egress
-                .discover(&work_request(&id), &FetchOptions::json(), 3600)
+                .discover(
+                    &work_request(&id),
+                    &FetchOptions::json(),
+                    cx.egress.config().discovery_secs,
+                )
                 .await?;
             match parse_work(f.status, &f.body, &id)? {
                 WorkRecord::Work => {

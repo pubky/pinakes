@@ -947,7 +947,7 @@ pub fn endpoint(
                 format!("https://www.wikidata.org/wiki/Special:EntityData/{id}.json"),
                 FetchOptions {
                     // A much-edited item carries megabytes of claims.
-                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    body_cap: Some(crate::hubs::DEFAULT_BODY_CAP),
                     ..opts
                 },
             ))
@@ -1050,7 +1050,7 @@ async fn wiki(uri: &str, f: &Fetched, egress: &Egress) -> Result<Item> {
             .discover(
                 &format!("https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"),
                 &FetchOptions {
-                    body_cap: Some(crate::hubs::WIKIDATA_CAP),
+                    body_cap: Some(crate::hubs::body_cap(egress)),
                     ..Default::default()
                 },
                 86400,

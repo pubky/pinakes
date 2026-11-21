@@ -33,8 +33,6 @@ use serde_json::Value;
 
 /// How far a track's length may be from the video's, in seconds.
 pub const MATCH_WINDOW_SECS: i64 = 2;
-/// The largest watch page read (they are about 1.4 MB); a larger one is refused.
-const WATCH_CAP: usize = 3 * 1024 * 1024;
 /// When a lookup YouTube answered with a sign-in page is tried again.
 const LOGIN_WAIT_SECS: u64 = 6 * 3600;
 /// The description YouTube gives a label's upload.
@@ -188,7 +186,7 @@ impl Source for YoutubeMatch {
                     if !super::client_credentials::refused(&error) {
                         let seconds = error
                             .downcast_ref::<RetryLater>()
-                            .map_or(super::client_credentials::REFUSAL_HOLD, |r| r.seconds);
+                            .map_or(cx.config.also_on.refusal_hold_secs, |r| r.seconds);
                         found.retry_after = Some(std::time::Duration::from_secs(seconds));
                     }
                 }
@@ -204,10 +202,15 @@ async fn watch(cx: &Context, id: &str) -> Result<Watch> {
     let url = format!("https://www.youtube.com/watch?v={id}");
     let options = FetchOptions {
         accept: Some("text/html".into()),
-        body_cap: Some(WATCH_CAP),
+        // The largest watch page read (they are about 1.4 MB); a larger one is refused.
+        body_cap: Some(cx.config.also_on.watch_page_bytes),
         ..Default::default()
     };
-    let fetched = match cx.egress.discover(&url, &options, 3600).await {
+    let fetched = match cx
+        .egress
+        .discover(&url, &options, cx.egress.config().discovery_secs)
+        .await
+    {
         Ok(fetched) => fetched,
         // The sign-in page ("confirm you're not a bot") is a wall to the egress: no answer.
         Err(error) if error.is::<crate::resolver::interstitial::Blocked>() => {

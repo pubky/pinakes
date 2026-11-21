@@ -299,7 +299,10 @@ impl Films {
     }
     async fn tvmaze(cx: &Context, url: &str) -> Result<Option<Show>> {
         let options = FetchOptions::json();
-        let f = cx.egress.discover(url, &options, 3600).await?;
+        let f = cx
+            .egress
+            .discover(url, &options, cx.egress.config().discovery_secs)
+            .await?;
         parse_tvmaze(f.status, &f.body)
     }
     /// Letterboxd's film for the title; a refusal (e.g. a challenge page) is no answer, a rate
@@ -307,7 +310,11 @@ impl Films {
     async fn letterboxd(cx: &Context, tt: &str) -> Result<Option<Link>> {
         match cx
             .egress
-            .discover(&letterboxd_request(tt), &FetchOptions::default(), 3600)
+            .discover(
+                &letterboxd_request(tt),
+                &FetchOptions::default(),
+                cx.egress.config().discovery_secs,
+            )
             .await
         {
             Ok(f) if f.status >= 500 => Err(crate::resolver::RetryLater {

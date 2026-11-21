@@ -13,7 +13,7 @@ the track's duration, the one recording within 3 s of it keyed by its MBID, else
 only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). TIDAL's catalogue is read in one country (`[tidal] country`,
 `US`); an item TIDAL does not offer there gives nothing. TIDAL's answers are cached per
 credential pair, so a new token keeps them; a 401 or 403 is never cached, and refused
-credentials are asked again after five minutes.
+credentials are asked again after `limits.also_on_refusal_hold_secs` (five minutes).
 
 ## Another service's track on TIDAL
 

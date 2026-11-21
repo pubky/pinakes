@@ -980,7 +980,7 @@ mod tests {
         let no_key = || -> Result<Option<()>> {
             Err(RetryLater {
                 class: "unit_auth",
-                seconds: crate::also_on::client_credentials::REFUSAL_HOLD,
+                seconds: crate::also_on::AlsoOnConfig::default().refusal_hold_secs,
             }
             .into())
         };

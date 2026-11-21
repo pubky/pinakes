@@ -761,6 +761,11 @@ impl Egress {
             && (self.cfg.allow_hosts.is_empty()
                 || self.cfg.allow_hosts.iter().any(|h| host_matches(&host, h)))
     }
+    /// The limits this egress was built with (`[limits]`: `hub_body_bytes`,
+    /// `discovery_cache_secs`, …).
+    pub fn config(&self) -> &EgressConfig {
+        &self.cfg
+    }
     /// The operator's contact address (`http.contact`), if set.
     pub fn contact(&self) -> Option<&str> {
         Some(self.cfg.contact.as_str()).filter(|c| !c.is_empty())
