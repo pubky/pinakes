@@ -7,8 +7,9 @@ quotes at most 200 characters, refreshes within the hour and is removed once the
 ## Links
 
 `https://news.ycombinator.com/item?id={id}` is the root; the same item's other pages
-(`&p=2`), its hnsignals.com page `https://hnsignals.com/signal/{id}` (which names items by the
-same id) and the API's `https://hacker-news.firebaseio.com/v0/item/{id}.json` are aliases of it.
+(`&p=2`) and the API's `https://hacker-news.firebaseio.com/v0/item/{id}.json` are aliases of it.
+Another site's page that names an item by its id (such as `https://hnsignals.com/signal/{id}`)
+is not read: it gets a web card of its own.
 
 ## What it reads
 
@@ -48,6 +49,6 @@ Two kinds of item are `JobPosting`s ([Jobs](../api.md#jobs)), posted at their ti
 ## Examples
 
 - `https://news.ycombinator.com/item?id=8863`
-- `https://hnsignals.com/signal/2921983` (a comment, by its hnsignals page)
+- `https://news.ycombinator.com/item?id=2921983` (a comment)
 - `https://news.ycombinator.com/item?id=49926618` (a job posting in the October 2026 hiring
   thread)

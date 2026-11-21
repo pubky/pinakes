@@ -89,7 +89,7 @@ or got plain web cards before are read by their source.
 - [`google_play`](google_play.md): page hook: a Google Play app's name, icon, developer and category from its page.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`greenhouse`](greenhouse.md): Greenhouse job board postings by board and job id.
-- [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
+- [`hacker_news`](hacker_news.md): Hacker News items by id.
 - [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
 - [`inaturalist`](inaturalist.md): iNaturalist observations and taxa by id.
 - [`instagram`](instagram.md): Instagram posts, reels and profiles.
