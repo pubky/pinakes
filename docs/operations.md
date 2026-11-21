@@ -866,8 +866,9 @@ Nostr identifiers and client URLs use signed NIP-52 events through two HTTP inde
 request per second, Archives at two), paginating `until` windows within
 `limits.max_indexer_pages`; the newest matching revision wins, and `nevent`/`note` pin one. Both
 must miss before absence is accepted. With `event.adapters.websocket`, one relay hint is asked
-after both miss (`limits.websocket_deadline_ms`, one MB, 256 frames, DNS checked and pinned); an
-unfinished subscription never confirms absence. A full tied page, an exhausted budget or an
+whenever no indexer has a match, also while an indexer is down or out of time
+(`limits.websocket_deadline_ms`, one MB, 256 frames, DNS checked and pinned); its signed match is
+used, and neither its silence nor an unfinished subscription ever confirms absence. A full tied page, an exhausted budget or an
 indexer 404 is inconclusive and retries after five minutes without charging an attempt.
 
 Only parser failures fall back to a web card. Upstream failures keep the accepted document and
