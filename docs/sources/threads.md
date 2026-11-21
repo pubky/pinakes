@@ -2,7 +2,7 @@
 
 Threads posts and profiles, from their pages' Open Graph tags. No key and no account. Posts are
 social content: the card quotes at most 200 characters, refreshes within the hour and is removed
-once the post is gone.
+once the post is gone. A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
@@ -21,10 +21,11 @@ handle is taken from that address, else from the last `(@handle)` of the page's 
 - A profile: `GET https://www.threads.com/@{handle}`, its Open Graph tags. A profile that does
   not exist, like anything Threads shows to accounts only, redirects to its sign-in page.
 
-A request Threads refuses (a sign-in redirect, a challenge, 401 or 403) gives the card of the
-link's shape alone, "Post on threads.com" or "Profile on threads.com", with the `blocked`
-fact: the link still resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. So does a page Threads withholds where the
-request came from (451): it is not `missing`.
+A request Threads refuses (a sign-in redirect, a challenge, 401 or 403) gives the card of the link's
+shape alone, "Post on threads.com" or "Profile on threads.com", with the `blocked` fact: the link
+still resolves, groups and counts. So does a page Threads withholds where the request came from
+(451): it is not `missing`. A refusal on a refresh keeps the card read before, as a wall on a web
+page does.
 
 ## Card
 

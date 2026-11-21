@@ -206,7 +206,9 @@ impl Source for Twitch {
     }
     /// A video's title is its creator's own text, as a TikTok's or a reel's is.
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "VideoObject" || crate::changes::gone_post_type(doc)
+        // A video, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "VideoObject" | "Person")
+            || crate::changes::gone_post_type(doc)
     }
     fn e2e(&self) -> Option<super::E2e> {
         use super::{E2e, E2eAnswer, E2eSample};
@@ -422,15 +424,15 @@ mod tests {
         assert_eq!(doc.source_root.as_deref(), Some(channel));
     }
 
-    /// A video's card quotes its creator (social, purged when the video goes); a channel's is
-    /// the channel's.
+    /// A video's card quotes its creator, and a channel's its bio: both are social content
+    /// (purged when gone).
     #[test]
-    fn videos_are_social_content() {
+    fn videos_and_channels_are_social_content() {
         let mut doc = ResourceMeta::new("https://www.twitch.tv/videos/1", "twitch", 60);
         doc.set_type("VideoObject");
         assert!(Twitch.social(&doc));
         doc.set_type("Person");
-        assert!(!Twitch.social(&doc));
+        assert!(Twitch.social(&doc));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Telegram public channels and their posts, from t.me's public pages. No key and no account.
 Posts are social content: the card quotes at most 200 characters, refreshes within the hour and
-is removed once the post is gone.
+is removed once the post is gone. A channel is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 

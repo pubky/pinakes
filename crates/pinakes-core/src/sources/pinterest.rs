@@ -208,7 +208,8 @@ impl Source for Pinterest {
         &["author", "author_name", "handle", "blocked"]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "Person")
     }
     fn examples(&self) -> &'static [Example] {
         &[

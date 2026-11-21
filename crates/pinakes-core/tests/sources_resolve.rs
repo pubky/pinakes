@@ -349,7 +349,11 @@ async fn a_past_dated_official_card_is_final_after_its_job(pool: sqlx::PgPool) {
         rows.push(row);
     }
     assert_eq!((rows[0].0.as_str(), rows[0].1), ("ok", true), "the block");
-    assert_eq!((rows[1].0.as_str(), rows[1].1), ("ok", false), "the compound");
+    assert_eq!(
+        (rows[1].0.as_str(), rows[1].1),
+        ("ok", false),
+        "the compound"
+    );
     // The official route's lifetime (a day), not the dateless page's week.
     assert!((82_800.0..=86_400.0).contains(&rows[1].2), "{}", rows[1].2);
 }
@@ -416,4 +420,43 @@ async fn a_walled_refresh_keeps_the_last_good_card(pool: sqlx::PgPool) {
         (name.as_deref(), blocked.as_deref(), status.as_str()),
         (Some("Profile on x.com"), Some("true"), "ok")
     );
+}
+
+/// A profile is social content: once it is gone it keeps nothing of itself (no name, bio or
+/// picture), as a gone post does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_gone_profile_is_purged_like_a_post(pool: sqlx::PgPool) {
+    use pinakes_core::{model::ResourceMeta, store};
+    if !has("x") {
+        return;
+    }
+    let uri = "https://x.com/someone";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut good = ResourceMeta::new(uri, "x", 3600);
+    good.set_type("Person");
+    good.name = Some("Some One".into());
+    good.description = Some("Builds bridges.".into());
+    good.image = Some("https://pbs.twimg.com/profile_images/1/a.jpg".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    // Gone, and confirmed by a second fresh read.
+    for later in [1, 2] {
+        let mut gone = ResourceMeta::new(uri, "x", 3600);
+        gone.status = Status::Missing;
+        gone.fetched_at = good.fetched_at + later;
+        store::save_document(&pool, &id, 0, &gone).await.unwrap();
+    }
+    let (status, name, description, image): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT status, doc->>'name', doc->>'description', doc->>'image' FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "missing");
+    assert_eq!((name, description, image), (None, None, None));
 }

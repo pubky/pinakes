@@ -3,7 +3,7 @@
 Reddit posts, subreddits and users, from Reddit's public JSON: the `.json` form of any page.
 No key and no account; ten requests a minute, Reddit's limit for requests without an account.
 Posts are social content: the card quotes at most 200 characters, refreshes within the hour
-and is removed once the post is gone.
+and is removed once the post is gone. A user's profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
@@ -29,12 +29,13 @@ records (`removed_by_category`), or the text replaced by `[deleted]` or `[remove
 account's post stays up under `[deleted]`, and its card names no author. An answer for another
 object is an error. Reddit refuses many requests without a browser with its network-security page
 (403): the card of the link's shape alone, "Post on reddit.com" or "Profile on reddit.com", with the
-`blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. A refused post keeps the post's type, so
+`blocked` fact. The link still resolves, groups and counts. A refused post keeps the post's type, so
 it stays social content: once the post is gone, its card keeps nothing of the post (no name, text,
 image or fact, such as its subreddit or author, not even its type: only its link and status, with
-the type every gone post has, [`SocialMediaPosting`](../api.md#card)), its change history
-and what the also-on lookups found for it are deleted, and the spellings of the post saved before
-they became its aliases, whenever they become one, keep only the line naming the post.
+the type every gone post has, [`SocialMediaPosting`](../api.md#card)), its change history and what
+the also-on lookups found for it are deleted, and the spellings of the post saved before they became
+its aliases, whenever they become one, keep only the line naming the post. A refusal on a refresh
+keeps the card read before, as a wall on a web page does.
 
 The recorded fixtures hold Reddit's refusals; the JSON fixtures are written by hand after
 Reddit's public JSON, as their provenance says.

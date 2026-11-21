@@ -2,7 +2,7 @@
 
 X (Twitter) posts and profiles. No key and no account: a post comes from X's oEmbed endpoint,
 a profile from its page's Open Graph tags. Posts are social content: the card quotes at most
-200 characters, refreshes within the hour and is removed once the post is gone.
+200 characters, refreshes within the hour and is removed once the post is gone. A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
@@ -18,10 +18,10 @@ name a post without its author: the root is known once X names the author.
   documented oEmbed endpoint. A 404 is `missing`.
 - A profile: `GET https://x.com/{handle}`, its Open Graph tags. A 404 is `missing`.
 
-A request X refuses (a sign-in redirect, a challenge, 401 or 403) gives the card of the link's
-shape alone, "Post on x.com" or "Profile on x.com", with the `blocked` fact: the link still
-resolves, groups and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does. So does a profile page X withholds where the request came from
-(451): it is not `missing`.
+A request X refuses (a sign-in redirect, a challenge, 401 or 403) gives the card of the link's shape
+alone, "Post on x.com" or "Profile on x.com", with the `blocked` fact: the link still resolves,
+groups and counts. So does a profile page X withholds where the request came from (451): it is not
+`missing`. A refusal on a refresh keeps the card read before, as a wall on a web page does.
 
 ## Card
 

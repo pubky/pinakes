@@ -2,7 +2,7 @@
 
 LinkedIn profiles, company pages and posts, from their pages' Open Graph tags. No key and no
 account. LinkedIn shows most of its pages to accounts only: a refused request gives a plain
-card rather than a failure (below).
+card rather than a failure (below). A profile or company page is social content too: it refreshes within the hour, is removed once it is gone, and its about text is published without e-mail addresses.
 
 ## Links
 

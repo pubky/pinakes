@@ -253,7 +253,11 @@ impl Source for LinkedIn {
         &["author", "handle", "headline", "followers", "blocked"]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a profile or company page (its about text is its owner's own).
+        matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "Person" | "Organization"
+        )
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -290,7 +294,14 @@ impl Source for LinkedIn {
                 }
             }
             Body::Missing => cx.missing(uri, self),
-            Body::Blocked => social::blocked(doc, target.shape(), SITE),
+            // A walled company keeps the link's type.
+            Body::Blocked => {
+                let mut doc = social::blocked(doc, target.shape(), SITE);
+                if let Target::Company(_) = target {
+                    doc.set_type("Organization");
+                }
+                doc
+            }
         };
         doc.source_root = Some(target.root());
         Ok(doc)
@@ -407,6 +418,22 @@ mod tests {
             .starts_with("Founded in 2003"));
         assert!(social::numeric(&doc.attributes["followers"]));
         assert!(company_card(base, "x", &tags("company-missing.html.gz")).is_none());
+    }
+
+    /// A walled company keeps the link's type: an `Organization`, not a `Person`.
+    #[tokio::test(start_paused = true)]
+    async fn a_walled_company_is_an_organization() {
+        let company = "https://www.linkedin.com/company/linkedin";
+        let (egress, _) =
+            crate::sources::fixture::egress(vec![(company, 999, "text/html", b"".to_vec())]);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = LinkedIn.resolve(&cx, company).await.unwrap();
+        assert_eq!(doc.type_name, "Organization");
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert!(LinkedIn.social(&doc), "a company page is its owner's own text");
     }
 
     /// A 200 page without a profile's or a company's tags (a consent page, LinkedIn's generic

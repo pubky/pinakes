@@ -197,7 +197,8 @@ impl Source for Facebook {
         &["author", "handle", "blocked"]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a page (its about text is its owner's own).
+        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "Organization")
     }
     fn examples(&self) -> &'static [Example] {
         &[Example {
@@ -217,7 +218,12 @@ impl Source for Facebook {
                         .unwrap_or_else(|| social::shape_only(plain_page(doc, name)))
                 }
                 Body::Missing => cx.missing(uri, self),
-                Body::Blocked => social::blocked(doc, Shape::Profile, SITE),
+                // A walled page keeps the link's type.
+                Body::Blocked => {
+                    let mut doc = social::blocked(doc, Shape::Profile, SITE);
+                    doc.set_type("Organization");
+                    doc
+                }
             },
             // Posts and videos are shown to accounts only, so their pages are never asked: the
             // card is the link's (its root, its shape and the page that posted it).

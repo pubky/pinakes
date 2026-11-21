@@ -5,7 +5,9 @@ them for a request without an account. No key and no account; Instagram's oEmbed
 needs an app token and is not used. Instagram shows almost everything to accounts only: such a
 link gets a plain card rather than a failure (below). A post is a link rule: its card is the
 link's root and shape alone, and nothing is asked. Reels are social content: the card quotes at
-most 200 characters, refreshes within the hour and is removed once the reel is gone.
+most 200 characters, refreshes within the hour and is removed once the reel is gone. A profile is
+social content too: it refreshes within the hour, is removed once it is gone, and its bio is
+published without e-mail addresses.
 
 ## Links
 

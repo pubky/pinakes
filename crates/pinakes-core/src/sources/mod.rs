@@ -910,11 +910,15 @@ pub async fn resolve(
     let Some(source) = enabled_source(uri, config) else {
         return Ok(None);
     };
-    let doc = match source.resolve(&Context { egress, ttl }, uri).await {
+    let mut doc = match source.resolve(&Context { egress, ttl }, uri).await {
         Ok(doc) => doc,
         Err(error) if error.is::<Declined>() => return Ok(None),
         Err(error) => return Err(error),
     };
+    // A social profile's bio is its author's own text, published: never with an e-mail address.
+    if matches!(doc.type_name.as_str(), "Person" | "Organization") && source.social(&doc) {
+        doc.description = doc.description.as_deref().map(without_addresses);
+    }
     Ok(Some(doc.bounded(attributes())?))
 }
 
@@ -1982,6 +1986,26 @@ mod tests {
                 "{uri}"
             );
         }
+    }
+
+    /// A social profile is social content, and its bio is published without e-mail addresses.
+    #[tokio::test(start_paused = true)]
+    async fn a_profiles_bio_publishes_no_address() {
+        let Some(x) = by_name("x") else {
+            return;
+        };
+        let uri = "https://x.com/someone";
+        let page = br#"<html><head><meta property="og:title" content="Some One (@someone) on X"><meta property="og:description" content="Builds bridges. Write to someone@example.org or mailto:me@example.org"></head></html>"#;
+        let (egress, _) = fixture::egress(vec![(uri, 200, "text/html", page.to_vec())]);
+        let doc = resolve(&egress, &Config::default(), uri, 3600)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.type_name, "Person");
+        assert!(x.social(&doc), "a profile is social content");
+        let bio = doc.description.unwrap();
+        assert!(bio.starts_with("Builds bridges."), "{bio}");
+        assert!(!bio.contains('@'), "{bio}");
     }
 
     #[test]

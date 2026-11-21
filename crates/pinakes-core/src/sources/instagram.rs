@@ -197,7 +197,11 @@ impl Source for Instagram {
     }
     /// A post's card and a reel's: both quote the author's caption.
     fn social(&self, doc: &ResourceMeta) -> bool {
-        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "VideoObject")
+        // A post or reel, and a profile (its bio is its author's own text).
+        matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "VideoObject" | "Person"
+        )
     }
     fn examples(&self) -> &'static [Example] {
         &[

@@ -4,7 +4,7 @@ Twitch channels, videos and clips, from their pages' Open Graph tags. No key and
 Videos are social content (a video's title is its creator's own text): the card quotes at most
 120 characters of the title, refreshes within the hour and is removed once Twitch answers that
 the video is gone (404 or 410). A clip is a link rule: its card is the link's root and shape,
-with the channel the link spells, and nothing is asked.
+with the channel the link spells, and nothing is asked. A channel is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 

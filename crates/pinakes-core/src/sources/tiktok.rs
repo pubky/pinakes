@@ -112,16 +112,14 @@ impl Source for TikTok {
                     group_with: None,
                 },
             ],
-            answers: &[
-                E2eAnswer {
-                    host: "www.tiktok.com",
-                    path: "/oembed",
-                    query: &[("url", "https://www.tiktok.com/@tiktok")],
-                    header: None,
-                    content_type: "application/json",
-                    file: "oembed-profile.json",
-                },
-            ],
+            answers: &[E2eAnswer {
+                host: "www.tiktok.com",
+                path: "/oembed",
+                query: &[("url", "https://www.tiktok.com/@tiktok")],
+                header: None,
+                content_type: "application/json",
+                file: "oembed-profile.json",
+            }],
         })
     }
     fn reads(&self, uri: &str) -> bool {
@@ -138,7 +136,9 @@ impl Source for TikTok {
     /// A video and a profile are social content (a video is its author's, a profile's name its
     /// owner's own).
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "VideoObject" || crate::changes::gone_post_type(doc)
+        // A video, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "VideoObject" | "Person")
+            || crate::changes::gone_post_type(doc)
     }
     fn examples(&self) -> &'static [Example] {
         &[

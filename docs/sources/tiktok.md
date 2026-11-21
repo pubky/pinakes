@@ -3,7 +3,7 @@
 TikTok videos and profiles. No key and no account. A profile is read from TikTok's oEmbed
 endpoint; a video is a link rule: its card is the link's root and shape, with the author the
 link spells, and nothing is asked (to a request without a browser TikTok names a video by its
-id alone).
+id alone). A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 

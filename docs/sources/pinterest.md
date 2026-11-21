@@ -3,7 +3,7 @@
 Pinterest pins and profiles. No key and no account: a pin comes from Pinterest's oEmbed
 endpoint, a profile from its page's Open Graph tags. Pins are social content: the card quotes at
 most 120 characters of the pin's title (its name; a pin's card has no description), refreshes
-within the hour and is removed once the pin is gone.
+within the hour and is removed once the pin is gone. A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 

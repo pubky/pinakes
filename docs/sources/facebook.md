@@ -4,7 +4,7 @@ Facebook pages, posts and videos, from what their public pages carry. No key and
 Facebook shows posts and videos to accounts only: such a link gets the card of its shape alone
 rather than a failure (below). Event links (`https://www.facebook.com/events/{id}`) are not this source's:
 the event module's Facebook adapter reads them (an event page that carries JSON-LD is an event
-there, with its dates).
+there, with its dates). A page is social content too: it refreshes within the hour, is removed once it is gone, and its about text is published without e-mail addresses.
 
 ## Links
 
