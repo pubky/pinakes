@@ -2135,6 +2135,14 @@ mod tests {
                 "https://t.me/moved_name",
                 "Profile on t.me",
             ),
+            (
+                "x",
+                "https://x.com/jack",
+                "own-page-profile-x.html.gz",
+                "jack",
+                "https://x.com/moved_name",
+                "Profile on x.com",
+            ),
         ] {
             let Some(s) = by_name(source) else {
                 continue;
