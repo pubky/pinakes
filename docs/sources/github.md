@@ -38,7 +38,8 @@ repository for (404: a deleted repository, or another page of the site shaped li
 web card, which is `missing` when the page is gone too. A renamed one answers a redirect, which is not followed with the
 token: its link gets a web card, which follows it.
 
-GitHub's rate limit retries later: a 429, or a 403 whose message names a rate limit. Any other
+GitHub's rate limit retries later: a 429, or a 403 whose message names a rate limit. It is the
+token's own quota, stored as `quota`, and charges the link nothing. Any other
 403 (GitHub blocks access to the repository) gets a web card. A timeout or a server error (408,
 5xx) retries later too.
 

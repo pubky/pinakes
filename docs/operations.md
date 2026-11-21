@@ -36,7 +36,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. Each key is one host name (`api.example.org`; an IPv6 address in brackets), read without regard to case. A key that is a pattern (`*.example.org`), a URL or a name with a path, or two keys for one host, stop startup. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
-| `max_failures` | `5` | Failures before a resource dead-letters. |
+| `max_failures` | `5` | Failures before a resource dead-letters. A service that keeps answering 5xx, 408 or 429 dead-letters a link only once its failures have lasted three days ([queue](#queue-and-refresh)). |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
 | `max_backoff_secs` | `3600` | Retry backoff ceiling (seconds). |
@@ -618,15 +618,21 @@ dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consec
 back off without charging an attempt. A service that answers 5xx, 408 or 429 (stored as
 `upstream`, `http_5xx` or `http_4xx`) is read again after the wait it named or the backoff,
 whichever is longer; the backoff doubles up to `limits.max_backoff_secs` while one of these
-answers follows another, a longer named wait is never cut, and each one is an attempt: the link
-dead-letters after `limits.max_failures` like any other failure and turns `error` then (until then
-its status stays). A request that never got an answer from the upstream (the
+answers follows another (the streak is kept in `timeout_streak`), and a longer named wait is never
+cut. These waits are no attempts, so a short outage never dead-letters a link: it dead-letters,
+and turns `error`, only once the failures have lasted three days (the span after which a denial
+turns a link `unreachable`), measured as the backoff of the streak's waits from its first; at the
+defaults that is the 79th in a row. Until then an accepted card keeps its status, and a link with
+no card yet shows `error` after `limits.max_failures` of them in a row. A rate limit on the
+operator's own quota (GitHub's token rate limit, a 429 from the operator's Nominatim; stored as
+`quota`) is the daemon's own wait: it charges nothing and keeps the streak. A request that never got an answer from the upstream (the
 connection refused, reset or aborted, or the host unreachable; stored as `connect`) is never
 charged and never dead-letters: it
 backs off up to `limits.max_backoff_secs` for as long as it lasts, its streak is kept in
 `timeout_streak` while `last_error` is `connect`, and a link with no card yet turns `error` after
 `limits.max_failures` of them in a row while it is still retried. Egress's own waits (its host
-budget, a cached failure) keep that streak and an upstream one, and charge nothing. A TLS failure (a certificate the host serves) and a
+budget, a cached failure) and the operator's quota keep that streak and an upstream one, and
+charge nothing. A TLS failure (a certificate the host serves) and a
 `connect` failure a resolver names itself (a PKARR relay, a key-pinned homeserver) are answers
 about the link and count. A missing result needs a second fresh fetch to confirm,
 scheduled after `limits.missing_ttl_secs` (at least an hour) for a link with an accepted card, and

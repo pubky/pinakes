@@ -3003,9 +3003,10 @@ async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
 
 /// A service that keeps answering 5xx, 408 or 429 (`RetryLater` of class `upstream`, `http_4xx`
 /// or `http_5xx`): the link waits the named wait or the backoff, whichever is longer, the backoff
-/// doubling while the class stays an upstream wait (one class to another keeps the streak), each
-/// wait is an attempt, and the row dead-letters after `max_failures`, turning `error` then.
-/// Another outcome starts the streak over; a longer named wait is never cut.
+/// doubling while the class stays an upstream wait (one class to another keeps the streak). The
+/// waits are no attempts and no dead letter: a link with no card shows `error` after
+/// `max_failures` of them and is still read. Another outcome starts the streak over; a longer
+/// named wait is never cut.
 #[sqlx::test(migrations = "../../migrations")]
 async fn upstream_waits_back_off_and_dead_letter(pool: PgPool) {
     struct Busy(&'static str, u64);
@@ -3065,24 +3066,20 @@ async fn upstream_waits_back_off_and_dead_letter(pool: PgPool) {
     assert_eq!(
         rows,
         [
-            (1, 1, false, 60, "pending".to_owned()),
-            (2, 2, false, 60, "pending".to_owned()),
-            (3, 3, false, 120, "pending".to_owned()),
-            (4, 4, false, 240, "pending".to_owned()),
-            (5, 5, false, 7200, "pending".to_owned()),
-            (6, 6, true, 240, "error".to_owned()),
+            (1, 0, false, 60, "pending".to_owned()),
+            (2, 0, false, 60, "pending".to_owned()),
+            (3, 0, false, 120, "pending".to_owned()),
+            (4, 0, false, 240, "pending".to_owned()),
+            (5, 0, false, 7200, "pending".to_owned()),
+            (6, 0, false, 240, "error".to_owned()),
         ]
     );
-    // The daemon's own wait for a host's budget charges nothing and keeps the streak; another
-    // outcome (here a timeout) starts it over.
-    sqlx::query("UPDATE resource SET dead_letter=false,attempts=0 WHERE id=$1")
-        .bind(&id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // The daemon's own waits (a host's budget, the operator's quota) charge nothing and keep the
+    // streak; another outcome (here a timeout) starts it over.
     let mut rows = vec![];
     for answer in [
         DeferredResolver("rate_limited"),
+        DeferredResolver("quota"),
         DeferredResolver("timeout"),
         DeferredResolver("upstream"),
     ] {
@@ -3107,8 +3104,9 @@ async fn upstream_waits_back_off_and_dead_letter(pool: PgPool) {
         rows,
         [
             (6, 0, "upstream".to_owned()),
+            (6, 0, "upstream".to_owned()),
             (1, 0, "timeout".to_owned()),
-            (1, 1, "upstream".to_owned()),
+            (1, 0, "upstream".to_owned()),
         ]
     );
     // A PKARR relay outage is no answer about the link: no attempt, and the streak starts over.
@@ -3128,7 +3126,64 @@ async fn upstream_waits_back_off_and_dead_letter(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(row, (0, 1, false, "relay_outage".to_owned()));
+    assert_eq!(row, (0, 0, false, "relay_outage".to_owned()));
+}
+
+/// A short outage never dead-letters a link: at the default settings, an hour of 503s (several
+/// waits, growing) leaves it to be read again, and it reads normally once the service answers.
+/// Only failures that have lasted three days (the backoff of the streak's waits, counted from its
+/// first) dead-letter it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_upstream_outage_dead_letters_only_after_three_days(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let id = store::ensure_resource(&pool, "https://example.org/outage")
+        .await
+        .unwrap();
+    let run = |resolver: &'static (dyn Resolver + Sync)| {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+            queue::run_job(&pool, resolver, &cfg, &job).await.unwrap();
+            sqlx::query_as::<_, (i32, i32, bool, f64, String)>("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,status FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    static BUSY: DeferredResolver = DeferredResolver("http_5xx");
+    let mut waited = 0.0;
+    let mut waits = 0;
+    while waited < 3600.0 {
+        let (streak, attempts, dead, delay, _) = run(&BUSY).await;
+        assert_eq!((streak, attempts, dead), (waits + 1, 0, false), "after {waited} s");
+        waited += delay.round();
+        waits += 1;
+    }
+    assert!(waits >= 5, "{waits} waits in an hour");
+    static UP: FakeResolver = FakeResolver { fail: false };
+    let (streak, attempts, dead, _, status) = run(&UP).await;
+    assert_eq!((streak, attempts, dead, status.as_str()), (0, 0, false, "ok"));
+    // The waits of the defaults: 30 s doubling to an hour, so the 79th failure in a row comes
+    // three days after the first (3810 s, then 71 waits of 3600 s); the 78th does not.
+    assert!(queue::upstream_span(&cfg, 78) < 3 * 86400);
+    assert!(queue::upstream_span(&cfg, 79) >= 3 * 86400);
+    sqlx::query("UPDATE resource SET timeout_streak=77,last_error='http_5xx' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (streak, _, dead, delay, status) = run(&BUSY).await;
+    assert_eq!((streak, dead, status.as_str(), delay.round()), (78, false, "ok", 3600.0));
+    let (streak, attempts, dead, _, status) = run(&BUSY).await;
+    assert_eq!((streak, attempts, dead, status.as_str()), (79, 0, true, "error"));
 }
 
 fn too_large() -> anyhow::Error {

@@ -386,12 +386,14 @@ impl OsmResolver {
         if status.as_u16() == 304 {
             return Err(super::NotModified.into());
         }
+        // A 429 is the operator's own quota at the upstream (it answers every job of the batch
+        // alike): the daemon's own wait (`quota`), which charges no link. A 5xx is charged.
         if status.as_u16() == 429 || status.is_server_error() {
             let seconds = retry_after(response.headers());
             *next = Instant::now() + Duration::from_secs(seconds);
             return Err(super::RetryLater {
                 class: if status.as_u16() == 429 {
-                    "http_4xx"
+                    "quota"
                 } else {
                     "http_5xx"
                 },

@@ -934,9 +934,12 @@ Statuses:
 - `unreachable`: the upstream denied access (401, 403) or answered with a challenge page (a bot
   wall, captcha or sign-in redirect); it is retried with backoff like an error.
 - `error`: the fetch failed; it is retried with backoff and dead-letters after
-  `limits.max_failures`. A service that keeps answering 5xx, 408 or 429 counts one failure each
-  time (it waits the longer of its `Retry-After` and the backoff); the status stays until the
-  link dead-letters. A request that never got an answer from the upstream (the connection
+  `limits.max_failures`. A service that keeps answering 5xx, 408 or 429 makes the link wait the
+  longer of its `Retry-After` and the backoff, which grows while the answers last; a short outage
+  never dead-letters it: it dead-letters only once the failures have lasted three days. Until
+  then an accepted card keeps its status, and a link with no card yet shows `error` after
+  `limits.max_failures` of them in a row. A rate limit on the operator's own quota (GitHub's
+  token, the operator's Nominatim) is no failure of the link. A request that never got an answer from the upstream (the connection
   refused, reset or aborted, or the host unreachable) says nothing about the link: it is retried with the capped backoff for as long
   as it lasts and never dead-letters. A link with no card yet shows `error` after
   `limits.max_failures` of them in a row; an accepted card keeps its status.
@@ -1969,9 +1972,10 @@ URL, so one resource and one cached `osm_place` row serve them all. OSM cards ca
 `attribution`; a resource read adds the category, address and bbox. Any other URL on an OSM host
 (user pages, map views,
 changesets, notes) is refused before any fetch: status `error`, a link-only card, stored once
-as final. A batch's 429 or 5xx defers its jobs, honouring a Retry-After of up to one hour, and charges
-each an attempt, as any service's busy answer does; an oversized answer defers them without a
-charge. Jobs claimed during that wait are put off to its end without a request or a charge. A 401 or 403 (the operator's key refused) is read again later and never
+as final. A batch's 429 or 5xx defers its jobs, honouring a Retry-After of up to one hour. A 429
+is the operator's own quota and charges nothing; a 5xx is a service's failure, as any service's
+busy answer is (its jobs dead-letter only once such failures have lasted three days); an
+oversized answer defers them without a charge. Jobs claimed during that wait are put off to its end without a request or a charge. A 401 or 403 (the operator's key refused) is read again later and never
 dead-letters, and is counted in `pinakes_source_token_refusals_total{source="osm"}`; after three days of refusals the link turns `unreachable`, read with the usual
 backoff. A timeout is charged from the fourth in a row (`limits.timeout_grace`).
 

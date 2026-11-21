@@ -48,14 +48,15 @@ fn a_failure_is_stored_as_a_source_error_class() {
     }
 }
 
-/// A redirect an upstream answered is stored on a link as `http_3xx`, and a refused key as
-/// `upstream_denied`; a source's health, whose classes the schema fixes, records each as the
+/// A redirect an upstream answered is stored on a link as `http_3xx`, a refused key as
+/// `upstream_denied` and the operator's spent quota as `quota`; a source's health, whose classes the schema fixes, records each as the
 /// client-side error it is (`http_4xx`), never as `parse`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_redirect_is_a_client_error_in_a_source_s_health(pool: PgPool) {
     for (class, stored) in [
         ("http_3xx", "http_4xx"),
         ("upstream_denied", "http_4xx"),
+        ("quota", "http_4xx"),
         ("http_4xx", "http_4xx"),
     ] {
         source::outcome(&pool, "osm", Some(class)).await.unwrap();
