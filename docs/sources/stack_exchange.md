@@ -2,12 +2,22 @@
 
 Questions on the Stack Exchange network (Stack Overflow, Super User, Server Fault, Ask Ubuntu,
 Stack Apps, MathOverflow, every `*.stackexchange.com` site, the language editions of Stack
-Overflow, and their metas), read from the Stack Exchange API 2.3. No key: the API allows an
-address 300 requests a day without one. A `backoff` the API asks for (on any answer, an error's
-too: the first 64 KiB of an error in JSON are read), its quota error (an hour), its "too many
-requests" (a minute) and, naming none of these, an HTTP 429 or 503 (its `Retry-After`, a minute
-at least) pause every request to it, for every question on every site,
-until the pause ends: a question asked meanwhile waits and tries again then. Requests to the API
+Overflow, and their metas), read from the Stack Exchange API 2.3. Without a key the API allows an
+address 300 requests a day, for cards, refreshes and the also-on half together; the host is paced
+to that quota (one request every 288 seconds). With an app key (`[sources.stack_exchange] key`,
+or `PINAKES__SOURCES__STACK_EXCHANGE__KEY`), sent as the query's `key=`, the quota is 10,000 a
+day and the host is paced to that (one request every 8.64 seconds). The key identifies an app and
+is not a secret; it is still kept out of logs, errors and `/v1/info`, as a token is. Register an
+app on [Stack Apps](https://stackapps.com/apps/oauth/register) for one.
+
+Every answer says how much of the day's quota is left (`quota_remaining`). Once it is 0, no
+request is made for an hour; the API's quota error then names when requests are allowed again
+("more requests available in N seconds"), and no request is made before then. A `backoff` the
+API asks for (on any answer, an error's too: the first 64 KiB of an error in JSON are read), its
+quota error (the wait it names, else an hour), its "too many requests" (a minute) and, naming
+none of these, an HTTP 429 or 503 (its `Retry-After`, a minute at least) pause every request to
+it, for every question on every site, until the pause ends: a question asked meanwhile waits and
+tries again then. Requests to the API
 take turns, so each is made only after the answer before it, and the pause that answer asks for. Any other error of the API (`bad_parameter` for a site there is not, …) is a failure, tried
 again on the usual schedule, never sooner.
 

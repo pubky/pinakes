@@ -672,6 +672,7 @@ mod tests {
                 Switch {
                     enabled: true,
                     token: Some("github_pat_x".into()),
+                    key: None,
                 },
             )]
             .into(),
@@ -692,6 +693,7 @@ mod tests {
                 Switch {
                     enabled: true,
                     token: Some("x".into()),
+                    key: None,
                 },
             )]
             .into(),

@@ -240,9 +240,9 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
 
 An instance that runs the build without the source may keep a `[sources.<name>]` block (or
 `PINAKES__SOURCES__<NAME>__ENABLED`) that only sets `enabled`: the daemon logs a warning and
-ignores it. A block that still carries a `token` stops the daemon at startup
-(`unknown source [sources.<name>]`), as a misspelled name with a token does; remove the token
-(and its `PINAKES__SOURCES__<NAME>__TOKEN` variable) with the source.
+ignores it. A block that still carries a `token` or a `key` stops the daemon at startup
+(`unknown source [sources.<name>]`), as a misspelled name with one does; remove it (and its
+`PINAKES__SOURCES__<NAME>__TOKEN` or `__KEY` variable) with the source.
 
 `scripts/check-removals [--tests] [NAME…]` proves it: it removes each source on a scratch
 worktree by this list, checks that nothing of the source's own is left (it looks for the

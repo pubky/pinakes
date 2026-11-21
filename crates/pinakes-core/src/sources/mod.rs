@@ -236,6 +236,17 @@ pub trait Source: Send + Sync {
     fn takes_token(&self) -> bool {
         false
     }
+    /// Whether this source sends the operator's app key when one is set (`[sources.<name>]
+    /// key`): an app's identifier, not a credential, that raises the service's quota. The source
+    /// is on with or without it, and the key is kept out of logs and errors as a token is.
+    fn takes_key(&self) -> bool {
+        false
+    }
+    /// The host rates while the operator's app key is set (`takes_key`): the service's keyed
+    /// quota as its average rate.
+    fn keyed_budgets(&self) -> &'static [Budget] {
+        self.budgets()
+    }
     /// A variable of its own (`PINAKES_NAME`) that fills its token when the config file and the
     /// `PINAKES__SOURCES__…` form leave it unset.
     fn token_variable(&self) -> Option<&'static str> {
@@ -583,20 +594,24 @@ impl HostMemo {
     }
 }
 
-/// A source's switch, and its token for a source that takes one (`Source::takes_token`): a
-/// secret that never appears in logs, errors or `Debug` output.
+/// A source's switch, its token for a source that takes one (`Source::takes_token`) and its app
+/// key for a source that sends one (`Source::takes_key`): values that never appear in logs,
+/// errors or `Debug` output.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Switch {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<crate::event::adapters::SecretKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<crate::event::adapters::SecretKey>,
 }
 impl Default for Switch {
     fn default() -> Self {
         Self {
             enabled: true,
             token: None,
+            key: None,
         }
     }
 }
@@ -617,13 +632,20 @@ impl SourcesConfig {
     pub fn token(&self, name: &str) -> Option<&str> {
         self.0.get(name)?.token.as_deref().filter(|t| !t.is_empty())
     }
+    /// The app key of `[sources.<name>]`, when it has a non-empty one.
+    pub fn key(&self, name: &str) -> Option<&str> {
+        self.0.get(name)?.key.as_deref().filter(|k| !k.is_empty())
+    }
     pub fn validate(&self) -> Result<()> {
         for (name, switch) in &self.0 {
             let Some(source) = by_name(name) else {
                 // A block left from a source the build no longer has is ignored when it only
-                // switches it; one with a token is an error, as a misspelled name may hide where
-                // the operator meant the secret to go.
-                anyhow::ensure!(switch.token.is_none(), "unknown source [sources.{name}]");
+                // switches it; one with a token or key is an error, as a misspelled name may hide
+                // where the operator meant the value to go.
+                anyhow::ensure!(
+                    switch.token.is_none() && switch.key.is_none(),
+                    "unknown source [sources.{name}]"
+                );
                 tracing::warn!(source = %name, "ignoring [sources.{name}]: no such source in this build");
                 continue;
             };
@@ -632,6 +654,13 @@ impl SourcesConfig {
                 anyhow::ensure!(
                     token.len() <= 256 && token.bytes().all(|b| b.is_ascii_graphic()),
                     "[sources.{name}] token must be at most 256 printable characters"
+                );
+            }
+            if let Some(key) = switch.key.as_deref().filter(|k| !k.is_empty()) {
+                anyhow::ensure!(source.takes_key(), "[sources.{name}] takes no key");
+                anyhow::ensure!(
+                    key.len() <= 256 && key.bytes().all(|b| b.is_ascii_graphic()),
+                    "[sources.{name}] key must be at most 256 printable characters"
                 );
             }
         }
@@ -747,6 +776,11 @@ pub fn token(source: &str) -> Option<crate::event::adapters::SecretKey> {
     let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
     switches.as_ref()?.token(source).map(Into::into)
 }
+/// The app key the daemon started with for `source` (`configure`).
+pub fn key(source: &str) -> Option<crate::event::adapters::SecretKey> {
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+    switches.as_ref()?.key(source).map(Into::into)
+}
 
 /// The static alias root of a source's spelling, from the link alone, while that source is on.
 pub fn alias_root(uri: &str) -> Option<String> {
@@ -774,7 +808,15 @@ pub fn budgets(config: &Config) -> impl Iterator<Item = (&'static str, f64)> {
             .filter(|s| {
                 config.sources.enabled(s.name()) || crate::also_on::enabled_by_id(config, s.name())
             })
-            .flat_map(|s| s.budgets().iter().copied()),
+            .flat_map(|s| {
+                if s.takes_key() && config.sources.key(s.name()).is_some() {
+                    s.keyed_budgets()
+                } else {
+                    s.budgets()
+                }
+                .iter()
+                .copied()
+            }),
     )
     .into_iter()
 }
@@ -1816,6 +1858,24 @@ mod tests {
             },
         );
         assert!(config.sources.validate().is_err());
+        config.sources.0.insert(
+            "nonesuch".into(),
+            Switch {
+                key: Some(String::from("abc").into()),
+                ..Default::default()
+            },
+        );
+        assert!(config.sources.validate().is_err());
+        config.sources.0.remove("nonesuch");
+        // An app key only where the source sends one.
+        config.sources.0.insert(
+            source.name().into(),
+            Switch {
+                key: Some(String::from("abc").into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(config.sources.validate().is_ok(), source.takes_key());
     }
 
     #[test]
