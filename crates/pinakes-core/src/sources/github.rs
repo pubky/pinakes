@@ -113,7 +113,8 @@ fn message_names(body: &[u8], words: &[&str]) -> bool {
 /// repository for (404) is declined: it may be another page of the site (an advisory, a
 /// two-part site page), so the web route reads it and says whether it is gone. A 403 that is
 /// not the rate limit (access to the repository is blocked) is declined too. The rate limit is
-/// a wait of class `http_4xx`, a timeout or a server error one of class `upstream`.
+/// the operator's token's own quota, a wait of class `quota` (the daemon's own wait: the link is
+/// not charged); a timeout or a server error is one of class `upstream`.
 pub async fn read(
     cx: &Context<'_>,
     doc: ResourceMeta,
@@ -145,9 +146,9 @@ pub async fn read(
         301 | 302 | 307 | 308 => Ok(Answer::Moved),
         401 => Ok(Answer::Refused),
         404 => Err(Declined.into()),
-        // GitHub's rate limit answers 429, or 403 with a message that names it.
-        429 => wait("http_4xx"),
-        403 if rate_limit(&f.body) => wait("http_4xx"),
+        // GitHub's rate limit (the token's quota) answers 429, or 403 with a message that names it.
+        429 => wait("quota"),
+        403 if rate_limit(&f.body) => wait("quota"),
         403 if bad_credentials(&f.body) => Ok(Answer::Refused),
         403 => Err(Declined.into()),
         408 | 500..=599 => wait("upstream"),
@@ -597,8 +598,8 @@ mod tests {
         assert_eq!(
             answers,
             [
-                ("busy", Some("http_4xx"), false),
-                ("slow", Some("http_4xx"), false),
+                ("busy", Some("quota"), false),
+                ("slow", Some("quota"), false),
                 ("blocked", None, true),
                 ("down", Some("upstream"), false),
                 ("mute", None, true),

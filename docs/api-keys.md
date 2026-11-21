@@ -117,7 +117,7 @@ The `ProviderKeyRefused` alert in `ops/alerts.yml` reads
 `pinakes_source_token_refusals_total{source}`, which counts every refusal of a configured key
 (as each provider signals it: a 401, a 403 where it means a refused key, or a refused token
 request; never a 429 or 5xx) for GitHub, CourtListener,
-Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster. Load the alert rules before
+Discogs, Spotify, TIDAL, TMDB, Podcast Index, Ticketmaster and Nominatim (`osm`). Load the alert rules before
 staging, and check that each provider you configured shows `0` on `/metrics` after the first
 cards using it are read. A rising value means the key is wrong, expired or revoked: fix it and
 restart (keys are read only at start; the count resets then). The alert clears six hours after

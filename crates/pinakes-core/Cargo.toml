@@ -42,6 +42,8 @@ async-stream = "0.3"
 prometheus = "0.14"
 chrono-tz = "=0.10.4"
 percent-encoding = "2"
+# A page's text in the character encoding it declares (`resolver::egress::decode`).
+encoding_rs = "=0.8.35"
 rrule = "=0.14.0"
 roxmltree = "=0.21.1"
 # Streams a feed body cut off at the page cap, to complete it after its last whole item.

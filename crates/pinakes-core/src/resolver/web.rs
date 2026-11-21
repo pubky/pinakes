@@ -535,7 +535,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         let page = match super::interstitial::unparsed(&url, fetched) {
             Some(page) => page,
             None => {
-                let text = String::from_utf8_lossy(&fetched.body);
+                let text = fetched.text();
                 let html = super::html::document(&text)?;
                 let page = super::interstitial::parsed(fetched, &text, &html);
                 walled = Some((text, html));
@@ -597,7 +597,7 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     // `as_read` changes the address alone: the body is the one the wall check parsed.
     let (text, walled) = match walled {
         Some((text, html)) => (text, Some(html)),
-        None => (String::from_utf8_lossy(&fetched.body), None),
+        None => (fetched.text(), None),
     };
     // A feed, on whichever route fetched it: its own title and description.
     if let Some((name, description)) = feed(&fetched.content_type, &text) {
@@ -723,38 +723,19 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
         }
     }
     guard_identity(&mut out.doc, &scripts, &fetched.url, claims);
-    for (class, kind) in [
-        ("h-event", "Event"),
-        ("h-card", "Person"),
-        ("h-entry", "Article"),
-    ] {
-        if let Some(root) = html.select(&selector(&format!(".{class}"))).next() {
-            if out.doc.source == "web" {
-                out.doc.set_type(kind);
-                out.doc.source = "microformats".into();
-            }
-            fill(&mut out.doc.name, mf(&root, ".p-name"));
-            fill(
-                &mut out.doc.description,
-                mf(&root, ".p-summary, .p-description"),
-            );
-            fill(
-                &mut out.doc.image,
-                mf(&root, ".u-photo").and_then(|s| origin_url(&fetched.url, &s)),
-            );
-            if out.doc.start.is_none() {
-                out.doc.start = mf(&root, ".dt-start").and_then(|s| parse_time(&s));
-            }
-            if out.doc.end.is_none() {
-                out.doc.end = mf(&root, ".dt-end").and_then(|s| parse_time(&s));
-            }
-            if out.doc.location.is_none() {
-                out.doc.location = mf(&root, ".p-latitude")
-                    .and_then(|s| s.parse().ok())
-                    .zip(mf(&root, ".p-longitude").and_then(|s| s.parse().ok()))
-                    .and_then(|(lat, lon)| point(lat, lon));
-            }
-        }
+    // The page's microformat: the first `h-event`, `h-entry` or `h-card` root that is not inside
+    // another (a post's author `h-card` is part of its `h-entry`). An event or a post fills here;
+    // a person's card is the body's, and fills only what the head's OpenGraph leaves, below.
+    let microformat = html
+        .select(&selector(".h-event, .h-entry, .h-card"))
+        .find(|el| {
+            !el.ancestors()
+                .take(super::html::MAX_ANCESTORS)
+                .any(|a| a.value().as_element().and_then(mf_root).is_some())
+        })
+        .and_then(|root| Some((root, mf_root(root.value())?)));
+    if let Some((root, kind)) = microformat.filter(|(_, kind)| *kind != "Person") {
+        microformat_fill(&mut out.doc, &root, kind, &fetched.url);
     }
     // Only the document head is the publisher's: a body `<meta>` may come from user content
     // (a comment citing an attacker's DOI).
@@ -834,6 +815,9 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
             out.doc.set_type(kind);
             out.doc.source = "opengraph".into();
         }
+    }
+    if let Some((root, kind)) = microformat.filter(|(_, kind)| *kind == "Person") {
+        microformat_fill(&mut out.doc, &root, kind, &fetched.url);
     }
     if let Some(site) = meta.get("og:site_name") {
         out.doc.site = site.chars().take(128).collect();
@@ -1156,21 +1140,72 @@ fn cited_doi(value: &str) -> Option<String> {
 fn selector(s: &str) -> Selector {
     Selector::parse(s).expect("static selector")
 }
+/// The card type of a microformats root (`h-event`, `h-entry`, `h-card`), `None` for any other
+/// element.
+fn mf_root(element: &scraper::node::Element) -> Option<&'static str> {
+    [
+        ("h-event", "Event"),
+        ("h-entry", "Article"),
+        ("h-card", "Person"),
+    ]
+    .into_iter()
+    .find(|(class, _)| element.has_class(class, scraper::CaseSensitivity::AsciiCaseInsensitive))
+    .map(|(_, kind)| kind)
+}
+/// What a microformats root says of the page, where the card has nothing yet.
+fn microformat_fill(
+    doc: &mut crate::model::ResourceMeta,
+    root: &ElementRef<'_>,
+    kind: &str,
+    base: &Url,
+) {
+    if doc.source == "web" {
+        doc.set_type(kind);
+        doc.source = "microformats".into();
+    }
+    fill(&mut doc.name, mf(root, ".p-name"));
+    fill(&mut doc.description, mf(root, ".p-summary, .p-description"));
+    fill(
+        &mut doc.image,
+        mf(root, ".u-photo").and_then(|s| origin_url(base, &s)),
+    );
+    if doc.start.is_none() {
+        doc.start = mf(root, ".dt-start").and_then(|s| parse_time(&s));
+    }
+    if doc.end.is_none() {
+        doc.end = mf(root, ".dt-end").and_then(|s| parse_time(&s));
+    }
+    if doc.location.is_none() {
+        doc.location = mf(root, ".p-latitude")
+            .and_then(|s| s.parse().ok())
+            .zip(mf(root, ".p-longitude").and_then(|s| s.parse().ok()))
+            .and_then(|(lat, lon)| point(lat, lon));
+    }
+}
+/// A property of the microformats `root`: its first element matching `s` that is not inside a
+/// root nested in it (an author's `h-card` in a post holds the author's name, not the post's).
 fn mf(root: &ElementRef<'_>, s: &str) -> Option<String> {
-    root.select(&selector(s)).next().map(|el| {
-        let attrs: &[&str] = if s.starts_with(".u-") {
-            &["href", "src", "data", "value"]
-        } else if s.starts_with(".dt-") {
-            &["datetime", "title", "value"]
-        } else {
-            &["content", "title", "value", "alt"]
-        };
-        attrs
-            .iter()
-            .find_map(|a| el.value().attr(a))
-            .map(str::to_owned)
-            .unwrap_or_else(|| el.text().collect::<String>().trim().to_owned())
-    })
+    root.select(&selector(s))
+        .find(|el| {
+            !el.ancestors()
+                .take(super::html::MAX_ANCESTORS)
+                .take_while(|a| a.id() != root.id())
+                .any(|a| a.value().as_element().and_then(mf_root).is_some())
+        })
+        .map(|el| {
+            let attrs: &[&str] = if s.starts_with(".u-") {
+                &["href", "src", "data", "value"]
+            } else if s.starts_with(".dt-") {
+                &["datetime", "title", "value"]
+            } else {
+                &["content", "title", "value", "alt"]
+            };
+            attrs
+                .iter()
+                .find_map(|a| el.value().attr(a))
+                .map(str::to_owned)
+                .unwrap_or_else(|| el.text().collect::<String>().trim().to_owned())
+        })
 }
 fn fill(dst: &mut Option<String>, src: Option<String>) {
     if dst.is_none() {
@@ -2039,7 +2074,12 @@ fn apply_jsonld(doc: &mut ResourceMeta, v: &Value, base: &Url, claims: bool, vou
             v.get("name").or_else(|| v.get("headline")).and_then(string),
         );
     }
-    fill(&mut doc.description, v.get("description").and_then(string));
+    fill(
+        &mut doc.description,
+        v.get("description")
+            .and_then(string)
+            .and_then(super::html::plain_text),
+    );
     fill(
         &mut doc.image,
         v.get("image")
@@ -3115,6 +3155,109 @@ mod tests {
             .image
             .as_deref()
             .is_some_and(|i| i.contains("/items/r1808W019H3baERCQAWo/")));
+    }
+
+    /// A page is read in the encoding it names: its answer's `charset`, else a `<meta>` in its
+    /// head; a byte order mark beats both.
+    #[test]
+    fn a_page_is_read_in_the_encoding_it_names() {
+        let fixture = |name: &str| {
+            std::fs::read(format!(
+                "{}/tests/fixtures/web/charset/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let page = |body: Vec<u8>, charset: Option<&str>| {
+            let mut fetched = Fetched::answer(
+                Url::parse("https://example.org/page").unwrap(),
+                200,
+                "text/html".into(),
+                body,
+            );
+            fetched.charset = charset.map(str::to_owned);
+            extract("https://example.org/page", &fetched, 100).unwrap()
+        };
+        let latin = page(fixture("windows-1252.html"), Some("windows-1252"));
+        assert_eq!(latin.title.as_deref(), Some("Café crème – Zürich"));
+        assert_eq!(
+            latin.doc.description.as_deref(),
+            Some("Prêt à servir für 5 €")
+        );
+        let japanese = page(fixture("shift_jis.html"), None);
+        assert_eq!(japanese.title.as_deref(), Some("日本語のページ"));
+        assert_eq!(japanese.description.as_deref(), Some("東京の喫茶店"));
+        let mut marked = b"\xEF\xBB\xBF".to_vec();
+        marked.extend_from_slice("<title>Grüße</title>".as_bytes());
+        assert_eq!(
+            page(marked, Some("windows-1252")).title.as_deref(),
+            Some("Grüße")
+        );
+    }
+
+    /// A JSON-LD description that holds markup (a WordPress event plugin's `<p>`) is read as
+    /// text, on the general reader and the event reader alike; one with a bare `<` is kept.
+    #[test]
+    fn a_json_ld_description_with_markup_is_plain_text() {
+        let read = |script: &str| {
+            let body = format!(
+                r#"<title>Page</title><script type="application/ld+json">{script}</script>"#
+            );
+            let fetched = Fetched::answer(
+                Url::parse("https://example.org/e/1").unwrap(),
+                200,
+                "text/html".into(),
+                body.into_bytes(),
+            );
+            extract("https://example.org/e/1", &fetched, 100)
+                .unwrap()
+                .doc
+                .description
+        };
+        for script in [
+            r#"{"@type":"WebPage","name":"Page","description":"<p>Join us at <b>the hall</b>.</p>"}"#,
+            r#"{"@type":"Event","name":"Gig","startDate":"2027-05-01T19:30:00Z","description":"<p>Join us at <b>the hall</b>.</p>"}"#,
+        ] {
+            assert_eq!(
+                read(script).as_deref(),
+                Some("Join us at the hall."),
+                "{script}"
+            );
+        }
+        assert_eq!(
+            read(r#"{"@type":"WebPage","name":"Page","description":"1 < 2, a <-> b"}"#).as_deref(),
+            Some("1 < 2, a <-> b")
+        );
+    }
+
+    /// A post's `h-entry` with its author's `h-card` inside is the post: an `Article` named by the
+    /// post, not the author. A body `h-card` of its own fills only what the head's OpenGraph
+    /// leaves.
+    #[test]
+    fn a_post_is_its_h_entry_and_head_opengraph_fills_before_a_body_h_card() {
+        let read = |body: &str| {
+            let fetched = Fetched::answer(
+                Url::parse("https://blog.example/2026/post").unwrap(),
+                200,
+                "text/html".into(),
+                body.as_bytes().into(),
+            );
+            extract("https://blog.example/2026/post", &fetched, 100)
+                .unwrap()
+                .doc
+        };
+        let doc = read(
+            r#"<html><head><title>Blog</title></head><body><article class="h-entry"><div class="p-author h-card"><img class="u-photo" src="/me.jpg"><span class="p-name">Jane Author</span></div><h1 class="p-name">Notes on caching</h1><p class="p-summary">What we learned.</p></article></body></html>"#,
+        );
+        assert_eq!(doc.type_name, "Article");
+        assert_eq!(doc.name.as_deref(), Some("Notes on caching"));
+        assert_eq!(doc.description.as_deref(), Some("What we learned."));
+        assert_eq!(doc.image, None);
+        let doc = read(
+            r#"<html><head><meta property="og:title" content="Notes on caching"><meta property="og:image" content="/cover.png"></head><body><div class="h-card"><img class="u-photo" src="/me.jpg"><span class="p-name">Jane Author</span><p class="p-note">Writes.</p></div></body></html>"#,
+        );
+        assert_eq!(doc.name.as_deref(), Some("Notes on caching"));
+        assert_eq!(doc.image.as_deref(), Some("https://blog.example/cover.png"));
     }
 
     #[test]

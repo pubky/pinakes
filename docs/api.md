@@ -49,7 +49,8 @@ moves to the front of the refresh queue without bypassing its TTL, backoff or fi
 Every route returns the same card for a resource or an occurrence.
 Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`, and every
 text a read adds) are plain text, decoded from the source's HTML entities once: escape them
-before rendering them as HTML.
+before rendering them as HTML. A source text that holds markup (a page's JSON-LD `description`,
+a DOI's title with `<i>`) is read as text, its tags dropped.
 
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
@@ -937,7 +938,12 @@ Statuses:
 - `unreachable`: the upstream denied access (401, 403) or answered with a challenge page (a bot
   wall, captcha or sign-in redirect); it is retried with backoff like an error.
 - `error`: the fetch failed; it is retried with backoff and dead-letters after
-  `limits.max_failures`. A request that never got an answer from the upstream (the connection
+  `limits.max_failures`. A service that keeps answering 5xx, 408 or 429 makes the link wait the
+  longer of its `Retry-After` and the backoff, which grows while the answers last; a short outage
+  never dead-letters it: it dead-letters only once the failures have lasted three days. Until
+  then an accepted card keeps its status, and a link with no card yet shows `error` after
+  `limits.max_failures` of them in a row. A rate limit on the operator's own quota (GitHub's
+  token, the operator's Nominatim) is no failure of the link. A request that never got an answer from the upstream (the connection
   refused, reset or aborted, or the host unreachable) says nothing about the link: it is retried with the capped backoff for as long
   as it lasts and never dead-letters. A link with no card yet shows `error` after
   `limits.max_failures` of them in a row; an accepted card keeps its status.
@@ -1174,7 +1180,9 @@ for the rest. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them
-in `episodes`: the latest 5 that have a `stream`, in the same shape (below). `guid` is what names the item: its GUID as
+in `episodes`: the latest 5 that have a `stream`, in the same shape (below). A show's new
+episodes write no [change line](#changes): a client that shows the list reads it again on a
+timer (when it shows the show again, or every few hours while it stays open). `guid` is what names the item: its GUID as
 the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
 enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
 `uri` is the episode's feed item, `{feed}?guid={guid}` (the GUID URL-encoded), which
@@ -1895,9 +1903,11 @@ record or a product database (their pages say which).
   `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
   `?variant=`), else of its only variant, never the group's: a group whose address picks none of
-  several variants names no barcode. A product's barcode is the key `gtin:`, so
-  the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
-  all.
+  several variants names no barcode. The barcode is `facts.gtin`. When a service's own record
+  states it (a product database's record an [official source](sources/README.md) reads), it is
+  also the key `gtin:`, so the same product on several shops is [one group](#groups), and
+  `key=gtin:{barcode}` finds them all; a barcode only the page's own JSON-LD or a record from
+  the page's own host (a shop's product record) states is a fact and never a key.
 - Its price and availability are facts with the time they were read, never identity: the cheapest
   offer's `price`, `price_currency`, `availability` and `seller` (all four of that one offer),
   and `price_at`.
@@ -1976,10 +1986,11 @@ URL, so one resource and one cached `osm_place` row serve them all. OSM cards ca
 `attribution`; a resource read adds the category, address and bbox. Any other URL on an OSM host
 (user pages, map views,
 changesets, notes) is refused before any fetch: status `error`, a link-only card, stored once
-as final. A batch's 429, 5xx or oversized answer defers its jobs without charging an attempt,
-honouring a Retry-After of up to one hour; jobs claimed during that wait are put off to its end
-without a request. A 401 or 403 (the operator's key refused) is read again later and never
-dead-letters; after three days of refusals the link turns `unreachable`, read with the usual
+as final. A batch's 429 or 5xx defers its jobs, honouring a Retry-After of up to one hour. A 429
+is the operator's own quota and charges nothing; a 5xx is a service's failure, as any service's
+busy answer is (its jobs dead-letter only once such failures have lasted three days); an
+oversized answer defers them without a charge. Jobs claimed during that wait are put off to its end without a request or a charge. A 401 or 403 (the operator's key refused) is read again later and never
+dead-letters, and is counted in `pinakes_source_token_refusals_total{source="osm"}`; after three days of refusals the link turns `unreachable`, read with the usual
 backoff. A timeout is charged from the fourth in a row (`limits.timeout_grace`).
 
 `geo:` URIs (RFC 5870, altitude and uncertainty ignored; other CRSs are errors) and location

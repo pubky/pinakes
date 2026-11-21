@@ -121,6 +121,7 @@ impl Transport for Recorded {
             permanent_redirect: false,
             truncated: false,
             validators: Default::default(),
+            charset: None,
         })
     }
 }

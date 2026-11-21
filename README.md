@@ -100,7 +100,12 @@ addresses refused, at most three redirects (each checked again), a 10-second tim
 cap for a page (an HTML page is read up to `limits.html_head_bytes`, 4 MB by default; a calendar up to
 `limits.event_feed_body_bytes`; 8 MB for podcast feeds; `limits.hub_body_bytes`, 8 MiB by
 default, for MusicBrainz and Wikidata answers). Requests to one host go one at a time, paced to
-`limits.host_requests_per_second` or the host's published rate. Discovery reads (also-on
+`limits.host_requests_per_second` or the host's published rate, and so do requests to one address
+(the first the host name resolves to; a same-host redirect to another address takes that
+address's turn), so many names on one server are paced together, at the default pace or a faster
+one the operator set for the host. A service's own host that the code names with its pace (a
+source's API host, a published rate) and the operator's PKARR relays are paced by host alone: no
+link multiplies their names. The Fetch standard's bad ports (25, 22, 6667, …) are refused. Discovery reads (also-on
 lookups, oEmbed, feed discovery) are cached and shared between concurrent readers. Card images
 stay origin URLs and are never fetched; a link that is itself an image resolves to an ImageObject
 card. Nominatim and Nexus are trusted upstreams outside this policy, each with a client of its own

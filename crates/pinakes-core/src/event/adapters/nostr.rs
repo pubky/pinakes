@@ -235,10 +235,11 @@ async fn lookup_inner(
     }
     let mut successful = 0;
     let mut inconclusive = false;
+    let mut out_of_time = false;
     // Inclusive timestamp windows do not skip tied timestamps. A full tied page
     // or an indexer that ignores `until` is inconclusive, never a disappearance.
     let deadline = tokio::time::Instant::now() + indexer_budget(cfg);
-    for (index, base) in [wine, archive].into_iter().enumerate() {
+    'indexers: for (index, base) in [wine, archive].into_iter().enumerate() {
         let mut until = None;
         let mut answered = false;
         let mut exhausted = false;
@@ -255,11 +256,8 @@ async fn lookup_inner(
             .await;
             let Ok(Ok(f)) = response else {
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(crate::resolver::RetryLater {
-                        class: "inconclusive",
-                        seconds: 300,
-                    }
-                    .into());
+                    out_of_time = true;
+                    break 'indexers;
                 }
                 answered = false;
                 break;
@@ -315,15 +313,9 @@ async fn lookup_inner(
         successful += usize::from(answered);
         inconclusive |= !exhausted;
     }
-    if successful != 2 {
-        return Err(crate::resolver::RetryLater {
-            class: "indexer_unavailable",
-            seconds: 300,
-        }
-        .into());
-    }
-    // A hint can supply a signed match, but cannot certify the absence of an
-    // event outside the bounded indexer scan. Poll the relay only after both answer.
+    // No indexer has a match: the relay the link names is asked, also while an indexer is down
+    // or out of time. Its signed match is used; its silence cannot certify the absence of an
+    // event outside the bounded indexer scan.
     if let Ok(values) = relay.await {
         let target = target.clone();
         if let Some(event) =
@@ -331,6 +323,20 @@ async fn lookup_inner(
         {
             return Ok(Some(event));
         }
+    }
+    if out_of_time {
+        return Err(crate::resolver::RetryLater {
+            class: "inconclusive",
+            seconds: 300,
+        }
+        .into());
+    }
+    if successful != 2 {
+        return Err(crate::resolver::RetryLater {
+            class: "indexer_unavailable",
+            seconds: 300,
+        }
+        .into());
     }
     if inconclusive {
         return Err(crate::resolver::RetryLater {
@@ -818,6 +824,74 @@ mod deadline_tests {
             fixture.0.load(Ordering::SeqCst),
             3,
             "the capped page refreshes while the complete empty indexer stays cached"
+        );
+    }
+
+    /// One indexer down and the other without a match: the relay the link names is asked, and
+    /// its signed match is the card. Without one the read waits for the indexers again.
+    #[tokio::test(start_paused = true)]
+    async fn the_relay_hint_is_asked_while_an_indexer_is_down() {
+        use crate::resolver::egress::{Dns, Fetched, Transport};
+        use nostr::prelude::*;
+        use std::{net::SocketAddr, sync::Arc};
+        struct Fixture;
+        #[async_trait::async_trait]
+        impl Dns for Fixture {
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                let ip = if host == "api.nostr.wine" {
+                    "93.184.216.34"
+                } else {
+                    "93.184.216.35"
+                };
+                Ok(vec![SocketAddr::new(ip.parse()?, port)])
+            }
+        }
+        #[async_trait::async_trait]
+        impl Transport for Fixture {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                Ok(if url.host_str() == Some("api.nostr.wine") {
+                    Fetched::answer(url.clone(), 503, "text/plain".into(), vec![])
+                } else {
+                    Fetched::answer(url.clone(), 200, "application/json".into(), b"[]".to_vec())
+                })
+            }
+        }
+        // A public fixture key, never used by a live identity.
+        let keys = Keys::parse(&"02".repeat(32)).unwrap();
+        let unsigned = EventBuilder::new(Kind::from(31923), "fixture")
+            .tags([Tag::parse(["d", "hinted"]).unwrap()])
+            .finalize_unsigned(keys.public_key());
+        let signature = keys.sign_schnorr_with_aux_rand(
+            &secp256k1::Secp256k1::new(),
+            unsigned.compute_id().as_bytes(),
+            &[0; 32],
+        );
+        let event = unsigned.add_signature(signature).unwrap();
+        let mut target =
+            Target::coordinate(&format!("31923:{}:hinted", keys.public_key())).unwrap();
+        target.relays.push("wss://hint.example/".into());
+        let cfg = EventConfig::default();
+        let fixture = Arc::new(Fixture);
+        let egress = Egress::with_backends(Default::default(), fixture.clone(), fixture);
+        let found = lookup_inner(
+            &target,
+            &egress,
+            &cfg,
+            std::future::ready(Ok(vec![json!(event)])),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.id, event.id);
+        let error = lookup_inner(&target, &egress, &cfg, std::future::ready(Ok(vec![])))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .unwrap()
+                .class,
+            "indexer_unavailable"
         );
     }
 

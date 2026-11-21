@@ -747,6 +747,11 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
             .await
             .unwrap();
         for status in [503, 408, 429] {
+            sqlx::query("UPDATE resource SET attempts=0,timeout_streak=0,dead_letter=false,last_error=NULL WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
             let (egress, _) = mock_egress_with_retry(vec![(status, Value::Null); 6], 720);
             let r = platform(&pool, cfg.clone(), egress);
             let error = r.resolve(uri).await.unwrap_err();
@@ -771,12 +776,92 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
                     .await
                     .unwrap();
             }
-            let (after, attempts, dead, delay): (Value, i32, bool, bool) = sqlx::query_as("SELECT doc,attempts,dead_letter,next_attempt_at>now()+interval '11 minutes' FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+            let (after, attempts, dead, delay, streak): (Value, i32, bool, bool, i32) = sqlx::query_as("SELECT doc,attempts,dead_letter,next_attempt_at>now()+interval '11 minutes',timeout_streak FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
             assert_eq!(after, before);
-            assert_eq!((attempts, dead, delay), (0, false, true));
+            // A streak of waits, never sooner than the named wait: no attempt, and no dead
+            // letter in the first hour.
+            assert_eq!((attempts, dead, delay, streak), (0, false, true, 5));
             assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some(previous));
         }
     }
+}
+
+/// A platform whose API answers 500 for ever: the link is read again after growing gaps (the
+/// named wait or the backoff, whichever is longer), and the row ends `error` and dead-lettered
+/// once the failures have lasted three days.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_platform_answering_500_for_ever_backs_off_and_dead_letters_after_three_days(
+    pool: PgPool,
+) {
+    use pinakes_core::queue;
+    let uri = "https://portal.einundzwanzig.space/api/changes";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let (egress, transport) = mock_egress(vec![(500, Value::Null); 20]);
+    let r = platform(
+        &pool,
+        EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        egress,
+    );
+    let cfg = pinakes_core::config::QueueConfig::default();
+    let mut gaps = vec![];
+    let mut ends = vec![];
+    for _ in 0..cfg.max_failures {
+        let job = queue::Job {
+            id: id.clone(),
+            uri: uri.into(),
+            generation: 0,
+            attempts: 0,
+        };
+        queue::run_job(&pool, &r, &cfg, &job).await.unwrap();
+        let (gap, attempts, dead, status, error): (f64, i32, bool, String, Option<String>) = sqlx::query_as(
+            "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,dead_letter,status,last_error FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(error.as_deref(), Some("http_5xx"));
+        gaps.push(gap.round() as i64);
+        ends.push((attempts, dead, status));
+    }
+    // The 500's wait is a minute; the backoff from 30 s doubles past it.
+    assert_eq!(gaps, [60, 60, 120, 240, 480]);
+    // No attempt and no dead letter in the first minutes; a link with no card shows `error`.
+    assert_eq!(
+        ends,
+        [
+            (0, false, "pending".to_owned()),
+            (0, false, "pending".to_owned()),
+            (0, false, "pending".to_owned()),
+            (0, false, "pending".to_owned()),
+            (0, false, "error".to_owned()),
+        ]
+    );
+    assert_eq!(transport.seen.lock().unwrap().len(), 5);
+    // Once the failures have lasted three days (the 79th in a row at the defaults), it
+    // dead-letters.
+    sqlx::query("UPDATE resource SET timeout_streak=78 WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::Job {
+        id: id.clone(),
+        uri: uri.into(),
+        generation: 0,
+        attempts: 0,
+    };
+    queue::run_job(&pool, &r, &cfg, &job).await.unwrap();
+    let (streak, dead, status): (i32, bool, String) =
+        sqlx::query_as("SELECT timeout_streak,dead_letter,status FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((streak, dead, status.as_str()), (79, true, "error"));
 }
 
 #[sqlx::test(migrations = "../../migrations")]
