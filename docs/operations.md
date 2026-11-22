@@ -623,7 +623,7 @@ versionless (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), and its `object_
 file written (`…/{id}/{editId}.json`). The URI must be a post in its author's own storage (else
 `uri`) and the object path a version file directly in it (else `object_path`). Social events and
 rsvps are indexed by Nexus. A `post` line in a namespace
-Pinakes never fetches (`social`, `pubky.app`, `mapky.app` and `eventky.app`, read
+Pinakes never fetches (`social` and `pubky.app`, read
 decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
 reference and fetching nothing. Letter case is kept, as the resolver keeps it: `Social` is another
 app's namespace. A namespace that is not one path segment once decoded (not UTF-8, an encoded `/`,

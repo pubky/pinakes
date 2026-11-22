@@ -371,16 +371,78 @@ fn other_apps_get_the_general_card() {
     );
     assert_eq!(doc.image.as_deref(), Some("https://example.org/pic.png"));
     // A known app's path that no kind matches is never fetched; pubky.app's own objects and the
-    // social specs' (their posts, events and rsvps included) are Nexus's, and the old Mapky and
-    // Eventky layouts are disregarded.
+    // social specs' (their posts, events and rsvps included) are Nexus's.
     never_fetched(&[
         "loopky/settings.json",
         "pubky.app/profile.json",
         "social/v1/posts/0034A0X7NJ52G",
         "social/v1/tags/0034A0X7NJ52G",
-        "mapky.app/routes/00351MV7WF0WG",
-        "eventky.app/events/0035DS0K1ZTEG",
+        "social/v1/events/0035DS0K1ZTEG",
     ]);
+}
+
+/// The old Mapky and Eventky layouts (`mapky.app`, `eventky.app`) are apps no profile knows:
+/// their recorded objects get the general card, as any other app's.
+#[test]
+fn old_mapky_and_eventky_objects_get_the_general_card() {
+    // An Eventky event: its `summary` names it, its image is a file in its owner's storage.
+    let (uri, _) = fixture("old-layouts/eventky-event-0034M8WQCPK20");
+    assert_eq!(classify(&uri), Some("pubky"));
+    let doc = card("old-layouts/eventky-event-0034M8WQCPK20");
+    assert_eq!(doc.status, Status::Ok);
+    assert_eq!(doc.type_name, "CreativeWork");
+    assert_eq!(doc.name.as_deref(), Some("Pubky Public Dev Call"));
+    assert_eq!(doc.description, None);
+    assert_eq!(
+        doc.image.as_deref(),
+        Some("pubky://gabri5dk51q1c1kzi53hjpqw5yhmw1nqsryzsfx5kubd7jpm63jy/pub/pubky.app/files/0034MQ2D8YV80")
+    );
+    assert!(doc.open_in.is_empty() && facts(&doc).is_empty());
+    // Mapky objects: a route and a collection by their name, a photo by its caption, a review
+    // post by its content (social content), a rating alone by nothing but its link.
+    for (name, type_name, title, description) in [
+        (
+            "mapky-route-00351MV7WF0WG",
+            "CreativeWork",
+            Some("Giggelitrain"),
+            Some("Short but fun freeride track."),
+        ),
+        (
+            "mapky-collection-00351MVGE211G",
+            "CreativeWork",
+            Some("Countries I've been to"),
+            None,
+        ),
+        (
+            "mapky-geo-capture-0035C4V0GVX90",
+            "CreativeWork",
+            Some("Good place to dinner"),
+            None,
+        ),
+        (
+            "mapky-post-review-00351MT54YS9G",
+            "SocialMediaPosting",
+            None,
+            Some("Great place to enjoy a beer!🍻"),
+        ),
+        (
+            "mapky-review-rating-only-003529F35DWWG",
+            "CreativeWork",
+            None,
+            None,
+        ),
+    ] {
+        let path = format!("old-layouts/{name}");
+        let (uri, _) = fixture(&path);
+        assert_eq!(classify(&uri), Some("pubky"), "{uri}");
+        let doc = card(&path);
+        assert_eq!(doc.status, Status::Ok, "{name}");
+        assert_eq!(doc.type_name, type_name, "{name}");
+        assert_eq!(doc.name.as_deref(), title, "{name}");
+        assert_eq!(doc.description.as_deref(), description, "{name}");
+        assert_eq!(doc.image, None, "{name}");
+        assert!(doc.open_in.is_empty() && facts(&doc).is_empty(), "{name}");
+    }
 }
 
 #[test]
@@ -571,34 +633,35 @@ async fn kept(
     .unwrap()
 }
 
-/// Objects at paths Pinakes never fetches (the old Mapky and Eventky layouts, a path a profile
+/// Objects at paths Pinakes never fetches (pubky.app's and the social specs', a path a profile
 /// leaves out) get no route when a reference names them, so nothing fetches them. One that holds
 /// a card all the same (stored while its path was read) keeps nothing of it once it is read
 /// again: the resolver gives it no card, without a request, and its save leaves a missing
 /// `CreativeWork` with nothing of the object and a history without documents, found neither by
-/// its text nor by its old type. Another app's object keeps its route and its card.
+/// its text nor by its old type. Another app's object, the old Mapky and Eventky layouts'
+/// included, keeps its route and its card.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: PgPool) {
     let owner = "ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi";
     let at = |path: &str| format!("pubky://{owner}/pub/{path}");
     let left_out = [
         stored_before(
-            &at("mapky.app/posts/00358SJCCNK1G"),
+            &at("social/v1/posts/00358SJCCNK1G"),
             json!({"content": "Excited to check out this place one day!"}),
             None,
         ),
         stored_before(
-            &at("eventky.app/events/0034FED2YCDKG"),
+            &at("social/v1/events/0034FED2YCDKG"),
             json!({"summary": "Lakeside meetup", "description": "Bring a lantern to the pier"}),
             Some("Event"),
         ),
         stored_before(
-            &at("mapky.app/routes/0034FED2YCDKH"),
+            &at("pubky.app/posts/0034FED2YCDKH"),
             json!({"name": "Old town loop", "description": "Cobbles and fountains"}),
             Some("Trip"),
         ),
         stored_before(
-            &at("mapky.app/collections/0034FED2YCDKJ"),
+            &at("loopky/decks/0034FED2YCDKJ/cards.json"),
             json!({"name": "Quiet cafés"}),
             None,
         ),
@@ -608,18 +671,30 @@ async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: P
             None,
         ),
         stored_before(
-            &at("mapky.app/reviews/0034FED2YCDKK"),
+            &at("pubky-rooms/messages/0034FED2YCDKK"),
             json!({"content": "Lovely terrace, slow service."}),
             None,
         ),
     ];
-    let other = stored_before(
-        &at("chess/games/0034FED2YCDKM"),
-        json!({"content": "A quiet opening, then fireworks."}),
-        None,
-    );
+    let others = [
+        stored_before(
+            &at("chess/games/0034FED2YCDKM"),
+            json!({"content": "A quiet opening, then fireworks."}),
+            None,
+        ),
+        stored_before(
+            &at("mapky.app/routes/0034FED2YCDKN"),
+            json!({"name": "Harbour loop", "description": "Gulls and lighthouses"}),
+            None,
+        ),
+        stored_before(
+            &at("eventky.app/events/0034FED2YCDKP"),
+            json!({"summary": "Lantern walk", "description": "Meet at the tramstop"}),
+            None,
+        ),
+    ];
     let mut ids = vec![];
-    for doc in left_out.iter().chain([&other]) {
+    for doc in left_out.iter().chain(&others) {
         let id = store::ensure_resource(&pool, &doc.url).await.unwrap();
         // No route for a path never fetched: no worker ever leases it.
         let route: Option<String> = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
@@ -629,7 +704,7 @@ async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: P
             .unwrap();
         assert_eq!(
             route.as_deref(),
-            (doc.url == other.url).then_some("pubky"),
+            others.iter().any(|o| o.url == doc.url).then_some("pubky"),
             "{}",
             doc.url
         );
@@ -637,7 +712,7 @@ async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: P
         tagged(&pool, &id).await;
         ids.push(id);
     }
-    let other_id = ids.pop().unwrap();
+    let other_ids = ids.split_off(left_out.len());
     let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
     let posting = found(&app, "type=SocialMediaPosting").await;
     assert!(posting.contains(&left_out[0].url), "{posting:?}");
@@ -691,11 +766,17 @@ async fn an_object_at_a_path_never_fetched_keeps_nothing_once_read_again(pool: P
         .contains(&left_out[0].url));
     assert!(found(&app, "q=fountains").await.is_empty());
     // Another app's object keeps its card and stays a search result.
-    assert_eq!(
-        found(&app, "q=fireworks").await,
-        std::slice::from_ref(&other.url),
-        "{other_id}"
-    );
+    for ((word, other), id) in ["fireworks", "lighthouses", "tramstop"]
+        .iter()
+        .zip(&others)
+        .zip(&other_ids)
+    {
+        assert_eq!(
+            found(&app, &format!("q={word}")).await,
+            std::slice::from_ref(&other.url),
+            "{id}"
+        );
+    }
 }
 
 /// A deck whose title, description or topic holds a NUL (which no stored text may hold) keeps

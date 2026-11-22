@@ -122,10 +122,8 @@ pub enum Route {
 }
 /// The namespaces whose objects Pinakes never fetches: those Nexus describes (pubky.app's own, and
 /// the social specs', `/pub/social/…` in any version, their posts, events and rsvps included:
-/// social events are Nexus's), and the old Mapky and Eventky layouts (`mapky.app`,
-/// `eventky.app`), whose data is disregarded: Maps writes posts (`posts`), and events and
-/// availability are social posts.
-const NEVER_FETCHED: &[&str] = &["pubky.app", "social", "mapky.app", "eventky.app"];
+/// social events are Nexus's).
+const NEVER_FETCHED: &[&str] = &["pubky.app", "social"];
 /// Whether Pinakes never fetches the objects of this namespace (decoded): ingest drops their post
 /// lines, so they create no resource, and one stored before the rule keeps no card (`no_card`).
 pub fn never_fetched(namespace: &str) -> bool {

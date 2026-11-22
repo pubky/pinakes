@@ -657,23 +657,19 @@ async fn a_read_in_flight_never_undoes_a_newer_version(pool: PgPool) {
     assert!(!due(&pool, &route).await);
 }
 
-/// A post in a namespace Pinakes never fetches (a social specs' event or rsvp, Nexus's; pubky.app's;
-/// the old Mapky and Eventky layouts), however its namespace is spelt: its feed line is rejected
-/// and counted (`never_fetched`), and it creates no resource or reference, so nothing fetches it.
-/// A post of another app in the same batch is indexed.
+/// A post in a namespace Pinakes never fetches (a social specs' event or rsvp, Nexus's; pubky.app's),
+/// however its namespace is spelt: its feed line is rejected and counted (`never_fetched`), and it
+/// creates no resource or reference, so nothing fetches it. Posts of other apps in the same batch,
+/// the old Mapky and Eventky layouts' included, are indexed.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let never: Vec<String> = [
         "social",
         "pubky.app",
-        "mapky.app",
-        "eventky.app",
         "%73ocial",
         "%73%6F%63%69%61%6C",
         "pubky%2Eapp",
-        "mapky.ap%70",
-        "eventky%2eapp",
     ]
     .iter()
     .map(|namespace| post(namespace, &id()))
@@ -683,8 +679,13 @@ async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) 
         lines.push(line(Op::Put, uri, "0034A", Utc::now()));
         lines.push(line(Op::Del, uri, "0034A", Utc::now()));
     }
-    let chess = post("chess", &id());
-    lines.push(line(Op::Put, &chess, "0034A", Utc::now()));
+    let indexed: Vec<String> = ["chess", "mapky.app", "eventky.app"]
+        .iter()
+        .map(|namespace| post(namespace, &id()))
+        .collect();
+    for uri in &indexed {
+        lines.push(line(Op::Put, uri, "0034A", Utc::now()));
+    }
     batch(&pool, lines, &metrics).await;
     assert_eq!(
         metrics
@@ -693,33 +694,40 @@ async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) 
             .get(),
         2 * never.len() as u64
     );
-    let (chess_id, _, _) = identity(&chess).unwrap();
+    let mut expected: Vec<(String, i64)> = indexed
+        .iter()
+        .map(|uri| (identity(uri).unwrap().0, 1))
+        .collect();
+    expected.sort();
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT r.id,(SELECT count(*) FROM reference f WHERE f.resource_id=r.id) FROM resource r",
+        "SELECT r.id,(SELECT count(*) FROM reference f WHERE f.resource_id=r.id) FROM resource r ORDER BY r.id",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(rows, [(chess_id, 1)]);
+    assert_eq!(rows, expected);
     let refs: i64 = sqlx::query_scalar("SELECT count(*) FROM reference")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(refs, 1);
+    assert_eq!(refs, indexed.len() as i64);
     for uri in &never {
         assert_eq!(classify(uri), None, "{uri}");
     }
+    for uri in &indexed {
+        assert_eq!(classify(uri), Some("pubky"), "{uri}");
+    }
 }
 
-/// A tag on an object of a namespace Pinakes never fetches (the old Mapky and Eventky layouts)
-/// is a reference like any other, but its object gets no route: it is never queued for a fetch
-/// and stores no card.
+/// A tag on an object of a namespace Pinakes never fetches (the social specs') is a reference
+/// like any other, but its object gets no route: it is never queued for a fetch and stores no
+/// card.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tag_on_an_object_never_fetched_stores_nothing(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     let uris = [
-        format!("pubky://{AUTHOR}/pub/mapky.app/posts/{}", id()),
-        format!("pubky://{AUTHOR}/pub/eventky.app/events/{}", id()),
+        format!("pubky://{AUTHOR}/pub/social/v1/events/{}", id()),
+        format!("pubky://{AUTHOR}/pub/%73ocial/v1/rsvps/{}", id()),
     ];
     let lines = uris
         .iter()
@@ -749,6 +757,53 @@ async fn a_tag_on_an_object_never_fetched_stores_nothing(pool: PgPool) {
         .await
         .unwrap()
         .is_none());
+}
+
+/// A tag on an object of the old Mapky or Eventky layout queues it on the Pubky route, as any
+/// other app's object: it is fetched for the general card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tag_on_an_old_mapky_or_eventky_object_queues_it_for_a_card(pool: PgPool) {
+    let metrics = Metrics::new().unwrap();
+    let uris = [
+        format!("pubky://{AUTHOR}/pub/mapky.app/posts/{}", id()),
+        format!("pubky://{AUTHOR}/pub/eventky.app/events/{}", id()),
+    ];
+    let lines = uris
+        .iter()
+        .map(|uri| Change {
+            op: Op::Put,
+            uri: uri.clone(),
+            kind: Kind::Tag,
+            author: AUTHOR.into(),
+            object_path: format!("/pub/pubky.app/tags/{}", id()),
+            label: Some("coffee".into()),
+            at: Utc::now().timestamp_millis(),
+        })
+        .collect();
+    batch(&pool, lines, &metrics).await;
+    let mut ids = vec![];
+    for uri in &uris {
+        let (id, _, _) = identity(uri).unwrap();
+        let row: (Option<String>, i64) = sqlx::query_as(
+            "SELECT resolver,(SELECT count(*) FROM reference f WHERE f.resource_id=r.id) FROM resource r WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, (Some("pubky".into()), 1), "{uri}");
+        ids.push(id);
+    }
+    let mut claimed = vec![];
+    while let Some(job) = queue::claim(&pool, "pubky", &QueueConfig::default())
+        .await
+        .unwrap()
+    {
+        claimed.push(job.id);
+    }
+    claimed.sort();
+    ids.sort();
+    assert_eq!(claimed, ids);
 }
 
 /// A post whose namespace is not one plain path segment once decoded (not UTF-8, an encoded `/`,

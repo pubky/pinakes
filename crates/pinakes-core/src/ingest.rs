@@ -409,9 +409,8 @@ pub const TAG_PATH: &str = "";
 /// Why a `post` line is rejected: its URI must be a post in its author's storage
 /// (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), its object path a version file directly in
 /// that post (`…/{id}/{editId}.json`). A post in a namespace Pinakes never fetches
-/// (`pubky_apps::never_fetched`: the social specs' events and rsvps are Nexus's, `pubky.app`'s too,
-/// and the old Mapky and Eventky layouts are disregarded) is neither fetched nor indexed
-/// (`never_fetched`), however its namespace is spelt.
+/// (`pubky_apps::never_fetched`: the social specs' events and rsvps are Nexus's, `pubky.app`'s too)
+/// is neither fetched nor indexed (`never_fetched`), however its namespace is spelt.
 fn post_rejection(line: &Change, uri: &str) -> Option<&'static str> {
     let Some(path) = uri
         .strip_prefix("pubky://")
