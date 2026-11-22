@@ -80,9 +80,9 @@ pub struct Related {
     /// title from its feed, or the label of an entry without a `uri`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// In satoshis: an input's or output's value, a channel's capacity, a block's reward on its
-    /// coinbase transaction, or what a transaction moved into (positive) or out of (negative)
-    /// an address.
+    /// In bitcoin, the base unit of BIP 177 (₿): an input's or output's value, a channel's
+    /// capacity, a block's reward on its coinbase transaction, or what a transaction moved into
+    /// (positive) or out of (negative) an address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount_sat: Option<i64>,
     /// When it happened: the block time of a transaction or of a transaction's block.

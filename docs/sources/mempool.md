@@ -39,7 +39,7 @@ first form of each listed site, so every listed link reads back as the card.
 | Explorer | Networks (path prefix) | Block | Block by height | Transaction | Address | Also on |
 | --- | --- | --- | --- | --- | --- | --- |
 | Blockstream (`blockstream.info`) | mainnet, `/testnet`, `/testnet4`, `/signet` | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
-| `mempool.emzy.de` (a mempool instance, language prefix as on mempool.space) | mainnet, `/testnet4`, `/signet` | `/block/{hash or n}` | | `/tx/{txid}` | `/address/{a}` | listed |
+| `mempool.emzy.de` (a mempool instance, language prefix as on mempool.space) | mainnet, `/testnet4`, `/signet` | `/block/{hash or n}` | | `/tx/{txid}` | `/address/{a}` | read only |
 | BTCScan (`btcscan.org`) | mainnet | `/block/{hash}` | `/block-height/{n}` | `/tx/{txid}` | `/address/{a}` | listed |
 | Blockchain.com (`www.blockchain.com`) | `btc` | `/explorer/blocks/btc/{hash or n}` | | `/explorer/transactions/btc/{txid}` | `/explorer/addresses/btc/{a}` | listed |
 | Blockchain.com, older paths | `/btc` | `/btc/block/{hash or n}` | | `/btc/tx/{txid}` | `/btc/address/{a}` | read only |
@@ -63,6 +63,7 @@ first form of each listed site, so every listed link reads back as the card.
   `/edge/` is a route of its app, so their forms are routes only.
 - Blockchair, BlockCypher, bitcoinexplorer.org and 3xpl refuse a plain client: their links are
   read, never listed.
+- mempool.emzy.de is a copy of mempool.space: its links are read, never listed.
 - mempool.emzy.de's testnet (it answers 502) and Blockchain.com's `btc-testnet` pages (they show
   nothing that names their network) are left out.
 - A trailing slash, a query string, a fragment and `www.` change nothing. Language prefixes are
@@ -86,8 +87,8 @@ object's own record failed, to decide `missing`; the match is exact on the key, 
 
 ## Also on
 
-`mempool`: a block, transaction or address card lists its pages on Blockstream, mempool.emzy.de,
-BTCScan, Blockchain.com and OKLink (those that show its network), and a Lightning node or
+`mempool`: a block, transaction or address card lists its pages on Blockstream, BTCScan,
+Blockchain.com and OKLink (those that show its network), and a Lightning node or
 channel card its pages on 1ML, Amboss and Lightning Network+ (mainnet), from its root alone, with
 no request. Each is a link of the card's own object (above).
 
@@ -122,6 +123,9 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 - Lightning channel: `name` "Channel {short id}"; when it was opened and closed are the `created`
   and `closed` facts (an open channel has no `closed`).
 
+Amounts are whole numbers of bitcoin as BIP 177 counts them: the base unit, ₿
+(₿100,000,000 = 1 BTC).
+
 | Fact | Meaning |
 | --- | --- |
 | `page_url` | The object's page on mempool.space |
@@ -129,13 +133,13 @@ The card types are local, not schema.org: `BitcoinBlock`, `BitcoinTransaction`,
 | `tx_count` | A block's transactions; an address's confirmed transactions |
 | `size`, `weight` | A block's or a transaction's size in bytes and its weight units |
 | `pool` | The mining pool, as mempool.space names it |
-| `total_fees`, `reward` | In satoshis |
-| `median_fee_rate` | sat/vB |
+| `total_fees`, `reward` | In bitcoin |
+| `median_fee_rate` | Bitcoin per virtual byte (₿/vB) |
 | `stale` | `true` for a block its status puts outside the best chain (an orphaned block) |
 | `confirmed`, `block_height`, `block_hash` | A transaction's confirmation |
-| `fee`, `vsize`, `inputs`, `outputs`, `output_value`, `coinbase` | A transaction (satoshis, vbytes) |
-| `received`, `balance`, `unconfirmed_tx_count` | An address (confirmed satoshis) |
-| `public_key`, `alias`, `color`, `capacity`, `channels`, `updated_at` | A Lightning node (capacity in satoshis) |
+| `fee`, `vsize`, `inputs`, `outputs`, `output_value`, `coinbase` | A transaction (bitcoin, vbytes) |
+| `received`, `balance`, `unconfirmed_tx_count` | An address (confirmed bitcoin) |
+| `public_key`, `alias`, `color`, `capacity`, `channels`, `updated_at` | A Lightning node (capacity in bitcoin) |
 | `first_seen` | When the Lightning node was first seen (RFC 3339) |
 | `short_id`, `status`, `funding_tx`, `funding_output`, `closing_tx` | A Lightning channel (`active`, `inactive` or `closed`) |
 | `created`, `closed` | When the channel was opened and closed (RFC 3339) |

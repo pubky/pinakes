@@ -28,7 +28,7 @@ News's own capture of the item (`https://capture.stacker.news/items/{id}`).
 | `author` | The author's name |
 | `territory` | The post's territory, e.g. `bitcoin` |
 | `published` | RFC 3339 |
-| `comment_count`, `sats` | Its comments and the sats it received |
+| `comment_count`, `sats` | Its comments and the bitcoin it received (BIP 177 base units, ₿) |
 | `link` | The link a post discusses (another object, not this one) |
 | `thread` | For a comment, its thread's root post |
 | `nostr` | Its Nostr cross-post, `nostr:…` |

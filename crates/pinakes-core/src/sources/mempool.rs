@@ -291,8 +291,8 @@ pub struct Explorer {
     /// Its hosts in lower case; the first writes its links. A leading `www.` is ignored when
     /// reading, as everywhere.
     hosts: &'static [&'static str],
-    /// Whether a card lists it in Also on. Sites that refuse a plain client (bot walls) or are
-    /// down are only read.
+    /// Whether a card lists it in Also on. Sites that refuse a plain client (bot walls), are
+    /// down or copy the cards' own site (a mempool.space instance) are only read.
     listed: bool,
     /// Whether a two-letter language may lead its paths (`/de/tx/…`), as on mempool sites.
     languages: bool,
@@ -385,7 +385,7 @@ pub const EXPLORERS: &[Explorer] = &[
     Explorer {
         site: "mempool.emzy.de",
         hosts: &["mempool.emzy.de"],
-        listed: true,
+        listed: false,
         languages: true,
         // Its testnet answers 502.
         networks: &[
@@ -1764,7 +1764,6 @@ pub mod also_on {
                 sites(&found),
                 [
                     format!("Blockstream Explorer https://blockstream.info/block/{HASH}"),
-                    format!("mempool.emzy.de https://mempool.emzy.de/block/{HASH}"),
                     format!("BTCScan https://btcscan.org/block/{HASH}"),
                     format!("Blockchain.com https://www.blockchain.com/explorer/blocks/btc/{HASH}"),
                     format!("OKLink https://www.oklink.com/bitcoin/block/{HASH}"),
@@ -2225,7 +2224,6 @@ mod tests {
             sites,
             [
                 "Blockstream Explorer",
-                "mempool.emzy.de",
                 "BTCScan",
                 "Blockchain.com",
                 "OKLink"
@@ -2316,7 +2314,6 @@ mod tests {
             links,
             [
                 format!("https://blockstream.info/block/{HASH}"),
-                format!("https://mempool.emzy.de/block/{HASH}"),
                 format!("https://btcscan.org/block/{HASH}"),
                 format!("https://www.blockchain.com/explorer/blocks/btc/{HASH}"),
                 format!("https://www.oklink.com/bitcoin/block/{HASH}"),
@@ -2522,16 +2519,10 @@ mod tests {
         assert_eq!(card.details["pool"], "wiz");
         assert_eq!(
             links(&from_root(&card.id).unwrap()),
-            [
-                (
-                    "Blockstream Explorer",
-                    format!("https://blockstream.info/testnet4/block/{hash}")
-                ),
-                (
-                    "mempool.emzy.de",
-                    format!("https://mempool.emzy.de/testnet4/block/{hash}")
-                ),
-            ]
+            [(
+                "Blockstream Explorer",
+                format!("https://blockstream.info/testnet4/block/{hash}")
+            )]
         );
         assert_eq!(
             parse_height(200, &read("signet-block-height-1000.txt"))
@@ -2560,7 +2551,7 @@ mod tests {
         assert_eq!(card.details["output_value"], 1000000000000u64);
         assert_eq!(card.details["vsize"], 23620);
         assert_eq!(card.details["coinbase"], false);
-        assert_eq!(links(&from_root(&card.id).unwrap()).len(), 5);
+        assert_eq!(links(&from_root(&card.id).unwrap()).len(), 4);
         assert_eq!(
             parse_tx(404, &read("tx-missing.txt"), Network::Mainnet, PIZZA).unwrap(),
             None
@@ -2568,7 +2559,7 @@ mod tests {
     }
 
     /// Output values that pass `u64` together (a malformed record) give the largest value, as
-    /// the other satoshi sums do.
+    /// the other amount sums do.
     #[test]
     fn output_values_past_u64_saturate() {
         let body = format!(
@@ -2597,7 +2588,7 @@ mod tests {
         assert_eq!(card.details["tx_count"], 67019);
         assert_eq!(card.details["balance"], 5767070988u64);
         assert_eq!(
-            links(&from_root(&card.id).unwrap())[3],
+            links(&from_root(&card.id).unwrap())[2],
             (
                 "Blockchain.com",
                 format!("https://www.blockchain.com/explorer/addresses/btc/{GENESIS}")

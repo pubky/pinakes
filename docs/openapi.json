@@ -1581,7 +1581,7 @@
         "description": "One object a card points at (docs/api.md, Related objects): on a Bitcoin or Lightning card,\nthe block a transaction is in, its inputs and outputs, a block's neighbours, an address's\nlatest transactions, a node's channels and peers, a channel's nodes and transactions; on a\npodcast episode's card, its show.",
         "properties": {
           "amount_sat": {
-            "description": "In satoshis: an input's or output's value, a channel's capacity, a block's reward on its\ncoinbase transaction, or what a transaction moved into (positive) or out of (negative)\nan address.",
+            "description": "In bitcoin, the base unit of BIP 177 (₿): an input's or output's value, a channel's\ncapacity, a block's reward on its coinbase transaction, or what a transaction moved into\n(positive) or out of (negative) an address.",
             "format": "int64",
             "type": [
               "integer",
