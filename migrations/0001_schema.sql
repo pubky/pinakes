@@ -180,11 +180,18 @@ $$;
 -- path ingest accepts fits a btree entry.
 CREATE INDEX reference_collection_post_idx ON reference USING btree (author, collection_post(object_path), timezone('UTC', created_at) DESC, collection_file(object_path) COLLATE "C" DESC) INCLUDE (created_at) WHERE kind = 'collection';
 
--- References as they count: an alias's count for its root, posts' own rows left out.
+-- References as they count: an alias's count for its root, posts' own rows left out. Each
+-- reference is one row: as itself when its link is no alias, else for the alias's one root (the
+-- alias is the key of `resource_alias`). The resource is a plain column of each branch, so a
+-- probe by resource reads `reference` by resource and `resource_alias` by alias and by root.
 CREATE VIEW effective_reference AS
-    SELECT coalesce(a.root_id, f.resource_id) AS resource_id, f.author, f.object_path, f.kind, f.label, f.created_at
-    FROM reference f LEFT JOIN resource_alias a ON a.alias_id = f.resource_id
+    SELECT f.resource_id, f.author, f.object_path, f.kind, f.label, f.created_at
+    FROM reference f
     -- A post's own row keeps its card alive; it references nothing else, so it does not count.
+    WHERE f.kind <> 'post' AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id = f.resource_id)
+    UNION ALL
+    SELECT a.root_id, f.author, f.object_path, f.kind, f.label, f.created_at
+    FROM resource_alias a JOIN reference f ON f.resource_id = a.alias_id
     WHERE f.kind <> 'post';
 
 -- Resources a page derives (an event adapter's entries), each with its adapter and when the
