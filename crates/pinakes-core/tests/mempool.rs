@@ -69,9 +69,11 @@ async fn a_block_card_lists_the_explorers_and_their_links_are_its_aliases(pool: 
     .await
     .unwrap();
 
-    // People tag the block on three other explorers.
+    // People tag the block on four other explorers, mempool.emzy.de among them, which the card
+    // no longer lists but still reads.
     let tagged = [
         format!("https://blockstream.info/block/{HASH}"),
+        format!("https://mempool.emzy.de/block/{HASH}"),
         format!("https://www.blockchain.com/explorer/blocks/btc/{HASH}"),
         format!("https://blockchair.com/bitcoin/block/{HASH}"),
     ];
@@ -96,8 +98,7 @@ async fn a_block_card_lists_the_explorers_and_their_links_are_its_aliases(pool: 
             "BTCScan",
             "Blockchain.com",
             "Blockstream Explorer",
-            "OKLink",
-            "mempool.emzy.de"
+            "OKLink"
         ],
         "{read}"
     );

@@ -375,7 +375,8 @@ open each one's card. Each entry is `{rel, uri, name?, amount_sat?, at?}`:
   output without an address has a null `uri` and a `name` that says what it is (`OP_RETURN`,
   `P2PK`, `coinbase`, or the script type).
 - `name` is plain text (a block's "Block 975,251", a node's alias, a show's title); `amount_sat`
-  is in satoshis; `at` is an RFC 3339 instant.
+  is a whole number of bitcoin as BIP 177 counts them (the base unit, ₿; ₿100,000,000 = 1 BTC);
+  `at` is an RFC 3339 instant.
 - A `rel` lists at most 10 entries; when there are more, `related_total` gives their number
   (`{"input": 400}`). Entries come in the order below; inputs, outputs and channels the largest
   first.
