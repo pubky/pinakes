@@ -980,9 +980,9 @@ pub async fn enrich_until(
                 let until = crate::episodes::feed_deadline(deadline);
                 match tokio::time::timeout_at(until, longer).await {
                     Ok(Some(d)) => parsed = Ok(Some(d)),
-                    // The show's list is then the cut read's: the save joins the other episodes
-                    // an earlier, longer read stored to it, so one slow or failed read on does
-                    // not cut the stored list back to the page cap.
+                    // The show's list is then the cut read's, whatever the feed's order: the save
+                    // joins the other episodes an earlier, longer read stored to it, so one slow
+                    // or failed read on does not cut the stored list back to the page cap.
                     _ if !item && reads_on(&f) => {
                         if let Ok(Some(d)) = &mut parsed {
                             d.episodes_cut = d.episodes.is_some();
@@ -1287,6 +1287,17 @@ fn podcast_body(
         let listed = crate::episodes::listed(&items, &f.url, partial);
         d.episodes = Some(listed.episodes);
         d.episodes_older = listed.older;
+        // An oldest-first feed's read that stopped before the feed ended (cut at its cap, or past
+        // the item cap) is a cut read: the save keeps the other episodes a longer stored list
+        // holds. A newest-first one's stands, unless its read on fails (`enrich_until`).
+        d.episodes_cut = listed.cut;
+        d.episodes_oldest_first = listed.oldest_first;
+        // The show the list's feed names, for the save: by the name this card stores (the
+        // channel's first title, as read above) and the channel's link.
+        d.episodes_channel = crate::episodes::Channel::new(
+            d.name.clone(),
+            crate::episodes::Channel::of(channel).link,
+        );
     }
     Ok(Some(d.bounded(web::ATTRIBUTES)?))
 }
@@ -1629,8 +1640,26 @@ mod tests {
         )
     }
 
+    /// A feed of `n` items, its oldest first: each dated a day after the one before, with `notes`
+    /// bytes of notes.
+    fn oldest_first_feed(n: i64, notes: usize) -> String {
+        let items: String = (1..=n)
+            .map(|n| {
+                let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
+                    .unwrap()
+                    .to_rfc2822();
+                format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{date}</pubDate><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(notes))
+            })
+            .collect();
+        format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Show</title>{items}</channel></rss>"#
+        )
+    }
+
     /// A whole feed of more items than the item cap is read to its first `cap` items, as a cut
-    /// one is: still the show's card (no error), and an episode past them is not missing.
+    /// one is: still the show's card (no error), and an episode past them is not missing. Its list
+    /// stands as the show's (a newest-first feed's first items are its newest), or, for a feed
+    /// that lists oldest first, is a cut read's. A feed of `cap` items is read whole.
     #[test]
     fn a_whole_feed_past_the_item_cap_is_read_to_it() {
         let f = crate::sources::fixture::page(
@@ -1642,6 +1671,10 @@ mod tests {
         let d = podcast(f.url.as_str(), &f, 3600, 10).unwrap().unwrap();
         assert_eq!(d.type_name, "PodcastSeries");
         assert!(d.episodes_older, "two items past the cap");
+        assert!(
+            !d.episodes_cut,
+            "a newest-first read that stopped at the item cap holds the newest: it stands"
+        );
         let episodes = d.episodes.unwrap();
         assert_eq!(episodes.len(), 10);
         assert_eq!(episodes[9].name.as_deref(), Some("E3"));
@@ -1654,6 +1687,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(e.type_name, "PodcastEpisode");
+        let whole = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            long_feed(10, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(whole.url.as_str(), &whole, 3600, 10)
+            .unwrap()
+            .unwrap();
+        assert!(!d.episodes_older);
+        assert!(!d.episodes_cut, "a whole read");
+        // Oldest first: the first `cap` items are its oldest, and the save keeps a stored list's
+        // newer episodes.
+        let f = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            oldest_first_feed(12, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(f.url.as_str(), &f, 3600, 10).unwrap().unwrap();
+        assert!(d.episodes_older && d.episodes_oldest_first);
+        assert!(
+            d.episodes_cut,
+            "an oldest-first read that stopped at the item cap: the save keeps a stored list's others"
+        );
+        assert_eq!(d.episodes.unwrap()[0].name.as_deref(), Some("E10"));
+        let whole = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            oldest_first_feed(10, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(whole.url.as_str(), &whole, 3600, 10)
+            .unwrap()
+            .unwrap();
+        assert!(d.episodes_oldest_first);
+        assert!(!d.episodes_cut, "a whole read");
     }
 
     /// A show's feed cut at the page cap is read on (`read_on`, at the address the cut read ended
@@ -1709,6 +1779,53 @@ mod tests {
         assert!(!d.episodes_older, "the whole feed was read");
         assert!(!d.episodes_cut, "the longer read's list");
         assert_eq!(recorded.asked(), [uri]);
+        // A longer read that stops before the feed ends (past the item cap) holds a newest-first
+        // feed's newest episodes: it stands. An oldest-first feed's is a cut read.
+        let capped = &CardConfig {
+            podcast_items: 200,
+            ..CardConfig::default()
+        };
+        let read_capped = |body: &str| {
+            let (egress, _) = feed(body);
+            let f = cut_of(body, uri);
+            async move {
+                enrich(
+                    uri,
+                    &f,
+                    ResourceMeta::new(uri, "web", 100),
+                    None,
+                    &egress,
+                    capped,
+                    true,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let d = read_capped(&whole).await;
+        assert_eq!(
+            d.episodes.as_ref().map(Vec::len),
+            Some(200),
+            "the longer read's"
+        );
+        assert!(d.episodes_older);
+        assert!(
+            !d.episodes_cut,
+            "a newest-first longer read stopped at the item cap"
+        );
+        let ascending = oldest_first_feed(300, 8000);
+        assert!(ascending.len() > 2 * BODY_CAP);
+        let d = read_capped(&ascending).await;
+        assert_eq!(
+            d.episodes.as_ref().map(|e| (e.len(), e[0].name.clone())),
+            Some((200, Some("E200".into()))),
+            "the longer read's"
+        );
+        assert!(d.episodes_older && d.episodes_oldest_first);
+        assert!(
+            d.episodes_cut,
+            "an oldest-first longer read stopped at the item cap"
+        );
         // Not read again: the cut read's list stands.
         let (egress, recorded) =
             crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
@@ -1720,10 +1837,43 @@ mod tests {
             d.episodes_cut,
             "the save keeps a longer stored list's older episodes"
         );
+        assert!(!d.episodes_oldest_first, "undated items list nothing first");
         assert_eq!(
             recorded.asked(),
             [uri],
             "a read just made is not made again"
+        );
+        // A feed that lists its oldest episode first (its items' dates ascend): the cut read says
+        // so (`ResourceMeta::episodes_oldest_first`, for the save).
+        let ascending: String = (1..=300)
+            .map(|n| {
+                let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
+                    .unwrap()
+                    .to_rfc2822();
+                format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{date}</pubDate><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(8000))
+            })
+            .collect();
+        let ascending = format!(
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom"><channel><itunes:title>Show (iTunes)</itunes:title><title>Show</title><atom:link href="https://feeds.example/show.xml" rel="self"/><link>https://show.example/</link>{ascending}</channel></rss>"#
+        );
+        let (egress, _) =
+            crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
+        let d = read(egress, uri, cut_of(&ascending, uri)).await;
+        assert!(d.episodes_cut);
+        assert!(d.episodes_oldest_first, "the cut read of an ascending feed");
+        // And names its show as the card does (the save asks whether it is the stored card's):
+        // by the card's own name, the channel's first title, and the channel's link.
+        assert_eq!(d.name.as_deref(), Some("Show (iTunes)"));
+        assert_eq!(
+            d.episodes_channel,
+            crate::episodes::Channel::new(
+                Some("Show (iTunes)".into()),
+                Some("https://show.example/".into())
+            )
+        );
+        assert_eq!(
+            d.episodes.unwrap().last().unwrap().name.as_deref(),
+            Some("E1")
         );
         // A longer read that does not parse (an undefined entity past the cut): the cut read's
         // card and list.

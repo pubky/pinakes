@@ -234,6 +234,8 @@ async fn resolve_with(
             doc.episodes = Some(listed.episodes);
             doc.episodes_older = listed.older;
             doc.episodes_cut = listed.cut;
+            doc.episodes_oldest_first = listed.oldest_first;
+            doc.episodes_channel = listed.channel;
         }
     }
     Ok(doc)
@@ -506,6 +508,51 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].published >= w[1].published),
             "newest first"
+        );
+        assert!(!doc.episodes_oldest_first, "the feed lists newest first");
+        // A feed that lists its oldest episode first: the card says so, for the save.
+        let ascending: String = (1..=3)
+            .map(|n| {
+                let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
+                    .unwrap()
+                    .to_rfc2822();
+                format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{date}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#)
+            })
+            .collect();
+        let ascending = format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title> Show </title><link>https://show.example/</link>{ascending}</channel></rss>"#
+        );
+        let (egress, _) = fixture::egress(vec![
+            (api, 200, "application/json", read("feed-577105.json")),
+            (
+                "https://podcast.darknetdiaries.com/",
+                200,
+                "application/rss+xml",
+                ascending.into_bytes(),
+            ),
+        ]);
+        let cx = super::super::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        configure(&PodcastIndexConfig {
+            key: Some("TESTKEY".into()),
+            secret: Some("TESTSECRET".into()),
+        });
+        let doc = PodcastIndex
+            .resolve(&cx, "https://podcastindex.org/podcast/577105")
+            .await
+            .unwrap();
+        *CREDENTIALS.write().unwrap() = None;
+        assert_eq!(doc.episodes.as_ref().map(Vec::len), Some(3));
+        assert!(doc.episodes_oldest_first);
+        // And the show its feed's channel names, trimmed, for the save.
+        assert_eq!(
+            doc.episodes_channel,
+            crate::episodes::Channel::new(
+                Some("Show".into()),
+                Some("https://show.example/".into())
+            )
         );
         // An episode page asked as such reads no feed.
         let (egress, recorded) = fixture::egress(vec![(

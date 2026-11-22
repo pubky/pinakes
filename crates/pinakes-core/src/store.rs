@@ -397,6 +397,8 @@ pub(crate) async fn write_document(
             .bind(&osm.osm_type).bind(osm.id).bind(doc.location.as_ref().map(|p|p.lat)).bind(doc.location.as_ref().map(|p|p.lon)).bind(doc.bbox.map(|b|b.to_vec())).bind(&doc.name).bind(&doc.category).bind(serde_json::json!(doc.address)).bind(serde_json::json!(doc.attributes)).bind(&doc.type_name).bind(&doc.type_path).bind(serde_json::json!(doc)).bind(doc.status.as_str()).bind(crate::changes::normalize(doc)).execute(&mut **tx).await?;
         return Ok(());
     }
+    // The stored card's show, before this document replaces it (`episodes::store`).
+    let stored_show = crate::episodes::stored_show(tx, id, doc).await?;
     sqlx::query(r#"UPDATE resource SET type=$3, type_path=$4, name=$5, category=$6,
         point=CASE WHEN $7::double precision IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($8,$7),4326) END,
         start_at=$9, end_at=$10, venue_id=$14, doc=$11, status=$12, ever_existed=ever_existed OR $12='ok', resolved_at=now(),
@@ -408,7 +410,7 @@ pub(crate) async fn write_document(
         .bind(doc.start).bind(doc.end).bind(serde_json::to_value(doc)?).bind(doc.status.as_str()).bind(doc.ttl_secs as f64).bind(doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()))
         .execute(&mut **tx).await?;
     // A show's episodes follow its document: kept, replaced or cleared with it.
-    crate::episodes::store(tx, id, doc).await?;
+    crate::episodes::store(tx, id, doc, stored_show.as_ref()).await?;
     if matches!(doc.source.as_str(), "media" | "activitypub")
         && doc.status == crate::model::Status::Ok
     {
