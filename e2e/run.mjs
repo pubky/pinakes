@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { E2E_CONTACT, dropRefusedPages, freshen, instanceAgent, json, liveRecipes, preflight, runFlow, userAgent, withoutStackSkipped } from './harness.mjs';
+import { operatorContact, dropRefusedPages, freshen, instanceAgent, json, liveRecipes, preflight, runFlow, userAgent, withoutStackSkipped } from './harness.mjs';
 
 const mock = process.argv.includes('--mock');
 const recipesOnly = process.argv.includes('--live-recipes');
@@ -31,6 +31,7 @@ async function recipeSweep() {
 }
 let report;
 try {
+  if (recipesOnly || process.argv.includes('--isolated-live')) operatorContact();
   if (recipesOnly) {
     const recipes = await recipeSweep();
     report = { ok: !recipes.failed.length, mode: 'recipes', recipes };
@@ -53,10 +54,10 @@ try {
       for (const file of files) samples.push(...JSON.parse((await readFile(file, 'utf8')).replaceAll('{author}', author)));
       for (const sample of samples) if (sample.kind === 'ics' && process.env.PINAKES_E2E_ICS_URL) sample.uri = process.env.PINAKES_E2E_ICS_URL;
       // The preflight fetches go out as Pinakes' egress will: the stack this checkout builds sends
-      // its version with the operator's contact, else the run's; a running instance says what it
+      // its version with the operator's contact; a running instance says what it
       // sends in its `/v1/info`.
       const agent = process.argv.includes('--isolated-live')
-        ? userAgent(/\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(await readFile('Cargo.toml', 'utf8'))[1], process.env.PINAKES__HTTP__CONTACT?.trim() || E2E_CONTACT)
+        ? userAgent(/\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(await readFile('Cargo.toml', 'utf8'))[1], operatorContact())
         : instanceAgent(await json(`${pinakes}/v1/info`));
       const fetches = preflight(agent);
       await freshen(samples, fetches.text);

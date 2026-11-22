@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read-only resolver demo/regression check against a running daemon: POST /v1/resolve for a
+# Resolver demo/regression check against a running daemon: POST /v1/resolve for a
 # curated list of public URIs and print what each became. Never writes to Pubky or Nexus.
 set -euo pipefail
 cd "$(dirname "$0")/.."

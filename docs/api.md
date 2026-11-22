@@ -19,8 +19,8 @@ snapshot; a test fails when it is stale.
 | --- | --- | --- |
 | `GET /v1/search` | Query parameters ([Search](#search)) | `{items: [card], cursor, reach_truncated, facets?}` |
 | `GET /v1/resources/{id}` | 32-character resource ID | The card with the [read's fields](#resource-read); 404 if unknown |
-| `GET /v1/resources/by-uri` | `uri`: any spelling of a link | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root); 404 if unknown, nothing is fetched |
-| `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
+| `GET /v1/resources/by-uri` | `uri`: a link ([Aliases](#aliases)) | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root). A spelling held neither as a card nor as an alias answers with its root by the static alias rules, when it has one (tracking parameters dropped, a `doi.org` or ISBN link, a service's other URL forms); 404 if unknown, nothing is fetched or stored |
+| `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped; a URI reads as `by-uri` reads it |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued, with `Retry-After` (seconds) when the next attempt is put off |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500, default 100), signed `cursor` | `{items: [occurrence card], cursor}` |
 | `GET /v1/resources/{id}/episodes` | Optional `limit` (1–20, default 20), `offset` (0–1000, default 0), `q` (at most 256 bytes) | `{items: [episode], next_offset, truncated}`: a podcast show's latest episodes, newest first ([Episodes](#episodes)); 404 if unknown |
@@ -209,7 +209,9 @@ Where it comes from, the first that has one:
    another site's oEmbed answer counts when the card reads it anyway. Its `provider` is the
    answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer takes
    the name of a service of the first kind only for a frame on that service's own embed host
-   (never Mastodon's).
+   (never Mastodon's). An answer from an endpoint only the page named (on the page's own origin,
+   not the registry's for the link) is the site's own word: its `provider` is the frame's host,
+and the card's `provider` fact the endpoint's host.
 3. **The page's own player**: its head's `twitter:player` (with `:width` and `:height`), or an
    `og:video:secure_url` / `og:video:url` whose `og:video:type` is `text/html`.
 
@@ -803,7 +805,7 @@ next to the picked ones, read the facet from the same search without its own fil
 | Facet | Entries |
 | --- | --- |
 | `type` | `facets.type`: `{type, type_path, count}` per card type; `type_path` runs from `Thing` down to the type, enough to build the type tree and roll counts up into families |
-| `tags` | `facets.tags`: `{label, count}` per label people tagged the links with |
+| `tags` | `facets.tags`: `{label, count}` per label people tagged the links with, at most 100 (the most frequent, ties by label) |
 | `host` | `facets.host`: `{host, site, count}` per service, at most 100: `host` as `host=` takes it (exactly as the links' URLs name it, so `www.youtube.com` and `youtube.com` are two entries), `site` the name its cards show (`YouTube`, `Wikipedia (en)`: the service Pinakes knows by the URL, else the site name the documents give most often, else the host). A host that `pubky://` objects use is a user's key, not a service, and is left out (`host=<user key>` still filters them) |
 | `category` | `facets.category`: `{category, count}` per category, at most 100, as `category=` takes it: a place's OpenStreetMap `key/value` (`amenity/cafe`), or the `category` a page's schema.org data gives |
 
@@ -919,11 +921,11 @@ feed item's id that is such a link is kept by its hash, and a change line names 
 a link written scheme-relative (`//host/p`) or as `webcal:` without `//` counts too. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, the `social` tool leaves it out of what it asks the Nexus, and it is never kept as another link's alias. A
 resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
-client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
+client address (the connecting one, or behind a proxy in `api.trusted_proxies` the one it
+forwards) and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
 30 each); a 429 carries `Retry-After: 60`. The instance stores at most
-`limits.preview_new_per_hour` (1000) links it did not know in any hour, and, when the operator sets
-`limits.preview_new_per_client_per_hour` (no share by default), one client address at most that
-many of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
+`limits.preview_new_per_hour` (1000) links it did not know in any hour, and one client address at
+most `limits.preview_new_per_client_per_hour` (100; 0 is no share) of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
 (seconds), and nothing is stored, while a known link still reads.
 
 Statuses:
@@ -955,7 +957,11 @@ A failed refresh keeps the last accepted metadata.
 An alias is the same object under another URI. It keeps its own resource ID (an ID never
 changes), but it is never fetched: its references count for its root, search lists only the
 root, and a read, lookup, change query or occurrence read of the alias answers with the root
-(so the card's `id` is the root's). Aliases are resolved deterministically:
+(so the card's `id` is the root's). A spelling nobody referenced is no alias yet: `by-uri` and the
+`uris` of `POST /v1/resources/lookup` still answer it with its root by the rules below that need
+only the URI (not a page's canonical or an API's answer), when that root is stored; nothing is
+fetched or stored for it. Another scheme (`http` for `https`), `www.` or a trailing slash is
+another link unless someone referenced that spelling. Aliases are resolved deterministically:
 
 - **Tracking parameters**: `utm_*`, `fbclid`, `gclid`, `dclid`, `msclkid`, `igshid`, `mc_cid`,
   `mc_eid` and `_gl` on every host, `recId`, `recSource`, `searchId` and `eventOrigin` on
@@ -2030,8 +2036,10 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 
 ## Limits and errors
 
-Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the direct peer address
-(`api.requests_per_minute`, 120; forwarded headers are not trusted). A search costs
+Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the client address
+(`api.requests_per_minute`, 120): the connecting address, or behind a reverse proxy listed in
+`api.trusted_proxies` the right-most `X-Forwarded-For` entry that is not one of them
+([operations](operations.md#clients-and-budgets)). A search costs
 `limits.reach_cost` (6) units for each of `reach` and `boost` (each reads a set from Nexus),
 charged before any Nexus call, `limits.related_cost` (6) for `related`, all of them together
 when it has several; every other request costs one.
@@ -2068,7 +2076,10 @@ for any other. `GET /` links the guide, the skill, the MCP endpoint (when on), t
 `/v1/info` and nexus-scout's guide.
 
 **MCP.** `POST /mcp` (`api.mcp`, default on) is a Model Context Protocol server over Streamable
-HTTP, stateless and read-only, built on the official Rust SDK (`rmcp`). Messages are answered as
+HTTP, stateless, built on the official Rust SDK (`rmcp`). Every tool only reads, except `card`
+with `resolve: true`, which stores an unknown link as a preview and has a worker fetch it
+(`POST /v1/resolve`): `card` is announced with `readOnlyHint: false` and `openWorldHint: true`,
+the others with `readOnlyHint: true` and `openWorldHint: false`. Messages are answered as
 JSON (`application/json`); there are no sessions and no server-to-client requests. Each tool is a
 request to the public routes above, answered by their handlers under the public listener's
 layers, with the caller's address:
@@ -2080,7 +2091,7 @@ layers, with the caller's address:
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
 | `types` | `GET /v1/search?facet=type&limit=1` and `GET /v1/info` | The card types with their counts, and `resolves` |
-| `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v1/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged` (a view's `tag_uri` for the label addresses the viewer's own tag file); `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know |
+| `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v1/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged` (a view's `tag_uri` for the label addresses the viewer's own tag file); `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know. A plain link is sent to the Nexus only when this instance holds it (a card's link or an alias of one): `unknown_uris` names the others, which no Nexus call asks about. All of a call's Nexus reads share one deadline, `limits.reach_timeout_secs` (5 s): past it the tool answers 504 |
 
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
 characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`, and
@@ -2109,7 +2120,7 @@ message that has not arrived in full by the request's deadline.
 
 **No admin operation.** The tools' requests go to the public routes only, built afresh with no
 header of the MCP request, so the admin listener's routes and its token are out of reach. Any
-`Host` is accepted: the endpoint takes no credentials and changes nothing, so rmcp's DNS-rebinding
+`Host` is accepted: the endpoint takes no credentials and writes nothing but budgeted previews, so rmcp's DNS-rebinding
 guard for local servers protects nothing here, and the public host names are the reverse proxy's
 to know.
 
@@ -2117,9 +2128,11 @@ to know.
 
 `admin_listen` (default `127.0.0.1:9090`) serves `GET /metrics` (Prometheus text),
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
-(the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`, and
-`DELETE /v1/groups/{id}` to undo one). With
-`admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
+(the stored document with its internal fields), group curation (`PUT /v1/groups/{id}`, and
+`DELETE /v1/groups/{id}` to undo one) and
+`GET /healthz`: 200 `ok` when the database answers `SELECT 1` within a second, 503 when it does
+not or the daemon is stopping (a background task ended). With
+`admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route but `/healthz` needs `Authorization: Bearer`,
 compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
 request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token
 is checked. It sends no CORS

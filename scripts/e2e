@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# A live run names its operator to every service it reads: there is no default contact.
+contact="${PINAKES__HTTP__CONTACT:-}"
+if [[ "${1:-}" == "--isolated-live" || "${1:-}" == "--live-recipes" ]] && [[ -z "${contact// /}" ]]; then
+  echo "scripts/e2e ${1}: set PINAKES__HTTP__CONTACT to the operator's contact address (e2e/README.md)" >&2
+  exit 2
+fi
 if [[ ! -d e2e/node_modules ]]; then npm ci --prefix e2e; fi
 if [[ "${1:-}" == "--mock" || "${1:-}" == "--isolated-live" || "${1:-}" == "--live-recipes" ]]; then
   cargo build -p pinakes-core --example e2e_stack

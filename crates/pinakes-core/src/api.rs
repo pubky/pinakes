@@ -85,14 +85,21 @@ pub struct AppState {
     /// The request clock for relative times and search cursors; tests set it, the daemon never
     /// does (wall clock).
     pub clock: Option<Clock>,
+    /// `api.trusted_proxies`, parsed.
+    trusted_proxies: Arc<Vec<ipnet::IpNet>>,
+    /// Set by the daemon once a background task or worker has ended or the daemon is stopping:
+    /// `GET /healthz` then answers 503.
+    pub stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
+        let trusted_proxies = Arc::new(config.api.trusted_proxy_nets()?);
         Ok(Self {
             pool,
+            trusted_proxies,
             nexus: Nexus::configured(&config)?,
             config,
             wake: Arc::default(),
@@ -105,6 +112,7 @@ impl AppState {
             cursor_mac: SimpleHmac::<blake3::Hasher>::new_from_slice(&cursor_key)
                 .context("initialize cursor MAC")?,
             clock: None,
+            stopping: Arc::default(),
         })
     }
     /// Now, for relative times and search cursors.
@@ -250,17 +258,88 @@ pub fn pool_options() -> sqlx::postgres::PgPoolOptions {
             })
         })
 }
+/// The address a public request is counted under: its per-IP budgets, its ODbL dump downloads and
+/// its share of the hour's new previews. Set by the per-IP budget layer for every public request
+/// ([`client_address`]); an MCP tool's requests carry their MCP request's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientAddr(pub std::net::IpAddr);
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientAddr {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, ApiError> {
+        parts
+            .extensions
+            .get::<ClientAddr>()
+            .copied()
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "missing client address".into(),
+                )
+            })
+    }
+}
+/// The client of a request from `peer`: `peer` itself, unless it is one of `trusted` (the
+/// operator's reverse proxies, `api.trusted_proxies`). From a trusted proxy it is the right-most
+/// `X-Forwarded-For` entry that is not itself a trusted proxy: each proxy appends the address it
+/// was connected from, so the entries left of it are whatever the client sent and are never
+/// read. With no such entry (no header, every entry a trusted proxy, or one that is no address)
+/// the client is `peer`.
+pub fn client_address(
+    peer: std::net::IpAddr,
+    headers: &HeaderMap,
+    trusted: &[ipnet::IpNet],
+) -> std::net::IpAddr {
+    let peer = peer.to_canonical();
+    let is_trusted = |ip: &std::net::IpAddr| trusted.iter().any(|net| net.contains(ip));
+    if !is_trusted(&peer) {
+        return peer;
+    }
+    // Split as bytes: an entry that is no text (a byte a client wrote) is that entry alone, and
+    // never hides the entries after it.
+    let hops: Vec<&[u8]> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|b| *b == b','))
+        .collect();
+    for hop in hops.into_iter().rev() {
+        let hop = std::str::from_utf8(hop).unwrap_or_default().trim();
+        // An address, or one with a port (`192.0.2.1:4711`, `[2001:db8::1]:4711`).
+        let Some(ip) = hop
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .or_else(|| hop.parse::<SocketAddr>().ok().map(|a| a.ip()))
+            .map(|ip| ip.to_canonical())
+        else {
+            return peer;
+        };
+        if !is_trusted(&ip) {
+            return ip;
+        }
+    }
+    peer
+}
 async fn public_budget(
     State(state): State<AppState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let Some(peer) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
-        return ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "missing peer address".into(),
-        )
-        .into_response();
+    let client = match request.extensions().get::<ClientAddr>() {
+        Some(client) => client.0,
+        None => {
+            let Some(peer) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+                return ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "missing peer address".into(),
+                )
+                .into_response();
+            };
+            let client = client_address(peer.0.ip(), request.headers(), &state.trusted_proxies);
+            request.extensions_mut().insert(ClientAddr(client));
+            client
+        }
     };
     // A reach search (`reach` or `boost`, each a set read from Nexus) and a related search cost
     // their own units, a search with several all of them together; anything else costs one.
@@ -284,7 +363,7 @@ async fn public_budget(
     if let Err(error) = state
         .budget(
             &[(
-                format!("api-ip:{}", peer.0.ip()),
+                format!("api-ip:{client}"),
                 state.config.api.requests_per_minute,
             )],
             state.config.api.cache_capacity,
@@ -1120,7 +1199,7 @@ pub struct CategoryFacet {
 /// The facets `facet` asked for, over the whole filtered set.
 #[derive(Serialize, ToSchema)]
 pub struct Facets {
-    /// `facet=tags`: the labels the filtered links carry, most frequent first.
+    /// `facet=tags`: the labels the filtered links carry, most frequent first, at most 100.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<TagFacet>>,
     /// `facet=type`: the card types of the filtered set, most frequent first.
@@ -1135,7 +1214,7 @@ pub struct Facets {
     #[serde(rename = "category", skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<CategoryFacet>>,
 }
-/// The most entries `facet=host` and `facet=category` list each.
+/// The most entries `facet=tags`, `facet=host` and `facet=category` list each.
 pub const FACET_LIST_CAP: i64 = 100;
 /// The links per host `facet=host` tries for the service's name (`HostFacet::site`).
 const FACET_SITE_SAMPLE: i32 = 8;
@@ -1189,8 +1268,8 @@ pub struct LookupRequest {
     pub ids: Option<Vec<String>>,
     pub uris: Option<Vec<String>>,
 }
-/// The resource IDs a lookup names: `ids` as given, then each of `uris` as its ID (normalised, as
-/// `POST /v1/resources/lookup` reads a link); 1–500 together. An alias ID reads its root where
+/// The resource IDs a lookup names: `ids` as given, then each of `uris` as its ID (normalised);
+/// 1–500 together. An alias ID reads its root where
 /// the lookup reads, and an unknown ID adds nothing.
 pub(crate) fn lookup_ids(
     ids: Option<Vec<String>>,
@@ -2978,7 +3057,9 @@ pub async fn search(
             .push(" r JOIN effective_reference f ON r.id=f.resource_id WHERE f.label IS NOT NULL");
 
         scope(&mut sql, &q, &reach);
-        sql.push(" GROUP BY f.label) t),'[]')");
+        sql.push(" GROUP BY f.label ORDER BY count DESC,f.label LIMIT ")
+            .push_bind(FACET_LIST_CAP)
+            .push(") t),'[]')");
     } else {
         sql.push("NULL");
     }
@@ -3223,10 +3304,22 @@ pub async fn by_uri(
     let id = model::identity(&q.uri)
         .map_err(|e| ApiError::bad(e.to_string()))?
         .0;
-    let detail = read(&state.pool, &id, &state.config)
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
+    let mut detail = read(&state.pool, &id, &state.config).await?;
+    if detail.is_none() {
+        if let Some(root) = static_root_id(&q.uri) {
+            detail = read(&state.pool, &root, &state.config).await?;
+        }
+    }
+    let detail = detail.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
     tagged(&headers, &detail)
+}
+/// The ID of `uri`'s root by the static alias rule (`alias::root`: tracking parameters, a DOI
+/// or ISBN link, a service's other URL forms), when it has one: what a read of a spelling this
+/// instance holds neither as a card nor as an alias answers with. Computed from the URI alone:
+/// nothing is fetched or written.
+fn static_root_id(uri: &str) -> Option<String> {
+    let alias = crate::alias::root(uri)?;
+    model::identity(&alias.root).ok().map(|(id, _, _)| id)
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resources/lookup",operation_id="lookup_resources",request_body=LookupRequest,responses((status=200,body=Vec<Card>),(status=400,description="Exactly one list of 1–500 IDs or URIs")))]
 pub async fn lookup(
@@ -3249,15 +3342,28 @@ pub async fn lookup(
             }
             ids
         }
-        (None, uris) => uris
-            .unwrap_or_default()
-            .iter()
-            .map(|s| {
-                model::identity(s)
-                    .map(|v| v.0)
-                    .map_err(|e| ApiError::bad(e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        (None, uris) => {
+            let uris = uris.unwrap_or_default();
+            let mut ids = uris
+                .iter()
+                .map(|s| {
+                    model::identity(s)
+                        .map(|v| v.0)
+                        .map_err(|e| ApiError::bad(e.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // A spelling held neither as a card nor as an alias reads as its static root.
+            let held: Vec<String> = sqlx::query_scalar("SELECT w.id FROM unnest($1::text[]) w(id) WHERE EXISTS(SELECT 1 FROM resource r WHERE r.id=w.id) OR EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=w.id)").bind(&ids).fetch_all(&state.pool).await?;
+            let held: std::collections::HashSet<String> = held.into_iter().collect();
+            for (id, uri) in ids.iter_mut().zip(&uris) {
+                if !held.contains(id) {
+                    if let Some(root) = static_root_id(uri) {
+                        *id = root;
+                    }
+                }
+            }
+            ids
+        }
     };
     let roots: Vec<String> = sqlx::query_scalar("SELECT coalesce(a.root_id,w.id) FROM unnest($1::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id").bind(&ids).fetch_all(&state.pool).await?;
     store::expedite(&state.pool, &roots).await?;
@@ -3275,7 +3381,7 @@ pub async fn lookup(
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI, disabled resolver, or a link that carries a credential"),(status=429,description="Preview rate limit"),(status=503,description="The instance's new previews for this hour are taken; nothing was stored",headers(("Retry-After"=u64,description="Seconds until a new preview can be taken")))))]
 pub async fn resolve(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ClientAddr(client): ClientAddr,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Response, ApiError> {
     let (id, uri, _) = model::identity(&body.uri).map_err(|e| ApiError::bad(e.to_string()))?;
@@ -3293,7 +3399,7 @@ pub async fn resolve(
     // An alias is never fetched: the root's route decides.
     let target = crate::alias::root(&uri).map_or_else(|| uri.clone(), |a| a.root);
     crate::resolver::admit(&target, &state.config).map_err(ApiError::bad)?;
-    state.preview_budget(peer.ip(), &id).await?;
+    state.preview_budget(client, &id).await?;
     // A link the instance does not know yet takes a place in its hour of new previews; when the
     // hour is full, nothing is stored. Two first requests for one link at once may both take one.
     let known: bool = sqlx::query_scalar(
@@ -3305,7 +3411,7 @@ pub async fn resolve(
     let slot = if known {
         None
     } else {
-        match state.reserve_preview(peer.ip()) {
+        match state.reserve_preview(client) {
             Ok(slot) => Some(slot),
             Err((status, seconds)) => {
                 let (limit, message) = if status == StatusCode::TOO_MANY_REQUESTS {
@@ -3865,7 +3971,7 @@ pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'
 #[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet; retry later")))]
 async fn osm_dump(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ClientAddr(client): ClientAddr,
     method: axum::http::Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -3944,7 +4050,7 @@ async fn osm_dump(
     };
     // Only a transfer counts: not a HEAD, a revalidation or an unsatisfiable range.
     if method != axum::http::Method::HEAD {
-        state.download_budget(peer.ip()).await?;
+        state.download_budget(client).await?;
     }
     file.seek(std::io::SeekFrom::Start(start))
         .await
@@ -4033,8 +4139,26 @@ pub fn admin_router(state: AppState) -> Router {
         )
         .route("/v1/resources/{id}/document", get(admin_document))
         .route("/metrics", get(metrics))
-        .route("/v1/info", get(admin_info));
+        .route("/v1/info", get(admin_info))
+        .route(HEALTHZ, get(healthz));
     with_admin_layers(routes, state)
+}
+/// The admin listener's health route.
+pub const HEALTHZ: &str = "/healthz";
+/// How long the health route waits for the database.
+const HEALTHZ_TIMEOUT: Duration = Duration::from_secs(1);
+/// `GET /healthz`: 200 when the database answers `SELECT 1` within a second and no background
+/// task has ended; 503 otherwise. Only on the admin listener, and the one route there that takes
+/// no admin token: it says nothing but whether the daemon is well.
+async fn healthz(State(state): State<AppState>) -> Response {
+    if state.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "stopping").into_response();
+    }
+    let select = sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool);
+    match tokio::time::timeout(HEALTHZ_TIMEOUT, select).await {
+        Ok(Ok(_)) => (StatusCode::OK, "ok").into_response(),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response(),
+    }
 }
 /// The admin listener's layer stack around `routes`: the panic backstop innermost, then the
 /// request deadline, the bearer check, the `Host` check, so a request for another host or
@@ -4103,6 +4227,9 @@ async fn admin_auth(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    if request.method() == axum::http::Method::GET && request.uri().path() == HEALTHZ {
+        return next.run(request).await;
+    }
     if let Some(expected) = &state.config.admin_token {
         let supplied = request
             .headers()

@@ -50,6 +50,9 @@ for _ in {1..30}; do
 done
 [[ "$ready" == true ]]
 [[ "$(docker exec "$name" id -u)" == 10001 ]]
+# The image's HEALTHCHECK asks the admin listener's /healthz, which reads the database.
+[[ "$(docker image inspect "$image" --format '{{json .Config.Healthcheck.Test}}')" == '["CMD","/usr/local/bin/pinakesd","healthcheck"]' ]]
+[[ "$(docker exec "$name" /usr/local/bin/pinakesd healthcheck)" == healthy ]]
 [[ "$(docker image inspect "$image" --format '{{json .Config.ExposedPorts}}')" == '{"8090/tcp":{}}' ]]
 # /proc stores IPv4 in little endian. 2382 is port 9090: it must bind loopback only.
 docker exec "$name" cat /proc/net/tcp > "$RUNNER_TEMP/pinakes-tcp.txt"

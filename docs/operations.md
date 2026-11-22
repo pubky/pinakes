@@ -48,7 +48,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `osm_ttl_secs` | `2592000` | OSM place cache lifetime (seconds). |
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
-| `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds, 1–60, and more than two seconds below `request_timeout_secs`). |
+| `reach_timeout_secs` | `5` | Nexus reach deadline per search, and for all of an MCP `social` call's Nexus reads (seconds, 1–60, and more than two seconds below `request_timeout_secs`). |
 | `related_taggers` | `200` | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
 | `related_window_days` | `365` | Days a related page looks back, for those taggers and their tags. |
 | `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
@@ -66,7 +66,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | The same table's size when a preview adds its client address and link (100–100000); past it the oldest entry (an API client's too) is forgotten with its used budget. Keep it equal to `api_cache_capacity`. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
-| `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
+| `preview_new_per_client_per_hour` | `100` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
 | `podcast_items` | `2000` | Podcast feed items read for a show's or an episode's card. A show's episode list looks at a feed's first 2000 items at most (fewer on a feed's own card when this is lower) and keeps the newest 1000. |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
@@ -268,7 +268,11 @@ deleted, and it is regrouped. An opted-out post's lines lose their documents. Th
 either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
 It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 
-**Dead letters.** To retry one by hand:
+**Dead letters.** A dead letter is read again when someone references its link anew (a new tag,
+reply, embed or collection item, through any of its spellings), as a final page is reopened: the
+reference must be newer than the card's last read (for a link never read, than its first storing),
+so the feed read again after a reset revives only links referenced since. Time alone never brings one back, and a lookup or preview does
+not either. To retry one by hand:
 
 ```sql
 UPDATE resource SET dead_letter=false, attempts=0, timeout_streak=0, last_error=NULL,
@@ -410,6 +414,12 @@ to 0.5 and is refused above 1 for a public host. Staging and production use thei
 `osm.nominatim_url`, a self-hosted or a hosted Nominatim ([deployment](deployment.md#nominatim)).
 Pinakes never proxies place search, autocomplete or reverse geocoding.
 
+The `osm_place` cache holds what Pinakes serves: the hourly maintenance deletes the cached
+objects nothing refers to any more (no OSM card, no venue of a card or an occurrence, no line
+of the change journal), once their cached fetch expired an hour ago or more, at most 1000 a pass
+and the oldest cache first. A place only a deleted card named so leaves the dump once its cache
+has expired; one referenced again is fetched anew.
+
 The ODbL share-alike download is a file: the daemon writes `osm_place.ndjson.gz` into
 `osm.dump_dir` (default `dumps`, relative to the working directory) at startup when it is missing
 or older than `limits.osm_dump_every_hours` (24), then at that interval. One writer per
@@ -482,10 +492,18 @@ their load to one request per owner and TTL.
 
 ### Clients and budgets
 
-Every public `/v1` route shares the direct-peer IP budget (`api.requests_per_minute`), and
-previews have their own per-IP and per-URI budgets. Forwarded headers are deliberately ignored:
-behind a reverse proxy the proxy's address gets the aggregate budget, so set client-IP limits at
-the edge.
+Every public `/v1` route shares the per-IP budget (`api.requests_per_minute`), and previews have
+their own per-IP and per-URI budgets and a per-client share of the hour's new previews; ODbL dump
+downloads are counted per address too. The address a request is counted under is the connecting
+peer's, unless the peer is in `api.trusted_proxies` (addresses or networks, such as
+`["172.17.0.1"]` for a proxy at the Docker bridge gateway; empty by default). From a trusted
+proxy it is the right-most `X-Forwarded-For` entry that is not itself a trusted proxy: each proxy
+appends the address it was connected from, so whatever a client wrote to the left of that is
+never read. With no such entry
+(no header, every entry a trusted proxy, or one that is no address) the proxy's own address is
+used. From a peer not in the list the header is never read, so leave the list empty where clients
+connect directly, and list exactly the proxies that set the header (a proxy that passes on a
+client's header without appending its peer lets clients choose their address).
 
 CORS: `api.cors_allow_origins` (default `["*"]`, safe because the public API takes no cookies or
 tokens and writes nothing but budgeted previews) lets browser apps on other origins call the
@@ -521,8 +539,8 @@ is off. Swagger UI shares the `/v1` per-IP budget.
 
 The agents' guide (`/llms.txt`, `/skill.md`, the index at `/`) and the MCP endpoint (`POST /mcp`,
 `api.mcp`, default on) are on the public listener under the same per-IP budget
-([api](api.md#agents)). The MCP endpoint is stateless and read-only, takes no credentials and
-accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
+([api](api.md#agents)). The MCP endpoint is stateless, takes no credentials, writes nothing but
+the previews `card` with `resolve: true` asks for, and accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
 names the public `https` URL. The proxy must pass the public `Host` too: the guide's base URL is
 the `Host` the daemon receives (in nginx, `proxy_set_header Host $host;`). Turning `api.mcp` off
 removes `/mcp` and its link from the index; the guide stays.
@@ -550,15 +568,11 @@ line names its feed position only, never its content). A panic anywhere else in 
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
 cursor beyond the feed's length, clears the reference projection and scores and restarts at
-zero, after one `limits.poll_secs` wait; resource documents stay through the grace period.
-The cursor is kept under `nexus_url` as written. After `nexus_url` changes (another Nexus, or
-another spelling of the same one, such as a trailing slash) the new feed is read from zero and
-the references read from the old one stay beside it: the daemon logs a warning at each start
-that names the other feed's host. The other feed's cursor row also stays in
-`pinakes_ingest_lag_lines`. To start over with the new feed alone, stop the daemon and
-clear the projection as a feed reset does
-(`UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`):
-the next start reads the configured feed from zero. A resource without references is
+zero, once it is confirmed: the answer that reports it writes nothing (the daemon logs a
+warning), and only the next read, at least `limits.poll_secs` later and from the same cursor,
+that reports the same epoch and still starts over clears them. An answer in between that does not
+start over (the old epoch again) cancels it. After a reset the next poll waits `limits.poll_secs`;
+resource documents stay through the grace period. A resource without references is
 deleted `limits.grace_days` after it became orphaned. One nothing ever referenced (a link only
 previewed with `POST /v1/resolve`) goes after `limits.preview_grace_hours` (a day) instead: its
 orphan time is still the instant it was created, as a reference clears it and losing the last
@@ -571,17 +585,36 @@ most. A Nexus outage leaves cached data served and polling retries.
 `POST /v1/resolve` stores at most `limits.preview_new_per_hour` (1000) links the instance did not
 know in any hour, whoever asks. Over it, a new link gets 503 with `Retry-After` (the seconds until
 the oldest of the hour's previews is an hour old) and nothing is stored; a known link still
-reads, and the per-client budget's 429 comes first. With
-`limits.preview_new_per_client_per_hour` set (0, no share, by default), one client address takes
-at most that many of them: over it, that client gets 429 with `Retry-After` and the others go on.
-Set it only where clients reach the listener directly: the share is keyed on the connecting
-address, as the per-IP budgets are, and behind a reverse proxy every client has the proxy's, so a
-share would cap the whole instance. A place is kept only by the request that stored the link; one
+reads, and the per-client budget's 429 comes first. One client address takes at most
+`limits.preview_new_per_client_per_hour` (100; 0 is no share) of them: over it, that client gets
+429 with `Retry-After` and the others go on. The share is keyed on the client address the per-IP
+budgets use ([Clients and budgets](#clients-and-budgets)): behind a reverse proxy, list it in
+`api.trusted_proxies`, or every client has the proxy's address and one share caps them all. A place is kept only by the request that stored the link; one
 whose request fails or goes away first is given back. The window is in memory and starts empty at
 startup. `pinakes_preview_refused_total{limit}` counts the refusals, `instance` for the hour and
 `client` for a share (alert `PreviewCapacityReached` on either),
 and `pinakes_preview_backlog` the resources nothing ever referenced (not derived children or
 venues).
+
+### Changing nexus_url
+
+The references are the projection of one Nexus feed, and its cursor is kept under `nexus_url`
+without a trailing `/` (with or without one it is the same URL). The daemon refuses to start on a
+database that holds the cursor of another Nexus and none of the configured one: the error names
+the other feed's host and this section. Before you change `nexus_url`, stop the daemon and do one
+of these:
+
+- Another feed: clear the projection as a feed reset does, and the next start reads the
+  configured feed from zero:
+  `UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`
+- The same feed at a new address: move its cursor row, so the feed is read on from where it was:
+  `UPDATE feed_cursor SET nexus='<new nexus_url>';`
+
+A database with a cursor row for the configured URL starts. Another feed's row left beside it is
+logged by host at each start and still counts in `pinakes_ingest_lag_lines`: delete it
+(`DELETE FROM feed_cursor WHERE nexus='<old nexus_url>';`). A row under another spelling of the
+configured URL is the same feed: the daemon moves it to the configured key at start, or drops it
+beside a row already there.
 
 ### Posts
 
@@ -622,7 +655,9 @@ being named.
 ## Queue and refresh
 
 The durable queue leases rows with `SKIP LOCKED` and fences stale completions by a generation
-counter. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
+counter. A worker takes the rows a lookup or a preview moved to the front first, then
+links never read before overdue refreshes (after downtime the refreshes that came due together
+wait behind new links), then the longest due. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
 back off without charging an attempt. A service that answers 5xx, 408 or 429 (stored as
@@ -658,12 +693,13 @@ confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="mis
 answered without its tags, on a stored card that says more than the link's plain card, waits and is counted the same
 way (the log line carries `shapeless`); its confirming read stores the plain card. A lookup or preview
 moves an overdue resource to the front within its TTL, author budget and retry schedule; it
-cannot revive a dead letter. Resolution is also limited per referencing author
+cannot revive a dead letter (a new reference does). Resolution is also limited per referencing author
 (`limits.author_requests_per_second`); several tags never multiply fetches.
 
 Refresh follows the time to an event's start (`limits.refresh_resource_secs`,
 `limits.refresh_container_secs`): 7 days, 2 days, 6 hours and 1 hour. One fetch at end + 24
-hours makes a resource final, and a new reference reopens a final resource; `geo:` stays final.
+hours makes a resource final, and a new reference reopens a final resource and revives a dead
+letter; `geo:` stays final.
 OSM places refresh after `limits.osm_ttl_secs`; a confirmed missing object stays cached as
 missing for the same period. Conditional responses keep accepted facts, but validators are kept
 only for calendars, where they commit with the parsed snapshot.
@@ -905,12 +941,6 @@ card shows its image only with the file's licence verified on Commons and its cr
 image, cached an hour. A stored card changes at its next read; `pinakesd reextract
 event_platform` reads every event platform link again at once, Wikidata items among them (a
 Wikipedia page read from its item is on the `web` route).
-
-`cargo run -p pinakes-core --example adapter_probe -- MANIFEST.json REPLAYS.json OUTPUT_DIR`
-(with `DATABASE_URL`) runs a read-only, keyless canary pass and records requests, the User-Agent
-each sent, statuses, hashes and parser output; secrets are refused. `PINAKES_PROBE_OFFLINE=1`
-replays captures without network access. Recorded responses for the keyless probes run in
-`scripts/test`.
 
 ## Also on
 

@@ -1987,3 +1987,59 @@ async fn json_ld_names_the_object_unless_its_provider_names_the_link_exactly() {
         Some("The page's own description.")
     );
 }
+
+/// A page whose own oEmbed endpoint (on its own origin, not the registry's) answers with another
+/// service's `provider_name`.
+struct OwnOembed;
+#[async_trait]
+impl Transport for OwnOembed {
+    async fn get(&self, u: &Url, a: &[SocketAddr]) -> Result<Fetched> {
+        self.get_with(u, a, &Default::default()).await
+    }
+    async fn get_with(&self, u: &Url, _: &[SocketAddr], _: &FetchOptions) -> Result<Fetched> {
+        let (content_type, body) = match u.path() {
+            "/oembed" => (
+                "application/json",
+                json!({"type": "rich", "provider_name": "Bandcamp", "title": "A talk",
+                       "html": "<iframe src=\"https://talks.example.org/player/1\" width=\"400\" height=\"120\"></iframe>"})
+                    .to_string(),
+            ),
+            _ => (
+                "text/html",
+                "<head><title>A talk</title><link rel='alternate' type='application/json+oembed' href='/oembed'></head>".into(),
+            ),
+        };
+        Ok(common::fetched(
+            u.clone(),
+            200,
+            content_type.into(),
+            body.into_bytes(),
+        ))
+    }
+}
+
+/// An oEmbed answer from an endpoint only the page named is the site's own word: its frame is
+/// named by its host, never by the service its `provider_name` claims.
+#[tokio::test]
+async fn a_frame_from_the_pages_own_oembed_endpoint_is_named_by_its_host() {
+    let cfg = Config::default();
+    let web = WebResolver {
+        oembed_policy: cards::OembedPolicy::Always,
+        cards: Some(Arc::new(cfg.cards.clone())),
+        events: None,
+        config: Default::default(),
+        egress: Egress::with_backends(
+            common::unpaced_egress_config(),
+            Arc::new(PublicDns),
+            Arc::new(OwnOembed),
+        ),
+    };
+    let d = web.resolve("https://talks.example.org/talk").await.unwrap();
+    let embed = d.embed.clone().expect("the answer's frame");
+    assert_eq!(embed.src, "https://talks.example.org/player/1");
+    assert_eq!(embed.provider, "talks.example.org");
+    assert_eq!(
+        d.attributes.get("provider").map(String::as_str),
+        Some("talks.example.org")
+    );
+}

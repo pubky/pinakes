@@ -1,12 +1,14 @@
-//! `POST /mcp`: a Model Context Protocol endpoint (Streamable HTTP, stateless, read-only), with
+//! `POST /mcp`: a Model Context Protocol endpoint (Streamable HTTP, stateless), with
 //! the official Rust SDK, `rmcp`. Each tool is a request to the public routes, answered by their
 //! own handlers under the public listener's layers (the per-IP budget, the size caps, the
 //! statement timeout), with the caller's address: an MCP message costs one unit of the budget
 //! and a tool call what its REST request costs on top. The admin routes are not in that router,
 //! and no header of the MCP request reaches it, so the admin token is never read here. The
 //! answer is compact JSON text: the card fields an agent needs and the REST URL of the full
-//! answer. `social` asks the Nexus this instance reads for tags per card, by the card's `uri`
-//! and `refs`, charged one unit per 100 URIs.
+//! answer. Every tool only reads, but `card` with `resolve: true`, which stores an unknown link
+//! as a preview and has a worker fetch it (`POST /v1/resolve`), and is annotated so. `social`
+//! asks the Nexus this instance reads for tags per card, by the card's `uri` and `refs`, and
+//! about plain links this instance holds, charged one unit per 100 URIs.
 use super::base_url;
 use crate::api::AppState;
 use axum::{
@@ -31,6 +33,7 @@ use serde_json::{json, Map, Value};
 use std::{
     net::SocketAddr,
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 use tower::ServiceExt;
 
@@ -40,7 +43,7 @@ const ANSWER_CAP: usize = 16 * 1024 * 1024;
 const DESCRIPTION_CHARS: usize = 300;
 
 /// The MCP service: stateless, JSON answers, a body cap of the REST routes' 2 MB. Any `Host` is
-/// accepted: the endpoint is public, read-only and takes no credentials, so the DNS-rebinding
+/// accepted: the endpoint is public and takes no credentials, so the DNS-rebinding
 /// guard rmcp applies to local servers protects nothing here, and the operator's host names are
 /// the reverse proxy's to know.
 pub fn service(rest: Router, state: AppState) -> StreamableHttpService<Tools, NeverSessionManager> {
@@ -69,6 +72,8 @@ pub struct Tools {
 /// request's deadline started to run (`api::RequestStarted`; `None` outside a request).
 struct Caller {
     peer: Option<ConnectInfo<SocketAddr>>,
+    /// The client address the MCP request is counted under (`api::ClientAddr`).
+    client: Option<crate::api::ClientAddr>,
     base: String,
     started: Option<std::time::Instant>,
 }
@@ -171,6 +176,9 @@ impl Tools {
             .map_err(|_| Failure::bad("the arguments do not make a request"))?;
         if let Some(peer) = caller.peer {
             request.extensions_mut().insert(peer);
+        }
+        if let Some(client) = caller.client {
+            request.extensions_mut().insert(client);
         }
         let response = self
             .rest
@@ -428,7 +436,15 @@ impl Tools {
                 });
             }
         }
-        for uri in uris {
+        // A plain link is asked about only when this instance holds it: a card's link or an
+        // alias of one. Any other is answered as not known, and never sent to the Nexus.
+        let mut unknown_uris = vec![];
+        let held = held_uris(&self.state.pool, &uris).await?;
+        for (uri, held) in uris.into_iter().zip(held) {
+            if !held {
+                unknown_uris.push(uri);
+                continue;
+            }
             asks.push(Ask {
                 id: None,
                 root: None,
@@ -437,38 +453,78 @@ impl Tools {
             });
         }
         let all: Vec<String> = asks.iter().flat_map(|a| a.asked.iter().cloned()).collect();
-        let mut views = vec![];
-        for batch in all.chunks(100) {
-            if let Some(peer) = caller.peer {
-                self.state
-                    .charge(peer.0.ip(), 1)
-                    .await
-                    .map_err(|e| Failure {
+        // All the call's Nexus reads under one deadline, the search's reach deadline.
+        let deadline = Duration::from_secs(self.state.config.search.reach_timeout_secs);
+        let reads = async {
+            let mut views = vec![];
+            for batch in all.chunks(100) {
+                if let Some(client) = caller.client {
+                    self.state.charge(client.0, 1).await.map_err(|e| Failure {
                         status: e.0.as_u16(),
                         error: e.1,
                         url: None,
                         retry_after: None,
                     })?;
+                }
+                views.extend(
+                    self.state
+                        .nexus
+                        .resources_by_uris(batch, viewer.as_deref())
+                        .await
+                        .map_err(|_| Failure {
+                            status: 502,
+                            error: "the Nexus this instance reads did not answer the batch resource view (POST /v1/stream/resources/by_ids)".into(),
+                            url: None,
+                            retry_after: None,
+                        })?,
+                );
             }
-            views.extend(
-                self.state
-                    .nexus
-                    .resources_by_uris(batch, viewer.as_deref())
-                    .await
-                    .map_err(|_| Failure {
-                        status: 502,
-                        error: "the Nexus this instance reads did not answer the batch resource view (POST /v1/stream/resources/by_ids)".into(),
-                        url: None,
-                        retry_after: None,
-                    })?,
-            );
-        }
+            Ok(views)
+        };
+        let views = tokio::time::timeout(deadline, reads)
+            .await
+            .unwrap_or_else(|_| {
+                Err(Failure {
+                    status: 504,
+                    error: "the Nexus this instance reads did not answer the batch resource view in time".into(),
+                    url: None,
+                    retry_after: None,
+                })
+            })?;
         let mut answer = social_answer(&asks, &views, viewer.as_deref());
         if !unknown_ids.is_empty() {
             answer["unknown_ids"] = unknown_ids.into();
         }
+        if !unknown_uris.is_empty() {
+            answer["unknown_uris"] = unknown_uris.into();
+        }
         Ok(answer)
     }
+}
+
+/// For each of `uris`, whether this instance holds it: its ID (`model::identity`) is a stored
+/// card's or an alias's. A link that does not normalize is not held.
+async fn held_uris(pool: &sqlx::PgPool, uris: &[String]) -> Result<Vec<bool>, Failure> {
+    let ids: Vec<Option<String>> = uris
+        .iter()
+        .map(|uri| crate::model::identity(uri).ok().map(|(id, _, _)| id))
+        .collect();
+    let known: Vec<String> = sqlx::query_scalar(
+        "SELECT wanted.id FROM unnest($1::text[]) AS wanted(id) WHERE EXISTS(SELECT 1 FROM resource r WHERE r.id=wanted.id) OR EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=wanted.id)",
+    )
+    .bind(ids.iter().flatten().cloned().collect::<Vec<String>>())
+    .fetch_all(pool)
+    .await
+    .map_err(|_| Failure {
+        status: 500,
+        error: "the links could not be read".into(),
+        url: None,
+        retry_after: None,
+    })?;
+    Ok(ids
+        .iter()
+        .map(|id| id.as_ref().is_some_and(|id| known.contains(id)))
+        .collect())
 }
 
 /// What `social` asks Nexus about one card (or one link): the URIs, the card's own first. `id`
@@ -507,6 +563,7 @@ impl ServerHandler for Tools {
         let parts = context.extensions.get::<axum::http::request::Parts>();
         let caller = Caller {
             peer: parts.and_then(|p| p.extensions.get::<ConnectInfo<SocketAddr>>().copied()),
+            client: parts.and_then(|p| p.extensions.get::<crate::api::ClientAddr>().copied()),
             base: parts.map_or_else(|| "http://localhost".into(), |p| base_url(&p.headers)),
             started: parts
                 .and_then(|p| p.extensions.get::<crate::api::RequestStarted>())
@@ -542,7 +599,18 @@ pub fn tools() -> Vec<Tool> {
         let Value::Object(schema) = schema else {
             unreachable!("a tool's schema is an object")
         };
-        Tool::new(name, description, Arc::new(schema)).with_annotations(read_only())
+        // `card` with `resolve: true` stores a link it does not know as a preview and has this
+        // instance fetch it from its site: neither read-only nor closed-world.
+        let annotations = if name == "card" {
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(true)
+        } else {
+            read_only()
+        };
+        Tool::new(name, description, Arc::new(schema)).with_annotations(annotations)
     };
     vec![
         tool(
@@ -578,10 +646,10 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "card",
-            "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Exact non-derived also_on members include optional refs (at most 5) for a Nexus tag join alongside their uri; derived or maybe links do not. Only links this instance already knows; set resolve to true to have an unknown link read now (it has its own small per-minute budget and may answer pending).",
+            "Read one link by its URI: its card with details (address, facts from official APIs, the objects it points at (`related`: a Bitcoin transaction's block, inputs and outputs, an address's latest transactions, a Lightning node's channels), other spellings, the same thing on other services, the public Pubky collections that hold it). Exact non-derived also_on members include optional refs (at most 5) for a Nexus tag join alongside their uri; derived or maybe links do not. Only links this instance already knows; set resolve to true to have an unknown link read now: this instance stores it as a temporary preview and fetches it from its site (it has its own small per-minute budget and may answer pending).",
             json!({"type":"object","required":["uri"],"additionalProperties":false,"properties":{
-                "uri":{"type":"string","description":"The link, in any spelling."},
-                "resolve":{"type":"boolean","description":"Read the link now if it is unknown here. Default false."}
+                "uri":{"type":"string","description":"The link: a spelling people referenced, or one with tracking parameters, a doi.org or ISBN link, or another URL form of a service's known card."},
+                "resolve":{"type":"boolean","description":"Read the link now if it is unknown here: stores it as a preview and fetches it from its site. Default false."}
             }}),
         ),
         tool(
@@ -606,10 +674,10 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool(
             "social",
-            "Tags and taggers per card, from the Nexus this instance reads. Give the ids of cards from search: each card is asked about by its own uri and by every link people referenced for it (its refs, such as the mempool.space page of a btc: block, or an occurrence's feed, occurrence.feed_uri), and the answers are merged per card. Links that are not Pinakes cards, or a card's other spellings (aliases on its full read), can be given as uris. Taggers are counted once each; a count marked at_least is a lower bound (Nexus counts taggers it does not list, who may be the same on several links). With viewer, each tag says whether that user used it.",
+            "Tags and taggers per card, from the Nexus this instance reads. Give the ids of cards from search: each card is asked about by its own uri and by every link people referenced for it (its refs, such as the mempool.space page of a btc: block, or an occurrence's feed, occurrence.feed_uri), and the answers are merged per card. A card's link or one of its other spellings (aliases on its full read) can be given as uris; a link this instance does not hold is answered in unknown_uris and not asked about. Taggers are counted once each; a count marked at_least is a lower bound (Nexus counts taggers it does not list, who may be the same on several links). With viewer, each tag says whether that user used it.",
             json!({"type":"object","additionalProperties":false,"properties":{
                 "ids":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Card ids from search, card or lookup."},
-                "uris":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Links to ask about as they are."},
+                "uris":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Links this instance holds (a card's link or alias), asked about as they are."},
                 "viewer":{"type":"string","description":"A 52-character pubky public key."}
             }}),
         ),
@@ -1299,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_is_read_only_and_its_schema_an_object() {
+    fn every_tool_is_announced_as_it_acts_and_its_schema_an_object() {
         let tools = tools();
         assert_eq!(
             tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
@@ -1307,10 +1375,12 @@ mod tests {
         );
         for tool in tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
-            assert_eq!(
-                tool.annotations.as_ref().and_then(|a| a.read_only_hint),
-                Some(true)
-            );
+            let annotations = tool.annotations.as_ref().unwrap();
+            // `card` with `resolve: true` stores and fetches: it is not announced read-only.
+            let reads = tool.name != "card";
+            assert_eq!(annotations.read_only_hint, Some(reads), "{}", tool.name);
+            assert_eq!(annotations.open_world_hint, Some(!reads), "{}", tool.name);
+            assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name);
         }
     }
 
@@ -1335,6 +1405,7 @@ mod tests {
         };
         let caller = Caller {
             peer: None,
+            client: None,
             base: "https://pinakes.example".into(),
             started: None,
         };
@@ -1394,6 +1465,7 @@ mod tests {
         };
         let caller = |ago: Duration| Caller {
             peer: None,
+            client: None,
             base: "https://pinakes.example".into(),
             started: Some(Instant::now() - ago),
         };

@@ -427,6 +427,12 @@ impl WebResolver {
             // needed, while retaining oEmbed's established precedence if fetched.
             let mut candidate = extracted.doc.clone();
             fill(&mut candidate.name, extracted.title.clone());
+            // The endpoint the pinned registry names for the link; any other is the page's own.
+            let registered = |endpoint: &Url| {
+                super::cards::provider_endpoint(uri).is_some_and(|registered| {
+                    registered.origin() == endpoint.origin() && registered.path() == endpoint.path()
+                })
+            };
             // A link that carries a credential is never sent to an oEmbed provider.
             if let Some(endpoint) = extracted.oembed.take().filter(|endpoint| {
                 if crate::capability::is_capability(uri)
@@ -435,11 +441,7 @@ impl WebResolver {
                 {
                     return false;
                 }
-                let trusted = endpoint.origin() == fetched.url.origin()
-                    || super::cards::provider_endpoint(uri).is_some_and(|registered| {
-                        registered.origin() == endpoint.origin()
-                            && registered.path() == endpoint.path()
-                    });
+                let trusted = endpoint.origin() == fetched.url.origin() || registered(endpoint);
                 if !trusted {
                     crate::telemetry::discovery("oembed", "untrusted");
                 }
@@ -471,7 +473,12 @@ impl WebResolver {
                 {
                     if response.status == 200 {
                         if let Ok(value) = serde_json::from_slice::<Value>(&response.body) {
-                            apply_oembed(&mut extracted.doc, &value, &read_at(&response.url));
+                            let base = read_at(&response.url);
+                            if registered(&endpoint) {
+                                apply_oembed(&mut extracted.doc, &value, &base);
+                            } else {
+                                apply_page_oembed(&mut extracted.doc, &value, &base);
+                            }
                         }
                     }
                 }
@@ -2156,6 +2163,15 @@ pub fn apply_oembed_first(doc: &mut ResourceMeta, v: &Value, base: &Url) {
     apply_oembed(doc, v, base);
 }
 pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
+    apply_oembed_from(doc, v, base, false);
+}
+/// [`apply_oembed`] for an answer from an endpoint only the page named (`base`, on the page's
+/// own origin): the page wrote it, so its `provider_name` is not taken. The card's `provider` is
+/// the endpoint's host, and its frame is named by the frame's (`embed::from_page_oembed`).
+fn apply_page_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
+    apply_oembed_from(doc, v, base, true);
+}
+fn apply_oembed_from(doc: &mut ResourceMeta, v: &Value, base: &Url, page: bool) {
     fill(&mut doc.name, oembed_field(v, "title"));
     fill(
         &mut doc.image,
@@ -2172,14 +2188,24 @@ pub fn apply_oembed(doc: &mut ResourceMeta, v: &Value, base: &Url) {
         }
     }
     for (key, field) in [("author", "author_name"), ("provider", "provider_name")] {
-        if let Some(v) = oembed_field(v, field) {
-            doc.attributes.entry(key.into()).or_insert(v);
+        let value = if page && key == "provider" {
+            base.host_str().map(str::to_owned)
+        } else {
+            oembed_field(v, field)
+        };
+        if let Some(value) = value {
+            doc.attributes.entry(key.into()).or_insert(value);
         }
     }
     // The provider's frame comes before the page's own player, unless the link names one
     // (`embed::link`); only its address is kept, never the answer's HTML.
     if crate::embed::link(&doc.url).is_none() {
-        if let Some(embed) = crate::embed::from_oembed(v, base) {
+        let frame = if page {
+            crate::embed::from_page_oembed(v, base)
+        } else {
+            crate::embed::from_oembed(v, base)
+        };
+        if let Some(embed) = frame {
             doc.embed = Some(embed);
         }
     }

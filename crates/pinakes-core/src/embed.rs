@@ -917,6 +917,14 @@ pub fn from_oembed(v: &Value, base: &Url) -> Option<Embed> {
     }
     quiet(embed).bounded()
 }
+/// [`from_oembed`] for an answer from an endpoint only the page named (a `<link rel="alternate">`
+/// on its own origin that the pinned registry does not list for the link): the page wrote the
+/// answer, so its frame is named by the frame's host, never by the `provider_name` it claims.
+pub fn from_page_oembed(v: &Value, base: &Url) -> Option<Embed> {
+    let mut embed = from_oembed(v, base)?;
+    embed.provider = Url::parse(&embed.src).ok()?.host_str()?.to_owned();
+    embed.bounded()
+}
 /// The provider names of the services whose frames follow from their links (`link`, `mastodon`,
 /// `map`), each with the hosts of its own frames: an answer's name is taken only for a frame on
 /// one of them (SoundCloud's answer for a short link), never for another host. Any server can

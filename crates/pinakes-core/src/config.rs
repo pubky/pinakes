@@ -71,9 +71,9 @@ pub struct Config {
     /// whole instance.
     #[serde(skip)]
     pub preview_new_per_hour: usize,
-    /// The share of those one client address may take in an hour; 0 is no share. It is only a
-    /// client's own where clients reach the listener directly: behind a proxy every client has
-    /// its address.
+    /// The share of those one client address may take in an hour; 0 is no share. The client
+    /// address is the connecting one, or behind a proxy in `api.trusted_proxies` the one it
+    /// forwards (`api::client_address`).
     #[serde(skip)]
     pub preview_new_per_client_per_hour: usize,
     #[serde(skip)]
@@ -360,7 +360,7 @@ impl Config {
             grace_days: 7,
             preview_grace_hours: 24,
             preview_new_per_hour: 1000,
-            preview_new_per_client_per_hour: 0,
+            preview_new_per_client_per_hour: 100,
             // The web route (and the event routes on it) fetches arbitrary hosts: twice the
             // other resolvers' workers and rate.
             web: ResolverConfig {
@@ -882,10 +882,32 @@ pub struct ApiConfig {
     pub swagger_ui: bool,
     /// Serve the MCP endpoint, `POST /mcp`, on the public listener (docs/api.md, Agents).
     pub mcp: bool,
+    /// The reverse proxies in front of the public listener: addresses (`10.0.0.2`) or networks
+    /// (`10.0.0.0/8`, `fd00::/8`). A request from one is counted under the right-most
+    /// `X-Forwarded-For` entry that is not itself one of them (`api::client_address`). Empty,
+    /// the default: the connecting address is the client, and the header is never read.
+    pub trusted_proxies: Vec<String>,
 }
 /// The seconds an MCP tool call's deadline lies inside the request's own.
 const TOOL_MARGIN_SECS: u64 = 2;
 impl ApiConfig {
+    /// `trusted_proxies`, parsed: an address is a network of that one address.
+    pub fn trusted_proxy_nets(&self) -> Result<Vec<ipnet::IpNet>> {
+        self.trusted_proxies
+            .iter()
+            .map(|entry| {
+                entry
+                    .parse::<ipnet::IpNet>()
+                    .map(|net| net.trunc())
+                    .or_else(|_| entry.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "api.trusted_proxies: {entry:?} is not an IP address or network (10.0.0.2, 10.0.0.0/8)"
+                        )
+                    })
+            })
+            .collect()
+    }
     /// How long one MCP tool call may take, all its requests together, from the start of the
     /// request that carries it: `request_timeout_secs` less two seconds, so the tool's own
     /// failure is written before the request's deadline answers 504 in its place.
@@ -908,6 +930,7 @@ impl Default for ApiConfig {
             cors_allow_origins: vec!["*".into()],
             swagger_ui: true,
             mcp: true,
+            trusted_proxies: vec![],
         }
     }
 }
@@ -1111,6 +1134,7 @@ impl Config {
                 bail!("api.cors_allow_origins: {origin:?} is not an origin (scheme://host[:port], no path or trailing slash)");
             }
         }
+        self.api.trusted_proxy_nets()?;
         let admin: std::net::SocketAddr =
             self.admin_listen.parse().context("invalid admin_listen")?;
         if self.admin_token.as_ref().is_some_and(|t| {

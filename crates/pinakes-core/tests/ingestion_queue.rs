@@ -1967,28 +1967,140 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     assert!(!final_root);
 }
 
-/// The feeds a database has a cursor for besides the configured one, by host only.
+/// A dead letter comes back on a new reference to its link, as a final page reopens: due now,
+/// with its failures forgotten. A repeat of a reference it already has, or a line from before the
+/// link was stored (a replayed feed), revives nothing; neither does time alone.
 #[sqlx::test(migrations = "../../migrations")]
-async fn other_feeds_are_named_by_host(pool: PgPool) {
-    let configured = "http://nexus.example.org:8080";
-    ingest::cursor(&pool, configured).await.unwrap();
-    assert!(ingest::other_feeds(&pool, configured)
-        .await
-        .unwrap()
-        .is_empty());
-    ingest::cursor(&pool, "http://nexus.example.org:8080/")
+async fn new_reference_revives_a_dead_letter_but_a_repeat_never_does(pool: PgPool) {
+    let first = change("https://example.org/dead", "a", "/pub/app/tags/a");
+    batch(&pool, vec![first.clone()], Some("one")).await;
+    let dead = || {
+        sqlx::query("UPDATE resource SET dead_letter=true,attempts=5,status='error',last_error='http',created_at=now()-interval '1 day',next_attempt_at=now()+interval '1 day'")
+            .execute(&pool)
+    };
+    dead().await.unwrap();
+    let state = || {
+        sqlx::query_as::<_, (bool, i32, bool)>(
+            "SELECT dead_letter,attempts,next_attempt_at<=now() FROM resource WHERE uri='https://example.org/dead'",
+        )
+        .fetch_one(&pool)
+    };
+    batch(&pool, vec![first.clone()], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (true, 5, false), "a repeat");
+    let mut replayed = change("https://example.org/dead", "b", "/pub/app/tags/b");
+    replayed.at = (Utc::now() - chrono::Duration::days(2)).timestamp_millis();
+    batch(&pool, vec![replayed], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (true, 5, false), "an older line");
+    let second = change("https://example.org/dead", "c", "/pub/app/tags/c");
+    batch(&pool, vec![second], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (false, 0, true), "a new reference");
+    // A dead letter that had a card is revived by a reference made after its last read.
+    dead().await.unwrap();
+    sqlx::query("UPDATE resource SET resolved_at=now()-interval '1 hour'")
+        .execute(&pool)
         .await
         .unwrap();
-    ingest::cursor(
-        &pool,
-        "https://user:SECRET@old.nexus.example.org/base?token=x",
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        ingest::other_feeds(&pool, configured).await.unwrap(),
-        ["nexus.example.org", "old.nexus.example.org"]
+    let third = change(
+        "https://example.org/dead?utm_source=feed",
+        "d",
+        "/pub/app/tags/d",
     );
+    batch(&pool, vec![third], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (false, 0, true), "through an alias");
+}
+
+/// A link never read is claimed before an overdue refresh, however long the refresh has waited;
+/// an expedited row still comes first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_new_link_is_claimed_before_an_overdue_refresh(pool: PgPool) {
+    let (refresh, _) = store::ensure_resource_created(&pool, "https://example.org/refresh")
+        .await
+        .unwrap();
+    let (new, _) = store::ensure_resource_created(&pool, "https://example.org/new")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='ok',resolved_at=now()-interval '8 days',next_attempt_at=now()-interval '1 day' WHERE id=$1")
+        .bind(&refresh)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, new);
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, refresh);
+    // An expedited refresh goes ahead of a new link.
+    let (later, _) = store::ensure_resource_created(&pool, "https://example.org/later")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=now() WHERE id=$1")
+        .bind(&refresh)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, refresh);
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, later);
+}
+
+/// A database that holds the cursor of another Nexus feed and none of the configured one is
+/// refused, with the reset step and the other feed by host only. One the operator prepared, with
+/// a cursor row for the configured feed (beside the old one, or the old one moved), starts,
+/// under any spelling of its URL (a trailing `/`), and keeps that cursor.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_database_read_from_another_nexus_is_refused(pool: PgPool) {
+    let configured = "http://nexus.example.org:8080";
+    ingest::check_feed(&pool, configured).await.unwrap();
+    let old = "https://user:SECRET@old.nexus.example.org/PRIVATEPATH?token=CANARY";
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES($1,7)")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = ingest::check_feed(&pool, configured).await.unwrap_err();
+    let text = format!("{error:#} {error:?}");
+    assert!(text.contains("old.nexus.example.org"), "{text}");
+    assert!(text.contains(ingest::CHANGING_NEXUS), "{text}");
+    for secret in ["user", "SECRET", "PRIVATEPATH", "CANARY"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+    // The operator gave the configured feed its row beside the old one: it starts.
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES($1,3)")
+        .bind(configured)
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    assert_eq!(ingest::cursor(&pool, configured).await.unwrap().cursor, 3);
+    // Or moved the old row to the new address (the same feed): it starts and reads on.
+    sqlx::query("DELETE FROM feed_cursor WHERE nexus=$1")
+        .bind(configured)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_cursor SET nexus=$1")
+        .bind(format!("{configured}/"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    assert_eq!(ingest::cursor(&pool, configured).await.unwrap().cursor, 7);
+    ingest::check_feed(&pool, &format!("{configured}/"))
+        .await
+        .unwrap();
+    // Another spelling's row beside the configured one's is the same feed: it is dropped.
+    sqlx::query("INSERT INTO feed_cursor(nexus) VALUES($1)")
+        .bind(format!("{configured}//"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT nexus,cursor FROM feed_cursor")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, [(configured.to_owned(), 7)]);
 }
 
 #[sqlx::test(migrations = "../../migrations")]

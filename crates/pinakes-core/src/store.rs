@@ -339,6 +339,31 @@ pub async fn expedite(pool: &PgPool, ids: &[String]) -> Result<()> {
     sqlx::query("UPDATE resource SET priority_at=now() WHERE id=ANY($1) AND priority_at IS NULL AND (refresh_at IS NULL OR refresh_at<=now()) AND NOT final AND NOT dead_letter AND (lease_until IS NULL OR lease_until<now())").bind(ids).execute(pool).await?;
     Ok(())
 }
+/// The `osm_place` rows one maintenance pass deletes at most ([`prune_osm_places`]).
+pub const OSM_PLACE_PRUNE_BATCH: i64 = 1000;
+/// Deletes at most [`OSM_PLACE_PRUNE_BATCH`] cached OpenStreetMap objects nothing refers to any
+/// more, oldest cache first: no OSM card (`resource.osm_type`, `osm_id`), no venue of a card or
+/// an occurrence, and no line of the change journal names it. Only a row whose cached fetch
+/// expired an hour ago or more goes: a resolver uses a cached fetch only before its `refresh_at`
+/// and saves within its lease, and a fresh fetch writes the row again. The ODbL dump then holds
+/// only what Pinakes serves. The number of rows deleted.
+pub async fn prune_osm_places(pool: &PgPool) -> Result<u64> {
+    let deleted = sqlx::query(
+        "DELETE FROM osm_place o WHERE o.refresh_at<now()-interval '1 hour' AND (o.osm_type,o.osm_id) IN (
+           SELECT p.osm_type,p.osm_id FROM osm_place p WHERE p.refresh_at<now()-interval '1 hour'
+             AND NOT EXISTS(SELECT 1 FROM resource r WHERE r.osm_type=p.osm_type AND r.osm_id=p.osm_id)
+             AND NOT EXISTS(SELECT 1 FROM resource r WHERE r.doc#>>'{venue,osm_id}'=p.osm_type||'/'||p.osm_id)
+             AND NOT EXISTS(SELECT 1 FROM occurrence x WHERE x.doc#>>'{venue,osm_id}'=p.osm_type||'/'||p.osm_id)
+             AND NOT EXISTS(SELECT 1 FROM resource_change c WHERE c.osm_type=p.osm_type AND c.osm_id=p.osm_id)
+             AND NOT EXISTS(SELECT 1 FROM resource_change c WHERE c.before#>>'{venue,osm_id}'=p.osm_type||'/'||p.osm_id)
+             AND NOT EXISTS(SELECT 1 FROM resource_change c WHERE c.after#>>'{venue,osm_id}'=p.osm_type||'/'||p.osm_id)
+           ORDER BY p.refresh_at LIMIT $1 FOR UPDATE SKIP LOCKED)",
+    )
+    .bind(OSM_PLACE_PRUNE_BATCH)
+    .execute(pool)
+    .await?;
+    Ok(deleted.rows_affected())
+}
 /// A save with the default queue settings, for tests: the daemon's workers save through
 /// `changes::save` with the configured ones.
 pub async fn save_document(
