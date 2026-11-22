@@ -2028,6 +2028,31 @@ async fn a_cut_read_of_an_oldest_first_feed_keeps_the_newer_stored_episodes(pool
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=199")).await;
     assert_eq!(page["items"][0]["name"], "Episode 101", "{page}");
     assert_eq!(page["items"][1]["name"], "Episode 100", "{page}");
+    // The feed has dropped its oldest episode since: a cut of its next 100 still reaches the
+    // stored list, and the dropped one stays listed until a read reads the whole feed again.
+    d.episodes = Some((2..=101).rev().map(|n| episode(n, true)).collect());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 300);
+    // A cut that lacks a stored episode at its own end (here the second oldest) does not reach
+    // the stored list: between the two lie episodes neither read has, and the cut stands alone.
+    let gap = "https://feeds.example.org/oldest-first-gap.xml";
+    let whole: Vec<Episode> = (1..=300).rev().map(|n| episode(n, true)).collect();
+    let other = show(&pool, gap, Some(whole)).await;
+    let mut cut = ResourceMeta::new(gap, "web", 86_400);
+    cut.set_type("PodcastSeries");
+    cut.episodes = Some(
+        (50..=148)
+            .rev()
+            .chain(std::iter::once(1))
+            .map(|n| episode(n, true))
+            .collect(),
+    );
+    cut.episodes_older = true;
+    cut.episodes_cut = true;
+    cut.episodes_oldest_first = true;
+    store::save_document(&pool, &other, 0, &cut).await.unwrap();
+    assert_eq!(rows(&pool, &other).await, 100);
+    d.episodes = Some((1..=100).rev().map(|n| episode(n, true)).collect());
     // The same cut from a feed that lists newest first: the newer stored episodes are ones the
     // feed took down, and the cut stands alone.
     d.episodes_oldest_first = false;

@@ -531,8 +531,9 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
 /// A cut read of a feed that lists its oldest episode first (`oldest_first`, from the parse)
 /// holds the feed's oldest episodes: the stored episodes newer than its newest are the part the
 /// read did not reach, not episodes the feed took down, and they join it too. Such a cut reaches
-/// the stored list when it names the stored list's two oldest dated episodes (its one, when it
-/// holds one).
+/// the stored list when it names the stored list's two oldest dated episodes no older than its
+/// own oldest (its one, when it holds one); an older stored one the feed has dropped stays, as
+/// it does for a newest-first feed.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -566,15 +567,17 @@ async fn under_stored(
         .filter(|r| oldest_first || !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
         .collect();
     // The cut list reaches the stored one only when it names the two stored episodes at its own
-    // end of the feed (the newest two left; for an oldest-first feed the oldest two dated ones;
-    // its one, when it holds one): else between the two lie episodes neither read has (more new
-    // ones than the cut holds; one of them alone may be a re-release at the top of the feed), or
-    // the stored list is another feed's, and the cut list stands alone.
+    // end of the feed (the newest two left; for an oldest-first feed the oldest two dated ones no
+    // older than its oldest, as one the feed has dropped since is no older episode the cut
+    // lacks; its one, when it holds one): else between the two lie episodes neither read has
+    // (more new ones than the cut holds; one of them alone may be a re-release at the top of the
+    // feed), or the stored list is another feed's, and the cut list stands alone.
     let reaches = if oldest_first {
+        let first = list.iter().filter_map(|e| e.published).min();
         let mut oldest = kept
             .iter()
             .rev()
-            .filter(|r| r.4.is_some())
+            .filter(|r| matches!((r.4, first), (Some(d), Some(f)) if d >= f))
             .take(2)
             .peekable();
         oldest.peek().is_some() && oldest.all(|r| named.contains(r.0.as_str()))
