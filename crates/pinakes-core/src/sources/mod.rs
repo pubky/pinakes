@@ -1700,8 +1700,7 @@ mod tests {
     }
 
     /// A source's mock end-to-end samples are links it reads (or pages it improves), each named
-    /// once in the run; their answers are recorded files of its own that match a request. Only a
-    /// source whose samples are all link rules (`LINK_RULES_ONLY`) asks nothing and has none.
+    /// once in the run; their answers are recorded files of its own that match a request.
     #[test]
     fn each_sources_e2e_samples_and_answers_are_its_own() {
         let mut kinds = std::collections::BTreeSet::new();
@@ -1710,13 +1709,7 @@ mod tests {
                 continue;
             };
             let name = source.name();
-            const LINK_RULES_ONLY: &[&str] = &["instagram"];
-            assert!(!e2e.samples.is_empty(), "{name}");
-            assert_eq!(
-                e2e.answers.is_empty(),
-                LINK_RULES_ONLY.contains(&name),
-                "{name}: answers"
-            );
+            assert!(!e2e.samples.is_empty() && !e2e.answers.is_empty(), "{name}");
             for sample in e2e.samples {
                 assert!(
                     sample.kind == name || sample.kind.starts_with(&format!("{name}_")),
@@ -2008,24 +2001,6 @@ mod tests {
             (
                 "facebook",
                 "https://www.facebook.com/watch/?v=123456789",
-                "VideoObject",
-                None,
-            ),
-            (
-                "instagram",
-                "https://www.instagram.com/p/C2vXx0yPvYq/",
-                "SocialMediaPosting",
-                None,
-            ),
-            (
-                "instagram",
-                "https://www.instagram.com/reel/C2vXx0yPvYq/",
-                "VideoObject",
-                None,
-            ),
-            (
-                "instagram",
-                "https://instagr.am/tv/C2vXx0yPvYq",
                 "VideoObject",
                 None,
             ),
