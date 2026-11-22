@@ -1233,7 +1233,9 @@ back to the first megabyte's episodes, and an older episode the feed has dropped
 until a read reads its whole list again. A feed that lists its oldest episode first (its dated
 items' dates ascend as read) is cut at its oldest episodes instead: its cut list keeps every
 other episode the stored list holds, newer ones too, when it holds the stored list's two oldest
-dated episodes no older than its own oldest. A Podcast Index or Apple show's feed that does not parse
+dated episodes no older than its own oldest. When the stored list is full (1,000 episodes) and
+every one of them is newer than the cut's newest, the feed is longer than is kept and the cut is
+its old end: the stored list stays as it is. A Podcast Index or Apple show's feed that does not parse
 past the page cap is read within it, and keeps a longer stored list's other episodes the same way. A page's alternate feed is read within the page cap. Why a route and not a fact: a fact is one string per name, and a card's document is
 bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
 document of its own here.

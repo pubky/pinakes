@@ -533,7 +533,9 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
 /// read did not reach, not episodes the feed took down, and they join it too. Such a cut reaches
 /// the stored list when it names the stored list's two oldest dated episodes no older than its
 /// own oldest (its one, when it holds one); an older stored one the feed has dropped stays, as
-/// it does for a newest-first feed.
+/// it does for a newest-first feed. A stored list of [`KEPT`] episodes, each newer than such a
+/// cut's newest, holds the newest part of a feed longer than is kept: the cut is that feed's old
+/// end, and the stored list stays as it is.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -562,6 +564,25 @@ async fn under_stored(
     // A stored episode newer than the cut list's newest is one the feed has taken down, unless
     // the feed lists its oldest first: then it is one the cut did not reach.
     let newest = list.iter().filter_map(|e| e.published).max();
+    let as_episode = |(guid, uri, name, image, published, stream, _): &Stored| Episode {
+        id: None,
+        uri: uri.clone(),
+        aliases: Vec::new(),
+        name: name.clone(),
+        image: image.clone(),
+        published: *published,
+        guid: guid.clone(),
+        stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
+    };
+    // A full stored list wholly newer than an oldest-first cut is the newest part of a feed
+    // longer than is kept, and the cut is the old end of the same feed: the list stays as it is.
+    if oldest_first
+        && rows.len() >= KEPT
+        && newest.is_some_and(|n| rows.iter().all(|r| r.4.is_some_and(|d| d > n)))
+    {
+        let stored_older = rows.first().and_then(|r| r.6).unwrap_or(older);
+        return Ok((rows.iter().map(as_episode).collect(), stored_older));
+    }
     let kept: Vec<&Stored> = rows
         .iter()
         .filter(|r| oldest_first || !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
@@ -595,20 +616,7 @@ async fn under_stored(
         return Ok((list.to_vec(), older));
     };
     let mut merged = list.to_vec();
-    merged.extend(
-        joining
-            .into_iter()
-            .map(|(guid, uri, name, image, published, stream, _)| Episode {
-                id: None,
-                uri: uri.clone(),
-                aliases: Vec::new(),
-                name: name.clone(),
-                image: image.clone(),
-                published: *published,
-                guid: guid.clone(),
-                stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
-            }),
-    );
+    merged.extend(joining.into_iter().map(as_episode));
     // Stable: equal dates keep the order above, as `listed` keeps the feed's.
     merged.sort_by_key(|e| std::cmp::Reverse(e.published));
     Ok((merged, stored_older))

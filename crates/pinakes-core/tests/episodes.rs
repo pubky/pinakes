@@ -2060,6 +2060,47 @@ async fn a_cut_read_of_an_oldest_first_feed_keeps_the_newer_stored_episodes(pool
     assert_eq!(rows(&pool, &id).await, 100);
 }
 
+/// An oldest-first feed longer than is kept: the stored list holds its newest 1000 episodes, and
+/// a cut read its oldest 100, all older than any stored one. The cut is the old end of the same
+/// feed, not a shorter feed, and the stored list stays as it is.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cut_of_an_oldest_first_feed_longer_than_is_kept_leaves_the_stored_list(pool: PgPool) {
+    let uri = "https://feeds.example.org/oldest-first-long.xml";
+    let whole: Vec<Episode> = (1000..=2000).rev().map(|n| episode(n, true)).collect();
+    let id = show(&pool, uri, Some(whole)).await;
+    assert_eq!(rows(&pool, &id).await, 1000);
+    // The first megabyte of the feed: its 100 oldest episodes.
+    let cut = |uri: &str| {
+        let mut d = ResourceMeta::new(uri, "web", 86_400);
+        d.set_type("PodcastSeries");
+        d.episodes = Some((1..=100).rev().map(|n| episode(n, true)).collect());
+        d.episodes_older = true;
+        d.episodes_cut = true;
+        d.episodes_oldest_first = true;
+        d
+    };
+    store::save_document(&pool, &id, 0, &cut(uri))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2000", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=999")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 1001", "{page}");
+    // A stored list short of the cap is no newest part of a longer feed: the cut, which does
+    // not reach it, stands alone.
+    let short = "https://feeds.example.org/oldest-first-short.xml";
+    let list: Vec<Episode> = (1001..=1999).rev().map(|n| episode(n, true)).collect();
+    let other = show(&pool, short, Some(list)).await;
+    assert_eq!(rows(&pool, &other).await, 999);
+    store::save_document(&pool, &other, 0, &cut(short))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &other).await, 100);
+}
+
 /// A feed card's cut read whose read on gave nothing (`ResourceMeta::episodes_cut`: too slow, or
 /// the read failed) keeps the older episodes a longer stored list holds under its own, newer
 /// ones first, and what that list says of its feed, when it names the stored list's two newest
