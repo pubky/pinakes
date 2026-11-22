@@ -53,6 +53,15 @@
     "status": 200,
     "url": "https://blockstream.info/api/block-height/481824"
   },
+  "testnet4-tx-coinbase-1000": {
+    "bytes": 1155,
+    "content_type": "application/json",
+    "file": "testnet4-tx-coinbase-1000.json",
+    "recorded_at": "2026-11-21T18:44:28+00:00",
+    "sha256": "71144ff1e947bb6efd4f4fc66ee7cc3e44a2d2d2860fc11f7a0614de3271fc9c",
+    "status": 200,
+    "url": "https://blockstream.info/testnet4/api/tx/5c5d91f2e7251501dccfe0e7ae684a865f499e77620e483760d9f70d1259e958"
+  },
   "tx-missing": {
     "bytes": 21,
     "content_type": "text/plain",

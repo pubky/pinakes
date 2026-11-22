@@ -194,6 +194,11 @@ pub trait Source: Send + Sync {
     fn facts(&self) -> &'static [&'static str] {
         &[]
     }
+    /// The facts of its stored card a read of the link sees again (`Context::stored`): what an
+    /// earlier read learnt that the link alone does not say. Each is one of `facts`.
+    fn reads_back(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// The service's published limits per host, as `(host, requests_per_second)`; a windowed
     /// limit is given as its average rate (60 per minute → 1.0). The rate lowers the host's
     /// default (`limits.host_requests_per_second`), never raises it: one above the default
@@ -235,6 +240,17 @@ pub trait Source: Send + Sync {
     /// token`): it is then on only with one, and its links get ordinary web cards without it.
     fn takes_token(&self) -> bool {
         false
+    }
+    /// Whether this source sends the operator's app key when one is set (`[sources.<name>]
+    /// key`): an app's identifier, not a credential, that raises the service's quota. The source
+    /// is on with or without it, and the key is kept out of logs and errors as a token is.
+    fn takes_key(&self) -> bool {
+        false
+    }
+    /// The host rates while the operator's app key is set (`takes_key`): the service's keyed
+    /// quota as its average rate.
+    fn keyed_budgets(&self) -> &'static [Budget] {
+        self.budgets()
     }
     /// A variable of its own (`PINAKES_NAME`) that fills its token when the config file and the
     /// `PINAKES__SOURCES__…` form leave it unset.
@@ -472,6 +488,53 @@ tokio::task_local! {
     /// fetches beyond its card.
     static DEADLINE: tokio::time::Instant;
 }
+tokio::task_local! {
+    /// The facts the jobs' sources read back of their stored cards (`Source::reads_back`), by link.
+    static STORED: BTreeMap<String, BTreeMap<String, String>>;
+}
+/// What the sources of `jobs` read back of their stored cards in `pool` (`Source::reads_back`),
+/// by link, for `with_stored`. It asks the database only when such a source reads one of them.
+pub async fn stored(
+    pool: &sqlx::PgPool,
+    jobs: &[crate::queue::Job],
+) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
+    let wanted: BTreeMap<&str, (&str, &'static [&'static str])> = jobs
+        .iter()
+        .filter_map(|j| {
+            let facts = reading(&j.uri)?.reads_back();
+            (!facts.is_empty()).then_some((j.id.as_str(), (j.uri.as_str(), facts)))
+        })
+        .collect();
+    let mut stored = BTreeMap::new();
+    if wanted.is_empty() {
+        return Ok(stored);
+    }
+    let ids: Vec<&str> = wanted.keys().copied().collect();
+    let rows: Vec<(String, Option<serde_json::Value>)> =
+        sqlx::query_as("SELECT id, doc->'attributes' FROM resource WHERE id=ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+    for (id, attributes) in rows {
+        let (Some((uri, facts)), Some(attributes)) = (wanted.get(id.as_str()), attributes) else {
+            continue;
+        };
+        let kept: BTreeMap<String, String> = facts
+            .iter()
+            .filter_map(|f| Some(((*f).to_owned(), attributes.get(*f)?.as_str()?.to_owned())))
+            .collect();
+        stored.insert((*uri).to_owned(), kept);
+    }
+    Ok(stored)
+}
+/// Run `read` with `stored` (from `stored()`) as what its sources' contexts see
+/// (`Context::stored`).
+pub async fn with_stored<F: std::future::Future>(
+    stored: BTreeMap<String, BTreeMap<String, String>>,
+    read: F,
+) -> F::Output {
+    STORED.scope(stored, read).await
+}
 /// Run `hook` with `deadline` as the deadline its context reports (`Context::deadline`).
 pub async fn within<F: std::future::Future>(deadline: tokio::time::Instant, hook: F) -> F::Output {
     DEADLINE.scope(deadline, hook).await
@@ -488,6 +551,14 @@ impl Context<'_> {
     /// route, which has the fetch to itself.
     pub fn deadline(&self) -> Option<tokio::time::Instant> {
         DEADLINE.try_with(|d| *d).ok()
+    }
+    /// Fact `name` of the stored card of `uri`, when its source reads it back
+    /// (`Source::reads_back`) and the queue's job of `uri` runs this read.
+    pub fn stored(&self, uri: &str, name: &str) -> Option<String> {
+        STORED
+            .try_with(|s| s.get(uri).and_then(|facts| facts.get(name)).cloned())
+            .ok()
+            .flatten()
     }
     /// A GET (or, with `options.json_body`, a POST) through the egress policy. A rate limit
     /// (429), a request timeout (408) and a server error become `RetryLater` (`retry`, classes
@@ -583,20 +654,24 @@ impl HostMemo {
     }
 }
 
-/// A source's switch, and its token for a source that takes one (`Source::takes_token`): a
-/// secret that never appears in logs, errors or `Debug` output.
+/// A source's switch, its token for a source that takes one (`Source::takes_token`) and its app
+/// key for a source that sends one (`Source::takes_key`): values that never appear in logs,
+/// errors or `Debug` output.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Switch {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<crate::event::adapters::SecretKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<crate::event::adapters::SecretKey>,
 }
 impl Default for Switch {
     fn default() -> Self {
         Self {
             enabled: true,
             token: None,
+            key: None,
         }
     }
 }
@@ -617,15 +692,35 @@ impl SourcesConfig {
     pub fn token(&self, name: &str) -> Option<&str> {
         self.0.get(name)?.token.as_deref().filter(|t| !t.is_empty())
     }
+    /// The app key of `[sources.<name>]`, when it has a non-empty one.
+    pub fn key(&self, name: &str) -> Option<&str> {
+        self.0.get(name)?.key.as_deref().filter(|k| !k.is_empty())
+    }
     pub fn validate(&self) -> Result<()> {
         for (name, switch) in &self.0 {
-            let source =
-                by_name(name).ok_or_else(|| anyhow::anyhow!("unknown source [sources.{name}]"))?;
+            let Some(source) = by_name(name) else {
+                // A block left from a source the build no longer has is ignored when it only
+                // switches it; one with a token or key is an error, as a misspelled name may hide
+                // where the operator meant the value to go.
+                anyhow::ensure!(
+                    switch.token.is_none() && switch.key.is_none(),
+                    "unknown source [sources.{name}]"
+                );
+                tracing::warn!(source = %name, "ignoring [sources.{name}]: no such source in this build");
+                continue;
+            };
             if let Some(token) = switch.token.as_deref().filter(|t| !t.is_empty()) {
                 anyhow::ensure!(source.takes_token(), "[sources.{name}] takes no token");
                 anyhow::ensure!(
                     token.len() <= 256 && token.bytes().all(|b| b.is_ascii_graphic()),
                     "[sources.{name}] token must be at most 256 printable characters"
+                );
+            }
+            if let Some(key) = switch.key.as_deref().filter(|k| !k.is_empty()) {
+                anyhow::ensure!(source.takes_key(), "[sources.{name}] takes no key");
+                anyhow::ensure!(
+                    key.len() <= 256 && key.bytes().all(|b| b.is_ascii_graphic()),
+                    "[sources.{name}] key must be at most 256 printable characters"
                 );
             }
         }
@@ -634,12 +729,14 @@ impl SourcesConfig {
 }
 
 /// Every source, also-on service and event platform that reads with an operator's key, token or
-/// app credentials, as `pinakes_source_token_refusals_total{source}` names it: the series exists
-/// (at 0) for each from the start, and no other label is ever counted.
+/// app credentials, and Nominatim (`osm`, a hosted one's key in its URL), as
+/// `pinakes_source_token_refusals_total{source}` names it: the series exists (at 0) for each from
+/// the start, and no other label is ever counted.
 pub const KEYED: &[&str] = &[
     "courtlistener",
     "discogs",
     "github",
+    "osm",
     "podcast_index",
     "spotify",
     "ticketmaster",
@@ -666,6 +763,60 @@ pub fn token_refused(source: &'static str) {
         .entry(source)
         .or_default() += 1;
 }
+/// A keyed service's refusals of the operator's key or token: each one is counted
+/// (`token_refused`) and switches the key off for an hour, during which the source answers
+/// `Declined` (its links get web cards) or reads without it. A refusal is what the service's
+/// own answer says is one: a 401, or a 403 whose body names the key (each source says how).
+pub struct Refusals {
+    source: &'static str,
+    until: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+impl Refusals {
+    /// How long a refused key stays off.
+    pub const LATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+    pub const fn new(source: &'static str) -> Self {
+        Self {
+            source,
+            until: std::sync::Mutex::new(None),
+        }
+    }
+    /// Whether the key is off: the service refused it less than an hour ago.
+    pub fn latched(&self) -> bool {
+        let until = *self.until.lock().unwrap_or_else(|e| e.into_inner());
+        until.is_some_and(|u| tokio::time::Instant::now() < u)
+    }
+    /// Count one refusal and switch the key off for an hour from now; true when it was on, so
+    /// the caller warns once per latch.
+    pub fn refused(&self) -> bool {
+        token_refused(self.source);
+        let now = tokio::time::Instant::now();
+        let mut until = self.until.lock().unwrap_or_else(|e| e.into_inner());
+        let was_on = until.is_none_or(|u| now >= u);
+        *until = Some(now + Self::LATCH);
+        was_on
+    }
+    /// `Declined` while the key is off: the link gets a web card.
+    pub fn check(&self) -> Result<()> {
+        if self.latched() {
+            return Err(Declined.into());
+        }
+        Ok(())
+    }
+}
+
+/// Whether an error answer's JSON names the key or token as its reason (`field` holds the
+/// service's message: "Invalid token.", "Bad credentials", …).
+pub fn names_the_key(body: &[u8], field: &str) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v[field].as_str().map(str::to_ascii_lowercase))
+        .is_some_and(|m| {
+            ["token", "credential", "key", "authoriz", "authentic"]
+                .iter()
+                .any(|w| m.contains(w))
+        })
+}
+
 /// Every source's token refusals so far.
 pub fn token_refusals() -> Vec<(&'static str, u64)> {
     TOKEN_REFUSALS
@@ -717,29 +868,15 @@ pub fn apply_title(
         .iter()
         .any(|s| s.apply_title(uri, title, description, doc))
 }
-/// The card the switched-on source reading `uri` makes of it, `None` when no source reads it,
-/// its source declined it or the object does not exist: for a source whose card builds on another
-/// object's (an SEC release on the Federal Register document that publishes it), by the other
-/// object's identifier alone.
-pub async fn card_of(cx: &Context<'_>, uri: &str) -> Result<Option<ResourceMeta>> {
-    let source = {
-        let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
-        reading(uri).filter(|s| switches.as_ref().is_none_or(|c| c.enabled(s.name())))
-    };
-    let Some(source) = source else {
-        return Ok(None);
-    };
-    match source.resolve(cx, uri).await {
-        Ok(doc) if doc.status == Status::Ok => Ok(Some(doc)),
-        Ok(_) => Ok(None),
-        Err(error) if error.is::<Declined>() => Ok(None),
-        Err(error) => Err(error),
-    }
-}
 /// The token the daemon started with for `source` (`configure`).
 pub fn token(source: &str) -> Option<crate::event::adapters::SecretKey> {
     let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
     switches.as_ref()?.token(source).map(Into::into)
+}
+/// The app key the daemon started with for `source` (`configure`).
+pub fn key(source: &str) -> Option<crate::event::adapters::SecretKey> {
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+    switches.as_ref()?.key(source).map(Into::into)
 }
 
 /// The static alias root of a source's spelling, from the link alone, while that source is on.
@@ -768,7 +905,15 @@ pub fn budgets(config: &Config) -> impl Iterator<Item = (&'static str, f64)> {
             .filter(|s| {
                 config.sources.enabled(s.name()) || crate::also_on::enabled_by_id(config, s.name())
             })
-            .flat_map(|s| s.budgets().iter().copied()),
+            .flat_map(|s| {
+                if s.takes_key() && config.sources.key(s.name()).is_some() {
+                    s.keyed_budgets()
+                } else {
+                    s.budgets()
+                }
+                .iter()
+                .copied()
+            }),
     )
     .into_iter()
 }
@@ -827,11 +972,15 @@ pub async fn resolve(
     let Some(source) = enabled_source(uri, config) else {
         return Ok(None);
     };
-    let doc = match source.resolve(&Context { egress, ttl }, uri).await {
+    let mut doc = match source.resolve(&Context { egress, ttl }, uri).await {
         Ok(doc) => doc,
         Err(error) if error.is::<Declined>() => return Ok(None),
         Err(error) => return Err(error),
     };
+    // A social profile's bio is its author's own text, published: never with an e-mail address.
+    if matches!(doc.type_name.as_str(), "Person" | "Organization") && source.social(&doc) {
+        doc.description = doc.description.as_deref().map(without_addresses);
+    }
     Ok(Some(doc.bounded(attributes())?))
 }
 
@@ -1233,7 +1382,7 @@ pub(crate) mod fixture {
             ));
             if kind == "!too-large" {
                 return Err(crate::resolver::egress::BodyTooLarge {
-                    cap: crate::hubs::WIKIDATA_CAP,
+                    cap: crate::hubs::DEFAULT_BODY_CAP,
                 }
                 .into());
             }
@@ -1551,7 +1700,8 @@ mod tests {
     }
 
     /// A source's mock end-to-end samples are links it reads (or pages it improves), each named
-    /// once in the run; their answers are recorded files of its own that match a request.
+    /// once in the run; their answers are recorded files of its own that match a request. Only a
+    /// source whose samples are all link rules (`LINK_RULES_ONLY`) asks nothing and has none.
     #[test]
     fn each_sources_e2e_samples_and_answers_are_its_own() {
         let mut kinds = std::collections::BTreeSet::new();
@@ -1560,7 +1710,13 @@ mod tests {
                 continue;
             };
             let name = source.name();
-            assert!(!e2e.samples.is_empty() && !e2e.answers.is_empty(), "{name}");
+            const LINK_RULES_ONLY: &[&str] = &["instagram"];
+            assert!(!e2e.samples.is_empty(), "{name}");
+            assert_eq!(
+                e2e.answers.is_empty(),
+                LINK_RULES_ONLY.contains(&name),
+                "{name}: answers"
+            );
             for sample in e2e.samples {
                 assert!(
                     sample.kind == name || sample.kind.starts_with(&format!("{name}_")),
@@ -1768,6 +1924,250 @@ mod tests {
         assert_eq!(alias_root_with(uri, Some(&off)), None);
     }
 
+    /// A refusal is counted and switches the key off for an hour from the latest refusal; the
+    /// latch then expires on its own (a paused clock stands in for the hour).
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_key_is_off_for_an_hour() {
+        let count = || {
+            token_refusals()
+                .into_iter()
+                .find(|(s, _)| *s == "tmdb")
+                .map_or(0, |(_, n)| n)
+        };
+        let refusals = Refusals::new("tmdb");
+        let before = count();
+        assert!(!refusals.latched() && refusals.check().is_ok());
+        assert!(refusals.refused(), "the first refusal of a latch warns");
+        assert!(count() > before);
+        assert!(refusals.check().is_err_and(|e| e.is::<Declined>()));
+        tokio::time::advance(std::time::Duration::from_secs(1800)).await;
+        assert!(!refusals.refused(), "a refusal while latched warns no more");
+        tokio::time::advance(std::time::Duration::from_secs(3599)).await;
+        assert!(refusals.latched(), "an hour from the latest refusal");
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(!refusals.latched() && refusals.check().is_ok());
+        assert!(refusals.refused());
+    }
+
+    #[test]
+    fn a_403_names_the_key_in_its_own_words() {
+        assert!(names_the_key(br#"{"detail":"Invalid token."}"#, "detail"));
+        assert!(names_the_key(
+            br#"{"detail":"Authentication credentials were not provided."}"#,
+            "detail"
+        ));
+        assert!(!names_the_key(
+            br#"{"detail":"You do not have permission to perform this action."}"#,
+            "detail"
+        ));
+        assert!(!names_the_key(b"<html>Forbidden</html>", "detail"));
+        assert!(!names_the_key(br#"{"message":"Invalid token."}"#, "detail"));
+    }
+
+    /// One case rule for identifier roots: the lower-case spelling of a root whose canonical form
+    /// is in upper case is a spelling of that root (its alias), never an invalid link.
+    #[test]
+    fn a_root_in_another_letter_case_is_its_spelling() {
+        for (source, spelling, root) in [
+            ("clinicaltrials", "nct:nct04368728", "nct:NCT04368728"),
+            ("pdb", "pdb:4hhb", "pdb:4HHB"),
+            ("uniprot", "uniprot:p69905", "uniprot:P69905"),
+            (
+                "gleif",
+                "lei:ky37lus27qqx7bb93l28",
+                "lei:KY37LUS27QQX7BB93L28",
+            ),
+            ("federal_register", "fr:e9-12345", "fr:E9-12345"),
+        ] {
+            if by_name(source).is_none() {
+                continue;
+            }
+            assert!(!invalid(spelling), "{spelling}");
+            assert_eq!(
+                alias_root_with(spelling, None).as_deref(),
+                Some(root),
+                "{spelling}"
+            );
+            assert_eq!(alias_root_with(root, None), None, "{root}");
+            assert!(!invalid(root), "{root}");
+        }
+    }
+
+    /// The social shapes whose pages never show the object to a request without an account are
+    /// link rules: their card is the link's root and shape (with what the link spells), and no
+    /// request is made.
+    #[tokio::test(start_paused = true)]
+    async fn link_only_social_shapes_ask_nothing() {
+        for (source, uri, type_name, author) in [
+            (
+                "facebook",
+                "https://www.facebook.com/facebook/posts/10162533193146729",
+                "SocialMediaPosting",
+                Some("facebook"),
+            ),
+            (
+                "facebook",
+                "https://www.facebook.com/watch/?v=123456789",
+                "VideoObject",
+                None,
+            ),
+            (
+                "instagram",
+                "https://www.instagram.com/p/C2vXx0yPvYq/",
+                "SocialMediaPosting",
+                None,
+            ),
+            (
+                "instagram",
+                "https://www.instagram.com/reel/C2vXx0yPvYq/",
+                "VideoObject",
+                None,
+            ),
+            (
+                "instagram",
+                "https://instagr.am/tv/C2vXx0yPvYq",
+                "VideoObject",
+                None,
+            ),
+            (
+                "tiktok",
+                "https://www.tiktok.com/@scout2015/video/6718335390845095173",
+                "VideoObject",
+                Some("scout2015"),
+            ),
+            (
+                "linkedin",
+                "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA",
+                "SocialMediaPosting",
+                Some("linkedin"),
+            ),
+            (
+                "twitch",
+                "https://www.twitch.tv/twitch/clip/AwkwardHelplessSalamanderSwiftRage",
+                "VideoObject",
+                Some("twitch"),
+            ),
+        ] {
+            let Some(s) = by_name(source) else {
+                continue;
+            };
+            let (egress, recorded) = fixture::egress(vec![]);
+            let cx = Context {
+                egress: &egress,
+                ttl: 3600,
+            };
+            let doc = s.resolve(&cx, uri).await.unwrap();
+            assert!(recorded.asked().is_empty(), "{uri}");
+            assert_eq!(doc.status, Status::Ok, "{uri}");
+            assert_eq!(doc.type_name, type_name, "{uri}");
+            assert!(doc.source_root.is_some(), "{uri}");
+            assert!(!doc.attributes.contains_key("blocked"), "{uri}");
+            assert_eq!(
+                doc.attributes.get("author").map(String::as_str),
+                author,
+                "{uri}"
+            );
+        }
+    }
+
+    /// A social profile is social content, and its bio is published without e-mail addresses.
+    #[tokio::test(start_paused = true)]
+    async fn a_profiles_bio_publishes_no_address() {
+        let Some(x) = by_name("x") else {
+            return;
+        };
+        let uri = "https://x.com/someone";
+        let page = br#"<html><head><meta property="og:title" content="Some One (@someone) on X"><meta property="og:description" content="Builds bridges. Write to someone@example.org or mailto:me@example.org"></head></html>"#;
+        let (egress, _) = fixture::egress(vec![(uri, 200, "text/html", page.to_vec())]);
+        let doc = resolve(&egress, &Config::default(), uri, 3600)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.type_name, "Person");
+        assert!(x.social(&doc), "a profile is social content");
+        let bio = doc.description.unwrap();
+        assert!(bio.starts_with("Builds bridges."), "{bio}");
+        assert!(!bio.contains('@'), "{bio}");
+    }
+
+    /// A social card takes its name from the object's own page only. Each recorded page (one real
+    /// page per platform, as the platform served it to this source's request) names its object;
+    /// the same page reached from another object's link (a redirect) names nothing, and that link
+    /// gets the plain card of its shape.
+    #[tokio::test(start_paused = true)]
+    async fn a_social_card_is_named_from_the_objects_own_page_only() {
+        for (source, own, file, name, moved, plain) in [
+            (
+                "facebook",
+                "https://www.facebook.com/facebook",
+                "own-page-facebook.html.gz",
+                "Facebook",
+                "https://www.facebook.com/moved.name",
+                "Profile on facebook.com",
+            ),
+            (
+                "linkedin",
+                "https://www.linkedin.com/company/linkedin",
+                "own-page-company-linkedin.html.gz",
+                "LinkedIn",
+                "https://www.linkedin.com/company/moved-name",
+                "Profile on linkedin.com",
+            ),
+            (
+                "pinterest",
+                "https://www.pinterest.com/pinterest/",
+                "own-page-profile-pinterest.html.gz",
+                "Pinterest",
+                "https://www.pinterest.com/moved_name/",
+                "Profile on pinterest.com",
+            ),
+            (
+                "twitch",
+                "https://www.twitch.tv/twitch",
+                "own-page-channel-twitch.html.gz",
+                "Twitch",
+                "https://www.twitch.tv/moved_name",
+                "Profile on twitch.tv",
+            ),
+            (
+                "telegram",
+                "https://t.me/telegram",
+                "own-page-channel-telegram.html",
+                "Telegram News",
+                "https://t.me/moved_name",
+                "Profile on t.me",
+            ),
+            (
+                "x",
+                "https://x.com/jack",
+                "own-page-profile-x.html.gz",
+                "jack",
+                "https://x.com/moved_name",
+                "Profile on x.com",
+            ),
+        ] {
+            let Some(s) = by_name(source) else {
+                continue;
+            };
+            let (egress, _) = fixture::egress(vec![
+                (own, 200, "text/html", fixture::read(source, file)),
+                (moved, 302, "text/html", own.as_bytes().to_vec()),
+            ]);
+            let cx = Context {
+                egress: &egress,
+                ttl: 3600,
+            };
+            let doc = s.resolve(&cx, own).await.unwrap();
+            assert_eq!(doc.name.as_deref(), Some(name), "{own}");
+            let doc = s.resolve(&cx, moved).await.unwrap();
+            assert_eq!(doc.status, Status::Ok, "{moved}");
+            assert_eq!(doc.name.as_deref(), Some(plain), "{moved}");
+            assert_eq!(doc.description, None, "{moved}");
+            assert_eq!(doc.image, None, "{moved}");
+            assert_eq!(doc.source_root.as_deref(), Some(moved), "{moved}");
+        }
+    }
+
     #[test]
     fn switches_and_names() {
         let mut config = Config::default();
@@ -1792,11 +2192,42 @@ mod tests {
         assert!(enabled_source(uri, &config).is_none());
         assert!(reading(uri).is_some());
         assert!(config.sources.validate().is_ok());
-        config
-            .sources
-            .0
-            .insert("nonesuch".into(), Switch::default());
+        // A block for a source the build does not have: ignored while it only switches it, an
+        // error once it carries a token.
+        config.sources.0.insert(
+            "nonesuch".into(),
+            Switch {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        assert!(config.sources.validate().is_ok());
+        config.sources.0.insert(
+            "nonesuch".into(),
+            Switch {
+                token: Some(String::from("abc").into()),
+                ..Default::default()
+            },
+        );
         assert!(config.sources.validate().is_err());
+        config.sources.0.insert(
+            "nonesuch".into(),
+            Switch {
+                key: Some(String::from("abc").into()),
+                ..Default::default()
+            },
+        );
+        assert!(config.sources.validate().is_err());
+        config.sources.0.remove("nonesuch");
+        // An app key only where the source sends one.
+        config.sources.0.insert(
+            source.name().into(),
+            Switch {
+                key: Some(String::from("abc").into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(config.sources.validate().is_ok(), source.takes_key());
     }
 
     #[test]

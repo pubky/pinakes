@@ -19,6 +19,25 @@
     "status": 200,
     "url": "https://www.federalregister.gov/api/v1/documents/2026-20818.json"
   },
+  "fr-docket-34-106268": {
+    "bytes": 205,
+    "content_type": "application/json; charset=utf-8",
+    "file": "fr-docket-34-106268.json",
+    "note": "Federal Register API, public domain.",
+    "recorded_at": "2026-10-19T16:17:24+00:00",
+    "sha256": "2f519d9732e40db6833073f36ad36173e2173bfec6009e20632606c65b641046",
+    "status": 200,
+    "url": "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bdocket_id%5D=34-106268&fields%5B%5D=document_number&fields%5B%5D=docket_ids&per_page=20"
+  },
+  "fr-docket-34-999999": {
+    "bytes": 73,
+    "content_type": "application/json; charset=utf-8",
+    "file": "fr-docket-34-999999.json",
+    "recorded_at": "2026-10-19T16:17:26+00:00",
+    "sha256": "40d743ddd22d1bf2a5baa4d6f1833749cb62c690a57ac6a86bcf0e72ef5841d2",
+    "status": 200,
+    "url": "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bdocket_id%5D=34-999999&fields%5B%5D=document_number&fields%5B%5D=docket_ids&per_page=20"
+  },
   "fr-missing": {
     "bytes": 4569,
     "content_type": "text/html",

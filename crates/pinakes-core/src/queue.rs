@@ -65,11 +65,13 @@ pub(crate) const CLAIMABLE: &str = concat!(
     referenced!(),
     ")"
 );
+/// The claim: expedited rows first (`priority_at`), then links never read before overdue
+/// refreshes, then by due time.
 static CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1 \
         WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND {CLAIMABLE} \
-          ORDER BY priority_at DESC NULLS LAST,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3) \
+          ORDER BY priority_at DESC NULLS LAST,(resolved_at IS NULL) DESC,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3) \
         RETURNING id,uri,attempts,generation"
     )
 });
@@ -415,6 +417,60 @@ async fn off_origin(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
     tx.commit().await?;
     Ok(())
 }
+/// The classes of a service's own answer that it cannot serve now: a 5xx, a 408 or a 429
+/// (`sources::retry`, `event::adapters::service::upstream_status`, the egress's 429, a card
+/// reader's or Nominatim's). The daemon's own waits (`OWN_WAITS`) are not among them.
+const UPSTREAM_WAITS: [&str; 3] = ["upstream", "http_4xx", "http_5xx"];
+/// The daemon's own waits, which say nothing about the link and charge nothing: its host budget
+/// (`rate_limited`), a cached failure replayed (`discovery_cached`) and the operator's own quota
+/// at a service (`quota`: GitHub's token rate limit, Nominatim's 429).
+const OWN_WAITS: [&str; 3] = ["rate_limited", "discovery_cached", "quota"];
+/// How long a service's failures must last before its link dead-letters (`upstream_wait`): three
+/// days, the span after which a denial turns a link `unreachable` (`denied`).
+pub const UPSTREAM_OUTAGE_SECS: u64 = 3 * 86400;
+/// How long a streak of upstream waits has lasted at least when its `streak`-th failure comes:
+/// the queue's backoff of each wait before it (`backoff(cfg, 1..streak)`), counted from the
+/// streak's first wait. A longer named wait only made it longer.
+pub fn upstream_span(cfg: &QueueConfig, streak: u32) -> u64 {
+    let mut span = 0u64;
+    for wait in 1..streak {
+        let b = backoff(cfg, wait);
+        if b >= cfg.max_backoff_secs {
+            // Every later wait is the cap.
+            return span.saturating_add(b.saturating_mul(u64::from(streak - wait)));
+        }
+        span = span.saturating_add(b);
+    }
+    span
+}
+/// A service that answered 5xx, 408 or 429 (`UPSTREAM_WAITS`): the link is read again after the
+/// wait the answer named or the queue's backoff, whichever is longer, the backoff doubling up to
+/// `max_backoff_secs` while `last_error` stays one of these classes (the streak is kept in
+/// `timeout_streak`; a longer named wait is never cut). A short outage never dead-letters a link:
+/// it dead-letters, and turns `error`, only once the failures have lasted `UPSTREAM_OUTAGE_SECS`
+/// (`upstream_span` of the streak), and the waits are not `attempts`, so a later failure of
+/// another kind is not brought nearer to the dead letter. Until then its status stays (an
+/// accepted card is not flipped by busy answers); a link with no card yet shows `error` once the
+/// streak reaches `max_failures`, and is still read again, as a refused connection's does.
+async fn upstream_wait(
+    pool: &PgPool,
+    job: &Job,
+    cfg: &QueueConfig,
+    retry: &crate::resolver::RetryLater,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error=ANY($3) THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).bind(&UPSTREAM_WAITS[..]).fetch_optional(&mut *tx).await?;
+    if let Some(streak) = streak {
+        let streak = streak.saturating_add(1);
+        let delay = retry.seconds.max(backoff(cfg, streak as u32));
+        let dead = upstream_span(cfg, streak as u32) >= UPSTREAM_OUTAGE_SECS;
+        sqlx::query("UPDATE resource SET timeout_streak=$2,dead_letter=$3,status=CASE WHEN $3 OR ($4 AND status='pending') THEN 'error' ELSE status END,lease_until=NULL,priority_at=NULL,last_error=$5,next_attempt_at=now()+$6*interval '1 second' WHERE id=$1")
+            .bind(&job.id).bind(streak).bind(dead).bind(streak as u32 >= cfg.max_failures).bind(retry.class).bind(delay as f64).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) -> Result<()> {
     let mut tx = pool.begin().await?;
     let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
@@ -509,7 +565,8 @@ async fn run_job_inner(
     job: &Job,
 ) -> Result<()> {
     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
-    let result = resolve(resolver, &job.uri, confirming).await;
+    let stored = crate::sources::stored(pool, std::slice::from_ref(job)).await?;
+    let result = crate::sources::with_stored(stored, resolve(resolver, &job.uri, confirming)).await;
     guarded_finish_job(
         pool,
         resolver,
@@ -555,7 +612,9 @@ async fn guarded_finish_job(
                         .execute(pool)
                         .await?;
                     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
-                    match resolve(resolver, &job.uri, confirming).await {
+                    let stored = crate::sources::stored(pool, std::slice::from_ref(job)).await?;
+                    let read = resolve(resolver, &job.uri, confirming);
+                    match crate::sources::with_stored(stored, read).await {
                         Err(error) if error.is::<crate::resolver::NotModified>() => Ok(doc),
                         other => other,
                     }
@@ -571,7 +630,13 @@ async fn guarded_finish_job(
         Ok(mut doc) if crate::music::parse(&job.uri).is_some() => {
             // What the also-on sources said about the artist (a person or a group), if anything.
             let artist = crate::also_on::media::artist_type(pool, &job.id).await?;
-            crate::music::type_card(&job.uri, artist.as_ref().map(|(t, _)| t.as_str()), &mut doc);
+            let on_youtube_music = crate::music::on_youtube_music(pool, &job.id, &job.uri).await?;
+            crate::music::type_card(
+                &job.uri,
+                artist.as_ref().map(|(t, _)| t.as_str()),
+                on_youtube_music,
+                &mut doc,
+            );
             if let Some((t, source)) =
                 artist.filter(|(t, _)| t == "Person" && doc.type_name == "Person")
             {
@@ -706,7 +771,11 @@ async fn finish_job(
                 | "doi"
                 | "nostr"
                 | "activitypub"
-        ) {
+                | "official"
+        ) && (resolver.name() != "official" || doc.status == Status::Ok)
+        {
+            // On the official route only a card read whole is scheduled by its dates (and final
+            // once they passed): a missing answer keeps the `missing_ttl_secs` re-read.
             let now = chrono::Utc::now();
             let mut manifest = resolver.manifest_for(&job.uri);
             if resolver.name() == "osm" {
@@ -748,7 +817,10 @@ async fn finish_job(
                         crate::scheduler::next(&manifest, &doc, now, refresh)
                     }
                 };
-                doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+                // An official card keeps its route's lifetime until its date makes it final.
+                if resolver.name() != "official" || next.is_none() {
+                    doc.ttl_secs = next.map_or(0, |at| (at - now).num_seconds().max(0) as u64);
+                }
             } else if resolver.name() != "osm" {
                 doc.ttl_secs = doc.ttl_secs.max(3600);
             }
@@ -816,7 +888,7 @@ async fn finish_job(
         // link: with a slow host budget every waiting link meets it, so it is logged at debug.
         if error
             .downcast_ref::<crate::resolver::RetryLater>()
-            .is_some_and(|r| matches!(r.class, "rate_limited" | "discovery_cached"))
+            .is_some_and(|r| OWN_WAITS.contains(&r.class))
         {
             tracing::debug!(resource_id=%job.id,host=%crate::resolver::log_host(&job.uri),kind=crate::resolver::error_class(&error),resolver=resolver.name(),"resolution waits for its host");
         } else {
@@ -833,12 +905,15 @@ async fn finish_job(
                 denied(pool, job, cfg, retry).await?;
             } else if retry.class == "off_origin" {
                 off_origin(pool, job, cfg).await?;
+            } else if UPSTREAM_WAITS.contains(&retry.class) {
+                upstream_wait(pool, job, cfg, retry).await?;
             } else {
-                // Egress's own waits (its host budget, a cached failure replayed) say nothing new
-                // about the link: a refused-connection streak stays, so its backoff keeps growing.
-                let own = matches!(retry.class, "rate_limited" | "discovery_cached");
-                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND last_error='connect' THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND last_error='connect' THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
-                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).bind(own).execute(pool).await?;
+                // The daemon's own waits (`OWN_WAITS`) say nothing new about the link and charge
+                // nothing: a refused-connection or upstream-wait streak stays, so its backoff
+                // keeps growing.
+                let own = OWN_WAITS.contains(&retry.class);
+                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
+                    .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).bind(own).bind(&UPSTREAM_WAITS[..]).execute(pool).await?;
             }
         } else if crate::resolver::unreached(&error) {
             // A refused, reset or unreachable connection: retried with backoff, never dead-lettered.
@@ -988,6 +1063,7 @@ async fn run_batch_within(
             resolve.await
         }
     };
+    let resolve = crate::sources::with_stored(crate::sources::stored(pool, jobs).await?, resolve);
     let results = tokio::time::timeout(deadline, resolve).await;
     let late = results.is_err();
     let results = match results {

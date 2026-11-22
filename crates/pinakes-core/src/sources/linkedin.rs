@@ -1,5 +1,6 @@
-//! LinkedIn profiles, company pages and posts, from their pages' Open Graph tags as written
-//! (their JSON-LD lists recent posts, not the page). LinkedIn shows most of it to accounts
+//! LinkedIn profiles and company pages, from their pages' Open Graph tags as written (their
+//! JSON-LD lists recent posts, not the page), and posts as link rules (a post's page is the
+//! sign-in invitation without an account, so it is never asked). LinkedIn shows most of it to accounts
 //! only: a refused request (its 999, a sign-in page) gets the plain card, marked `blocked`. No
 //! key, no account. Every spelling (the host without `www.`, a country host, a capitalised
 //! slug) is one resource at `https://www.linkedin.com/in/{slug}`, `/company/{slug}` or
@@ -94,6 +95,11 @@ impl Target {
             }
         }
     }
+    /// Whether the page read at `address` (`OpenGraph::address`) is this object's: the same
+    /// profile or company, under any of its spellings (a country's site, `/school/`).
+    fn is_at(&self, address: &str) -> bool {
+        Self::of_uri(address).as_ref() == Some(self)
+    }
     fn shape(&self) -> Shape {
         match self {
             Self::Post { .. } => Shape::Post,
@@ -125,13 +131,6 @@ fn plain(doc: ResourceMeta, target: &Target) -> ResourceMeta {
         Target::Post { .. } => social::fact(&mut doc, "author", target.author()),
     }
     doc
-}
-
-/// Whether a page is LinkedIn's sign-in invitation in place of the object.
-fn sign_in(tags: &OpenGraph) -> bool {
-    tags.description
-        .as_deref()
-        .is_some_and(|d| d.starts_with("Sign in or join now"))
 }
 
 /// The card of a person from their page's tags: `Name - Headline | LinkedIn` and a description
@@ -205,27 +204,6 @@ pub fn company_card(doc: ResourceMeta, slug: &str, tags: &OpenGraph) -> Option<R
     Some(doc)
 }
 
-/// The card of a post from its page's tags, when LinkedIn shows the post rather than its
-/// sign-in invitation.
-pub fn post_card(doc: ResourceMeta, target: &Target, tags: &OpenGraph) -> ResourceMeta {
-    let author = target.author();
-    if sign_in(tags) || tags.title.is_none() {
-        let mut doc = social::blocked(doc, Shape::Post, SITE);
-        social::fact(&mut doc, "author", author);
-        return doc;
-    }
-    let mut doc = Shape::Post.card(doc, SITE);
-    social::post_text(
-        &mut doc,
-        tags.description.as_deref().unwrap_or_default(),
-        author.as_deref(),
-    );
-    doc.name = tags.title.as_deref().map(|t| social::excerpt(t, 120));
-    doc.image = tags.image.clone();
-    social::fact(&mut doc, "author", author);
-    doc
-}
-
 #[async_trait]
 impl Source for LinkedIn {
     fn name(&self) -> &'static str {
@@ -280,7 +258,11 @@ impl Source for LinkedIn {
         &["author", "handle", "headline", "followers", "blocked"]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a profile or company page (its about text is its owner's own).
+        matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "Person" | "Organization"
+        )
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -297,20 +279,41 @@ impl Source for LinkedIn {
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
         let target = Target::of_uri(uri).context("not a LinkedIn link")?;
         let doc = cx.card(uri, self);
+        // A post's page is the sign-in invitation to a request without an account, so it is
+        // never asked: the card is the link's (its root, its shape and the author it spells).
+        if let Target::Post { .. } = target {
+            let mut doc = plain(doc, &target);
+            doc.source_root = Some(target.root());
+            return Ok(doc);
+        }
         let mut doc = match social::page_body(cx, &target.root(), REFUSED).await? {
-            Body::Read { body, .. } => {
+            Body::Read { body, url } => {
                 let tags =
                     crate::resolver::html::blocking(move || social::open_graph(&body)).await??;
+                // Only the object's own page names it: a fetch may end on another page, whose
+                // tags are not read.
+                let tags = if target.is_at(tags.address(&url)) {
+                    tags
+                } else {
+                    OpenGraph::default()
+                };
                 match &target {
                     Target::Person(slug) => person_card(doc.clone(), slug, &tags)
                         .unwrap_or_else(|| social::shape_only(plain(doc, &target))),
                     Target::Company(slug) => company_card(doc.clone(), slug, &tags)
                         .unwrap_or_else(|| social::shape_only(plain(doc, &target))),
-                    Target::Post { .. } => post_card(doc, &target, &tags),
+                    Target::Post { .. } => unreachable!("a post is answered above"),
                 }
             }
             Body::Missing => cx.missing(uri, self),
-            Body::Blocked => social::blocked(doc, target.shape(), SITE),
+            // A walled company keeps the link's type.
+            Body::Blocked => {
+                let mut doc = social::blocked(doc, target.shape(), SITE);
+                if let Target::Company(_) = target {
+                    doc.set_type("Organization");
+                }
+                doc
+            }
         };
         doc.source_root = Some(target.root());
         Ok(doc)
@@ -429,31 +432,23 @@ mod tests {
         assert!(company_card(base, "x", &tags("company-missing.html.gz")).is_none());
     }
 
-    #[test]
-    fn a_post_behind_the_sign_in_invitation_is_blocked() {
-        let target = Target::of_uri(
-            "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA",
-        )
-        .unwrap();
-        let base = ResourceMeta::new(&target.root(), "linkedin", 3600);
-        let doc = post_card(
-            base.clone(),
-            &target,
-            &tags("post-linkedin-7517918134654218241.html.gz"),
-        );
-        assert_eq!(doc.type_name, "SocialMediaPosting");
-        assert_eq!(doc.name.as_deref(), Some("Post on linkedin.com"));
-        assert_eq!(doc.attributes["blocked"], "true");
-        assert_eq!(doc.attributes["author"], "linkedin");
-        let shown = OpenGraph {
-            title: Some("LinkedIn on LinkedIn: hello".into()),
-            description: Some("hello world".into()),
-            ..OpenGraph::default()
+    /// A walled company keeps the link's type: an `Organization`, not a `Person`.
+    #[tokio::test(start_paused = true)]
+    async fn a_walled_company_is_an_organization() {
+        let company = "https://www.linkedin.com/company/linkedin";
+        let (egress, _) =
+            crate::sources::fixture::egress(vec![(company, 999, "text/html", b"".to_vec())]);
+        let cx = crate::sources::Context {
+            egress: &egress,
+            ttl: 3600,
         };
-        let doc = post_card(base, &target, &shown);
-        assert_eq!(doc.name.as_deref(), Some("LinkedIn on LinkedIn: hello"));
-        assert_eq!(doc.description.as_deref(), Some("hello world"));
-        assert!(!doc.attributes.contains_key("blocked"));
+        let doc = LinkedIn.resolve(&cx, company).await.unwrap();
+        assert_eq!(doc.type_name, "Organization");
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert!(
+            LinkedIn.social(&doc),
+            "a company page is its owner's own text"
+        );
     }
 
     /// A 200 page without a profile's or a company's tags (a consent page, LinkedIn's generic
@@ -492,10 +487,11 @@ mod tests {
         assert_eq!(doc.source_root.as_deref(), Some(company));
     }
 
-    /// The resolver reads a `/posts/` link at its own address, and a link LinkedIn answers with
-    /// its 999 (as recorded for a profile without an account) is the blocked card, not a retry.
+    /// A `/posts/` link is a link rule rooted at its own address (nothing is asked), and a link
+    /// LinkedIn answers with its 999 (as recorded for a profile without an account) is the
+    /// blocked card, not a retry.
     #[tokio::test(start_paused = true)]
-    async fn posts_are_read_at_their_address_and_999_is_a_blocked_card() {
+    async fn posts_are_link_rules_and_999_is_a_blocked_card() {
         let posts = "https://www.linkedin.com/posts/linkedin_activity-7517918134654218241-7OWA";
         let person = "https://www.linkedin.com/in/thispersondoesnotexist12345x";
         let read = |file: &str| crate::sources::fixture::read("linkedin", file);
@@ -513,7 +509,7 @@ mod tests {
             ttl: 3600,
         };
         let doc = LinkedIn.resolve(&cx, posts).await.unwrap();
-        assert_eq!(recorded.asked(), [posts]);
+        assert!(recorded.asked().is_empty());
         assert_eq!(doc.source_root.as_deref(), Some(posts));
         assert_eq!(doc.type_name, "SocialMediaPosting");
         assert_eq!(doc.attributes["author"], "linkedin");

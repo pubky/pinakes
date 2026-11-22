@@ -6,14 +6,14 @@ One of the music sources of [also on](../api.md#also-on): links on music service
 `client_secret` or `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`,
 [operations](#operations)): a TIDAL album's barcode and a track's ISRC from TIDAL's
 own API, as the keys `upc:…` and `isrc:…` (`via` `tidal`) and as facts, and no links;
-`musicbrainz`, `deezer` and `itunes` then find the
-same album or track by them. An ISRC MusicBrainz gives to several recordings that agree is those
+`musicbrainz` and `deezer` then find the
+same album or track by them (and `itunes` a possibly-same Apple Music album). An ISRC MusicBrainz gives to several recordings that agree is those
 recordings' as one, keyed by the ISRC and the MBID that stands for them; one on recordings that disagree is decided by
 the track's duration, the one recording within 3 s of it keyed by its MBID, else the ISRC a fact
 only ([an ISRC on several recordings](README.md#an-isrc-on-several-recordings)). TIDAL's catalogue is read in one country (`[tidal] country`,
 `US`); an item TIDAL does not offer there gives nothing. TIDAL's answers are cached per
 credential pair, so a new token keeps them; a 401 or 403 is never cached, and refused
-credentials are asked again after five minutes.
+credentials are asked again after `limits.also_on_refusal_hold_secs` (five minutes).
 
 ## Another service's track on TIDAL
 

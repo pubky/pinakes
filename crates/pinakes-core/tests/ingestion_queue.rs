@@ -628,7 +628,8 @@ async fn timeout_escalation_is_durable_fenced_and_resets(pool: PgPool) {
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     for (kind, expected) in [
         ("timeout", 1),
-        ("http_5xx", 0),
+        // A 5xx starts a streak of its own in the column, which a timeout then starts over.
+        ("http_5xx", 1),
         ("timeout", 1),
         ("success", 0),
         ("timeout", 1),
@@ -1966,28 +1967,140 @@ async fn new_reference_reopens_final_pages_but_never_geo(pool: PgPool) {
     assert!(!final_root);
 }
 
-/// The feeds a database has a cursor for besides the configured one, by host only.
+/// A dead letter comes back on a new reference to its link, as a final page reopens: due now,
+/// with its failures forgotten. A repeat of a reference it already has, or a line from before the
+/// link was stored (a replayed feed), revives nothing; neither does time alone.
 #[sqlx::test(migrations = "../../migrations")]
-async fn other_feeds_are_named_by_host(pool: PgPool) {
-    let configured = "http://nexus.example.org:8080";
-    ingest::cursor(&pool, configured).await.unwrap();
-    assert!(ingest::other_feeds(&pool, configured)
-        .await
-        .unwrap()
-        .is_empty());
-    ingest::cursor(&pool, "http://nexus.example.org:8080/")
+async fn new_reference_revives_a_dead_letter_but_a_repeat_never_does(pool: PgPool) {
+    let first = change("https://example.org/dead", "a", "/pub/app/tags/a");
+    batch(&pool, vec![first.clone()], Some("one")).await;
+    let dead = || {
+        sqlx::query("UPDATE resource SET dead_letter=true,attempts=5,status='error',last_error='http',created_at=now()-interval '1 day',next_attempt_at=now()+interval '1 day'")
+            .execute(&pool)
+    };
+    dead().await.unwrap();
+    let state = || {
+        sqlx::query_as::<_, (bool, i32, bool)>(
+            "SELECT dead_letter,attempts,next_attempt_at<=now() FROM resource WHERE uri='https://example.org/dead'",
+        )
+        .fetch_one(&pool)
+    };
+    batch(&pool, vec![first.clone()], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (true, 5, false), "a repeat");
+    let mut replayed = change("https://example.org/dead", "b", "/pub/app/tags/b");
+    replayed.at = (Utc::now() - chrono::Duration::days(2)).timestamp_millis();
+    batch(&pool, vec![replayed], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (true, 5, false), "an older line");
+    let second = change("https://example.org/dead", "c", "/pub/app/tags/c");
+    batch(&pool, vec![second], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (false, 0, true), "a new reference");
+    // A dead letter that had a card is revived by a reference made after its last read.
+    dead().await.unwrap();
+    sqlx::query("UPDATE resource SET resolved_at=now()-interval '1 hour'")
+        .execute(&pool)
         .await
         .unwrap();
-    ingest::cursor(
-        &pool,
-        "https://user:SECRET@old.nexus.example.org/base?token=x",
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        ingest::other_feeds(&pool, configured).await.unwrap(),
-        ["nexus.example.org", "old.nexus.example.org"]
+    let third = change(
+        "https://example.org/dead?utm_source=feed",
+        "d",
+        "/pub/app/tags/d",
     );
+    batch(&pool, vec![third], Some("one")).await;
+    assert_eq!(state().await.unwrap(), (false, 0, true), "through an alias");
+}
+
+/// A link never read is claimed before an overdue refresh, however long the refresh has waited;
+/// an expedited row still comes first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_new_link_is_claimed_before_an_overdue_refresh(pool: PgPool) {
+    let (refresh, _) = store::ensure_resource_created(&pool, "https://example.org/refresh")
+        .await
+        .unwrap();
+    let (new, _) = store::ensure_resource_created(&pool, "https://example.org/new")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET status='ok',resolved_at=now()-interval '8 days',next_attempt_at=now()-interval '1 day' WHERE id=$1")
+        .bind(&refresh)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, new);
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, refresh);
+    // An expedited refresh goes ahead of a new link.
+    let (later, _) = store::ensure_resource_created(&pool, "https://example.org/later")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET lease_until=NULL,priority_at=now() WHERE id=$1")
+        .bind(&refresh)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, refresh);
+    let claimed = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(claimed.id, later);
+}
+
+/// A database that holds the cursor of another Nexus feed and none of the configured one is
+/// refused, with the reset step and the other feed by host only. One the operator prepared, with
+/// a cursor row for the configured feed (beside the old one, or the old one moved), starts,
+/// under any spelling of its URL (a trailing `/`), and keeps that cursor.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_database_read_from_another_nexus_is_refused(pool: PgPool) {
+    let configured = "http://nexus.example.org:8080";
+    ingest::check_feed(&pool, configured).await.unwrap();
+    let old = "https://user:SECRET@old.nexus.example.org/PRIVATEPATH?token=CANARY";
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES($1,7)")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = ingest::check_feed(&pool, configured).await.unwrap_err();
+    let text = format!("{error:#} {error:?}");
+    assert!(text.contains("old.nexus.example.org"), "{text}");
+    assert!(text.contains(ingest::CHANGING_NEXUS), "{text}");
+    for secret in ["user", "SECRET", "PRIVATEPATH", "CANARY"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+    // The operator gave the configured feed its row beside the old one: it starts.
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES($1,3)")
+        .bind(configured)
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    assert_eq!(ingest::cursor(&pool, configured).await.unwrap().cursor, 3);
+    // Or moved the old row to the new address (the same feed): it starts and reads on.
+    sqlx::query("DELETE FROM feed_cursor WHERE nexus=$1")
+        .bind(configured)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_cursor SET nexus=$1")
+        .bind(format!("{configured}/"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    assert_eq!(ingest::cursor(&pool, configured).await.unwrap().cursor, 7);
+    ingest::check_feed(&pool, &format!("{configured}/"))
+        .await
+        .unwrap();
+    // Another spelling's row beside the configured one's is the same feed: it is dropped.
+    sqlx::query("INSERT INTO feed_cursor(nexus) VALUES($1)")
+        .bind(format!("{configured}//"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    ingest::check_feed(&pool, configured).await.unwrap();
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT nexus,cursor FROM feed_cursor")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, [(configured.to_owned(), 7)]);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -3000,13 +3113,37 @@ async fn our_own_rate_limit_is_its_own_class_and_no_failure(pool: PgPool) {
     assert!(delay > 58.0 && delay <= 60.0, "{delay}");
 }
 
-/// A source that answers `RetryLater` with a class other than `timeout` (a server error, a rate
-/// limit) is rescheduled and never counts toward dead letter, however often it happens.
+/// A service that keeps answering 5xx, 408 or 429 (`RetryLater` of class `upstream`, `http_4xx`
+/// or `http_5xx`): the link waits the named wait or the backoff, whichever is longer, the backoff
+/// doubling while the class stays an upstream wait (one class to another keeps the streak). The
+/// waits are no attempts and no dead letter: a link with no card shows `error` after
+/// `max_failures` of them and is still read. Another outcome starts the streak over; a longer
+/// named wait is never cut.
 #[sqlx::test(migrations = "../../migrations")]
-async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
+async fn upstream_waits_back_off_and_dead_letter(pool: PgPool) {
+    struct Busy(&'static str, u64);
+    #[async_trait::async_trait]
+    impl Resolver for Busy {
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(60)
+        }
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+            Err(pinakes_core::resolver::RetryLater {
+                class: self.0,
+                seconds: self.1,
+            }
+            .into())
+        }
+    }
     let cfg = QueueConfig {
         timeout_grace: 1,
-        max_failures: 2,
+        max_failures: 6,
         backoff_secs: 30,
         max_backoff_secs: 240,
         ..Default::default()
@@ -3014,24 +3151,164 @@ async fn upstream_retries_never_count_toward_dead_letter(pool: PgPool) {
     let id = store::ensure_resource(&pool, "https://example.org/slow-upstream")
         .await
         .unwrap();
-    for _ in 0..6 {
+    let mut rows = vec![];
+    for answer in [
+        Busy("upstream", 60),
+        Busy("http_5xx", 60),
+        Busy("http_4xx", 60),
+        Busy("upstream", 60),
+        // A named wait longer than the capped backoff stays whole.
+        Busy("upstream", 7200),
+        Busy("upstream", 60),
+    ] {
         sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
             .bind(&id)
             .execute(&pool)
             .await
             .unwrap();
         let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
-        queue::run_job(&pool, &DeferredResolver("upstream"), &cfg, &job)
-            .await
-            .unwrap();
-        let row: (i32, i32, bool, f64) = sqlx::query_as("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1")
+        queue::run_job(&pool, &answer, &cfg, &job).await.unwrap();
+        let row: (i32, i32, bool, f64, String) = sqlx::query_as("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,status FROM resource WHERE id=$1")
             .bind(&id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!((row.0, row.1, row.2), (0, 0, false), "{row:?}");
-        assert!(row.3 <= 60.0 && row.3 > 58.0, "{row:?}");
+        rows.push((row.0, row.1, row.2, row.3.round() as i64, row.4));
     }
+    assert_eq!(
+        rows,
+        [
+            (1, 0, false, 60, "pending".to_owned()),
+            (2, 0, false, 60, "pending".to_owned()),
+            (3, 0, false, 120, "pending".to_owned()),
+            (4, 0, false, 240, "pending".to_owned()),
+            (5, 0, false, 7200, "pending".to_owned()),
+            (6, 0, false, 240, "error".to_owned()),
+        ]
+    );
+    // The daemon's own waits (a host's budget, the operator's quota) charge nothing and keep the
+    // streak; another outcome (here a timeout) starts it over.
+    let mut rows = vec![];
+    for answer in [
+        DeferredResolver("rate_limited"),
+        DeferredResolver("quota"),
+        DeferredResolver("timeout"),
+        DeferredResolver("upstream"),
+    ] {
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        queue::run_job(&pool, &answer, &cfg, &job).await.unwrap();
+        rows.push(
+            sqlx::query_as::<_, (i32, i32, String)>(
+                "SELECT timeout_streak,attempts,last_error FROM resource WHERE id=$1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        );
+    }
+    assert_eq!(
+        rows,
+        [
+            (6, 0, "upstream".to_owned()),
+            (6, 0, "upstream".to_owned()),
+            (1, 0, "timeout".to_owned()),
+            (1, 0, "upstream".to_owned()),
+        ]
+    );
+    // A PKARR relay outage is no answer about the link: no attempt, and the streak starts over.
+    sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    queue::run_job(&pool, &DeferredResolver("relay_outage"), &cfg, &job)
+        .await
+        .unwrap();
+    let row: (i32, i32, bool, String) = sqlx::query_as(
+        "SELECT timeout_streak,attempts,dead_letter,last_error FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (0, 0, false, "relay_outage".to_owned()));
+}
+
+/// A short outage never dead-letters a link: at the default settings, an hour of 503s (several
+/// waits, growing) leaves it to be read again, and it reads normally once the service answers.
+/// Only failures that have lasted three days (the backoff of the streak's waits, counted from its
+/// first) dead-letter it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_upstream_outage_dead_letters_only_after_three_days(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let id = store::ensure_resource(&pool, "https://example.org/outage")
+        .await
+        .unwrap();
+    let run = |resolver: &'static (dyn Resolver + Sync)| {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+            queue::run_job(&pool, resolver, &cfg, &job).await.unwrap();
+            sqlx::query_as::<_, (i32, i32, bool, f64, String)>("SELECT timeout_streak,attempts,dead_letter,extract(epoch FROM next_attempt_at-now())::float8,status FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    static BUSY: DeferredResolver = DeferredResolver("http_5xx");
+    let mut waited = 0.0;
+    let mut waits = 0;
+    while waited < 3600.0 {
+        let (streak, attempts, dead, delay, _) = run(&BUSY).await;
+        assert_eq!(
+            (streak, attempts, dead),
+            (waits + 1, 0, false),
+            "after {waited} s"
+        );
+        waited += delay.round();
+        waits += 1;
+    }
+    assert!(waits >= 5, "{waits} waits in an hour");
+    static UP: FakeResolver = FakeResolver { fail: false };
+    let (streak, attempts, dead, _, status) = run(&UP).await;
+    assert_eq!(
+        (streak, attempts, dead, status.as_str()),
+        (0, 0, false, "ok")
+    );
+    // The waits of the defaults: 30 s doubling to an hour, so the 79th failure in a row comes
+    // three days after the first (3810 s, then 71 waits of 3600 s); the 78th does not.
+    assert!(queue::upstream_span(&cfg, 78) < 3 * 86400);
+    assert!(queue::upstream_span(&cfg, 79) >= 3 * 86400);
+    sqlx::query("UPDATE resource SET timeout_streak=77,last_error='http_5xx' WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (streak, _, dead, delay, status) = run(&BUSY).await;
+    assert_eq!(
+        (streak, dead, status.as_str(), delay.round()),
+        (78, false, "ok", 3600.0)
+    );
+    let (streak, attempts, dead, _, status) = run(&BUSY).await;
+    assert_eq!(
+        (streak, attempts, dead, status.as_str()),
+        (79, 0, true, "error")
+    );
 }
 
 fn too_large() -> anyhow::Error {

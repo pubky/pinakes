@@ -20,8 +20,8 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/check-ops` | The test that checks every metric in `ops/alerts.yml` and `ops/grafana/pinakes.json`, and every fetch outcome the rules match, against the registry (`telemetry.rs`), which `cargo test` also runs; then `promtool check rules --lint-fatal ops/alerts.yml` when promtool is installed. |
 | `npm ci --prefix e2e && npm test --prefix e2e` | The e2e harness's own unit tests. |
 | `scripts/e2e --mock` | The whole flow against fixtures, offline: migrations, ingest, queue, resolvers, groups, API. First, that a cancelled `--live-recipes` run drops its database and still reports (`e2e/cancel.test.mjs`, which lets egress reach no host). |
-| `scripts/e2e --isolated-live` | The same against a real homeserver, Nexus and public services. Needs a test identity ([e2e/README.md](e2e/README.md)). Then runs `--live-recipes`. |
-| `scripts/e2e --live-recipes` | Resolves each public `/v1/resolve` example (`data/api-recipes.json`, the sources') live, once, and checks its card's type; a recipe this host could not check (host out of reach, a bot wall, rate limited) is left out with the reason. Needs no identity. |
+| `scripts/e2e --isolated-live` | The same against a real homeserver, Nexus and public services. Needs a test identity ([e2e/README.md](e2e/README.md)) and the operator's contact (`PINAKES__HTTP__CONTACT`). Then runs `--live-recipes`. |
+| `scripts/e2e --live-recipes` | Resolves each public `/v1/resolve` example (`data/api-recipes.json`, the sources') live, once, and checks its card's type; a recipe this host could not check (host out of reach, a bot wall, rate limited) is left out with the reason. Needs no identity, but the operator's contact (`PINAKES__HTTP__CONTACT`). |
 | `scripts/demo-lookup [--base URL]` | Resolves the curated links in `e2e/samples.lookup.json` against a running daemon. Writes nothing to Pubky or Nexus; creates and queues the links in that Pinakes (`POST /v1/resolve`). |
 | `scripts/openapi` | Regenerates `docs/openapi.json`. A test fails while the snapshot differs from the code. |
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`, `python3`). |
@@ -99,8 +99,8 @@ service whose artist page it names). Joins never come from a title or name match
 **Egress.** Every request a reference can steer goes through `resolver::egress::Egress`: never
 build another HTTP client for them (the two others, `resolver/osm.rs` and `nexus.rs`, ask only the
 Nominatim and Nexus URLs the operator sets). The egress pins DNS, refuses private addresses, caps bodies,
-paces each host (one request at a time, at `limits.host_requests_per_second` or the service's
-published rate) and caches answers. A source with a published limit lowers its host's rate; it
+paces each host and each address (one request at a time, at `limits.host_requests_per_second` or the service's
+published rate; a service's own host named with its pace, `budgets` or `PUBLISHED_RATES`, by host alone) and caches answers. A source with a published limit lowers its host's rate; it
 never raises it.
 
 **Secrets.** Keys, tokens and passwords come only from the config file or the environment

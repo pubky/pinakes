@@ -419,11 +419,12 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
         .contains(&json!("web")));
 
     // social by links: tags per link from Nexus, with the viewer's own; a link Nexus does not
-    // know has none.
+    // know has none, and one this instance does not hold is not asked about.
     let (error, social) = call(
         &app,
         "social",
-        json!({"uris": ["https://example.org/concert", "https://example.org/article"],
+        json!({"uris": ["https://example.org/concert", "https://example.org/article",
+                        "https://example.org/never-referenced"],
                "viewer": AUTHOR}),
     )
     .await;
@@ -436,7 +437,7 @@ async fn the_mcp_handshake_and_every_tool(pool: PgPool) {
              "tags": [{"label": "music", "taggers_count": 1, "viewer_tagged": true}]},
             {"uri": "https://example.org/article", "asked": ["https://example.org/article"],
              "found": [], "taggers_count": 0, "tags": []}
-        ]})
+        ], "unknown_uris": ["https://example.org/never-referenced"]})
     );
     let (error, refused) = call(&app, "social", json!({"uris": []})).await;
     assert!(error);
@@ -478,6 +479,9 @@ async fn social_without_a_nexus_is_a_plain_error(pool: PgPool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let older_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, older).await.unwrap() });
+    store::ensure_resource(&pool, "https://example.org/")
+        .await
+        .unwrap();
     for nexus_url in [format!("http://{free}"), older_url] {
         let config = Config {
             nexus_url: nexus_url.clone(),
@@ -687,13 +691,21 @@ async fn social_refuses_more_than_100_entries_and_an_over_long_link(pool: PgPool
         nexus_url,
         ..Config::default()
     };
-    let app = api::router(AppState::new(pool, config).unwrap());
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let links = |n: usize| -> Vec<String> {
         (0..n)
             .map(|i| format!("https://example.org/link/{i}"))
             .collect()
     };
     let too_many = "`ids` (card ids) and `uris` (links) take 1–100 entries together";
+    let link = |bytes: usize| {
+        let start = "https://example.org/";
+        format!("{start}{}", "a".repeat(bytes - start.len()))
+    };
+    // `social` asks the Nexus only about links this instance holds.
+    for uri in links(97).into_iter().chain([link(2048)]) {
+        store::ensure_resource(&pool, &uri).await.unwrap();
+    }
 
     // The three seeded cards and 97 links: 100 entries, each answered.
     let (error, answer) = call(&app, "social", json!({"ids": ids, "uris": links(97)})).await;
@@ -714,10 +726,6 @@ async fn social_refuses_more_than_100_entries_and_an_over_long_link(pool: PgPool
     assert_eq!(asked.load(Ordering::SeqCst), served);
 
     // A link of exactly 2048 bytes is asked about; one byte more is refused.
-    let link = |bytes: usize| {
-        let start = "https://example.org/";
-        format!("{start}{}", "a".repeat(bytes - start.len()))
-    };
     let (error, answer) = call(&app, "social", json!({"uris": [link(2048)]})).await;
     assert!(!error, "{answer}");
     assert_eq!(answer["items"][0]["uri"], link(2048), "{answer}");
@@ -735,6 +743,139 @@ async fn social_refuses_more_than_100_entries_and_an_over_long_link(pool: PgPool
         "{answer}"
     );
     assert_eq!(asked.load(Ordering::SeqCst), served);
+}
+
+/// `social` sends the Nexus only links this instance holds, a card's link or an alias of one:
+/// any other is answered in `unknown_uris`, and a call naming only such links asks the Nexus
+/// nothing. Nothing is stored for them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn social_asks_the_nexus_only_about_links_this_instance_holds(pool: PgPool) {
+    let asked: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = std::sync::Arc::default();
+    let seen = asked.clone();
+    let fake = Router::new().route(
+        "/v1/stream/resources/by_ids",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body["uris"].clone());
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    store::ensure_resource(&pool, "https://example.org/held")
+        .await
+        .unwrap();
+    // A spelling someone referenced is an alias of its root: held too.
+    store::ensure_resource(&pool, "https://example.org/held?utm_source=feed")
+        .await
+        .unwrap();
+    let stored = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM resource")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = stored().await;
+    let config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let (error, answer) = call(
+        &app,
+        "social",
+        json!({"uris": ["https://example.org/unknown", "https://example.org/held",
+                        "https://example.org/held?utm_source=feed", "not a link"]}),
+    )
+    .await;
+    assert!(!error, "{answer}");
+    assert_eq!(
+        answer["unknown_uris"],
+        json!(["https://example.org/unknown", "not a link"]),
+        "{answer}"
+    );
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [json!([
+            "https://example.org/held",
+            "https://example.org/held?utm_source=feed"
+        ])]
+    );
+    let (error, answer) = call(
+        &app,
+        "social",
+        json!({"uris": ["https://example.org/unknown"]}),
+    )
+    .await;
+    assert!(!error, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"items": [], "unknown_uris": ["https://example.org/unknown"]})
+    );
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "no Nexus call for unknown links"
+    );
+    assert_eq!(stored().await, before);
+}
+
+/// The Nexus reads of one `social` call share one deadline, `limits.reach_timeout_secs`: a call
+/// asking about more than 100 links reads two batches, each inside the deadline by itself but
+/// not together, and is answered the reach deadline's 504, not the tool's own later one.
+///
+/// The timing leaves slack on both sides: the first batch takes 1 s, so the second starts about
+/// 3 s before the 4 s deadline; the second takes 3.5 s, well inside the Nexus client's own 10 s
+/// request timeout. A slow machine only makes the call later, which the reach deadline still
+/// cuts; without that deadline the call answers both batches' items.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_batches_of_one_social_call_share_the_reach_deadline(pool: PgPool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    let batches: std::sync::Arc<AtomicUsize> = std::sync::Arc::default();
+    let counted = batches.clone();
+    let slow = Router::new().route(
+        "/v1/stream/resources/by_ids",
+        post(move || {
+            let first = counted.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                let wait = if first { 1000 } else { 3500 };
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                Json(json!([]))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nexus_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, slow).await.unwrap() });
+    // Three typed cards, each asked about by its own link and the links people wrote for it,
+    // and 97 held links: 100 entries, 103 links asked in two batches.
+    let ids = seed_typed(&pool).await;
+    let mut uris = vec![];
+    for n in 0..97 {
+        let uri = format!("https://example.org/held/{n}");
+        store::ensure_resource(&pool, &uri).await.unwrap();
+        uris.push(Value::from(uri));
+    }
+    let mut config = Config {
+        nexus_url,
+        ..Config::default()
+    };
+    config.search.reach_timeout_secs = 4;
+    config.api.request_timeout_secs = 30;
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let (error, answer) = call(&app, "social", json!({"ids": ids, "uris": uris})).await;
+    assert!(error, "{answer}");
+    assert_eq!(answer["status"], 504, "{answer}");
+    assert_eq!(
+        answer["error"],
+        "the Nexus this instance reads did not answer the batch resource view in time",
+        "{answer}"
+    );
+    assert_eq!(batches.load(Ordering::SeqCst), 2);
 }
 
 /// `card` with `resolve: true` is the one tool call that stores a link: it is a preview, and
@@ -834,7 +975,17 @@ async fn no_admin_route_is_reachable_through_mcp(pool: PgPool) {
             ["search", "card", "lookup", "group", "types", "social"].contains(&name),
             "{name}"
         );
-        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
+        // `card` may store and fetch a link (`resolve: true`); every other tool only reads.
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            name != "card",
+            "{name}"
+        );
+        assert_eq!(
+            tool["annotations"]["openWorldHint"],
+            name == "card",
+            "{name}"
+        );
     }
     let card = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                       "params": {"name": "card", "arguments": {"uri": "https://example.org/concert"}}});

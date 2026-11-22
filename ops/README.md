@@ -57,7 +57,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_after_save_failures_total{resolver}` | Saved cards whose steps after the save failed (the alias its page names, an episode's pages), by resolver; the base routes' and each running resolver's series are at 0 from the start. The card stays as saved and no attempt is charged, so the link never dead-letters. A card saved `ok` is read again in full within `limits.max_backoff_secs` (an event platform's slower cadence, where it has one), so the step runs again; any other waits for its own next read. A steady rise is a step that fails every time; the log line `a step after the save failed` names the resource each time |
 | `pinakes_also_on_service_errors_total{service,class}` | Failed also-on requests to a service (`wikidata`, `itunes`, `tidal`, `crossref`, …), by error class; the lookup goes on without that service |
 | `pinakes_also_on_recording_key_conflicts_total{source}` | Also-on runs that keyed a recording another source keys differently on the same resource, by source; both keys stay and the resource joins no recording group |
-| `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service, as each signals one (a 401; a 403 where the service uses it for a refused key, not GitHub's rate limit; a token endpoint answering anything but 200, 408, 429 or 5xx), never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
+| `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service, as each signals one (a 401; a 403 where the service uses it for a refused key, not GitHub's rate limit; a token endpoint answering anything but 200, 408, 429 or 5xx), never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `osm` (Nominatim's 401 or 403), `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
 
 Database metric refreshes are cached for 15 seconds. Overdue excludes dead letters. Every source
 a running resolver reads has its series from the first scrape: fetch counters at 0, change, held
@@ -102,13 +102,14 @@ the share answered 429; both need twenty requests in five minutes.
 `source`: the key is mistyped, expired, revoked or its account lost access (Spotify answers 403
 while the app owner has no Premium plan). Check or rotate that provider's key
 ([api-keys](../docs/api-keys.md)); keys are read only at start, so a new key needs a restart.
-Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster keep asking with the key, so their alert
-holds while lookups keep being refused and clears six hours after the last refusal (a provider
-that takes a key back, a one-off refusal, or no lookup for that provider in six hours). A refusal
-before Prometheus first scrapes a new target is its starting value, so the alert shows only at
-the next refusal. GitHub, CourtListener and Discogs stop sending a refused key
-until restart (the first two then give their links web cards), so theirs holds until a restart
-resets the count.
+Spotify, TIDAL, TMDB, Ticketmaster and the podcasts also-on lookups keep asking with the key;
+GitHub, CourtListener, Discogs and the Podcast Index card source stop sending a refused key for
+an hour (GitHub's, CourtListener's and Podcast Index's links get web cards meanwhile, Discogs
+reads without it) and then send it again. So every
+provider's alert holds while its key keeps being refused and clears six hours after the last
+refusal (a provider that takes a key back, a one-off refusal, or no lookup for that provider in
+six hours). A refusal before Prometheus first scrapes a new target is its starting value, so the
+alert shows only at the next refusal.
 
 Run `scripts/check-ops`: it runs the test that parses the rules and the dashboard and checks
 every metric they name, and every fetch outcome a rule matches, against an initialized registry,

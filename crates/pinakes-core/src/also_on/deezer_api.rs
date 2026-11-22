@@ -27,7 +27,10 @@ pub(crate) async fn answer(cx: &Context, path: &str) -> Result<Option<Value>> {
     }
     let options = crate::resolver::egress::FetchOptions::json();
     let url = format!("{DEEZER_API}/{path}");
-    let fetched = cx.egress.discover(&url, &options, 3600).await?;
+    let fetched = cx
+        .egress
+        .discover(&url, &options, cx.egress.config().discovery_secs)
+        .await?;
     let busy = || super::media::busy("deezer_busy", &fetched);
     match fetched.status {
         200 => {}

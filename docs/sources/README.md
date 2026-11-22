@@ -89,7 +89,7 @@ or got plain web cards before are read by their source.
 - [`google_play`](google_play.md): page hook: a Google Play app's name, icon, developer and category from its page.
 - [`govinfo`](govinfo.md): US public laws, bills, US Code sections and the Statutes at Large.
 - [`greenhouse`](greenhouse.md): Greenhouse job board postings by board and job id.
-- [`hacker_news`](hacker_news.md): Hacker News items by id (and hnsignals.com pages).
+- [`hacker_news`](hacker_news.md): Hacker News items by id.
 - [`huggingface`](huggingface.md): Hugging Face models, datasets and Spaces by repo id.
 - [`inaturalist`](inaturalist.md): iNaturalist observations and taxa by id.
 - [`instagram`](instagram.md): Instagram posts, reels and profiles.
@@ -139,6 +139,16 @@ on the same page. A source that records keys lists their forms (`Source::key_for
 example each): every form searches back as recorded (`GET /v1/search?key=`, tested for every
 registered source), and in a debug build a source records no other form.
 
+### Lookups by ISRC or barcode
+
+The music sources that ask their service's catalogue by an ISRC or a barcode the card already has
+as a key (each source's page says it is one) cover the same cards: another service's track or
+video (a video counts as its recording) by its `isrc:` keys, another service's album or YouTube
+album playlist by its `upc:` keys, and a MusicBrainz recording's or release's page by the keys
+its hub gave. Never the service's own links (each reads its own object's record instead), an
+artist, another playlist or any other page. A source that asks albums only asks those cards'
+albums.
+
 ### An ISRC on several recordings
 
 MusicBrainz gives one ISRC to several recordings at times. When those recordings agree, they
@@ -185,7 +195,7 @@ so one goes without the others needing a change.
 - [`deezer`](deezer.md): Deezer's own ISRCs and barcodes, and another service's track or album on Deezer by its ISRC or barcode.
 - [`spotify_isrc`](spotify_isrc.md): another service's track or album on Spotify by its ISRC or barcode (with the operator's Spotify app credentials).
 - [`tidal_isrc`](tidal_isrc.md): another service's track or album on TIDAL by its ISRC or barcode (with the operator's TIDAL credentials).
-- [`itunes`](itunes.md): Apple Music albums by barcode, and an Apple Music track's preview.
+- [`itunes`](itunes.md): Apple Music albums by barcode (a maybe: iTunes' answer cannot be read back), and an Apple Music track's preview.
 - [`itunes_song`](itunes_song.md): Apple Music's song for another service's track, by its album's barcode, place and title (a maybe: a match, unkeyed).
 - [`youtube_match`](youtube_match.md): a label's YouTube upload on Deezer and TIDAL, by artist, title and length (a maybe: a match, unkeyed).
 - [`wikipedia`](wikipedia.md): the other editions of a Wikipedia article.
@@ -238,10 +248,11 @@ its registry lines, nothing else; `scripts/test` and `scripts/e2e --mock` then p
   (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
 - its live end-to-end samples, `e2e/samples/<name>.json`.
 
-An instance that runs the build without the source must also lose the source's
-`[sources.<name>]` block (and its `PINAKES__SOURCES__<NAME>__…` variables) from its own
-configuration first: a block for a source the build does not have stops the daemon at startup
-(`unknown source [sources.<name>]`), as a misspelled name does.
+An instance that runs the build without the source may keep a `[sources.<name>]` block (or
+`PINAKES__SOURCES__<NAME>__ENABLED`) that only sets `enabled`: the daemon logs a warning and
+ignores it. A block that still carries a `token` or a `key` stops the daemon at startup
+(`unknown source [sources.<name>]`), as a misspelled name with one does; remove it (and its
+`PINAKES__SOURCES__<NAME>__TOKEN` or `__KEY` variable) with the source.
 
 `scripts/check-removals [--tests] [NAME…]` proves it: it removes each source on a scratch
 worktree by this list, checks that nothing of the source's own is left (it looks for the
@@ -259,7 +270,7 @@ Shared code stays (`sources/kit.rs`, `sources/social.rs`, `sources/biodiversity.
 `also_on/*_api.rs`); code only one source uses is in that source's files, so a removal leaves no
 unused code behind. The exceptions stay as shared code: test helpers for any source, a hook of the
 `Source` trait that one source implements today (`apply_title`), and helpers in `sources/mod.rs` and
-`sources/kit.rs` with one caller today (`card_of`, `kit::unix_ms`). Shared tables and the stored
+`sources/kit.rs` with one caller today (`kit::unix_ms`). Shared tables and the stored
 document's fields stay as they are, also when the source that goes was the only one to fill them: a
 card type in `data/local-types.json` or `kit::DATED` (the Bitcoin types), a related entry's
 `amount_sat`. A source that needs to know whether another one runs asks by its ID

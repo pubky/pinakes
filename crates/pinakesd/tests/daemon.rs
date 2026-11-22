@@ -10,7 +10,7 @@ use tokio::process::{Child, Command};
 
 /// A config for the test database on free loopback ports, with nothing that reaches out: no
 /// Nexus listens on the discard port, and Pubky and the canaries are off.
-fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String) {
+fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String, String) {
     let mut database = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
     database.set_path(&format!(
         "/{}",
@@ -37,7 +37,11 @@ fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String) {
         ),
     )
     .unwrap();
-    (path, format!("http://127.0.0.1:{listen}"))
+    (
+        path,
+        format!("http://127.0.0.1:{listen}"),
+        format!("http://127.0.0.1:{admin}"),
+    )
 }
 fn daemon(config: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pinakesd"));
@@ -65,13 +69,18 @@ async fn run(config: &Path, args: &[&str]) -> Output {
         .unwrap_or_else(|_| panic!("pinakesd {args:?} did not return within a minute"))
         .unwrap()
 }
-async fn stop(mut child: Child) {
+/// Send the daemon SIGTERM.
+fn terminate(child: &Child) {
     let pid = child.id().unwrap().to_string();
     assert!(std::process::Command::new("kill")
         .args(["-TERM", &pid])
         .status()
         .unwrap()
         .success());
+}
+/// SIGTERM, then a clean exit within 30 s.
+async fn stop(mut child: Child) {
+    terminate(&child);
     let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
         .await
         .expect("pinakesd stops on SIGTERM")
@@ -83,7 +92,10 @@ async fn stop(mut child: Child) {
 async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool: PgPool) {
     let dir =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
-    let (config, base) = config(&pool, &dir);
+    let (config, base, admin) = config(&pool, &dir);
+    // Nothing listens yet: the health check fails.
+    let unhealthy = run(&config, &["healthcheck"]).await;
+    assert!(!unhealthy.status.success());
     let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
     let mut serving = daemon(&config, &[])
         .stdout(log.try_clone().unwrap())
@@ -106,6 +118,17 @@ async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool:
         assert!(started.elapsed() < Duration::from_secs(60), "not serving");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    // The admin listener's health route, without the admin token, and the image's check of it.
+    let health = http.get(format!("{admin}/healthz")).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+    let healthy = run(&config, &["healthcheck"]).await;
+    assert!(
+        healthy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&healthy.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&healthy.stdout), "healthy\n");
 
     // A second daemon on the same database is refused, a re-extraction included.
     let refused = run(&config, &["reextract", "all"]).await;
@@ -159,7 +182,7 @@ async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool:
 async fn the_daemon_stops_when_it_loses_the_instance_lock(pool: PgPool) {
     let dir =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
-    let (config, base) = config(&pool, &dir);
+    let (config, base, _) = config(&pool, &dir);
     let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
     let mut serving = daemon(&config, &[])
         .stdout(log.try_clone().unwrap())
@@ -201,5 +224,141 @@ async fn the_daemon_stops_when_it_loses_the_instance_lock(pool: PgPool) {
         "{log}"
     );
     assert!(log.contains("instance lock ended before shutdown"), "{log}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A daemon on a database that holds another Nexus feed's cursor does not start: its error names
+/// the reset step. Once the operator has moved the cursor row to the configured address (here
+/// spelt with a trailing `/`, the same URL), it starts and keeps that cursor.
+#[sqlx::test(migrations = false)]
+async fn the_daemon_refuses_a_database_read_from_another_nexus(pool: PgPool) {
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
+    let (config, base, _) = config(&pool, &dir);
+    let migrated = run(&config, &["--migrate"]).await;
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    sqlx::query("INSERT INTO feed_cursor(nexus,cursor) VALUES('http://old.nexus.example.org',5)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = run(&config, &[]).await;
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("old.nexus.example.org"), "{stderr}");
+    assert!(
+        stderr.contains(pinakes_core::ingest::CHANGING_NEXUS),
+        "{stderr}"
+    );
+    sqlx::query("UPDATE feed_cursor SET nexus='http://127.0.0.1:9/'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
+    let mut serving = daemon(&config, &[])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let http = reqwest::Client::new();
+    let started = Instant::now();
+    while !http
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+    {
+        assert!(
+            serving.try_wait().unwrap().is_none(),
+            "pinakesd exited; see {}",
+            dir.join("pinakesd.log").display()
+        );
+        assert!(started.elapsed() < Duration::from_secs(60), "not serving");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stop(serving).await;
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT nexus,cursor FROM feed_cursor")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, [("http://127.0.0.1:9".to_owned(), 5)]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Once a daemon starts its shutdown, its admin `/healthz` answers 503. The admin listener stops
+/// taking connections then, so the request that sees it is one already in flight: here its last
+/// line arrives after the signal, once the public listener is closed, and the daemon still exits
+/// cleanly after answering it.
+#[sqlx::test(migrations = false)]
+async fn a_stopping_daemon_answers_healthz_with_503(pool: PgPool) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
+    let (config, base, admin) = config(&pool, &dir);
+    let log = std::fs::File::create(dir.join("pinakesd.log")).unwrap();
+    let mut serving = daemon(&config, &[])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let http = reqwest::Client::new();
+    let started = Instant::now();
+    while !http
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+    {
+        assert!(
+            serving.try_wait().unwrap().is_none(),
+            "pinakesd exited; see {}",
+            dir.join("pinakesd.log").display()
+        );
+        assert!(started.elapsed() < Duration::from_secs(60), "not serving");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let health = http.get(format!("{admin}/healthz")).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+
+    // A health request with all but its last line sent, then the signal.
+    let admin = admin.strip_prefix("http://").unwrap();
+    let public = base.strip_prefix("http://").unwrap();
+    let mut request = tokio::net::TcpStream::connect(admin).await.unwrap();
+    request
+        .write_all(format!("GET /healthz HTTP/1.1\r\nHost: {admin}\r\n").as_bytes())
+        .await
+        .unwrap();
+    // The daemon must have accepted the connection and started reading the request before the
+    // signal; a connection it has not yet taken is dropped at shutdown and the test fails.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    terminate(&serving);
+    // The shutdown has started once the public listener no longer takes connections.
+    let started = Instant::now();
+    while tokio::net::TcpStream::connect(public).await.is_ok() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the public listener still takes connections"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // `stopping` is set by a task of its own that the same shutdown wakes.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    request.write_all(b"\r\n").await.unwrap();
+    let mut answer = String::new();
+    tokio::time::timeout(Duration::from_secs(10), request.read_to_string(&mut answer))
+        .await
+        .expect("the health request is answered")
+        .unwrap();
+    assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+    assert!(answer.ends_with("stopping"), "{answer}");
+    // Already signalled: it exits by itself once the request is answered.
+    let status = tokio::time::timeout(Duration::from_secs(30), serving.wait())
+        .await
+        .expect("pinakesd stops on SIGTERM")
+        .unwrap();
+    assert!(status.success(), "{status}");
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -172,10 +172,10 @@ async fn item(cx: &Context, kind: Kind, id: &str) -> Result<Option<Value>> {
 /// and one TIDAL leaves out finds that it has none.
 async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
     let (client_id, secret, slot) = pair_of(cx)?;
-    let mut s = client_credentials::slot(&slot).await;
+    let mut s = client_credentials::slot(&slot, cx.config.also_on.refusal_hold_secs).await;
     s.unless_busy(&TIDAL)?;
     let token = s.token(&TIDAL, cx, &client_id, &secret).await?;
-    // A batch asks only for what its items don't have cached (a retry's, within the hour).
+    // A batch asks only for what its items don't have cached (a retry's, within the discovery cache's lifetime).
     let mut ids: Vec<&str> = ids.to_vec();
     for id in ids.clone() {
         if cx
@@ -208,7 +208,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
         401 => return Err(s.reject(&TIDAL, &token)),
         403 => {
             s.refuse(&TIDAL, "forbidden", 403);
-            return Err(TIDAL.refused());
+            return Err(TIDAL.refused(s.hold));
         }
         429 | 500..=599 => {
             s.cool_down(fetched.retry_after_secs);
@@ -244,8 +244,11 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
             location: None,
             content_type: JSON_API.into(),
             body: serde_json::to_vec(&body)?,
+            charset: None,
         };
-        cx.egress.seed(&one, &options, 3600, seeded).await?;
+        cx.egress
+            .seed(&one, &options, cx.egress.config().discovery_secs, seeded)
+            .await?;
     }
     Ok(())
 }
@@ -330,7 +333,7 @@ mod tests {
         // A token issued two minutes ago, which TIDAL now rejects.
         let slot = slot_key(&TIDAL, "rotate-id", "rotate-secret");
         let now = Instant::now();
-        *client_credentials::slot(&slot).await = Slot {
+        *client_credentials::slot(&slot, 300).await = Slot {
             token: Some(Issued {
                 token: "old".into(),
                 at: now.checked_sub(Duration::from_secs(120)).unwrap_or(now),

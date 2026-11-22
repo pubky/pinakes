@@ -71,9 +71,9 @@ pub struct Config {
     /// whole instance.
     #[serde(skip)]
     pub preview_new_per_hour: usize,
-    /// The share of those one client address may take in an hour; 0 is no share. It is only a
-    /// client's own where clients reach the listener directly: behind a proxy every client has
-    /// its address.
+    /// The share of those one client address may take in an hour; 0 is no share. The client
+    /// address is the connecting one, or behind a proxy in `api.trusted_proxies` the one it
+    /// forwards (`api::client_address`).
     #[serde(skip)]
     pub preview_new_per_client_per_hour: usize,
     #[serde(skip)]
@@ -360,7 +360,7 @@ impl Config {
             grace_days: 7,
             preview_grace_hours: 24,
             preview_new_per_hour: 1000,
-            preview_new_per_client_per_hour: 0,
+            preview_new_per_client_per_hour: 100,
             // The web route (and the event routes on it) fetches arbitrary hosts: twice the
             // other resolvers' workers and rate.
             web: ResolverConfig {
@@ -718,6 +718,14 @@ pub struct EgressConfig {
     /// `deny_hosts` are: switching a source off stops every call to its API.
     #[serde(skip)]
     pub off_hosts: Vec<String>,
+    /// The body cap of a MusicBrainz or Wikidata answer (`hubs`): a much-edited item or an
+    /// artist with very many relations is megabytes, above the default cap.
+    #[serde(skip)]
+    pub hub_body_bytes: usize,
+    /// How long an answer the also-on sources, lookups and hubs ask for is shared
+    /// (`Egress::discover`), in seconds: two sources asking the same thing ask once.
+    #[serde(skip)]
+    pub discovery_secs: u64,
 }
 impl Default for EgressConfig {
     fn default() -> Self {
@@ -730,6 +738,8 @@ impl Default for EgressConfig {
             source_rates: BTreeMap::new(),
             html_head_bytes: 4 * 1024 * 1024,
             off_hosts: vec![],
+            hub_body_bytes: crate::hubs::DEFAULT_BODY_CAP,
+            discovery_secs: 3600,
         }
     }
 }
@@ -872,10 +882,32 @@ pub struct ApiConfig {
     pub swagger_ui: bool,
     /// Serve the MCP endpoint, `POST /mcp`, on the public listener (docs/api.md, Agents).
     pub mcp: bool,
+    /// The reverse proxies in front of the public listener: addresses (`10.0.0.2`) or networks
+    /// (`10.0.0.0/8`, `fd00::/8`). A request from one is counted under the right-most
+    /// `X-Forwarded-For` entry that is not itself one of them (`api::client_address`). Empty,
+    /// the default: the connecting address is the client, and the header is never read.
+    pub trusted_proxies: Vec<String>,
 }
 /// The seconds an MCP tool call's deadline lies inside the request's own.
 const TOOL_MARGIN_SECS: u64 = 2;
 impl ApiConfig {
+    /// `trusted_proxies`, parsed: an address is a network of that one address.
+    pub fn trusted_proxy_nets(&self) -> Result<Vec<ipnet::IpNet>> {
+        self.trusted_proxies
+            .iter()
+            .map(|entry| {
+                entry
+                    .parse::<ipnet::IpNet>()
+                    .map(|net| net.trunc())
+                    .or_else(|_| entry.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "api.trusted_proxies: {entry:?} is not an IP address or network (10.0.0.2, 10.0.0.0/8)"
+                        )
+                    })
+            })
+            .collect()
+    }
     /// How long one MCP tool call may take, all its requests together, from the start of the
     /// request that carries it: `request_timeout_secs` less two seconds, so the tool's own
     /// failure is written before the request's deadline answers 504 in its place.
@@ -898,6 +930,7 @@ impl Default for ApiConfig {
             cors_allow_origins: vec!["*".into()],
             swagger_ui: true,
             mcp: true,
+            trusted_proxies: vec![],
         }
     }
 }
@@ -1101,6 +1134,7 @@ impl Config {
                 bail!("api.cors_allow_origins: {origin:?} is not an origin (scheme://host[:port], no path or trailing slash)");
             }
         }
+        self.api.trusted_proxy_nets()?;
         let admin: std::net::SocketAddr =
             self.admin_listen.parse().context("invalid admin_listen")?;
         if self.admin_token.as_ref().is_some_and(|t| {
@@ -1187,6 +1221,8 @@ impl Config {
             || !(8..=256).contains(&a.facts_per_source)
             || !(1..=16).contains(&a.concurrency)
             || !(1..=86400).contains(&a.retry_secs)
+            || !(120..=86400).contains(&a.refusal_hold_secs)
+            || !(1024 * 1024..=16 * 1024 * 1024).contains(&a.watch_page_bytes)
         {
             bail!("invalid also_on limits");
         }
@@ -1200,6 +1236,17 @@ impl Config {
             .contains(&self.egress.html_head_bytes)
         {
             bail!("limits.html_head_bytes must be 1–16 MB");
+        }
+        if !(1024 * 1024..=64 * 1024 * 1024).contains(&self.egress.hub_body_bytes) {
+            bail!("limits.hub_body_bytes must be 1–64 MiB");
+        }
+        // The cache keeps an answer at least an hour: a shorter lifetime would not be kept.
+        if !(crate::resolver::egress::MIN_ANSWER_SECS..=86400).contains(&self.egress.discovery_secs)
+        {
+            bail!(
+                "limits.discovery_cache_secs must be {}–86400",
+                crate::resolver::egress::MIN_ANSWER_SECS
+            );
         }
         if !(100..=7000).contains(&self.pubky.pkarr_relay_timeout_ms) {
             bail!("limits.pkarr_relay_timeout_ms must be 100–7000");
@@ -1539,6 +1586,71 @@ mod tests {
                 .max_period_dates,
             2
         );
+    }
+    /// The hub body cap, the discovery cache lifetime, the refusal hold and the watch-page cap
+    /// are limits: their defaults, applied where they are read, and held to their ranges.
+    #[test]
+    fn the_also_on_caps_and_waits_are_limits() {
+        let limits = Limits::default();
+        assert_eq!(limits.hub_body_bytes, 8 * 1024 * 1024);
+        assert_eq!(limits.discovery_cache_secs, 3600);
+        assert_eq!(limits.also_on_refusal_hold_secs, 300);
+        assert_eq!(limits.also_on_watch_page_bytes, 3 * 1024 * 1024);
+        let set = with(serde_json::json!({"limits": {
+            "hub_body_bytes": 16 * 1024 * 1024,
+            "discovery_cache_secs": 7200,
+            "also_on_refusal_hold_secs": 900,
+            "also_on_watch_page_bytes": 4 * 1024 * 1024,
+        }}))
+        .unwrap();
+        assert_eq!(set.egress.hub_body_bytes, 16 * 1024 * 1024);
+        assert_eq!(set.egress.discovery_secs, 7200);
+        assert_eq!(set.also_on.refusal_hold_secs, 900);
+        assert_eq!(set.also_on.watch_page_bytes, 4 * 1024 * 1024);
+        let egress = policy(&set);
+        assert_eq!(crate::hubs::body_cap(&egress), 16 * 1024 * 1024);
+        for (key, value) in [
+            ("hub_body_bytes", 1024),
+            ("hub_body_bytes", 65 * 1024 * 1024),
+            ("discovery_cache_secs", 3599),
+            ("discovery_cache_secs", 86401),
+            // A refusal's wait must stay above a rejected token's minute (`client_credentials`).
+            ("also_on_refusal_hold_secs", 60),
+            ("also_on_refusal_hold_secs", 86401),
+            ("also_on_watch_page_bytes", 1024),
+            ("also_on_watch_page_bytes", 17 * 1024 * 1024),
+        ] {
+            assert!(
+                with(serde_json::json!({"limits":{key:value}})).is_err(),
+                "{key}={value}"
+            );
+        }
+    }
+    /// Every `limits.discovery_cache_secs` the config accepts is how long the cache keeps a
+    /// successful answer: replayed until then, gone after.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_is_cached_for_the_discovery_cache_secs() {
+        use crate::resolver::egress::{FetchOptions, Fetched};
+        let url = "https://example.org/answer";
+        for secs in [3600, 7200, 86400] {
+            let set = with(serde_json::json!({"limits": {"discovery_cache_secs": secs}})).unwrap();
+            let egress = policy(&set);
+            let options = FetchOptions::default();
+            let answer = Fetched::answer(
+                url::Url::parse(url).unwrap(),
+                200,
+                "application/json".into(),
+                b"{}".to_vec(),
+            );
+            egress
+                .seed(url, &options, egress.config().discovery_secs, answer)
+                .await
+                .unwrap();
+            tokio::time::advance(std::time::Duration::from_secs(secs - 1)).await;
+            assert!(egress.discovered(url, &options).await.unwrap(), "{secs}");
+            tokio::time::advance(std::time::Duration::from_secs(2)).await;
+            assert!(!egress.discovered(url, &options).await.unwrap(), "{secs}");
+        }
     }
     #[test]
     fn operations_md_documents_every_limit() {
@@ -2693,6 +2805,17 @@ limits! {
     also_on_concurrency: usize = |c| c.also_on.concurrency => [|c, v| c.also_on.concurrency = v],
     /// First retry of a failed source run (seconds); doubles up to an hour.
     also_on_retry_secs: u64 = |c| c.also_on.retry_secs => [|c, v| c.also_on.retry_secs = v],
+    /// How long a service's refusal of the operator's credentials (TIDAL, Spotify, Podcast Index)
+    /// is held before it is asked again (seconds, 120–86400).
+    also_on_refusal_hold_secs: u64 = |c| c.also_on.refusal_hold_secs => [|c, v| c.also_on.refusal_hold_secs = v],
+    /// The largest YouTube watch page `youtube_match` reads (bytes, 1–16 MiB); a larger one is
+    /// refused.
+    also_on_watch_page_bytes: usize = |c| c.also_on.watch_page_bytes => [|c, v| c.also_on.watch_page_bytes = v],
+    /// The body cap of a MusicBrainz or Wikidata answer (bytes, 1–64 MiB).
+    hub_body_bytes: usize = |c| c.egress.hub_body_bytes => [|c, v| c.egress.hub_body_bytes = v],
+    /// How long an answer the also-on sources, lookups and hubs ask for is shared (seconds,
+    /// 3600–86400: the cache keeps a successful answer at least an hour).
+    discovery_cache_secs: u64 = |c| c.egress.discovery_secs => [|c, v| c.egress.discovery_secs = v],
     /// Longest calendar content line (bytes).
     event_max_line_bytes: usize = |c| c.event.max_line_bytes => [|c, v| c.event.max_line_bytes = v],
     /// Most date values in one calendar property.

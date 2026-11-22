@@ -292,8 +292,8 @@ async fn a_copy_that_claims_a_shows_apple_id_joins_nothing_of_it() {
         .await
         .unwrap();
     let theirs = item_key(own, "prx_7057_141e0c43-f935-41de-be94-708448052c4d").unwrap();
-    let file = enclosure_key("https://copy.example/a.mp3").unwrap();
-    assert_eq!(keys(&found), [theirs.as_str(), file.as_str()]);
+    // Its file is what its own feed says: no service names it, so it is no key.
+    assert_eq!(keys(&found), [theirs.as_str()]);
     assert_eq!(sites(&found), ["Podcast feed"], "its own RSS item only");
     // Darknet Diaries' own GUID, which Podcast Index says the real feed owns: nothing of the
     // show at all. Its own audio is still its stream: a stream joins nothing.
@@ -1182,5 +1182,39 @@ async fn an_unreadable_feed_has_no_guid_and_fails_nothing() {
         found.facts,
         [Fact::new("podcast_guid", derived_guid(feed).unwrap(),)],
         "the derived GUID, a fact only"
+    );
+}
+
+/// A page that names a show's feed (a player's show page) is keyed with the show's keys only when
+/// the feed names it as its page (the channel's `<link>`); otherwise the show's links stay, none
+/// of them a key of the page.
+#[tokio::test]
+async fn a_show_page_takes_the_shows_keys_only_when_its_feed_names_it() {
+    let feed = "https://feeds.podcastindex.org/pc20.xml";
+    let page_card = |uri: &str| {
+        let mut doc = ResourceMeta::new(uri, "fountain", 3600);
+        doc.attributes.insert("podcast_feed".into(), feed.into());
+        subject(uri, Some("PodcastSeries"), Some(doc))
+    };
+    let cx = cx(Recorded::new(), indexed());
+    // The feed's channel names http://podcastindex.org as its page, not this one.
+    let found = Podcasts
+        .lookup(&cx, &page_card("https://fountain.fm/show/pc20"))
+        .await
+        .unwrap();
+    assert!(found.keys.is_empty(), "{:?}", keys(&found));
+    assert!(!found.links.is_empty());
+    assert!(found.links.iter().all(|l| l.key.is_none()));
+    // The page the feed names is the show's.
+    let found = Podcasts
+        .lookup(&cx, &page_card("http://podcastindex.org"))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&found),
+        [
+            "podcast:apple:1584274529",
+            "podcast:guid:917393e3-1b1e-5cef-ace4-edaa54e1f810"
+        ]
     );
 }

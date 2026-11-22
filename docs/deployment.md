@@ -56,6 +56,11 @@ directory's ownership. For an existing volume or bind mount, provision write acc
 writes the ODbL dump through SQL and does not require a PostgreSQL client in the image. Run
 database backups with a separate PostgreSQL client matching the server major version.
 
+The image's `HEALTHCHECK` runs `pinakesd healthcheck`, which asks `GET /healthz` on the admin
+listener (`admin_listen` as the environment sets it, on loopback inside the container; no token
+needed): healthy when the database answers within a second and no background task has ended.
+`docker inspect --format '{{.State.Health.Status}}' pinakes` shows it.
+
 Put a TLS proxy in front of the loopback-published public API. Port 9090 remains on loopback
 inside the container; do not publish it or use host networking to reach it. Private monitoring
 needs an explicitly reviewed admin network configuration, bearer token and allowed admin hosts
@@ -242,10 +247,14 @@ not just `resource`, and budget backup retention separately from the table's sin
 - A request that takes longer than `limits.request_timeout_secs` (30) is answered 504. The
   listeners set no limit on connections, idle time or how slowly a request's headers arrive:
   those are the proxy's to set.
-- The public API ignores forwarded client-IP headers. Behind a proxy its direct-peer budget is
-  shared by that proxy's users; enforce per-client limits at the edge. For the same reason leave
-  `limits.preview_new_per_client_per_hour` at 0 behind a proxy: a share of new previews keyed on
-  the proxy's address would cap the whole instance. Do not expose admin routes
+- Behind the TLS proxy, list its address as the daemon sees it in `api.trusted_proxies` (for
+  the container above, the Docker bridge gateway, such as `["172.17.0.1"]`) and have the proxy
+  append the client address to `X-Forwarded-For` (nginx:
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). The per-IP budgets, dump
+  downloads and the per-client share of new previews (`limits.preview_new_per_client_per_hour`,
+  100 by default) are then each client's own. With the list empty (the default) the header is
+  never read and every client behind the proxy shares the proxy's budget
+  ([operations](operations.md#clients-and-budgets)). Do not expose admin routes
   by forwarding the public listener to the admin listener.
 - Public CORS defaults to `["*"]` without cookies or bearer credentials. Use exact origins or
   `[]` where appropriate; admin routes send no CORS headers.

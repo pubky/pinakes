@@ -288,13 +288,23 @@ pub async fn prepare(
         .max(container.limits.cadence_floor)
         .max(container.held_retry_secs)
         .max(3600);
-    let retry = floor
-        .saturating_mul(
-            1u64.checked_shl(holds.saturating_sub(1))
-                .unwrap_or(u64::MAX),
-        )
-        .min(7 * 86400)
-        .max(floor);
+    // A first hold is confirmed soon (`held_retry_secs`, never sooner than the feed's cadence
+    // floor): an identical snapshot then releases it before the feed changes again. Later holds
+    // back off from the normal cadence.
+    let retry = if holds <= 1 {
+        container
+            .held_retry_secs
+            .max(container.limits.cadence_floor)
+            .max(1)
+    } else {
+        floor
+            .saturating_mul(
+                1u64.checked_shl(holds.saturating_sub(1))
+                    .unwrap_or(u64::MAX),
+            )
+            .min(7 * 86400)
+            .max(floor)
+    };
     let mut plan = Prepared {
         source: container
             .cursor

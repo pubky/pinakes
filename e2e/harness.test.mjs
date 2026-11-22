@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, liveRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+import { operatorContact, dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, liveRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
 test('an interrupted run starts no recipe stack, and one interrupted while it runs is stopped', { timeout: 5000 }, async () => {
   // A stand-in for `e2e_stack --live-recipes`: it prints its line and closes when told to, and
   // closes as a signal ends it when killed.
@@ -288,4 +288,10 @@ test('a search check re-reads a card that became an alias and finds its root', a
   // A card that is never found fails the check at its timeout.
   const stuck = new Map([['event', { id: 'a' }]]);
   await assert.rejects(findsEvery('type=Event', async () => ({ items: [] }), [tag], stuck, async () => {}, 300), /type=Event/);
+});
+test('a live run needs the operator\'s contact: there is no default', () => {
+  for (const env of [{}, { PINAKES__HTTP__CONTACT: '' }, { PINAKES__HTTP__CONTACT: '  ' }]) {
+    assert.throws(() => operatorContact(env), /PINAKES__HTTP__CONTACT/);
+  }
+  assert.equal(operatorContact({ PINAKES__HTTP__CONTACT: ' ops@example.org ' }), 'ops@example.org');
 });

@@ -2,8 +2,9 @@
 //! page's own JSON-LD or the shop's own product record (a page hook in `sources`).
 //!
 //! The barcode (`gtin`) is the product's GTIN-13 (`barcode::gtin13`), from the product's own
-//! `gtin`, `gtin8`, `gtin12`, `gtin13`, `gtin14` or `isbn`, never from text. The also-on
-//! sources make it the key `gtin:` that groups the same product on several shops. A price and an
+//! `gtin`, `gtin8`, `gtin12`, `gtin13`, `gtin14` or `isbn`, never from text. A page's own
+//! barcode is a fact; when a service's own record states it, the also-on sources make it the key
+//! `gtin:` that groups the same product on several shops. A price and an
 //! availability are facts with the time they were read (`price_at`), never identity.
 //!
 //! Amazon pages are never fetched (the egress refuses them, a redirect's target too): an Amazon

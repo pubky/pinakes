@@ -345,6 +345,60 @@ async fn recordings_nothing_exact_joins_name_the_ones_they_may_be(pool: PgPool) 
     assert_eq!(named(&card(&config, &pool, &mb).await), Vec::<&str>::new());
 }
 
+/// Any page may copy a track's title, artist and length into its markup. Such a page never comes
+/// before a recording whose artist and length a source states, on a card or a search card,
+/// whatever their scores and addresses.
+#[sqlx::test(migrations = "../../migrations")]
+async fn recordings_a_source_states_come_before_pages_that_state_themselves(pool: PgPool) {
+    let config = Config::default();
+    let track = recording(
+        &pool,
+        "https://tidal.com/track/77",
+        "Copied Song",
+        Some("Singer"),
+        Some("PT3M20S"),
+    )
+    .await;
+    let mut copies = vec![];
+    for n in 1..=3 {
+        copies.push(
+            recording(
+                &pool,
+                &format!("https://aaa.example/{n}"),
+                "Copied Song",
+                Some("Singer"),
+                Some("PT3M20S"),
+            )
+            .await,
+        );
+    }
+    // A service's track whose page states nothing: its artist is a source's fact and its length
+    // unknown, so its pair scores below the copies'.
+    let mut doc = ResourceMeta::new("https://zzz.example/track/77", "web", 86400);
+    doc.set_type("MusicRecording");
+    doc.name = Some("Copied Song".into());
+    let vouched = save(&pool, &doc).await;
+    found(&pool, &vouched, "service", &[], &[("artist", "Singer")]).await;
+    pass(&pool, &config).await;
+    let read = card(&config, &pool, &track).await;
+    assert_eq!(named(&read).len(), 4, "{read}");
+    assert_eq!(named(&read)[0], vouched.as_str(), "{read}");
+    assert_eq!(read["maybe_same"][0]["score"], 0.7, "{read}");
+    // A search card keeps three: the vouched one first.
+    let (page, _) = response(&config, &pool, "/v1/search?q=copied").await;
+    let row = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == track.as_str())
+        .unwrap_or_else(|| panic!("{page}"));
+    assert_eq!(named(row).len(), 3, "{row}");
+    assert_eq!(named(row)[0], vouched.as_str(), "{row}");
+    // A copy's card lists the vouched one first too, ahead of the other copies and the track.
+    let copy = card(&config, &pool, &copies[0]).await;
+    assert_eq!(named(&copy)[0], vouched.as_str(), "{copy}");
+}
+
 /// The pass compares lengths in whole seconds: two recordings up to `LENGTH_WINDOW_SECS` (3 s)
 /// apart agree and pair with score 1; 4 s apart they are no pair.
 #[sqlx::test(migrations = "../../migrations")]

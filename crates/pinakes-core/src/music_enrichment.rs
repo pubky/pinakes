@@ -71,9 +71,6 @@ pub const OTHER_WIKIPEDIAS: [&str; 10] =
     ["de", "fr", "es", "it", "nl", "pt", "sv", "pl", "ja", "ru"];
 /// At most this many of an artist's Discogs artist pages are looked up on Wikidata.
 pub const DISCOGS_LOOKUPS: usize = 2;
-/// How long an answer stays in the egress cache (seconds); a card is read again at its own
-/// refresh.
-const CACHE_SECS: u64 = 3600;
 
 /// The image and description found for one entity.
 #[derive(Clone, Debug, PartialEq)]
@@ -798,7 +795,7 @@ async fn read_summary(
         .discover(
             &crate::wikipedia::summary_url(&article),
             &json_options(),
-            CACHE_SECS,
+            egress.config().discovery_secs,
         )
         .await
     {

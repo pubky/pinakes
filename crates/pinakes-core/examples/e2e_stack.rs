@@ -207,6 +207,7 @@ impl Transport for Fixture {
             location: None,
             retry_after_secs: 60,
             validators: Default::default(),
+            charset: None,
         })
     }
 }
@@ -217,9 +218,8 @@ struct Write {
 }
 /// The most sample resources one live run fetches.
 const MAX_LIVE_SAMPLES: usize = 128;
-/// The contact a run gives the services it reads when the operator set none (`http.contact`);
-/// `e2e/harness.mjs`'s preflight fetches name the same one.
-const E2E_CONTACT: &str = "info@synonym.to";
+/// The contact the mock run's clients send: it reads only this stack's own answers.
+const MOCK_CONTACT: &str = "e2e@example.invalid";
 
 async fn write(State(f): State<Fixture>, Json(w): Json<Write>) -> axum::http::StatusCode {
     if !w.path.starts_with("/pub/pinakes.e2e/tags/") {
@@ -440,8 +440,8 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     cfg.osm.requests_per_second = 10.;
     cfg.canary.enabled = false;
     // Services that need a contact (SEC EDGAR) wait without one.
-    cfg.egress.contact = E2E_CONTACT.into();
-    cfg.osm.contact = E2E_CONTACT.into();
+    cfg.egress.contact = MOCK_CONTACT.into();
+    cfg.osm.contact = MOCK_CONTACT.into();
     cfg.pubky.enabled = false;
     cfg.api.requests_per_minute = 10000;
     // The harness tags as one author: one shared tagger relates two samples.
@@ -457,6 +457,7 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
             pinakes_core::sources::Switch {
                 enabled: true,
                 token: Some("e2e-token".into()),
+                ..Default::default()
             },
         );
     }
@@ -527,8 +528,11 @@ async fn run(pool: sqlx::PgPool, f: Fixture) -> Result<()> {
     let nexus = Nexus::new(&base, None)?;
     let url = base.clone();
     let polling = tokio::spawn(async move {
+        let mut resets = ingest::Resets::new(Duration::from_secs(cfg.poll_secs));
         loop {
-            if let Err(e) = ingest::poll_once(&pool, &url, &nexus, &cfg.ingest, &metrics).await {
+            if let Err(e) =
+                ingest::poll_once(&pool, &url, &nexus, &cfg.ingest, &metrics, &mut resets).await
+            {
                 eprintln!("mock ingestion: {e}");
             }
             if let Err(e) = pinakes_core::groups::drain(&pool, &cfg.queue.groups, 25).await {
@@ -581,12 +585,12 @@ fn live(pool: &sqlx::PgPool) -> Result<Live> {
     // credentials, `PINAKES__…`); there is no file.
     let mut cfg = Config::load(None)?;
     cfg.canary.enabled = false;
-    // Services that need a contact (SEC EDGAR) wait without one: the operator's
-    // (`PINAKES__HTTP__CONTACT`, which `Config::load` gave every client), else this run's.
-    if cfg.egress.contact.is_empty() {
-        cfg.egress.contact = E2E_CONTACT.into();
-        cfg.osm.contact = E2E_CONTACT.into();
-    }
+    // A live run names its operator to every service it reads (`PINAKES__HTTP__CONTACT`, which
+    // `Config::load` gave every client): there is no default.
+    anyhow::ensure!(
+        !cfg.egress.contact.is_empty(),
+        "a live run needs the operator's contact: set PINAKES__HTTP__CONTACT"
+    );
     cfg.api.requests_per_minute = 10000;
     cfg.nexus_url = std::env::var("PINAKES_E2E_NEXUS").unwrap_or_else(|_| cfg.nexus_url.clone());
     // As the daemon: the sources' switches and tokens (GitHub, Discogs) apply to this run.
@@ -835,9 +839,17 @@ async fn run_live(pool: sqlx::PgPool, samples: Value) -> Result<()> {
         config: cfg.clone(),
     };
     let polling = tokio::spawn(async move {
+        let mut resets = ingest::Resets::new(Duration::from_secs(cfg.poll_secs));
         loop {
-            if let Err(e) =
-                ingest::poll_once(&pool, &cfg.nexus_url, &nexus, &cfg.ingest, &metrics).await
+            if let Err(e) = ingest::poll_once(
+                &pool,
+                &cfg.nexus_url,
+                &nexus,
+                &cfg.ingest,
+                &metrics,
+                &mut resets,
+            )
+            .await
             {
                 eprintln!("live ingestion: {e}");
             }

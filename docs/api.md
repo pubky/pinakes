@@ -19,8 +19,8 @@ snapshot; a test fails when it is stale.
 | --- | --- | --- |
 | `GET /v1/search` | Query parameters ([Search](#search)) | `{items: [card], cursor, reach_truncated, facets?}` |
 | `GET /v1/resources/{id}` | 32-character resource ID | The card with the [read's fields](#resource-read); 404 if unknown |
-| `GET /v1/resources/by-uri` | `uri`: any spelling of a link | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root); 404 if unknown, nothing is fetched |
-| `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped |
+| `GET /v1/resources/by-uri` | `uri`: a link ([Aliases](#aliases)) | As `GET /v1/resources/{id}` for the URI's ID (an alias answers with its root). A spelling held neither as a card nor as an alias answers with its root by the static alias rules, when it has one (tracking parameters dropped, a `doi.org` or ISBN link, a service's other URL forms); 404 if unknown, nothing is fetched or stored |
+| `POST /v1/resources/lookup` | Exactly one of `{"ids":[…]}` (alias `resource_ids`) or `{"uris":[…]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknowns skipped; a URI reads as `by-uri` reads it |
 | `POST /v1/resolve` | `{"uri":"https://example.org/"}` | The card with the read's fields now or within 3 seconds; 202 with `status: "pending"` while queued, with `Retry-After` (seconds) when the next attempt is put off |
 | `GET /v1/resources/{id}/occurrences` | Optional RFC 3339 `from`, `to`, `limit` (1–500, default 100), signed `cursor` | `{items: [occurrence card], cursor}` |
 | `GET /v1/resources/{id}/episodes` | Optional `limit` (1–20, default 20), `offset` (0–1000, default 0), `q` (at most 256 bytes) | `{items: [episode], next_offset, truncated}`: a podcast show's latest episodes, newest first ([Episodes](#episodes)); 404 if unknown |
@@ -39,7 +39,7 @@ snapshot; a test fails when it is stale.
 | `GET /mcp` | None | A browser (`Accept: text/html`): a short page on how to connect; any other GET: 405 with `Allow: POST` ([Agents](#agents)) |
 
 URIs are normalized and IDs computed by Pinakes itself: lowercase scheme and host, no default
-port, userinfo or fragment, then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
+port, userinfo or fragment (and no query on a `bitcoin:` payment request), then BLAKE3. Each URI is at most 2048 bytes; IDs are 32 lowercase hex
 characters and Pinakes's own, so combine with other indexes by URI. A missing upstream object is a known resource with
 `status: "missing"`, not a 404. `lookup` never fetches an unknown URI; a known overdue resource
 moves to the front of the refresh queue without bypassing its TTL, backoff or final state.
@@ -49,12 +49,17 @@ moves to the front of the refresh queue without bypassing its TTL, backoff or fi
 Every route returns the same card for a resource or an occurrence.
 Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`, and every
 text a read adds) are plain text, decoded from the source's HTML entities once: escape them
-before rendering them as HTML.
+before rendering them as HTML. A source text that holds markup (a page's JSON-LD `description`,
+a DOI's title with `<i>`) is read as text, its tags dropped.
 
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
 refresh after MusicBrainz says the artist is one) and a playlist a `MusicPlaylist`, on every
-service ([music service links](#aliases)). A video stays a `VideoObject`; a track's, album's or
+service ([music service links](#aliases)). YouTube is not only music: its channel is a
+`MusicGroup` only when it is a Topic channel (named `{Artist} - Topic`) or on YouTube Music, and
+its playlist a `MusicPlaylist` only on YouTube Music (`music.youtube.com`, the tagged spelling or
+another of the same channel or playlist, from the card's next read); any other channel or
+playlist keeps the type its page gives. A video stays a `VideoObject`; a track's, album's or
 artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a part of the page, not its
 card ([lists](#lists)). The card's `site` is the
 service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in
@@ -120,8 +125,8 @@ description from a content-like member (`content`, `text`): such a card is a
 `SocialMediaPosting`, social content like a note, with a 200-character excerpt that refreshes
 within the hour and is removed once the object is gone.
 
-A social post found gone (a note, or a post or comment an official-API source reads) keeps
-nothing of itself. Its card is `status: "missing"` with its `uri`, `site` and `from`, and the
+A social post found gone (a note, or a post, comment or profile an official-API source reads)
+keeps nothing of itself. Its card is `status: "missing"` with its `uri`, `site` and `from`, and the
 type every gone post has, `SocialMediaPosting`, whatever the post was (a Reddit thread, a TikTok
 video): no name, description, image or facts, no also-on links and no change history. Its read
 lists no `aliases`, and its `refs` name its own link alone: a spelling's link can carry the post's
@@ -204,7 +209,9 @@ Where it comes from, the first that has one:
    another site's oEmbed answer counts when the card reads it anyway. Its `provider` is the
    answer's `provider_name` as a slug (`speaker-deck`), else the frame's host; an answer takes
    the name of a service of the first kind only for a frame on that service's own embed host
-   (never Mastodon's).
+   (never Mastodon's). An answer from an endpoint only the page named (on the page's own origin,
+   not the registry's for the link) is the site's own word: its `provider` is the frame's host,
+and the card's `provider` fact the endpoint's host.
 3. **The page's own player**: its head's `twitter:player` (with `:width` and `:height`), or an
    `og:video:secure_url` / `og:video:url` whose `og:video:type` is `text/html`.
 
@@ -703,7 +710,7 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 | Parameter | Meaning |
 | --- | --- |
-| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A short `q` (letters and digits, at most three characters counting one space between words, e.g. `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a sign such as `/` or `™` starts a word too) and the description by whole words; several short words match in that order, apart only by white space, each at a word start (`a s` finds `A slow song`, not `As lop`); text with other signs (`c++`), in a script written without spaces (Chinese, Japanese, Thai) or in Hebrew or Arabic (which write prefixes onto words) still matches inside the name. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author opted out of search indexing (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
+| `q` | Full-text name/description search with a trigram/partial-name fallback; at most 256 bytes. A short `q` (letters and digits, at most three characters counting one space between words, e.g. `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a sign such as `/` or `™` starts a word too) and the description by whole words; several short words match in that order, apart only by white space, each at a word start (`a s` finds `A slow song`, not `As lop`); text with other signs (`c++`), in a script written without spaces (Chinese, Japanese, Thai) or in Hebrew or Arabic (which write prefixes onto words) still matches inside the name. Ranked by `relevance` unless `sort` says otherwise ([Ranking](#search)). A post whose author has not opted in to search (a read's `facts.opted_out`: Mastodon's `indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`) never matches |
 | `type` | A schema.org type, ancestors included (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`). An unknown type is a 400 that names it (only a name of letters and digits is repeated; anything else, such as a URL, gets a general message) |
 | `exclude_type` | Every card of another type: a schema.org type, or up to 50 comma-separated, each with its subtypes (`exclude_type=Event` leaves `MusicEvent` out too), in the same spelling as `type` (an unknown type is a 400 the same way). A link with no type yet (not read, or unreachable) is left out, as the `type` facet does not count it, so a client that groups types can list "every other type" as the links its type facet counts outside its groups (`exclude_type=` its groups' types). Combines with `type`: `type=CreativeWork&exclude_type=Article` |
 | `category` | Exact filter |
@@ -798,7 +805,7 @@ next to the picked ones, read the facet from the same search without its own fil
 | Facet | Entries |
 | --- | --- |
 | `type` | `facets.type`: `{type, type_path, count}` per card type; `type_path` runs from `Thing` down to the type, enough to build the type tree and roll counts up into families |
-| `tags` | `facets.tags`: `{label, count}` per label people tagged the links with |
+| `tags` | `facets.tags`: `{label, count}` per label people tagged the links with, at most 100 (the most frequent, ties by label) |
 | `host` | `facets.host`: `{host, site, count}` per service, at most 100: `host` as `host=` takes it (exactly as the links' URLs name it, so `www.youtube.com` and `youtube.com` are two entries), `site` the name its cards show (`YouTube`, `Wikipedia (en)`: the service Pinakes knows by the URL, else the site name the documents give most often, else the host). A host that `pubky://` objects use is a user's key, not a service, and is left out (`host=<user key>` still filters them) |
 | `category` | `facets.category`: `{category, count}` per category, at most 100, as `category=` takes it: a place's OpenStreetMap `key/value` (`amenity/cafe`), or the `category` a page's schema.org data gives |
 
@@ -882,7 +889,7 @@ No other search carries `because`.
   reference of theirs (a tag, a reply, an embed, a collection). With `reach`, only the
   taggers within the viewer's reach.
 - Each resource is listed once, as its own card: never once per occurrence of a feed.
-- A post whose author opted out of indexing is never listed, as it is never found by its text,
+- A post whose author has not opted in to search is never listed, as it is never found by its text,
   and references to it count for nothing: not toward its group, and its taggers are not the
   taggers of a group it is in.
 - An alias reads as its root; an unknown resource relates to nothing.
@@ -914,11 +921,11 @@ feed item's id that is such a link is kept by its hash, and a change line names 
 a link written scheme-relative (`//host/p`) or as `webcal:` without `//` counts too. Such a link is never sent to another service: also-on lookups (the hubs, the
 Wayback Machine) and oEmbed providers skip it, the `social` tool leaves it out of what it asks the Nexus, and it is never kept as another link's alias. A
 resource only previewed, never referenced, is not a search result and expires after `limits.preview_grace_hours` (a day). Previews are limited per
-client IP and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
+client address (the connecting one, or behind a proxy in `api.trusted_proxies` the one it
+forwards) and per URI (`limits.preview_requests_per_minute`, `limits.preview_uri_requests_per_minute`,
 30 each); a 429 carries `Retry-After: 60`. The instance stores at most
-`limits.preview_new_per_hour` (1000) links it did not know in any hour, and, when the operator sets
-`limits.preview_new_per_client_per_hour` (no share by default), one client address at most that
-many of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
+`limits.preview_new_per_hour` (1000) links it did not know in any hour, and one client address at
+most `limits.preview_new_per_client_per_hour` (100; 0 is no share) of them: over the first, a new link gets 503, over the second 429, each with `Retry-After`
 (seconds), and nothing is stored, while a known link still reads.
 
 Statuses:
@@ -933,7 +940,12 @@ Statuses:
 - `unreachable`: the upstream denied access (401, 403) or answered with a challenge page (a bot
   wall, captcha or sign-in redirect); it is retried with backoff like an error.
 - `error`: the fetch failed; it is retried with backoff and dead-letters after
-  `limits.max_failures`. A request that never got an answer from the upstream (the connection
+  `limits.max_failures`. A service that keeps answering 5xx, 408 or 429 makes the link wait the
+  longer of its `Retry-After` and the backoff, which grows while the answers last; a short outage
+  never dead-letters it: it dead-letters only once the failures have lasted three days. Until
+  then an accepted card keeps its status, and a link with no card yet shows `error` after
+  `limits.max_failures` of them in a row. A rate limit on the operator's own quota (GitHub's
+  token, the operator's Nominatim) is no failure of the link. A request that never got an answer from the upstream (the connection
   refused, reset or aborted, or the host unreachable) says nothing about the link: it is retried with the capped backoff for as long
   as it lasts and never dead-letters. A link with no card yet shows `error` after
   `limits.max_failures` of them in a row; an accepted card keeps its status.
@@ -945,7 +957,11 @@ A failed refresh keeps the last accepted metadata.
 An alias is the same object under another URI. It keeps its own resource ID (an ID never
 changes), but it is never fetched: its references count for its root, search lists only the
 root, and a read, lookup, change query or occurrence read of the alias answers with the root
-(so the card's `id` is the root's). Aliases are resolved deterministically:
+(so the card's `id` is the root's). A spelling nobody referenced is no alias yet: `by-uri` and the
+`uris` of `POST /v1/resources/lookup` still answer it with its root by the rules below that need
+only the URI (not a page's canonical or an API's answer), when that root is stored; nothing is
+fetched or stored for it. Another scheme (`http` for `https`), `www.` or a trailing slash is
+another link unless someone referenced that spelling. Aliases are resolved deterministically:
 
 - **Tracking parameters**: `utm_*`, `fbclid`, `gclid`, `dclid`, `msclkid`, `igshid`, `mc_cid`,
   `mc_eid` and `_gl` on every host, `recId`, `recSource`, `searchId` and `eventOrigin` on
@@ -1170,7 +1186,9 @@ for the rest. `q` lists only the episodes whose `name` holds it, in any
 letter case (Unicode's, as Rust folds it: `über` finds `ÜBER`); at most 256 bytes, spaces around
 it ignored, a blank `q` matching every episode; it pages the same way. Each item is
 `{uri, name, image, published, guid, stream, id?, aliases?}`. A show's card carries the first of them
-in `episodes`: the latest 5 that have a `stream`, in the same shape (below). `guid` is what names the item: its GUID as
+in `episodes`: the latest 5 that have a `stream`, in the same shape (below). A show's new
+episodes write no [change line](#changes): a client that shows the list reads it again on a
+timer (when it shows the show again, or every few hours while it stays open). `guid` is what names the item: its GUID as
 the feed gives it; its page when the feed gives none; else `sha256:` and the hex digest of its
 enclosure's URL (without a fragment), so a link that carries a token shows nothing of itself.
 `uri` is the episode's feed item, `{feed}?guid={guid}` (the GUID URL-encoded), which
@@ -1417,7 +1435,11 @@ Content-Type: application/json
 An occurrence member is `{"uid":"calendar-uid","recurrence_id":"2026-10-20T17:00:00Z"}`.
 Members must exist and have been grouped once. Curation pins its members away from automatic
 groups and overrides the distance and evidence rules; removing a member lets its automatic
-evidence count again. Invalid curation returns 400; a busy group writer returns 503 (retry). `groups.enabled = false` turns off group
+evidence count again. Invalid curation returns 400; a busy group writer returns 503 (retry).
+`DELETE /v1/groups/{id}`, also on the admin listener only, undoes a curation: its members are
+no longer pinned and the group is no longer curated, so each member groups again by what its
+keys say (the group goes when none joins it again). It answers 204, 404 when the ID is no
+curated group, 400 for an invalid ID, 503 while the group writer is busy. `groups.enabled = false` turns off group
 reads, writes and collapse; stored membership stays for when it is turned back on.
 
 ## Possibly the same event
@@ -1492,7 +1514,10 @@ Two recordings are possibly the same when all of these hold:
   names nothing);
 - their lengths, when both are known (the `duration` fact, else the page's), are within 3 s.
 
-`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. A member of the
+`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. Recordings whose
+artist and length (when they have one) a source states as facts come first, then those whose
+own page alone states them, each by score: any page can copy a track's title, artist and length
+into its markup, and that never puts it ahead of a recording a service vouches for. A member of the
 card's own group and an alias are never listed, so a pair that a key later joins drops out of
 the hint by itself. It is a hint, like a group, and less: nothing is merged, counted or ranked
 by it, and each recording keeps its own card.
@@ -1579,7 +1604,8 @@ seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
 `films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
 `pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
-`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over 8 MB is no answer: the source
+`[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over
+`limits.hub_body_bytes` (8 MiB by default) is no answer: the source
 records only what the link's URL proves (a MusicBrainz page's MBID or ISRC, a Wikidata item
 link's Q-id, the Q-id an article's own Wikipedia names), else nothing, until its next run. A
 source's exact keys
@@ -1609,11 +1635,13 @@ service's own track or album that carries the value becomes a link keyed by it.
 
 **Exact links and matches.** A derived link is exact when an identifier the service owns, or a
 hub, names it: a MusicBrainz relation, a Wikidata claim, or a service's own answer to a lookup by
-ISRC or barcode (`deezer`, `itunes` albums, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
-tagged resource that is the link joins the group; its entry is a plain derived link. Two sources
-match by metadata instead: their links are maybes, marked `kind: "maybe"` on the entry
-(possibly the same thing), still listed so a client can show or play them, but never keyed, never
-joining a group, never making a key of the card they are on.
+ISRC or barcode (`deezer`, `spotify_isrc`, `tidal_isrc`). It carries that key, so a
+tagged resource that is the link joins the group; its entry is a plain derived link. Three sources
+match by metadata or an answer they cannot read back instead: their links are maybes, marked
+`kind: "maybe"` on the entry (possibly the same thing), still listed so a client can show or play
+them, but never keyed, never joining a group, never making a key of the card they are on.
+- `itunes` albums: the one Apple Music album iTunes answers for the album's barcode (its answer
+  carries no barcode to compare).
 - `itunes_song`: Apple Music's song at the same disc and track number on the
   album with the track's barcode, with the same title and within 3 s of its length (iTunes
   answers carry no ISRC).
@@ -1634,9 +1662,9 @@ An article's card comes from its Wikipedia's REST summary (`Article`, the title,
 paragraph up to 600 characters, the thumbnail, `site` `Wikipedia ({lang})`), so a long article
 whose page exceeds the page cap still gets one; a page the summary does not cover (a special page)
 is read as a web page. A MusicBrainz page's card ([its spellings](#aliases)) comes from
-MusicBrainz's web service (the entity it names), not from the page (unless that answer is over its
-8 MB cap: then the page is read as any page, and the sources record only what its URL proves, the
-MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
+MusicBrainz's web service (the entity it names), not from the page (unless that answer is over
+`limits.hub_body_bytes`, 8 MiB by default: then the page is read as any page, and the sources
+record only what its URL proves, the MBID or the ISRC): the title, `MusicRecording`, `MusicAlbum`, `MusicGroup` or `Person` (an artist
 MusicBrainz calls a person), the artist credit and a recording's length as its description (an
 enriched description below takes the place of this line; the resource read's `facts` still give
 them as `artist` and `duration`, in seconds, from the card itself as soon as it is read, and from
@@ -1893,9 +1921,11 @@ record or a product database (their pages say which).
   `ProductGroup`
   names the barcode, article numbers and offers of the variant its address picks (its `url`, or
   `?variant=`), else of its only variant, never the group's: a group whose address picks none of
-  several variants names no barcode. A product's barcode is the key `gtin:`, so
-  the same product on several shops is [one group](#groups), and `key=gtin:{barcode}` finds them
-  all.
+  several variants names no barcode. The barcode is `facts.gtin`. When a service's own record
+  states it (a product database's record an [official source](sources/README.md) reads), it is
+  also the key `gtin:`, so the same product on several shops is [one group](#groups), and
+  `key=gtin:{barcode}` finds them all; a barcode only the page's own JSON-LD or a record from
+  the page's own host (a shop's product record) states is a fact and never a key.
 - Its price and availability are facts with the time they were read, never identity: the cheapest
   offer's `price`, `price_currency`, `availability` and `seller` (all four of that one offer),
   and `price_at`.
@@ -1974,10 +2004,11 @@ URL, so one resource and one cached `osm_place` row serve them all. OSM cards ca
 `attribution`; a resource read adds the category, address and bbox. Any other URL on an OSM host
 (user pages, map views,
 changesets, notes) is refused before any fetch: status `error`, a link-only card, stored once
-as final. A batch's 429, 5xx or oversized answer defers its jobs without charging an attempt,
-honouring a Retry-After of up to one hour; jobs claimed during that wait are put off to its end
-without a request. A 401 or 403 (the operator's key refused) is read again later and never
-dead-letters; after three days of refusals the link turns `unreachable`, read with the usual
+as final. A batch's 429 or 5xx defers its jobs, honouring a Retry-After of up to one hour. A 429
+is the operator's own quota and charges nothing; a 5xx is a service's failure, as any service's
+busy answer is (its jobs dead-letter only once such failures have lasted three days); an
+oversized answer defers them without a charge. Jobs claimed during that wait are put off to its end without a request or a charge. A 401 or 403 (the operator's key refused) is read again later and never
+dead-letters, and is counted in `pinakes_source_token_refusals_total{source="osm"}`; after three days of refusals the link turns `unreachable`, read with the usual
 backoff. A timeout is charged from the fourth in a row (`limits.timeout_grace`).
 
 `geo:` URIs (RFC 5870, altitude and uncertainty ignored; other CRSs are errors) and location
@@ -2017,8 +2048,10 @@ Coordinate-derived time zones use ODbL boundary data too; see `data/README.md`.
 
 ## Limits and errors
 
-Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the direct peer address
-(`api.requests_per_minute`, 120; forwarded headers are not trusted). A search costs
+Every public route (`/v1`, Swagger UI, the agents' guide and index, and `/mcp`) shares a per-IP budget on the client address
+(`api.requests_per_minute`, 120): the connecting address, or behind a reverse proxy listed in
+`api.trusted_proxies` the right-most `X-Forwarded-For` entry that is not one of them
+([operations](operations.md#clients-and-budgets)). A search costs
 `limits.reach_cost` (6) units for each of `reach` and `boost` (each reads a set from Nexus),
 charged before any Nexus call, `limits.related_cost` (6) for `related`, all of them together
 when it has several; every other request costs one.
@@ -2055,7 +2088,10 @@ for any other. `GET /` links the guide, the skill, the MCP endpoint (when on), t
 `/v1/info` and nexus-scout's guide.
 
 **MCP.** `POST /mcp` (`api.mcp`, default on) is a Model Context Protocol server over Streamable
-HTTP, stateless and read-only, built on the official Rust SDK (`rmcp`). Messages are answered as
+HTTP, stateless, built on the official Rust SDK (`rmcp`). Every tool only reads, except `card`
+with `resolve: true`, which stores an unknown link as a preview and has a worker fetch it
+(`POST /v1/resolve`): `card` is announced with `readOnlyHint: false` and `openWorldHint: true`,
+the others with `readOnlyHint: true` and `openWorldHint: false`. Messages are answered as
 JSON (`application/json`); there are no sessions and no server-to-client requests. Each tool is a
 request to the public routes above, answered by their handlers under the public listener's
 layers, with the caller's address:
@@ -2067,7 +2103,7 @@ layers, with the caller's address:
 | `lookup` | `GET /v1/search?key=` | Compact cards |
 | `group` | `GET /v1/groups/{id}` | `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
 | `types` | `GET /v1/search?facet=type&limit=1` and `GET /v1/info` | The card types with their counts, and `resolves` |
-| `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v1/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged` (a view's `tag_uri` for the label addresses the viewer's own tag file); `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know |
+| `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v1/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Per card (or link): `asked` (the URIs sent, the card's own first), `found` (those Nexus knew), and the tags merged over them: per label `taggers_count` (the taggers the views list, each once, or the most one view counts, whichever is more) and `viewer_tagged` (a view's `tag_uri` for the label addresses the viewer's own tag file); `taggers_count` over all labels, the same way. A view counts taggers it does not list, who may be ones another view lists: over several such views a count is a lower bound, marked `at_least: true`. An alias's id (a spelling, or a card that became one after it was read) is answered under the id asked, with `root`, the card that answers for it. `unknown_ids` names ids Pinakes does not know. A plain link is sent to the Nexus only when this instance holds it (a card's link or an alias of one): `unknown_uris` names the others, which no Nexus call asks about. All of a call's Nexus reads share one deadline, `limits.reach_timeout_secs` (5 s): past it the tool answers 504 |
 
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
 characters), `image`, `site`, `point`, `start`, `end`, `group`, `also_on` (`uri`, `site`, and
@@ -2096,7 +2132,7 @@ message that has not arrived in full by the request's deadline.
 
 **No admin operation.** The tools' requests go to the public routes only, built afresh with no
 header of the MCP request, so the admin listener's routes and its token are out of reach. Any
-`Host` is accepted: the endpoint takes no credentials and changes nothing, so rmcp's DNS-rebinding
+`Host` is accepted: the endpoint takes no credentials and writes nothing but budgeted previews, so rmcp's DNS-rebinding
 guard for local servers protects nothing here, and the public host names are the reverse proxy's
 to know.
 
@@ -2104,8 +2140,11 @@ to know.
 
 `admin_listen` (default `127.0.0.1:9090`) serves `GET /metrics` (Prometheus text),
 `GET /v1/info` with full ingestion, source and canary state, `GET /v1/resources/{id}/document`
-(the stored document with its internal fields) and group curation (`PUT /v1/groups/{id}`). With
-`admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route needs `Authorization: Bearer`,
+(the stored document with its internal fields), group curation (`PUT /v1/groups/{id}`, and
+`DELETE /v1/groups/{id}` to undo one) and
+`GET /healthz`: 200 `ok` when the database answers `SELECT 1` within a second, 503 when it does
+not or the daemon is stopping (a background task ended). With
+`admin_token` (or `PINAKES__ADMIN_TOKEN`) every admin route but `/healthz` needs `Authorization: Bearer`,
 compared in constant time; a non-loopback bind without a token is refused. It answers 421 to a
 request whose `Host` is not `localhost`, an IP address or a name in `admin_hosts`, before the token
 is checked. It sends no CORS

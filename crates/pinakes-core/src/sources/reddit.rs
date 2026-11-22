@@ -297,9 +297,11 @@ impl Source for Reddit {
     /// A post's card, and its blocked card (a post Reddit refused to show), whose type is the
     /// same: storage asks the stored card whether to purge the post's history once it is gone.
     fn social(&self, doc: &ResourceMeta) -> bool {
+        // A post or comment, and a user's profile (its bio is its author's own text); a
+        // subreddit is a community's page.
         matches!(
             doc.type_name.as_str(),
-            "DiscussionForumPosting" | "SocialMediaPosting"
+            "DiscussionForumPosting" | "SocialMediaPosting" | "Person"
         )
     }
     fn examples(&self) -> &'static [Example] {

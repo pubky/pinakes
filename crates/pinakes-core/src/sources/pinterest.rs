@@ -208,7 +208,8 @@ impl Source for Pinterest {
         &["author", "author_name", "handle", "blocked"]
     }
     fn social(&self, doc: &ResourceMeta) -> bool {
-        doc.type_name == "SocialMediaPosting"
+        // A post, and a profile (its bio is its author's own text).
+        matches!(doc.type_name.as_str(), "SocialMediaPosting" | "Person")
     }
     fn examples(&self) -> &'static [Example] {
         &[
@@ -232,8 +233,13 @@ impl Source for Pinterest {
                 Oembed::Blocked => social::blocked(doc, Shape::Post, SITE),
             },
             Target::Profile(name) => match social::page(cx, &target.root()).await? {
-                Page::Read { doc: page, .. } => profile_card(doc.clone(), name, &page)
-                    .unwrap_or_else(|| social::shape_only(plain_profile(doc, name))),
+                // Only the profile's own page names it: a fetch that ended at another address
+                // read another page.
+                Page::Read { doc: page, url } => (Target::of_uri(url.as_str()).as_ref()
+                    == Some(&target))
+                .then_some(&page)
+                .and_then(|page| profile_card(doc.clone(), name, page))
+                .unwrap_or_else(|| social::shape_only(plain_profile(doc, name))),
                 Page::Missing => cx.missing(uri, self),
                 Page::Blocked => social::blocked(doc, Shape::Profile, SITE),
             },

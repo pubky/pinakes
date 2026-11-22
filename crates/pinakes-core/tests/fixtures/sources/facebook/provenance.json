@@ -10,6 +10,15 @@
     "status": 302,
     "url": "https://www.facebook.com/events/1"
   },
+  "own-page-facebook": {
+    "bytes": 523328,
+    "content_type": "text/html; charset=\"utf-8\"",
+    "file": "own-page-facebook.html.gz",
+    "recorded_at": "2026-11-21T18:47:43+00:00",
+    "sha256": "7426b46d5401939f51dcc439a3d8d1b5483efa7adaf115f7c2c4b0a22669905a",
+    "status": 200,
+    "url": "https://www.facebook.com/facebook"
+  },
   "page-facebook": {
     "bytes": 964800,
     "content_type": "text/html; charset=\"utf-8\"",

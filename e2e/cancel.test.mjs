@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { psql } from './harness.mjs';
 
 const cluster = process.env.DATABASE_URL ?? 'postgresql:///postgres?host=/var/run/postgresql';
-const offline = { PINAKES__EGRESS__ALLOW_HOSTS: '["e2e.invalid"]', PINAKES__PUBKY__ENABLED: 'false', PINAKES__OSM__ENABLED: 'false' };
+const offline = { PINAKES__EGRESS__ALLOW_HOSTS: '["e2e.invalid"]', PINAKES__PUBKY__ENABLED: 'false', PINAKES__OSM__ENABLED: 'false', PINAKES__HTTP__CONTACT: 'e2e@example.invalid' };
 const query = (database, sql) => psql(cluster, database, sql);
 const owned = () => query('postgres', "SELECT datname FROM pg_database WHERE datname LIKE 'pinakes\\_e2e\\_owned\\_%'").split('\n').filter(Boolean);
 /** The run's database once its first recipe is stored: the run is past its setup. */

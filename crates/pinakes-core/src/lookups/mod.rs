@@ -273,10 +273,13 @@ pub(crate) async fn get(cx: &Context, url: &str, class: &'static str) -> Result<
         accept: Some("application/json".into()),
         body_cap: url
             .starts_with("https://www.wikidata.org/")
-            .then_some(hubs::WIKIDATA_CAP),
+            .then(|| hubs::body_cap(&cx.egress)),
         ..Default::default()
     };
-    let f = cx.egress.discover(url, &options, 3600).await?;
+    let f = cx
+        .egress
+        .discover(url, &options, cx.egress.config().discovery_secs)
+        .await?;
     if f.status == 429 || f.status >= 500 {
         return Err(RetryLater {
             class,
@@ -336,7 +339,11 @@ pub(crate) async fn send(
     };
     let f = cx
         .egress
-        .discover(request.url.as_str(), &options, 3600)
+        .discover(
+            request.url.as_str(),
+            &options,
+            cx.egress.config().discovery_secs,
+        )
         .await?;
     if f.status == 429 || f.status >= 500 {
         return Err(RetryLater {

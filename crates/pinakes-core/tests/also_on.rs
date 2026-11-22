@@ -1344,13 +1344,22 @@ async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
             let mut d = ResourceMeta::new(uri, "web", 3600);
             d.set_type(kind);
             d.site = site.into();
-            d.name = Some("Radiohead".into());
+            // YouTube's own channel of the artist's releases.
+            d.name = Some(if uri.contains("UCq19-LqvG35A-30oyAiPiqA") {
+                "Radiohead - Topic".into()
+            } else {
+                "Radiohead".into()
+            });
             Ok(d)
         }
         fn refresh_after(&self, _: &ResourceMeta) -> Duration {
             Duration::from_secs(3600)
         }
     }
+    // A playlist tagged on YouTube Music: an alias of its www.youtube.com spelling.
+    let on_music =
+        "https://music.youtube.com/playlist?list=OLAK5uy_nEGbRK3IZ018QZqnVmZtq-0k-vtJdysnA";
+    store::ensure_resource(&pool, on_music).await.unwrap();
     let expected = [
         (
             "https://open.spotify.com/track/003vvx7Niy0yvhvHt4a68B",
@@ -1394,9 +1403,26 @@ async fn the_production_queue_types_and_names_music_links(pool: PgPool) {
             "VideoObject",
             "YouTube",
         ),
+        // YouTube is not only music: a channel or playlist is music as a Topic channel or on
+        // YouTube Music, else it keeps its page's type.
         (
             "https://www.youtube.com/channel/UCr_iyUANcn9OX_yy9piYoLw",
+            "VideoObject",
+            "YouTube",
+        ),
+        (
+            "https://www.youtube.com/channel/UCq19-LqvG35A-30oyAiPiqA",
             "MusicGroup",
+            "YouTube",
+        ),
+        (
+            "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+            "VideoObject",
+            "YouTube",
+        ),
+        (
+            "https://www.youtube.com/playlist?list=OLAK5uy_nEGbRK3IZ018QZqnVmZtq-0k-vtJdysnA",
+            "MusicPlaylist",
             "YouTube",
         ),
     ];

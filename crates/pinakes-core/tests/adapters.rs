@@ -459,6 +459,57 @@ impl Transport for WikiFailure {
         ))
     }
 }
+/// Records the body cap each request asked for; answers 404.
+#[derive(Default)]
+struct Caps(std::sync::Mutex<Vec<(String, Option<usize>)>>);
+#[async_trait::async_trait]
+impl Transport for Caps {
+    async fn get(&self, u: &url::Url, a: &[SocketAddr]) -> anyhow::Result<Fetched> {
+        self.get_with(u, a, &FetchOptions::default()).await
+    }
+    async fn get_with(
+        &self,
+        u: &url::Url,
+        _: &[SocketAddr],
+        options: &FetchOptions,
+    ) -> anyhow::Result<Fetched> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((u.to_string(), options.body_cap));
+        Ok(common::fetched(u.clone(), 404, "text/html".into(), vec![]))
+    }
+}
+/// A Wikidata event item is read up to the configured `limits.hub_body_bytes`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_wikidata_item_is_read_up_to_the_hub_body_cap(pool: PgPool) {
+    use pinakes_core::resolver::Resolver;
+    let caps = Arc::new(Caps::default());
+    let r = platform(
+        &pool,
+        EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        Egress::with_backends(
+            pinakes_core::config::EgressConfig {
+                hub_body_bytes: 16 * 1024 * 1024,
+                ..Default::default()
+            },
+            Arc::new(AdapterDns),
+            caps.clone(),
+        ),
+    );
+    let _ = r.resolve("https://www.wikidata.org/wiki/Q12345").await;
+    let entity = "https://www.wikidata.org/wiki/Special:EntityData/Q12345.json";
+    let asked = caps.0.lock().unwrap().clone();
+    assert!(
+        asked
+            .iter()
+            .any(|(url, cap)| url == entity && *cap == Some(16 * 1024 * 1024)),
+        "{asked:?}"
+    );
+}
 #[sqlx::test(migrations = "../../migrations")]
 async fn only_parse_errors_fall_back_and_plain_wikipedia_skips_fetch(pool: PgPool) {
     use pinakes_core::resolver::Resolver;
@@ -696,6 +747,11 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
             .await
             .unwrap();
         for status in [503, 408, 429] {
+            sqlx::query("UPDATE resource SET attempts=0,timeout_streak=0,dead_letter=false,last_error=NULL WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
             let (egress, _) = mock_egress_with_retry(vec![(status, Value::Null); 6], 720);
             let r = platform(&pool, cfg.clone(), egress);
             let error = r.resolve(uri).await.unwrap_err();
@@ -720,12 +776,92 @@ async fn cursor_outages_preserve_documents_and_checkpoints(pool: PgPool) {
                     .await
                     .unwrap();
             }
-            let (after, attempts, dead, delay): (Value, i32, bool, bool) = sqlx::query_as("SELECT doc,attempts,dead_letter,next_attempt_at>now()+interval '11 minutes' FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+            let (after, attempts, dead, delay, streak): (Value, i32, bool, bool, i32) = sqlx::query_as("SELECT doc,attempts,dead_letter,next_attempt_at>now()+interval '11 minutes',timeout_streak FROM resource WHERE id=$1").bind(&id).fetch_one(&pool).await.unwrap();
             assert_eq!(after, before);
-            assert_eq!((attempts, dead, delay), (0, false, true));
+            // A streak of waits, never sooner than the named wait: no attempt, and no dead
+            // letter in the first hour.
+            assert_eq!((attempts, dead, delay, streak), (0, false, true, 5));
             assert_eq!(saved_cursor(&pool, &id).await.as_deref(), Some(previous));
         }
     }
+}
+
+/// A platform whose API answers 500 for ever: the link is read again after growing gaps (the
+/// named wait or the backoff, whichever is longer), and the row ends `error` and dead-lettered
+/// once the failures have lasted three days.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_platform_answering_500_for_ever_backs_off_and_dead_letters_after_three_days(
+    pool: PgPool,
+) {
+    use pinakes_core::queue;
+    let uri = "https://portal.einundzwanzig.space/api/changes";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let (egress, transport) = mock_egress(vec![(500, Value::Null); 20]);
+    let r = platform(
+        &pool,
+        EventConfig {
+            geocoding: false,
+            ..Default::default()
+        },
+        egress,
+    );
+    let cfg = pinakes_core::config::QueueConfig::default();
+    let mut gaps = vec![];
+    let mut ends = vec![];
+    for _ in 0..cfg.max_failures {
+        let job = queue::Job {
+            id: id.clone(),
+            uri: uri.into(),
+            generation: 0,
+            attempts: 0,
+        };
+        queue::run_job(&pool, &r, &cfg, &job).await.unwrap();
+        let (gap, attempts, dead, status, error): (f64, i32, bool, String, Option<String>) = sqlx::query_as(
+            "SELECT extract(epoch FROM next_attempt_at-now())::float8,attempts,dead_letter,status,last_error FROM resource WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(error.as_deref(), Some("http_5xx"));
+        gaps.push(gap.round() as i64);
+        ends.push((attempts, dead, status));
+    }
+    // The 500's wait is a minute; the backoff from 30 s doubles past it.
+    assert_eq!(gaps, [60, 60, 120, 240, 480]);
+    // No attempt and no dead letter in the first minutes; a link with no card shows `error`.
+    assert_eq!(
+        ends,
+        [
+            (0, false, "pending".to_owned()),
+            (0, false, "pending".to_owned()),
+            (0, false, "pending".to_owned()),
+            (0, false, "pending".to_owned()),
+            (0, false, "error".to_owned()),
+        ]
+    );
+    assert_eq!(transport.seen.lock().unwrap().len(), 5);
+    // Once the failures have lasted three days (the 79th in a row at the defaults), it
+    // dead-letters.
+    sqlx::query("UPDATE resource SET timeout_streak=78 WHERE id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = queue::Job {
+        id: id.clone(),
+        uri: uri.into(),
+        generation: 0,
+        attempts: 0,
+    };
+    queue::run_job(&pool, &r, &cfg, &job).await.unwrap();
+    let (streak, dead, status): (i32, bool, String) =
+        sqlx::query_as("SELECT timeout_streak,dead_letter,status FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((streak, dead, status.as_str()), (79, true, "error"));
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -1080,6 +1216,7 @@ fn manifests_cover_every_platform_and_keys_disable_without_exposing_credentials(
         "https://app.ticketmaster.com/discovery/v2/events/abc.json",
         None,
         &cfg,
+        pinakes_core::hubs::DEFAULT_BODY_CAP,
     )
     .unwrap()
     .unwrap();
@@ -2098,6 +2235,7 @@ async fn cursor_http_resync_pagination_and_tombstones(pool: PgPool) {
 fn own_calendar_links_and_deterministic_platform_endpoints() {
     use adapters::service::{endpoint, ics_link};
     let cfg = EventConfig::default();
+    let cap = pinakes_core::hubs::DEFAULT_BODY_CAP;
     let base = "https://tickets.example/org/current/".parse().unwrap();
     assert_eq!(
         ics_link(&base, "<a href='/org/other/ical/'>Other</a>"),
@@ -2159,7 +2297,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         ),
     ] {
         assert_eq!(
-            endpoint(adapters::definition(id).unwrap(), uri, None, &cfg)
+            endpoint(adapters::definition(id).unwrap(), uri, None, &cfg, cap)
                 .unwrap()
                 .unwrap()
                 .0,
@@ -2171,7 +2309,8 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         adapters::definition("tito").unwrap(),
         "https://ti.to/",
         None,
-        &cfg
+        &cfg,
+        cap
     )
     .unwrap()
     .is_none());
@@ -2194,7 +2333,7 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         ),
     ] {
         assert_eq!(
-            endpoint(adapters::definition(id).unwrap(), uri, Some(&f), &cfg)
+            endpoint(adapters::definition(id).unwrap(), uri, Some(&f), &cfg, cap)
                 .unwrap()
                 .unwrap()
                 .0,
@@ -2222,7 +2361,26 @@ fn own_calendar_links_and_deterministic_platform_endpoints() {
         url: page.parse().unwrap(),
         ..f
     };
-    assert!(endpoint(guidle, page, Some(&f), &cfg).unwrap().is_none());
+    assert!(endpoint(guidle, page, Some(&f), &cfg, cap)
+        .unwrap()
+        .is_none());
+    // A Wikidata item's answer is read up to `limits.hub_body_bytes`, as the hubs read it.
+    for cap in [cap, 16 * 1024 * 1024] {
+        let (target, options) = endpoint(
+            adapters::definition("wikidata").unwrap(),
+            "https://www.wikidata.org/wiki/Q12345",
+            None,
+            &cfg,
+            cap,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            target,
+            "https://www.wikidata.org/wiki/Special:EntityData/Q12345.json"
+        );
+        assert_eq!(options.body_cap, Some(cap));
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations")]

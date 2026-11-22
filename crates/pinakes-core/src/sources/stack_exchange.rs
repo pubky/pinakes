@@ -1,6 +1,9 @@
 //! Stack Exchange questions (Stack Overflow, Super User, Server Fault, Ask Ubuntu, MathOverflow,
 //! every `*.stackexchange.com` site and their metas), read from the Stack Exchange API 2.3 by
-//! question id. Keyless: the API allows 300 requests a day per address without a key.
+//! question id. Without a key the API allows an address 300 requests a day (cards, refreshes and
+//! the also-on half together); with the operator's app key (`[sources.stack_exchange] key`),
+//! 10,000. The host is paced to that quota, and the source stops asking when an answer says the
+//! quota is used up (`quota_remaining` 0).
 //!
 //! Its also-on half ([`also_on::StackExchange`]) keys a question by its id on its site, and a
 //! question closed as a duplicate by its original's instead: the two join one group, a hint.
@@ -105,19 +108,34 @@ fn plain(v: &Value) -> Option<String> {
     text(v).map(|t| crate::resolver::web::decoded(&t))
 }
 
+/// The requests a day the API allows an address without a key, and with an app key.
+const KEYLESS_QUOTA: f64 = 300.0;
+const KEYED_QUOTA: f64 = 10_000.0;
+/// How long no request is made once an answer says the day's quota is used up and names no
+/// other wait. The next answer, the API's quota error, says when requests are allowed again.
+const QUOTA_WAIT: u64 = 3600;
+
 /// The pause, in seconds, that an answer of the API asks for before the next call to its method:
-/// its `backoff` (on any answer), else an hour after its quota error (502) and a minute after
-/// "too many requests" (503).
+/// its `backoff` (on any answer); after its quota error (502) the wait it names ("more requests
+/// available in N seconds"), else an hour; a minute after "too many requests" (503); an hour
+/// once its `quota_remaining` is 0.
 fn pause(v: &Value) -> Option<u64> {
-    v["backoff"]
-        .as_u64()
-        .or(match v["error_id"].as_u64() {
-            Some(502) => Some(3600),
-            Some(503) => Some(60),
-            _ => None,
-        })
-        .filter(|s| *s > 0)
-        .map(|s| s.min(86400))
+    let asked = v["backoff"].as_u64().or(match v["error_id"].as_u64() {
+        Some(502) => Some(available_in(v).unwrap_or(QUOTA_WAIT)),
+        Some(503) => Some(60),
+        _ => None,
+    });
+    // A used-up quota holds at least its hour, whatever shorter backoff the answer names.
+    let used_up = (v["quota_remaining"].as_u64() == Some(0)).then_some(QUOTA_WAIT);
+    asked.max(used_up).filter(|s| *s > 0).map(|s| s.min(86400))
+}
+
+/// The seconds a quota error says requests are available again in.
+fn available_in(v: &Value) -> Option<u64> {
+    let message = v["error_message"].as_str()?;
+    let (_, after) = message.split_once("available in ")?;
+    let (seconds, _) = after.split_once(" second")?;
+    super::kit::number::<u64>(seconds.trim(), 6)
 }
 
 /// The API's pause: it holds for the method (every question on every site), so no call is made
@@ -158,12 +176,16 @@ impl Pause {
     /// answer asks for: its `backoff` or error (read from an error answer too), else a 429's or
     /// 503's `Retry-After` (a minute at least). Then rate limits and server errors are
     /// `RetryLater`, as for any source, for as long as the pause.
-    async fn ask(&self, egress: &Egress, url: &str) -> Result<Fetched> {
+    /// The operator's app key, when set, goes as the query's `key=` on the wire alone
+    /// (`FetchOptions::query_secret`): never in a log, an error or the cache's key.
+    async fn ask(&self, egress: &Egress, url: &str, key: Option<&str>) -> Result<Fetched> {
         let _turn = self.turn.lock().await;
         self.wait()?;
         let options = FetchOptions {
             accept: Some("application/json".into()),
             error_json: true,
+            sensitive: key.is_some(),
+            query_secret: key.map(|k| ("key", k.to_owned())),
             ..Default::default()
         };
         let f = egress.fetch_with(url, &options).await?;
@@ -348,15 +370,35 @@ impl Source for StackExchange {
             }],
         })
     }
+    fn takes_key(&self) -> bool {
+        true
+    }
+    fn budgets(&self) -> &'static [super::Budget] {
+        // The keyless quota, as its average rate: one request every 288 seconds.
+        &[("api.stackexchange.com", KEYLESS_QUOTA / 86_400.0)]
+    }
+    fn keyed_budgets(&self) -> &'static [super::Budget] {
+        &[("api.stackexchange.com", KEYED_QUOTA / 86_400.0)]
+    }
     async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        resolve(&PAUSE, cx, uri).await
+        resolve(&PAUSE, cx, uri, app_key().as_deref()).await
     }
 }
 
-/// The card of the question at `uri`, asked within `pause`.
-pub async fn resolve(pause: &Pause, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+/// The operator's app key (`[sources.stack_exchange] key`), when set.
+fn app_key() -> Option<crate::event::adapters::SecretKey> {
+    super::key("stack_exchange")
+}
+
+/// The card of the question at `uri`, asked within `pause`, with the app key `key` if set.
+pub async fn resolve(
+    pause: &Pause,
+    cx: &Context<'_>,
+    uri: &str,
+    key: Option<&str>,
+) -> Result<ResourceMeta> {
     let target = of_uri(uri).context("not a Stack Exchange question")?;
-    let f = pause.ask(cx.egress, &target.api()).await?;
+    let f = pause.ask(cx.egress, &target.api(), key).await?;
     let doc = cx.card(uri, &StackExchange);
     Ok(
         crate::resolver::html::blocking(move || card(doc, &target, f.status, &f.body))
@@ -367,7 +409,7 @@ pub async fn resolve(pause: &Pause, cx: &Context<'_>, uri: &str) -> Result<Resou
 
 pub mod also_on {
     //! The `stack_exchange` also-on source: a question's own key, and its original's.
-    use super::{of_uri, originals, refusal, Target, PAUSE};
+    use super::{app_key, of_uri, originals, refusal, Target, PAUSE};
     use crate::also_on::{Context, Found, Key, Source, Subject};
     use anyhow::{Context as _, Result};
     use async_trait::async_trait;
@@ -393,7 +435,9 @@ pub mod also_on {
                 id: *seen.last().unwrap(),
                 ..target.clone()
             };
-            let f = PAUSE.ask(&cx.egress, &at.api()).await?;
+            let f = PAUSE
+                .ask(&cx.egress, &at.api(), app_key().as_deref())
+                .await?;
             let v: Value = serde_json::from_slice(&f.body).context("not the API's answer")?;
             if let Some(error) = refusal(&v) {
                 return Err(error);
@@ -642,7 +686,17 @@ mod tests {
         assert!(card(base(&t), &t, 200, &read("se-stackoverflow-11227809.json")).is_err());
         // An answer without `items` says nothing about the question: an error, not "gone".
         assert!(card(base(&t), &t, 200, b"{}").is_err());
+        // The quota error names when requests are allowed again; one that names nothing waits
+        // an hour.
         let quota = br#"{"error_id":502,"error_message":"too many requests from this IP, more requests available in 82800 seconds","error_name":"throttle_violation"}"#;
+        let error = card(base(&t), &t, 400, quota).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|r| r.seconds),
+            Some(82800)
+        );
+        let quota = br#"{"error_id":502,"error_message":"throttle violation","error_name":"throttle_violation"}"#;
         let error = card(base(&t), &t, 400, quota).unwrap_err();
         assert_eq!(
             error
@@ -733,13 +787,13 @@ mod pause_tests {
             ttl: 3600,
         };
         let pause = Pause::new();
-        let doc = resolve(&pause, &cx, &uri(336)).await.unwrap();
+        let doc = resolve(&pause, &cx, &uri(336), None).await.unwrap();
         assert_eq!(doc.type_name, "Question");
-        let error = resolve(&pause, &cx, &uri(1)).await.unwrap_err();
+        let error = resolve(&pause, &cx, &uri(1), None).await.unwrap_err();
         assert_eq!(retry(error), Some(120));
         assert_eq!(recorded.asked().len(), 1);
         tokio::time::advance(std::time::Duration::from_secs(121)).await;
-        assert!(resolve(&pause, &cx, &uri(1)).await.is_ok());
+        assert!(resolve(&pause, &cx, &uri(1), None).await.is_ok());
         assert_eq!(recorded.asked().len(), 2);
     }
 
@@ -755,13 +809,13 @@ mod pause_tests {
             ttl: 3600,
         };
         let pause = Pause::new();
-        let error = resolve(&pause, &cx, &uri(336)).await.unwrap_err();
+        let error = resolve(&pause, &cx, &uri(336), None).await.unwrap_err();
         assert_eq!(retry(error), Some(30));
-        let error = resolve(&pause, &cx, &uri(1)).await.unwrap_err();
+        let error = resolve(&pause, &cx, &uri(1), None).await.unwrap_err();
         assert!(retry(error).is_some_and(|s| s <= 30));
         assert_eq!(recorded.asked().len(), 1);
         tokio::time::advance(std::time::Duration::from_secs(31)).await;
-        assert!(resolve(&pause, &cx, &uri(1)).await.is_ok());
+        assert!(resolve(&pause, &cx, &uri(1), None).await.is_ok());
     }
 
     #[tokio::test(start_paused = true)]
@@ -779,15 +833,18 @@ mod pause_tests {
                 ttl: 3600,
             };
             let pause = Pause::new();
-            let error = resolve(&pause, &cx, &uri(336)).await.unwrap_err();
+            let error = resolve(&pause, &cx, &uri(336), None).await.unwrap_err();
             assert!(retry(error).is_some(), "{status}");
-            let error = resolve(&pause, &cx, &uri(1))
+            let error = resolve(&pause, &cx, &uri(1), None)
                 .await
                 .expect_err(&format!("{status}"));
             assert!(retry(error).is_some_and(|s| s <= seconds), "{status}");
             assert_eq!(recorded.asked().len(), 1, "{status}");
             tokio::time::advance(std::time::Duration::from_secs(seconds + 1)).await;
-            assert!(resolve(&pause, &cx, &uri(1)).await.is_ok(), "{status}");
+            assert!(
+                resolve(&pause, &cx, &uri(1), None).await.is_ok(),
+                "{status}"
+            );
         }
     }
 
@@ -852,11 +909,11 @@ mod pause_tests {
                 ttl: 3600,
             };
             let pause = Pause::new();
-            let error = resolve(&pause, &cx, &uri(336)).await.unwrap_err();
+            let error = resolve(&pause, &cx, &uri(336), None).await.unwrap_err();
             assert!(retry(error).is_some_and(|s| s >= backoff), "{status}");
             tokio::time::pause();
             tokio::time::advance(std::time::Duration::from_secs(61)).await;
-            let error = resolve(&pause, &cx, &uri(1))
+            let error = resolve(&pause, &cx, &uri(1), None)
                 .await
                 .expect_err(&format!("{status}"));
             assert!(retry(error).is_some_and(|s| s <= backoff - 61), "{status}");
@@ -867,7 +924,10 @@ mod pause_tests {
             );
             tokio::time::advance(std::time::Duration::from_secs(backoff - 60)).await;
             tokio::time::resume();
-            assert!(resolve(&pause, &cx, &uri(1)).await.is_ok(), "{status}");
+            assert!(
+                resolve(&pause, &cx, &uri(1), None).await.is_ok(),
+                "{status}"
+            );
             assert_eq!(
                 asked.load(std::sync::atomic::Ordering::SeqCst),
                 2,
@@ -891,9 +951,121 @@ mod pause_tests {
         };
         let pause = Pause::new();
         let (a, b) = (uri(336), uri(1));
-        let (first, second) = tokio::join!(resolve(&pause, &cx, &a), resolve(&pause, &cx, &b));
+        let (first, second) = tokio::join!(
+            resolve(&pause, &cx, &a, None),
+            resolve(&pause, &cx, &b, None)
+        );
         assert_eq!(first.unwrap().type_name, "Question");
         assert!(retry(second.unwrap_err()).is_some_and(|s| s > 100));
         assert_eq!(recorded.asked(), vec![api(336)]);
+    }
+
+    /// The host is paced to the keyless quota (300 a day), or to the keyed one (10,000 a day)
+    /// while the operator's app key is set.
+    #[test]
+    fn the_host_is_paced_to_the_quota() {
+        let rate = |config: &crate::config::Config| {
+            crate::sources::budgets(config)
+                .find(|(host, _)| *host == "api.stackexchange.com")
+                .map(|(_, rate)| rate)
+        };
+        let mut config = crate::config::Config::default();
+        assert_eq!(rate(&config), Some(300.0 / 86_400.0));
+        config.sources.0.insert(
+            "stack_exchange".into(),
+            crate::sources::Switch {
+                key: Some("app-key".into()),
+                ..Default::default()
+            },
+        );
+        assert!(config.sources.validate().is_ok());
+        assert_eq!(rate(&config), Some(10_000.0 / 86_400.0));
+        assert!(!format!("{config:?}").contains("app-key"));
+    }
+
+    /// Once an answer says the day's quota is used up, no question is asked for an hour; the
+    /// quota error then asked for names the wait, which holds in turn.
+    #[tokio::test(start_paused = true)]
+    async fn a_used_up_quota_stops_asking() {
+        // Its short backoff does not shorten the quota's hour.
+        let mut last: Value = serde_json::from_slice(&answer(336, Some(10))).unwrap();
+        last["quota_remaining"] = 0.into();
+        let quota = br#"{"error_id":502,"error_message":"too many requests from this IP, more requests available in 7200 seconds","error_name":"throttle_violation"}"#;
+        let (egress, recorded) = fixture::egress(vec![
+            (&api(336), 200, JSON, serde_json::to_vec(&last).unwrap()),
+            (&api(1), 400, JSON, quota.to_vec()),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let pause = Pause::new();
+        assert_eq!(
+            resolve(&pause, &cx, &uri(336), None)
+                .await
+                .unwrap()
+                .type_name,
+            "Question"
+        );
+        let error = resolve(&pause, &cx, &uri(1), None).await.unwrap_err();
+        assert!(retry(error).is_some_and(|s| s > 3500 && s <= 3600));
+        assert_eq!(recorded.asked().len(), 1);
+        tokio::time::advance(std::time::Duration::from_secs(3601)).await;
+        let error = resolve(&pause, &cx, &uri(1), None).await.unwrap_err();
+        assert_eq!(retry(error), Some(7200));
+        assert_eq!(recorded.asked().len(), 2);
+        let error = resolve(&pause, &cx, &uri(1), None).await.unwrap_err();
+        assert!(retry(error).is_some_and(|s| s > 7100));
+        assert_eq!(recorded.asked().len(), 2);
+    }
+
+    /// The app key goes as `key=` on the wire alone: the URL the egress, its cache and the card
+    /// see never holds it.
+    #[tokio::test(start_paused = true)]
+    async fn the_app_key_is_sent_on_the_wire_alone() {
+        use crate::resolver::egress::{wire_url, FetchOptions, Fetched, Transport};
+        #[derive(Default)]
+        struct Seen(std::sync::Mutex<Vec<(String, String)>>);
+        #[async_trait::async_trait]
+        impl Transport for Seen {
+            async fn get(&self, url: &url::Url, a: &[std::net::SocketAddr]) -> Result<Fetched> {
+                self.get_with(url, a, &FetchOptions::default()).await
+            }
+            async fn get_with(
+                &self,
+                url: &url::Url,
+                _: &[std::net::SocketAddr],
+                options: &FetchOptions,
+            ) -> Result<Fetched> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((url.to_string(), wire_url(url, options).to_string()));
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    JSON.into(),
+                    answer(336, None),
+                ))
+            }
+        }
+        let seen = Arc::new(Seen::default());
+        let egress = crate::resolver::egress::Egress::with_backends(
+            Default::default(),
+            Arc::new(fixture::PublicDns),
+            seen.clone(),
+        );
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let pause = Pause::new();
+        let doc = resolve(&pause, &cx, &uri(336), Some("app-key"))
+            .await
+            .unwrap();
+        let (url, wire) = seen.0.lock().unwrap()[0].clone();
+        assert_eq!(url, api(336));
+        assert_eq!(wire, format!("{}&key=app-key", api(336)));
+        assert!(!serde_json::to_string(&doc).unwrap().contains("app-key"));
     }
 }

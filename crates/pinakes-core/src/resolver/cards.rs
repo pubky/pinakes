@@ -616,7 +616,8 @@ pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
     } else {
         "ScholarlyArticle"
     });
-    d.name = text(v.get("title"));
+    // A title may carry markup (`<i>` for a species name, `<sub>`): its text only.
+    d.name = text(v.get("title")).and_then(crate::resolver::html::plain_text);
     d.description = text(v.get("abstract")).map(|s| plain(&s));
     for (k, v) in [
         ("author", names(v.get("author"))),
@@ -1613,6 +1614,19 @@ fn budget(kind: &str) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    /// A DOI's title is plain text: Crossref's `<i>` around a species name is dropped.
+    #[test]
+    fn a_doi_title_with_markup_is_plain_text() {
+        let f = Fetched::answer(
+            Url::parse("https://api.crossref.org/v1/works/10.5555%2Fx/transform").unwrap(),
+            200,
+            "application/json".into(),
+            br#"{"type":"article-journal","title":"Growth of <i>E. coli</i> at 3 &lt; pH","abstract":"<jats:p>Text.</jats:p>"}"#.to_vec(),
+        );
+        let d = parse_doi("doi:10.5555/x", &f, 86400).unwrap();
+        assert_eq!(d.name.as_deref(), Some("Growth of E. coli at 3 < pH"));
+    }
+
     use super::*;
 
     /// A podcast feed of `n` items, newest first, each with `notes` bytes of show notes.

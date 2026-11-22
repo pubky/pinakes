@@ -5,7 +5,8 @@
 //! The API is signed with the operator's Podcast Index key and secret (`[podcast_index]`,
 //! `podcast_index_api`). Without them the source declines and the page gets
 //! an ordinary web card. The pair goes only to `api.podcastindex.org` and never appears in logs,
-//! errors or cards.
+//! errors or cards. A pair Podcast Index refuses (401, or a 403 whose `description` names the
+//! key) is switched off for an hour (`Refusals`): pages get web cards meanwhile, as without one.
 use super::{
     kit::{html_text, int, text, Card},
     Example, Source,
@@ -170,56 +171,74 @@ impl Source for PodcastIndex {
         ]
     }
     async fn resolve(&self, cx: &super::Context<'_>, uri: &str) -> Result<ResourceMeta> {
-        let Some((feed, episode)) = index_page(uri) else {
-            return Ok(cx.missing(uri, self));
-        };
-        let Some((key, secret)) = credentials() else {
-            return Err(super::Declined.into());
-        };
-        let Some(url) = (match episode {
-            Some(id) => Some(pi_episode_request(id)),
-            None => pi_request(Ask::FeedId(feed)),
-        }) else {
-            return Ok(cx.missing(uri, self));
-        };
-        let options = pi_options(&key, &secret);
-        let f = cx.egress.fetch_with(&url, &options).await?;
-        crate::podcast_index_api::note_refusal(f.status);
-        super::retry(&f)?;
-        let card = crate::resolver::html::blocking(move || match episode {
-            Some(id) => parse_episode(f.status, &f.body, feed, id),
-            None => parse_show(f.status, &f.body, feed),
-        })
-        .await??;
-        // A show's latest episodes, from the feed Podcast Index names for it (`episodes`).
-        let feed_url = card
-            .as_ref()
-            .filter(|_| episode.is_none())
-            .and_then(|c| c.details.get("feed_url"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let mut doc = match card {
-            Some(card) => card.into_doc(cx.card(uri, self), SITE),
-            None => cx.missing(uri, self),
-        };
-        if let Some(feed) = feed_url {
-            if let Some(listed) = crate::episodes::fetch(
-                cx.egress,
-                &feed,
-                cx.ttl,
-                crate::episodes::feed_deadline(cx.deadline()),
-            )
-            .await
-            {
-                doc.episodes = Some(listed.episodes);
-                doc.episodes_older = listed.older;
-                doc.episodes_cut = listed.cut;
-                doc.episodes_oldest_first = listed.oldest_first;
-                doc.episodes_channel = listed.channel;
-            }
-        }
-        Ok(doc)
+        resolve_with(cx, uri, &crate::podcast_index_api::REFUSALS).await
     }
+}
+
+/// The card of the Podcast Index page `uri`, `Declined` while `refusals` holds the pair off.
+async fn resolve_with(
+    cx: &super::Context<'_>,
+    uri: &str,
+    refusals: &super::Refusals,
+) -> Result<ResourceMeta> {
+    let this = &PodcastIndex;
+    let Some((feed, episode)) = index_page(uri) else {
+        return Ok(cx.missing(uri, this));
+    };
+    let Some((key, secret)) = credentials() else {
+        return Err(super::Declined.into());
+    };
+    let Some(url) = (match episode {
+        Some(id) => Some(pi_episode_request(id)),
+        None => pi_request(Ask::FeedId(feed)),
+    }) else {
+        return Ok(cx.missing(uri, this));
+    };
+    refusals.check()?;
+    let options = pi_options(&key, &secret);
+    let f = cx.egress.fetch_with(&url, &options).await?;
+    if crate::podcast_index_api::refuses_the_pair(&f) {
+        if refusals.refused() {
+            tracing::warn!(
+                "Podcast Index refused the configured key; its pages get web cards for an hour"
+            );
+        }
+        return Err(super::Declined.into());
+    }
+    super::retry(&f)?;
+    let card = crate::resolver::html::blocking(move || match episode {
+        Some(id) => parse_episode(f.status, &f.body, feed, id),
+        None => parse_show(f.status, &f.body, feed),
+    })
+    .await??;
+    // A show's latest episodes, from the feed Podcast Index names for it (`episodes`).
+    let feed_url = card
+        .as_ref()
+        .filter(|_| episode.is_none())
+        .and_then(|c| c.details.get("feed_url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut doc = match card {
+        Some(card) => card.into_doc(cx.card(uri, this), SITE),
+        None => cx.missing(uri, this),
+    };
+    if let Some(feed) = feed_url {
+        if let Some(listed) = crate::episodes::fetch(
+            cx.egress,
+            &feed,
+            cx.ttl,
+            crate::episodes::feed_deadline(cx.deadline()),
+        )
+        .await
+        {
+            doc.episodes = Some(listed.episodes);
+            doc.episodes_older = listed.older;
+            doc.episodes_cut = listed.cut;
+            doc.episodes_oldest_first = listed.oldest_first;
+            doc.episodes_channel = listed.channel;
+        }
+    }
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -365,6 +384,73 @@ mod tests {
         );
         assert_eq!(doc.episodes, None);
         assert!(!format!("{doc:?}").contains("TESTSECRET"));
+        *CREDENTIALS.write().unwrap() = None;
+    }
+
+    /// A pair Podcast Index refuses (401) gives the page a web card, as no pair does, and is
+    /// switched off for an hour: nothing is asked meanwhile, and the pair is used again after.
+    /// A 403 that does not name the key is that page's failure.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_pair_is_off_for_an_hour() {
+        let _pair = PAIR.lock().await;
+        let refused = "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=577105";
+        let forbidden = "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=1";
+        let (egress, recorded) = fixture::egress(vec![
+            (
+                refused,
+                401,
+                "application/json",
+                br#"{"status":"false","description":"Authorization header doesn't match"}"#
+                    .to_vec(),
+            ),
+            (
+                forbidden,
+                403,
+                "application/json",
+                br#"{"status":"false","description":"Forbidden"}"#.to_vec(),
+            ),
+        ]);
+        let cx = super::super::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        configure(&PodcastIndexConfig {
+            key: Some("TESTKEY".into()),
+            secret: Some("TESTSECRET".into()),
+        });
+        let declined = |r: Result<ResourceMeta>| r.is_err_and(|e| e.is::<super::super::Declined>());
+        let latch = super::super::Refusals::new("podcast_index");
+        let error = resolve_with(&cx, "https://podcastindex.org/podcast/1", &latch)
+            .await
+            .unwrap_err();
+        assert!(!error.is::<super::super::Declined>());
+        assert!(!latch.latched());
+        let uri = "https://podcastindex.org/podcast/577105";
+        assert!(declined(resolve_with(&cx, uri, &latch).await));
+        assert!(latch.latched());
+        tokio::time::advance(std::time::Duration::from_secs(3599)).await;
+        assert!(declined(resolve_with(&cx, uri, &latch).await));
+        assert_eq!(recorded.asked(), [forbidden, refused]);
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(declined(resolve_with(&cx, uri, &latch).await));
+        assert_eq!(recorded.asked(), [forbidden, refused, refused]);
+        // A 403 whose `description` names the key is a refusal too.
+        let named = "https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id=2";
+        let (egress, _) = fixture::egress(vec![(
+            named,
+            403,
+            "application/json",
+            br#"{"status":"false","description":"Invalid key"}"#.to_vec(),
+        )]);
+        let cx = super::super::Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let latch = super::super::Refusals::new("podcast_index");
+        assert!(declined(
+            resolve_with(&cx, "https://podcastindex.org/podcast/2", &latch).await
+        ));
+        assert!(latch.latched());
         *CREDENTIALS.write().unwrap() = None;
     }
 

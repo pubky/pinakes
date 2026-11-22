@@ -32,10 +32,10 @@ impl Api {
     /// A refusal of the credentials: the lookup keeps what the service gave before, as nothing
     /// else answers for its source, and the worker passes the source over as one that is not
     /// ready (`also_on::one`); a lookup that asks the service beside others decides for itself.
-    pub(crate) fn refused(&self) -> anyhow::Error {
+    pub(crate) fn refused(&self, hold: u64) -> anyhow::Error {
         RetryLater {
             class: self.auth_class,
-            seconds: REFUSAL_HOLD,
+            seconds: hold,
         }
         .into()
     }
@@ -59,17 +59,16 @@ pub(crate) fn pair(id: Option<&str>, secret: Option<&str>) -> Option<(String, St
 }
 /// Whether an error is a service refusing the operator's credentials, its token endpoint or its
 /// API ([`Api::refused`]: a class ending `_auth`, `spotify_auth` or `tidal_auth`, held
-/// [`REFUSAL_HOLD`]). It lasts: a retry soon would be refused too. A token the service rejects
-/// after its first minute is not one (the same class, a minute's wait): the next request takes
-/// a new token.
+/// `limits.also_on_refusal_hold_secs`, at least two minutes). It lasts: a retry soon would be
+/// refused too. A token the service rejects after its first minute is not one (the same class,
+/// [`REJECTED_WAIT`]): the next request takes a new token.
 pub(crate) fn refused(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RetryLater>()
-        .is_some_and(|r| r.class.ends_with("_auth") && r.seconds >= REFUSAL_HOLD)
+        .is_some_and(|r| r.class.ends_with("_auth") && r.seconds > REJECTED_WAIT)
 }
-/// How long refused credentials are held before the service is asked again, and the wait a
-/// refused lookup reports: one value, so the retry comes when the hold ends.
-pub(crate) const REFUSAL_HOLD: u64 = 300;
+/// The wait a rejected token that was not new reports: the next request takes a new one.
+const REJECTED_WAIT: u64 = 60;
 /// The wait the service's API answered with, when `error` is one (the egress turns a 429 and its
 /// `Retry-After` into `RetryLater`, class `http_4xx`); the egress's own pacing is not the
 /// service's.
@@ -89,6 +88,10 @@ pub(crate) struct Slot {
     pub(crate) refused_until: Option<Instant>,
     /// Until when the service asked to wait: no request before, batched or single.
     pub(crate) busy_until: Option<Instant>,
+    /// How long a refusal of the credentials is held (`limits.also_on_refusal_hold_secs`), and
+    /// the wait a refused lookup reports: one value, so the retry comes when the hold ends. Set
+    /// by [`slot`] at each turn.
+    pub(crate) hold: u64,
 }
 #[derive(Clone)]
 pub(crate) struct Issued {
@@ -97,7 +100,7 @@ pub(crate) struct Issued {
     pub(crate) until: Instant,
 }
 impl Slot {
-    /// The credentials are refused (`class` says how): logged, counted, and kept five minutes.
+    /// The credentials are refused (`class` says how): logged, counted, and kept for the hold.
     pub(crate) fn refuse(&mut self, api: &Api, class: &'static str, status: u16) {
         tracing::warn!(
             status,
@@ -108,7 +111,7 @@ impl Slot {
         crate::telemetry::also_on_service_error(api.service, class);
         crate::sources::token_refused(api.service);
         self.token = None;
-        self.refused_until = Some(Instant::now() + Duration::from_secs(REFUSAL_HOLD));
+        self.refused_until = Some(Instant::now() + Duration::from_secs(self.hold));
     }
     /// The service asked to wait: no request before, and a shorter wait never cuts a longer one.
     pub(crate) fn cool_down(&mut self, seconds: u64) {
@@ -153,13 +156,13 @@ impl Slot {
                 self.token = None;
                 if fresh {
                     self.refuse(api, "rejected", 401);
-                    return api.refused();
+                    return api.refused(self.hold);
                 }
             }
         }
         RetryLater {
             class: api.auth_class,
-            seconds: 60,
+            seconds: REJECTED_WAIT,
         }
         .into()
     }
@@ -174,7 +177,7 @@ impl Slot {
     ) -> Result<String> {
         let now = Instant::now();
         if self.refused_until.is_some_and(|until| until > now) {
-            return Err(api.refused());
+            return Err(api.refused(self.hold));
         }
         if let Some(issued) = &self.token {
             if issued.until > now {
@@ -216,7 +219,7 @@ impl Slot {
             }
             status => {
                 self.refuse(api, "refused", status);
-                Err(api.refused())
+                Err(api.refused(self.hold))
             }
         }
     }
@@ -259,8 +262,9 @@ impl Drop for Pending {
         }
     }
 }
-/// The slot `key` names, once this lookup's turn at it comes.
-pub(crate) async fn slot(key: &[u8; 32]) -> tokio::sync::OwnedMutexGuard<Slot> {
+/// The slot `key` names, once this lookup's turn at it comes, holding a refusal for `hold`
+/// seconds (`limits.also_on_refusal_hold_secs`).
+pub(crate) async fn slot(key: &[u8; 32], hold: u64) -> tokio::sync::OwnedMutexGuard<Slot> {
     let _pending = Pending::new(key);
     let cell = SLOTS
         .lock()
@@ -268,7 +272,9 @@ pub(crate) async fn slot(key: &[u8; 32]) -> tokio::sync::OwnedMutexGuard<Slot> {
         .entry(*key)
         .or_default()
         .clone();
-    cell.lock_owned().await
+    let mut slot = cell.lock_owned().await;
+    slot.hold = hold;
+    slot
 }
 /// A key of this process's own, so a cache tag is never the pair's plain hash (an offline check
 /// of a guessed secret).
@@ -329,11 +335,15 @@ pub(crate) async fn object_as(
     refuses: bool,
 ) -> Result<Option<Value>> {
     let slot = slot_key(api, id, secret);
-    let mut s = self::slot(&slot).await;
+    let mut s = self::slot(&slot, cx.config.also_on.refusal_hold_secs).await;
     s.unless_busy(api)?;
     let token = s.token(api, cx, id, secret).await?;
     let options = api_options(&token, &slot, accept, extra_types);
-    let fetched = match cx.egress.discover(url, &options, 3600).await {
+    let fetched = match cx
+        .egress
+        .discover(url, &options, cx.egress.config().discovery_secs)
+        .await
+    {
         Ok(fetched) => fetched,
         Err(error) => return Err(s.answered(api, error)),
     };
@@ -345,13 +355,13 @@ pub(crate) async fn object_as(
         // No catalogue scope, a restricted app: the credentials, not the object.
         403 if refuses => {
             s.refuse(api, "forbidden", 403);
-            return Err(api.refused());
+            return Err(api.refused(s.hold));
         }
         403 => {
             tracing::warn!("{} refused a request its credentials may make", api.label);
             return Err(RetryLater {
                 class: "forbidden_request",
-                seconds: REFUSAL_HOLD,
+                seconds: s.hold,
             }
             .into());
         }
@@ -375,6 +385,8 @@ pub(crate) async fn object_as(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The default refusal hold.
+    const HOLD: u64 = 300;
 
     const API: Api = Api {
         service: "unit",
@@ -388,13 +400,13 @@ mod tests {
         (r.class, r.seconds)
     }
     async fn unless_busy(key: &[u8; 32]) -> Result<()> {
-        slot(key).await.unless_busy(&API)
+        slot(key, HOLD).await.unless_busy(&API)
     }
     async fn cool_down(key: &[u8; 32], seconds: u64) {
-        slot(key).await.cool_down(seconds);
+        slot(key, HOLD).await.cool_down(seconds);
     }
     async fn reject(key: &[u8; 32], token: &str) -> anyhow::Error {
-        slot(key).await.reject(&API, token)
+        slot(key, HOLD).await.reject(&API, token)
     }
 
     #[tokio::test]
@@ -407,7 +419,7 @@ mod tests {
             until: now + Duration::from_secs(3600),
         };
         let two_minutes_ago = now.checked_sub(Duration::from_secs(120)).unwrap_or(now);
-        *self::slot(&slot).await = Slot {
+        *self::slot(&slot, HOLD).await = Slot {
             token: Some(issued("new", two_minutes_ago)),
             ..Default::default()
         };
@@ -417,7 +429,7 @@ mod tests {
             ("unit_auth", 60)
         );
         assert_eq!(
-            self::slot(&slot)
+            self::slot(&slot, HOLD)
                 .await
                 .token
                 .as_ref()
@@ -431,17 +443,25 @@ mod tests {
         );
         {
             // A scope of its own: the guard would otherwise hold the lock past the next one.
-            let s = self::slot(&slot).await;
+            let s = self::slot(&slot, HOLD).await;
             assert!(s.token.is_none() && s.refused_until.is_none());
         }
         // One issued just now and rejected: the credentials are refused for five minutes.
-        self::slot(&slot).await.token = Some(issued("fresh", now));
+        self::slot(&slot, HOLD).await.token = Some(issued("fresh", now));
         assert_eq!(
             class_and_seconds(&reject(&slot, "fresh").await),
-            ("unit_auth", REFUSAL_HOLD)
+            ("unit_auth", HOLD)
         );
-        let s = self::slot(&slot).await;
-        assert!(s.token.is_none() && s.refused_until.is_some_and(|u| u > now));
+        {
+            let s = self::slot(&slot, HOLD).await;
+            assert!(s.token.is_none() && s.refused_until.is_some_and(|u| u > now));
+        }
+        // The hold is the operator's limit: a refusal reports the hold its slot was taken with.
+        self::slot(&slot, HOLD).await.token = Some(issued("again", Instant::now()));
+        assert_eq!(
+            class_and_seconds(&self::slot(&slot, 900).await.reject(&API, "again")),
+            ("unit_auth", 900)
+        );
     }
     /// A token endpoint that issues `token-1`, `token-2`, …, each good for an hour.
     struct Tokens(std::sync::atomic::AtomicUsize);
@@ -490,7 +510,7 @@ mod tests {
         let key = slot_key(&API, "expiry-id", "expiry-secret");
         let asked = || tokens.0.load(std::sync::atomic::Ordering::SeqCst);
         let token = || async {
-            self::slot(&key)
+            self::slot(&key, HOLD)
                 .await
                 .token(&API, &cx, "expiry-id", "expiry-secret")
                 .await
@@ -499,14 +519,14 @@ mod tests {
         // None in hand: one is asked for, and kept for the hour less a minute.
         assert_eq!((token().await.as_str(), asked()), ("token-1", 1));
         {
-            let s = self::slot(&key).await;
+            let s = self::slot(&key, HOLD).await;
             let issued = s.token.as_ref().unwrap();
             assert_eq!(issued.until - issued.at, Duration::from_secs(3540));
         }
         // In hand: the endpoint is not asked.
         assert_eq!((token().await.as_str(), asked()), ("token-1", 1));
         // Its time is over now.
-        self::slot(&key).await.token.as_mut().unwrap().until = Instant::now();
+        self::slot(&key, HOLD).await.token.as_mut().unwrap().until = Instant::now();
         assert_eq!((token().await.as_str(), asked()), ("token-2", 2));
         assert_eq!((token().await.as_str(), asked()), ("token-2", 2));
     }
@@ -548,11 +568,18 @@ mod tests {
     async fn a_slow_request_holds_only_its_own_slot() {
         use crate::resolver::egress::{Dns, Egress, Fetched, Transport};
         use std::net::SocketAddr;
+        /// Each service on an address of its own, as two services are (one address paces the
+        /// names on it together).
         struct Public;
         #[async_trait::async_trait]
         impl Dns for Public {
-            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
-                Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                let ip = if host == "slow.example" {
+                    "8.8.8.8"
+                } else {
+                    "8.8.4.4"
+                };
+                Ok(vec![SocketAddr::new(ip.parse()?, port)])
             }
         }
         /// Answers every token and API request at once, but `slow.example`'s API request only
@@ -658,10 +685,10 @@ mod tests {
         assert_ne!(slot, slot_key(&other, "tag-id", "tag-secret"));
         // The refusal's reported wait is the hold.
         assert_eq!(
-            API.refused()
+            API.refused(HOLD)
                 .downcast_ref::<RetryLater>()
                 .map(|r| (r.class, r.seconds)),
-            Some(("unit_auth", REFUSAL_HOLD))
+            Some(("unit_auth", HOLD))
         );
     }
 }

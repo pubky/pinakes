@@ -1,8 +1,9 @@
 # TikTok
 
-TikTok videos and profiles, from TikTok's oEmbed endpoint. No key and no account. Videos are
-social content (their title is the author's caption): the card quotes at most 200 characters,
-refreshes within the hour and is removed once the video is gone.
+TikTok videos and profiles. No key and no account. A profile is read from TikTok's oEmbed
+endpoint; a video is a link rule: its card is the link's root and shape, with the author the
+link spells, and nothing is asked (to a request without a browser TikTok names a video by its
+id alone). A profile is social content too: it refreshes within the hour, is removed once it is gone, and its bio is published without e-mail addresses.
 
 ## Links
 
@@ -13,26 +14,22 @@ Short links (`vm.tiktok.com/…`, `/t/…`) name nothing without a fetch and are
 
 ## What it reads
 
-- `GET https://www.tiktok.com/oembed?url={root}`, the documented oEmbed endpoint, for a video
-  and for a profile alike.
+- A profile: `GET https://www.tiktok.com/oembed?url={root}`, the documented oEmbed endpoint.
+  Its answer names the profile.
+- A video: nothing. The card is "Video on tiktok.com" with the author the link spells.
 
-To a request without a browser TikTok names a video by its id alone (`embed_product_id`), so
-the card is "Video on tiktok.com" with the author the link spells; when the answer names the
-video (`title`, `author_name`, `author_unique_id`, `thumbnail_url`), the card has them. An
-answer for another video is an error. A profile's answer names the profile.
-
-A request TikTok refuses (a challenge, 401 or 403) gives the card of the link's shape alone,
-"Video on tiktok.com" or "Profile on tiktok.com", with the `blocked` fact: the link still
-resolves, groups and counts.
+A profile's request TikTok refuses (a challenge, 401 or 403) gives the card of the link's shape
+alone, "Profile on tiktok.com", with the `blocked` fact: the link still resolves, groups
+and counts. A refusal on a refresh keeps the card read before, as a wall on a web page does.
 
 ## Card
 
-A video is a `VideoObject` named by its title, with its thumbnail. A profile is a `Person`
+A video is a `VideoObject` named by its shape, "Video on tiktok.com". A profile is a `Person`
 named by its display name.
 
 | Fact | Meaning |
 | --- | --- |
-| `author`, `author_name` | A video's author's handle and display name |
+| `author` | A video's author's handle, as the link spells it |
 | `handle` | A profile's handle |
 | `blocked` | `true` when TikTok refused the request |
 

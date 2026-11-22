@@ -755,7 +755,8 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
             &url,
             &nexus,
             &IngestConfig::default(),
-            &Metrics::new().unwrap()
+            &Metrics::new().unwrap(),
+            &mut ingest::Resets::new(std::time::Duration::ZERO),
         )
         .await
         .unwrap(),
@@ -770,7 +771,8 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
             &url,
             &nexus,
             &IngestConfig::default(),
-            &Metrics::new().unwrap()
+            &Metrics::new().unwrap(),
+            &mut ingest::Resets::new(std::time::Duration::ZERO),
         )
         .await
         .unwrap(),
@@ -790,7 +792,8 @@ async fn polls_the_http_feed_and_replays_without_duplicates(pool: PgPool) {
 }
 
 /// A feed that starts over (its epoch is another) is no batch: the poll reports no lines read
-/// and no poll to follow at once, so the daemon waits before it reads the feed again from zero.
+/// and no poll to follow at once, so the daemon waits before it reads the feed again; the read
+/// that confirms the new epoch resets, and the feed is read again from zero.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_poll_that_resets_the_feed_reads_no_lines_and_waits(pool: PgPool) {
     let (_, uri, _) = identity("https://example.org/feed").unwrap();
@@ -807,30 +810,39 @@ async fn a_poll_that_resets_the_feed_reads_no_lines_and_waits(pool: PgPool) {
     let nexus = Nexus::new(&url, None).unwrap();
     let metrics = Metrics::new().unwrap();
     let limits = IngestConfig::default();
-    let poll = || ingest::poll_once(&pool, &url, &nexus, &limits, &metrics);
+    let mut resets = ingest::Resets::new(std::time::Duration::ZERO);
+    macro_rules! poll {
+        () => {
+            ingest::poll_once(&pool, &url, &nexus, &limits, &metrics, &mut resets)
+                .await
+                .unwrap()
+        };
+    }
     let read = ingest::Poll {
         lines: 1,
         again: true,
     };
-    assert_eq!(poll().await.unwrap(), read);
+    let idle = ingest::Poll {
+        lines: 0,
+        again: false,
+    };
+    assert_eq!(poll!(), read);
     sqlx::query("UPDATE feed_cursor SET epoch='an-earlier-epoch'")
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(
-        poll().await.unwrap(),
-        ingest::Poll {
-            lines: 0,
-            again: false
-        }
-    );
-    let (cursor, resets, references): (i64, i64, i64) =
-        sqlx::query_as("SELECT cursor,resets,(SELECT count(*) FROM reference) FROM feed_cursor")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!((cursor, resets, references), (0, 1, 0));
-    assert_eq!(poll().await.unwrap(), read);
+    let projection = || {
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT cursor,resets,(SELECT count(*) FROM reference) FROM feed_cursor",
+        )
+        .fetch_one(&pool)
+    };
+    // The first answer with the new epoch waits for its confirming read.
+    assert_eq!(poll!(), idle);
+    assert_eq!(projection().await.unwrap(), (1, 0, 1));
+    assert_eq!(poll!(), idle);
+    assert_eq!(projection().await.unwrap(), (0, 1, 0));
+    assert_eq!(poll!(), read);
     task.abort();
 }
 
@@ -1019,13 +1031,12 @@ async fn one_client_takes_at_most_its_share_of_new_previews(pool: PgPool) {
     assert_eq!(refused.with_label_values(&["client"]).get(), 1);
 }
 
-/// The per-client share of new previews is off unless the operator sets it: behind the reverse
-/// proxy the deployment asks for, every client has the proxy's address, and a share would cap the
-/// whole instance.
+/// The per-client share of new previews is 100 an hour by default; 0 is no share.
 #[test]
-fn the_per_client_share_is_off_unless_set() {
-    assert_eq!(Config::default().preview_new_per_client_per_hour, 0);
-    assert!(Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}})).is_ok());
+fn the_per_client_share_is_100_unless_set() {
+    assert_eq!(Config::default().preview_new_per_client_per_hour, 100);
+    let off = Config::from_value(json!({"limits": {"preview_new_per_client_per_hour": 0}}));
+    assert_eq!(off.unwrap().preview_new_per_client_per_hour, 0);
 }
 
 /// `store::ensure_resource_created` says whether its call created the row: the first call for a
@@ -5223,4 +5234,373 @@ async fn a_short_query_matches_word_starts_not_inside_words(pool: PgPool) {
         get("/v1/search?q=%E9%9F%B3%E4%B9%90".into()).await,
         [chinese]
     );
+}
+
+/// `GET /healthz` is on the admin listener only, takes no admin token and costs no budget: 200
+/// while the database answers, 503 once the daemon is stopping (a background task ended) or the
+/// database is gone. The other admin routes still need the token.
+#[sqlx::test(migrations = "../../migrations")]
+async fn healthz_answers_on_the_admin_listener_from_the_database(pool: PgPool) {
+    let config = Config {
+        admin_token: Some("admin-secret-token".into()),
+        ..Config::default()
+    };
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let (public, admin) = (api::router(state.clone()), api::admin_router(state.clone()));
+    let ok = (StatusCode::OK, json!({"body": "ok"}));
+    for _ in 0..3 {
+        assert_eq!(admin_call(&admin, "GET", "/healthz", None).await, ok);
+    }
+    assert_eq!(admin_call(&admin, "GET", "/metrics", None).await.0, 401);
+    assert_eq!(call(&public, "GET", "/healthz", None).await.0, 404);
+    state
+        .stopping
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        admin_call(&admin, "GET", "/healthz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // The database gone: no answer to `SELECT 1`.
+    let state = AppState::new(pool.clone(), Config::default()).unwrap();
+    let admin = api::admin_router(state);
+    assert_eq!(admin_call(&admin, "GET", "/healthz", None).await, ok);
+    pool.close().await;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        admin_call(&admin, "GET", "/healthz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+/// A database that takes the connection and never answers: `GET /healthz` gives up after its
+/// one second and answers 503 well before the pool's own wait (10 s here) would end.
+#[tokio::test]
+async fn healthz_answers_503_within_two_seconds_from_a_database_that_never_answers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Accept every connection and hold it open, reading nothing and writing nothing.
+    let held = tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            open.push(socket);
+        }
+    });
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect_lazy(&format!(
+            "postgres://pinakes@127.0.0.1:{port}/pinakes?sslmode=disable"
+        ))
+        .unwrap();
+    let admin = api::admin_router(AppState::new(pool, Config::default()).unwrap());
+    let started = std::time::Instant::now();
+    assert_eq!(
+        admin_call(&admin, "GET", "/healthz", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    held.abort();
+}
+
+/// A spelling held neither as a card nor as an alias reads as its root by the static alias rule:
+/// `by-uri` and the `uris` of lookup answer a link with `?utm_source=x` and the `doi.org` form
+/// with the stored root, and store nothing for them. A spelling with no stored root stays 404.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_read_of_an_unreferenced_spelling_answers_with_its_static_root(pool: PgPool) {
+    let (page, _) = store::ensure_resource_created(&pool, "https://example.org/a")
+        .await
+        .unwrap();
+    let (paper, _) = store::ensure_resource_created(&pool, "doi:10.1038/nature12373")
+        .await
+        .unwrap();
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (SELECT count(*) FROM resource)+(SELECT count(*) FROM resource_alias)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let stored = rows().await;
+    let spellings = [
+        ("https://example.org/a?utm_source=x", &page),
+        ("https://doi.org/10.1038/nature12373", &paper),
+    ];
+    for (spelling, root) in spellings {
+        let path = format!(
+            "/v1/resources/by-uri?uri={}",
+            url::form_urlencoded::byte_serialize(spelling.as_bytes()).collect::<String>()
+        );
+        let (code, card) = call(&app, "GET", &path, None).await;
+        assert_eq!(code, 200, "{spelling}: {card}");
+        assert_eq!(card["id"], root.as_str(), "{spelling}");
+    }
+    let (code, cards) = call(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"uris": [
+            "https://example.org/a?utm_source=x",
+            "https://example.org/unknown?utm_source=x",
+            "https://doi.org/10.1038/nature12373",
+        ]})),
+    )
+    .await;
+    assert_eq!(code, 200, "{cards}");
+    let ids: Vec<&str> = cards
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [page.as_str(), paper.as_str()]);
+    let (code, _) = call(
+        &app,
+        "GET",
+        "/v1/resources/by-uri?uri=https%3A%2F%2Fexample.org%2Funknown%3Futm_source%3Dx",
+        None,
+    )
+    .await;
+    assert_eq!(code, 404);
+    assert_eq!(rows().await, stored);
+}
+
+/// The client address behind `api.trusted_proxies`: the peer itself when it is not a trusted
+/// proxy (its `X-Forwarded-For` is never read), else the right-most entry that is not a trusted
+/// proxy, so entries a client wrote to the left of its own are ignored.
+#[test]
+fn the_client_address_is_the_right_most_untrusted_forwarded_hop() {
+    let trusted: Vec<ipnet::IpNet> = [
+        "10.0.0.0/8".parse().unwrap(),
+        "192.0.2.9/32".parse().unwrap(),
+    ]
+    .into();
+    let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+    let forwarded = |values: &[&str]| {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append("x-forwarded-for", value.parse().unwrap());
+        }
+        headers
+    };
+    let client =
+        |peer: &str, values: &[&str]| api::client_address(ip(peer), &forwarded(values), &trusted);
+    // An untrusted peer is the client, whatever it sends.
+    assert_eq!(client("203.0.113.5", &["198.51.100.1"]), ip("203.0.113.5"));
+    // A trusted peer: the address it forwards.
+    assert_eq!(client("10.1.2.3", &["198.51.100.1"]), ip("198.51.100.1"));
+    // Spoofed entries to the left of the one the proxy appended are ignored, and so are the
+    // trusted proxies on the way.
+    assert_eq!(
+        client("10.1.2.3", &["1.1.1.1, 2.2.2.2, 198.51.100.1, 192.0.2.9"]),
+        ip("198.51.100.1")
+    );
+    assert_eq!(
+        client("10.1.2.3", &["1.1.1.1", "198.51.100.1:4711, 10.9.9.9"]),
+        ip("198.51.100.1")
+    );
+    assert_eq!(
+        client("10.1.2.3", &["[2001:db8::7]:443"]),
+        ip("2001:db8::7")
+    );
+    // A byte that is no text in a spoofed entry does not hide the one the proxy appended.
+    let mut spoofed = HeaderMap::new();
+    spoofed.append(
+        "x-forwarded-for",
+        axum::http::HeaderValue::from_bytes(b"\xff, 198.51.100.1").unwrap(),
+    );
+    assert_eq!(
+        api::client_address(ip("10.1.2.3"), &spoofed, &trusted),
+        ip("198.51.100.1")
+    );
+    // No header, every hop trusted, or a hop that is no address: the proxy itself.
+    assert_eq!(client("10.1.2.3", &[]), ip("10.1.2.3"));
+    assert_eq!(client("10.1.2.3", &["10.4.4.4"]), ip("10.1.2.3"));
+    assert_eq!(client("10.1.2.3", &["1.1.1.1, unknown"]), ip("10.1.2.3"));
+    // Nothing is trusted by default: the header is never read.
+    assert_eq!(
+        api::client_address(ip("10.1.2.3"), &forwarded(&["198.51.100.1"]), &[]),
+        ip("10.1.2.3")
+    );
+    for bad in ["10.0.0.0/33", "proxy.example.org", "10.0.0.1:80"] {
+        let config = json!({"api": {"trusted_proxies": [bad]}});
+        assert!(Config::from_value(config).is_err(), "{bad}");
+    }
+    assert!(Config::from_value(json!({"api": {"trusted_proxies": ["10.0.0.0/8", "::1"]}})).is_ok());
+    assert!(Config::default().api.trusted_proxies.is_empty());
+}
+
+/// A request through the public layers from `peer` with `forwarded` as its `X-Forwarded-For`.
+async fn get_via(app: &Router, peer: &str, forwarded: Option<&str>, path: &str) -> StatusCode {
+    let mut request = Request::builder().uri(path);
+    if let Some(forwarded) = forwarded {
+        request = request.header("x-forwarded-for", forwarded);
+    }
+    let mut request = request.body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        format!("{peer}:1234").parse::<SocketAddr>().unwrap(),
+    ));
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+/// The per-IP budget behind a trusted proxy is each client's own: one client spends its budget
+/// and is refused while another, through the same proxy, still reads; a client that writes
+/// another's address to the left of its own is still counted as itself. From an untrusted peer
+/// the header changes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_per_ip_budget_behind_a_trusted_proxy_is_each_clients_own(pool: PgPool) {
+    let config = Config::from_value(json!({
+        "api": {"requests_per_minute": 2, "trusted_proxies": ["127.0.0.1"]}
+    }))
+    .unwrap();
+    let app = api::router(AppState::new(pool, config).unwrap());
+    let path = "/v1/info";
+    for _ in 0..2 {
+        assert_eq!(
+            get_via(&app, "127.0.0.1", Some("203.0.113.7"), path).await,
+            200
+        );
+    }
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.7"), path).await,
+        429
+    );
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.8, 203.0.113.7"), path).await,
+        429
+    );
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.8"), path).await,
+        200
+    );
+    // An untrusted peer naming a client with budget left is counted as itself.
+    for _ in 0..2 {
+        assert_eq!(
+            get_via(&app, "127.0.0.9", Some("203.0.113.9"), path).await,
+            200
+        );
+    }
+    assert_eq!(
+        get_via(&app, "127.0.0.9", Some("203.0.113.9"), path).await,
+        429
+    );
+    assert_eq!(
+        get_via(&app, "127.0.0.1", Some("203.0.113.9"), path).await,
+        200
+    );
+}
+
+/// By default one client address takes at most 100 of the hour's new previews: behind a trusted
+/// proxy the 101st new link from one client is refused with 429 and not stored, while another
+/// client through the same proxy still previews.
+#[sqlx::test(migrations = "../../migrations")]
+async fn by_default_one_client_takes_at_most_100_new_previews_an_hour(pool: PgPool) {
+    let config = Config::from_value(json!({
+        "api": {"trusted_proxies": ["127.0.0.1"], "requests_per_minute": 1000},
+        "limits": {"preview_requests_per_minute": 1000},
+    }))
+    .unwrap();
+    assert_eq!(config.preview_new_per_client_per_hour, 100);
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let refused = state.metrics.preview_refused.clone();
+    let app = api::router(state);
+    let preview = |client: &'static str, n: usize| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/resolve")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", client)
+                .body(Body::from(
+                    json!({ "uri": format!("https://example.org/{client}/{n}") }).to_string(),
+                ))
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                "127.0.0.1:1234".parse::<SocketAddr>().unwrap(),
+            ));
+            app.oneshot(request).await.unwrap().status()
+        }
+    };
+    let taken = futures_util::future::join_all((0..100).map(|n| preview("203.0.113.7", n))).await;
+    assert!(
+        taken.iter().all(|code| *code == 200 || *code == 202),
+        "{taken:?}"
+    );
+    assert_eq!(
+        preview("203.0.113.7", 100).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let code = preview("203.0.113.8", 0).await;
+    assert!(code == 200 || code == 202, "{code}");
+    assert_eq!(refused.with_label_values(&["client"]).get(), 1);
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM resource")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 101);
+}
+
+/// `facet=tags` lists at most 100 labels, the most frequent first and ties by label, however
+/// many labels the filtered links carry.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_tags_facet_lists_at_most_100_labels(pool: PgPool) {
+    let links = [
+        "https://example.org/tagged/a",
+        "https://example.org/tagged/b",
+    ];
+    let mut labels: Vec<(usize, String)> = (0..120).map(|n| (0, format!("l{n:03}"))).collect();
+    labels.extend([(0, "most".to_owned()), (1, "most".to_owned())]);
+    let lines: Vec<Change> = labels
+        .iter()
+        .map(|(link, label)| Change {
+            op: Op::Put,
+            uri: identity(links[*link]).unwrap().1,
+            kind: Kind::Tag,
+            author: author(*link),
+            object_path: format!("/pub/app/tags/{label}"),
+            label: Some(label.clone()),
+            at: SEEDED_AT_MS,
+        })
+        .collect();
+    let saved = ingest::cursor(&pool, "fixture").await.unwrap();
+    let next = lines.len() as i64;
+    let page = FeedPage {
+        page: Changes {
+            lines,
+            next_cursor: next,
+            skipped: Default::default(),
+        },
+        epoch: None,
+        length: next,
+    };
+    let metrics = Metrics::new().unwrap();
+    assert!(ingest::apply(
+        &pool,
+        "fixture",
+        &saved,
+        &page,
+        &IngestConfig::default(),
+        &metrics
+    )
+    .await
+    .unwrap());
+    for uri in links {
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some("A tagged page".into());
+        doc.set_type("Article");
+        store::save_document(&pool, &identity(uri).unwrap().0, 0, &doc)
+            .await
+            .unwrap();
+    }
+    let app = api::router(AppState::new(pool, Config::default()).unwrap());
+    let (code, page) = call(&app, "GET", "/v1/search?facet=tags&limit=1", None).await;
+    assert_eq!(code, 200, "{page}");
+    let tags = page["facets"]["tags"].as_array().unwrap();
+    assert_eq!(tags.len(), 100, "{page}");
+    assert_eq!(tags[0], json!({"label": "most", "count": 2}));
+    assert_eq!(tags[1]["label"], "l000");
+    assert_eq!(tags[99]["label"], "l098");
 }

@@ -36,7 +36,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `host_requests_per_second` | `1.0` | Requests per second to any one upstream host. |
 | `host_rates` | `{}` | Per-host overrides of `host_requests_per_second`. Each key is one host name (`api.example.org`; an IPv6 address in brackets), read without regard to case. A key that is a pattern (`*.example.org`), a URL or a name with a path, or two keys for one host, stop startup. |
 | `html_head_bytes` | `4194304` | How far an HTML page past the 1 MB page cap is read (bytes); nothing in the page stops the read earlier. |
-| `max_failures` | `5` | Failures before a resource dead-letters. |
+| `max_failures` | `5` | Failures before a resource dead-letters. A service that keeps answering 5xx, 408 or 429 dead-letters a link only once its failures have lasted three days ([queue](#queue-and-refresh)). |
 | `timeout_grace` | `3` | Timeouts tolerated before they count as failures. |
 | `backoff_secs` | `30` | First retry backoff (seconds). |
 | `max_backoff_secs` | `3600` | Retry backoff ceiling (seconds). |
@@ -48,7 +48,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `osm_ttl_secs` | `2592000` | OSM place cache lifetime (seconds). |
 | `osm_dump_every_hours` | `24` | Hours between two writes of the ODbL dump file. |
 | `osm_dump_downloads_per_hour` | `6` | ODbL dump downloads per hour per client address. |
-| `reach_timeout_secs` | `5` | Nexus reach deadline per search (seconds, 1–60, and more than two seconds below `request_timeout_secs`). |
+| `reach_timeout_secs` | `5` | Nexus reach deadline per search, and for all of an MCP `social` call's Nexus reads (seconds, 1–60, and more than two seconds below `request_timeout_secs`). |
 | `related_taggers` | `200` | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
 | `related_window_days` | `365` | Days a related page looks back, for those taggers and their tags. |
 | `related_refs_per_tagger` | `1000` | References a related page reads per sampled tagger (their most recent). |
@@ -66,7 +66,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `preview_uri_requests_per_minute` | `30` | Preview requests per minute per URI. |
 | `preview_cache_capacity` | `10000` | The same table's size when a preview adds its client address and link (100–100000); past it the oldest entry (an API client's too) is forgotten with its used budget. Keep it equal to `api_cache_capacity`. |
 | `preview_new_per_hour` | `1000` | New previews per hour for the whole instance; over it `POST /v1/resolve` answers 503. |
-| `preview_new_per_client_per_hour` | `0` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
+| `preview_new_per_client_per_hour` | `100` | New previews per hour one client address may take (0: no share); over it `POST /v1/resolve` answers 429. |
 | `podcast_items` | `2000` | Podcast feed items read for a show's or an episode's card. A show's episode list looks at a feed's first 2000 items at most (fewer on a feed's own card when this is lower) and keeps the newest 1000. |
 | `group_max_members` | `256` | Most members of one automatic group. |
 | `group_max_distance_m` | `500.0` | Farthest two located members of one group (metres). |
@@ -77,10 +77,14 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `also_on_facts_per_source` | `32` | Facts one source keeps per resource, at least 8: the cap cuts the many values of one name (a recording's ISRCs) before a name's one value, and 8 holds a recording's single-valued facts (its MBID, the MBID it was merged from, artist, length, original album, barcode). |
 | `also_on_concurrency` | `2` | Resources whose sources run at once. |
 | `also_on_retry_secs` | `300` | First retry of a failed source run (seconds); doubles up to an hour. |
+| `also_on_refusal_hold_secs` | `300` | How long a service's refusal of the operator's credentials (TIDAL, Spotify, Podcast Index) is held before it is asked again (seconds, 120–86400); the refused lookup reports the same wait. |
+| `also_on_watch_page_bytes` | `3145728` | The largest YouTube watch page `youtube_match` reads (bytes, 1–16 MiB; they are about 1.4 MB); a larger one is refused. |
+| `hub_body_bytes` | `8388608` | The body cap of a MusicBrainz or Wikidata answer (bytes, 1–64 MiB): a much-edited item or an artist with very many relations is megabytes. |
+| `discovery_cache_secs` | `3600` | How long an answer the also-on sources, lookups and hubs ask for is shared, so two sources asking the same thing ask once (seconds, 3600–86400: the cache keeps a successful answer at least an hour). |
 | `event_max_line_bytes` | `65536` | Longest calendar content line (bytes). |
 | `event_max_date_values` | `4096` | Most date values in one calendar property. |
 | `event_feed_body_bytes` | `33554432` | Largest calendar or feed body (bytes). |
-| `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to. |
+| `event_max_occurrences_per_series` | `50` | Most occurrences one series expands to: its upcoming dates first, then its most recent past ones. |
 | `event_max_occurrences_per_feed` | `10000` | Most occurrences one feed yields. |
 | `event_max_components` | `100000` | Most components one calendar may hold. |
 | `event_max_properties` | `1000000` | Most properties one calendar may hold, over all its components. |
@@ -92,7 +96,7 @@ routes on it; the resolver limits apply to pubky and to each card resolver.
 | `event_months_back` | `1` | Months of past occurrences kept in the horizon. |
 | `event_months_forward` | `12` | Months of future occurrences kept in the horizon. |
 | `geocode_score` | `0.8` | Lowest accepted geocoding score. |
-| `held_retry_secs` | `60` | Retry interval of a held feed snapshot (seconds). |
+| `held_retry_secs` | `60` | Wait before a held feed snapshot's first check (seconds; at least `feed_cadence_floor`); later holds back off from the normal cadence. |
 | `same_event_incoming_kept` | `40` | The most events that may name one event in the same-event hint (each keeps its best twenty). |
 | `same_event_drop_batch` | `500` | Events the same-event sweep drops per transaction. |
 | `feed_max_changes` | `100` | Occurrence changes per snapshot before they become one summary line. |
@@ -264,16 +268,20 @@ deleted, and it is regrouped. An opted-out post's lines lose their documents. Th
 either keep only their `aliased` line: their cards, other lines and also-on results are deleted.
 It prints `scrubbed N posts gone or opted out`, then the re-queued count.
 
-**Dead letters.** To retry one by hand:
+**Dead letters.** A dead letter is read again when someone references its link anew (a new tag,
+reply, embed or collection item, through any of its spellings), as a final page is reopened: the
+reference must be newer than the card's last read (for a link never read, than its first storing),
+so the feed read again after a reset revives only links referenced since. Time alone never brings one back, and a lookup or preview does
+not either. To retry one by hand:
 
 ```sql
-UPDATE resource SET dead_letter=false, attempts=0, next_attempt_at=now(),
-  lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
+UPDATE resource SET dead_letter=false, attempts=0, timeout_streak=0, last_error=NULL,
+  next_attempt_at=now(), lease_until=NULL, generation=generation+1 WHERE id='<resource_id>';
 ```
 
 `pinakesd reextract <route>` revives a route's dead letters too: every row it re-queues gets
-`dead_letter=false` and `attempts=0`. It runs with the daemon stopped and reads the whole route
-again.
+`dead_letter=false`, `attempts=0`, `timeout_streak=0` and `last_error=NULL`. It runs with the
+daemon stopped and reads the whole route again.
 
 **Grouping rebuild.** The daemon stores its grouping policy (its limits and mode) and
 re-queues every membership when it changes, so a changed `groups.cross_container_occurrences`
@@ -344,8 +352,8 @@ worker's limits are the guarantee. At most as many pages are parsed at once as t
 cores: a parse holds its slot until it ends, even after its request timed out. An RSS or
 Atom feed read without a calendar's feed cap is cut there too (a long show's feed is 2–5 MB):
 its channel and newest items come first, and its card reads up to the last whole item. Wikidata
-entity reads may take 8 MB, since a much-edited item carries megabytes of claims, and so may
-MusicBrainz answers (an artist or release with very many links). An answer over even that is
+entity reads may take `limits.hub_body_bytes` (8 MiB), since a much-edited item carries
+megabytes of claims, and so may MusicBrainz answers (an artist or release with very many links). An answer over even that is
 refused, never cut, and remembered as such for five minutes. The also-on sources then record only
 what the link's URL proves (a MusicBrainz page its MBID or ISRC, a Wikidata item its Q-id) and
 don't retry it; Wikidata items verified together that are over it together are read one by one;
@@ -378,18 +386,22 @@ and its address rules no longer merge new links (links it merged before stay mer
 that reads with the operator's token (`github`: `[sources.github] token` or `PINAKES_GITHUB_TOKEN`;
 `courtlistener`: `[sources.courtlistener] token` or `PINAKES_COURTLISTENER_TOKEN`) is on only with
 one. Its token is a secret, sent only to its service's API and never through a redirect. A token
-the service refuses (401; CourtListener's 403 too) switches the source off until restart, and
+the service refuses (401, or a 403 whose answer names the token) switches the source off for an
+hour (Discogs reads without its credential, Podcast Index pages get web cards), and
 `pinakes_source_token_refusals_total{source}` counts each refusal. That series counts every keyed
-provider's refusals (Discogs, Spotify, TIDAL, TMDB, Podcast Index and Ticketmaster too, as each
-signals one: a 401, a 403 where it means a refused key, or a refused token request; never a 429
-or 5xx), and the `ProviderKeyRefused` alert
+provider's refusals (Discogs, Spotify, TIDAL, TMDB, Podcast Index, Ticketmaster and Nominatim
+(`osm`) too, as each signals one: a 401, a 403 where it means a refused key, or a refused token
+request; never a 429 or 5xx), and the `ProviderKeyRefused` alert
 (`ops/alerts.yml`) reads it. A source
 lowers its service's host to the service's published rate (never above
 `limits.host_requests_per_second`) unless `limits.host_rates` names the host, and a request that
 would wait more than five seconds for its host (its slot, or the request ahead of it) is retried
 later instead of timing out; a redirect within the host keeps the slot it has. After an upgrade
 that adds a source, run `pinakesd reextract web official`: links already known get their source's
-card.
+card. An official card is read again at `[cards.official] ttl_secs` (sooner where its source asks)
+until it is a thing that happened at a time (an event such as an earthquake, a finished trial, a
+Bitcoin block or confirmed transaction): a day after its start or end has passed it is final and
+not read again. An observation's time is a fact, so observations keep being read again.
 
 Two clients are outside that policy. Nominatim and Nexus are trusted, operator-configured
 upstreams at fixed URLs that no reference can change: their clients do not apply the web DNS
@@ -401,6 +413,12 @@ User-Agent, caching and at most one request per second, and `osm.requests_per_se
 to 0.5 and is refused above 1 for a public host. Staging and production use their own
 `osm.nominatim_url`, a self-hosted or a hosted Nominatim ([deployment](deployment.md#nominatim)).
 Pinakes never proxies place search, autocomplete or reverse geocoding.
+
+The `osm_place` cache holds what Pinakes serves: the hourly maintenance deletes the cached
+objects nothing refers to any more (no OSM card, no venue of a card or an occurrence, no line
+of the change journal), once their cached fetch expired an hour ago or more, at most 1000 a pass
+and the oldest cache first. A place only a deleted card named so leaves the dump once its cache
+has expired; one referenced again is fetched anew.
 
 The ODbL share-alike download is a file: the daemon writes `osm_place.ndjson.gz` into
 `osm.dump_dir` (default `dumps`, relative to the working directory) at startup when it is missing
@@ -433,14 +451,19 @@ a record (when every relay answers 404, the owner has no record for five minutes
 forge one, and Pinakes never uses a packet older than the newest it remembers for that key. That
 memory is an accepted limit: it holds the newest timestamp of at most 10,000 keys, apart from the
 cache, and forgets the oldest timestamps of uncached keys first; a forgotten key, or any key
-after a restart, takes the newest packet the relays serve again. A relay that times out, is
-refused by the policy, answers with a redirect (never followed) or serves a packet that does not
-verify is a `connect` failure, retried
-with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
-relay answered, because each one that failed refused or reset the connection (or Egress waited
-for its host budget, or the request would have waited more than 1.5 s for the relay's host, or
-the relay answered 429), the failure never reached an answer and never dead-letters; after a
-429 the link is read again when the relay's `Retry-After` says.
+after a restart, takes the newest packet the relays serve again. A relay that is refused by the
+policy, answers with a redirect (never followed) or serves a packet that does not verify is a
+`connect` failure, and so is one that times out or answers 5xx beside another relay's 404 or such
+a failure; it is retried with the usual backoff and, like any failure, dead-lettered after `limits.max_failures`. When no
+relay gave a packet or a 404 and each one that failed answered 5xx or did not answer in time, the
+relays are down (`relay_outage`): the link did nothing wrong, so it is read again after the
+longest `Retry-After` a relay named (a minute when none did), with no attempt charged and no
+dead letter. When no relay answered, because each one that failed refused or reset the
+connection (or Egress waited for its host budget, or the request would have waited more than
+1.5 s for the relay's host, or the relay answered 429), the failure never reached an answer and
+never dead-letters. When a relay answered 429 (or Egress waited for its host) and no other relay
+failed otherwise, the link is read again when the relay's `Retry-After` says (or its host is
+free), also when another relay refused the connection or has no record.
 Verified packets are kept for their smallest record TTL, between five minutes
 and a day (10,000 keys at most). It then takes the first endpoint with a public HTTPS (ICANN)
 domain and GETs the object path there with the `pubky-host` header, as Pubky clients address
@@ -469,10 +492,18 @@ their load to one request per owner and TTL.
 
 ### Clients and budgets
 
-Every public `/v1` route shares the direct-peer IP budget (`api.requests_per_minute`), and
-previews have their own per-IP and per-URI budgets. Forwarded headers are deliberately ignored:
-behind a reverse proxy the proxy's address gets the aggregate budget, so set client-IP limits at
-the edge.
+Every public `/v1` route shares the per-IP budget (`api.requests_per_minute`), and previews have
+their own per-IP and per-URI budgets and a per-client share of the hour's new previews; ODbL dump
+downloads are counted per address too. The address a request is counted under is the connecting
+peer's, unless the peer is in `api.trusted_proxies` (addresses or networks, such as
+`["172.17.0.1"]` for a proxy at the Docker bridge gateway; empty by default). From a trusted
+proxy it is the right-most `X-Forwarded-For` entry that is not itself a trusted proxy: each proxy
+appends the address it was connected from, so whatever a client wrote to the left of that is
+never read. With no such entry
+(no header, every entry a trusted proxy, or one that is no address) the proxy's own address is
+used. From a peer not in the list the header is never read, so leave the list empty where clients
+connect directly, and list exactly the proxies that set the header (a proxy that passes on a
+client's header without appending its peer lets clients choose their address).
 
 CORS: `api.cors_allow_origins` (default `["*"]`, safe because the public API takes no cookies or
 tokens and writes nothing but budgeted previews) lets browser apps on other origins call the
@@ -508,8 +539,8 @@ is off. Swagger UI shares the `/v1` per-IP budget.
 
 The agents' guide (`/llms.txt`, `/skill.md`, the index at `/`) and the MCP endpoint (`POST /mcp`,
 `api.mcp`, default on) are on the public listener under the same per-IP budget
-([api](api.md#agents)). The MCP endpoint is stateless and read-only, takes no credentials and
-accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
+([api](api.md#agents)). The MCP endpoint is stateless, takes no credentials, writes nothing but
+the previews `card` with `resolve: true` asks for, and accepts any `Host`; terminate TLS at the reverse proxy and pass `X-Forwarded-Proto`, so the guide
 names the public `https` URL. The proxy must pass the public `Host` too: the guide's base URL is
 the `Host` the daemon receives (in nginx, `proxy_set_header Host $host;`). Turning `api.mcp` off
 removes `/mcp` and its link from the index; the guide stays.
@@ -537,15 +568,11 @@ line names its feed position only, never its content). A panic anywhere else in 
 batch's score update or cursor write, say) is an error: the batch rolls back, the cursor holds,
 `pinakes_ingest_panics_total` counts it and the poll is retried. A feed epoch change, or a
 cursor beyond the feed's length, clears the reference projection and scores and restarts at
-zero, after one `limits.poll_secs` wait; resource documents stay through the grace period.
-The cursor is kept under `nexus_url` as written. After `nexus_url` changes (another Nexus, or
-another spelling of the same one, such as a trailing slash) the new feed is read from zero and
-the references read from the old one stay beside it: the daemon logs a warning at each start
-that names the other feed's host. The other feed's cursor row also stays in
-`pinakes_ingest_lag_lines`. To start over with the new feed alone, stop the daemon and
-clear the projection as a feed reset does
-(`UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`):
-the next start reads the configured feed from zero. A resource without references is
+zero, once it is confirmed: the answer that reports it writes nothing (the daemon logs a
+warning), and only the next read, at least `limits.poll_secs` later and from the same cursor,
+that reports the same epoch and still starts over clears them. An answer in between that does not
+start over (the old epoch again) cancels it. After a reset the next poll waits `limits.poll_secs`;
+resource documents stay through the grace period. A resource without references is
 deleted `limits.grace_days` after it became orphaned. One nothing ever referenced (a link only
 previewed with `POST /v1/resolve`) goes after `limits.preview_grace_hours` (a day) instead: its
 orphan time is still the instant it was created, as a reference clears it and losing the last
@@ -558,17 +585,36 @@ most. A Nexus outage leaves cached data served and polling retries.
 `POST /v1/resolve` stores at most `limits.preview_new_per_hour` (1000) links the instance did not
 know in any hour, whoever asks. Over it, a new link gets 503 with `Retry-After` (the seconds until
 the oldest of the hour's previews is an hour old) and nothing is stored; a known link still
-reads, and the per-client budget's 429 comes first. With
-`limits.preview_new_per_client_per_hour` set (0, no share, by default), one client address takes
-at most that many of them: over it, that client gets 429 with `Retry-After` and the others go on.
-Set it only where clients reach the listener directly: the share is keyed on the connecting
-address, as the per-IP budgets are, and behind a reverse proxy every client has the proxy's, so a
-share would cap the whole instance. A place is kept only by the request that stored the link; one
+reads, and the per-client budget's 429 comes first. One client address takes at most
+`limits.preview_new_per_client_per_hour` (100; 0 is no share) of them: over it, that client gets
+429 with `Retry-After` and the others go on. The share is keyed on the client address the per-IP
+budgets use ([Clients and budgets](#clients-and-budgets)): behind a reverse proxy, list it in
+`api.trusted_proxies`, or every client has the proxy's address and one share caps them all. A place is kept only by the request that stored the link; one
 whose request fails or goes away first is given back. The window is in memory and starts empty at
 startup. `pinakes_preview_refused_total{limit}` counts the refusals, `instance` for the hour and
 `client` for a share (alert `PreviewCapacityReached` on either),
 and `pinakes_preview_backlog` the resources nothing ever referenced (not derived children or
 venues).
+
+### Changing nexus_url
+
+The references are the projection of one Nexus feed, and its cursor is kept under `nexus_url`
+without a trailing `/` (with or without one it is the same URL). The daemon refuses to start on a
+database that holds the cursor of another Nexus and none of the configured one: the error names
+the other feed's host and this section. Before you change `nexus_url`, stop the daemon and do one
+of these:
+
+- Another feed: clear the projection as a feed reset does, and the next start reads the
+  configured feed from zero:
+  `UPDATE resource SET orphaned_at=coalesce(orphaned_at,now()); TRUNCATE reference, resource_score, feed_cursor;`
+- The same feed at a new address: move its cursor row, so the feed is read on from where it was:
+  `UPDATE feed_cursor SET nexus='<new nexus_url>';`
+
+A database with a cursor row for the configured URL starts. Another feed's row left beside it is
+logged by host at each start and still counts in `pinakes_ingest_lag_lines`: delete it
+(`DELETE FROM feed_cursor WHERE nexus='<old nexus_url>';`). A row under another spelling of the
+configured URL is the same feed: the daemon moves it to the configured key at start, or drops it
+beside a row already there.
 
 ### Posts
 
@@ -609,16 +655,30 @@ being named.
 ## Queue and refresh
 
 The durable queue leases rows with `SKIP LOCKED` and fences stale completions by a generation
-counter. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
+counter. A worker takes the rows a lookup or a preview moved to the front first, then
+links never read before overdue refreshes (after downtime the refreshes that came due together
+wait behind new links), then the longest due. A job lease lasts at least `limits.lease_secs`; a 50-object OSM batch gets 760 seconds.
 Failures back off exponentially from `limits.backoff_secs` to `limits.max_backoff_secs` and
 dead-letter after `limits.max_failures`. The first `limits.timeout_grace` consecutive timeouts
-back off without charging an attempt. A request that never got an answer from the upstream (the
+back off without charging an attempt. A service that answers 5xx, 408 or 429 (stored as
+`upstream`, `http_5xx` or `http_4xx`) is read again after the wait it named or the backoff,
+whichever is longer; the backoff doubles up to `limits.max_backoff_secs` while one of these
+answers follows another (the streak is kept in `timeout_streak`), and a longer named wait is never
+cut. These waits are no attempts, so a short outage never dead-letters a link: it dead-letters,
+and turns `error`, only once the failures have lasted three days (the span after which a denial
+turns a link `unreachable`), measured as the backoff of the streak's waits from its first (a
+read brought forward, such as a re-read asked for, counts as one of them); at the defaults that
+is the 79th in a row. Until then an accepted card keeps its status, and a link with
+no card yet shows `error` after `limits.max_failures` of them in a row. A rate limit on the
+operator's own quota (GitHub's token rate limit, a 429 from the operator's Nominatim; stored as
+`quota`) is the daemon's own wait: it charges nothing and keeps the streak. A request that never got an answer from the upstream (the
 connection refused, reset or aborted, or the host unreachable; stored as `connect`) is never
 charged and never dead-letters: it
 backs off up to `limits.max_backoff_secs` for as long as it lasts, its streak is kept in
 `timeout_streak` while `last_error` is `connect`, and a link with no card yet turns `error` after
 `limits.max_failures` of them in a row while it is still retried. Egress's own waits (its host
-budget, a cached failure) keep that streak. A TLS failure (a certificate the host serves) and a
+budget, a cached failure) and the operator's quota keep that streak and an upstream one, and
+charge nothing. A TLS failure (a certificate the host serves) and a
 `connect` failure a resolver names itself (a PKARR relay, a key-pinned homeserver) are answers
 about the link and count. A missing result needs a second fresh fetch to confirm,
 scheduled after `limits.missing_ttl_secs` (at least an hour) for a link with an accepted card, and
@@ -633,12 +693,13 @@ confirming fetch`) and counted in `pinakes_resolution_deferred_total{reason="mis
 answered without its tags, on a stored card that says more than the link's plain card, waits and is counted the same
 way (the log line carries `shapeless`); its confirming read stores the plain card. A lookup or preview
 moves an overdue resource to the front within its TTL, author budget and retry schedule; it
-cannot revive a dead letter. Resolution is also limited per referencing author
+cannot revive a dead letter (a new reference does). Resolution is also limited per referencing author
 (`limits.author_requests_per_second`); several tags never multiply fetches.
 
 Refresh follows the time to an event's start (`limits.refresh_resource_secs`,
 `limits.refresh_container_secs`): 7 days, 2 days, 6 hours and 1 hour. One fetch at end + 24
-hours makes a resource final, and a new reference reopens a final resource; `geo:` stays final.
+hours makes a resource final, and a new reference reopens a final resource and revives a dead
+letter; `geo:` stays final.
 OSM places refresh after `limits.osm_ttl_secs`; a confirmed missing object stays cached as
 missing for the same period. Conditional responses keep accepted facts, but validators are kept
 only for calendars, where they commit with the parsed snapshot.
@@ -750,8 +811,10 @@ EXDATEs, with the warning `series_rule_unexpanded`. After an upgrade that change
 `pinakesd reextract event`: feeds re-parse at once instead of at their next fetch. A JSON feed (Gancio, a JSON Feed) is parsed as one document,
 so its parsed form can take several times `limits.event_feed_body_bytes` of memory; size that
 limit with the worker count in mind. `webcal://` is fetched over HTTPS and never downgrades. A
-feed-provided refresh interval is clamped to one hour through 30 days. Held snapshots retry after
-`limits.held_retry_secs`, backing off from the normal cadence.
+feed-provided refresh interval is clamped to one hour through 30 days. A held snapshot is read
+again after `limits.held_retry_secs` (at least `limits.feed_cadence_floor`, an hour by default),
+so an identical snapshot confirms it soon; a second hold in a row and later ones back off from
+the normal cadence, doubling each time up to seven days.
 
 `event.utc_series_wall_clock` (default `"x_wr_timezone"`; also `"coordinates"`, `"never"`)
 chooses which zone sources make a series with a UTC DTSTART expand on local wall-clock time
@@ -856,8 +919,9 @@ Nostr identifiers and client URLs use signed NIP-52 events through two HTTP inde
 request per second, Archives at two), paginating `until` windows within
 `limits.max_indexer_pages`; the newest matching revision wins, and `nevent`/`note` pin one. Both
 must miss before absence is accepted. With `event.adapters.websocket`, one relay hint is asked
-after both miss (`limits.websocket_deadline_ms`, one MB, 256 frames, DNS checked and pinned); an
-unfinished subscription never confirms absence. A full tied page, an exhausted budget or an
+whenever no indexer has a match, also while an indexer is down or out of time
+(`limits.websocket_deadline_ms`, one MB, 256 frames, DNS checked and pinned); its signed match is
+used, and neither its silence nor an unfinished subscription ever confirms absence. A full tied page, an exhausted budget or an
 indexer 404 is inconclusive and retries after five minutes without charging an attempt.
 
 Only parser failures fall back to a web card. Upstream failures keep the accepted document and
@@ -878,12 +942,6 @@ image, cached an hour. A stored card changes at its next read; `pinakesd reextra
 event_platform` reads every event platform link again at once, Wikidata items among them (a
 Wikipedia page read from its item is on the `web` route).
 
-`cargo run -p pinakes-core --example adapter_probe -- MANIFEST.json REPLAYS.json OUTPUT_DIR`
-(with `DATABASE_URL`) runs a read-only, keyless canary pass and records requests, the User-Agent
-each sent, statuses, hashes and parser output; secrets are refused. `PINAKES_PROBE_OFFLINE=1`
-replays captures without network access. Recorded responses for the keyless probes run in
-`scripts/test`.
-
 ## Also on
 
 After setting a source's key (its page in [docs/sources](sources/README.md#also-on) names
@@ -898,7 +956,7 @@ hour, on Spotify's pace. `tidal_isrc` (with the TIDAL credentials) costs one TID
 or barcode key of a track or album on another service, on `tidal`'s pace and token slot.
 `itunes_song` and `youtube_match` (their links are maybes, `kind` `maybe`, never keys) cost
 per track a Deezer, Spotify or TIDAL read and an iTunes lookup, and per label upload on YouTube a
-watch page (up to 3 MB) and a Deezer and a TIDAL search; each runs its part only while the source
+watch page (up to `limits.also_on_watch_page_bytes`) and a Deezer and a TIDAL search; each runs its part only while the source
 of that service runs (`deezer`, `spotify`, `tidal`, `tidal_isrc`, `itunes`). Every one of them is
 on by default (`[also_on.sources.<id>] enabled = false` turns one off);
 `reextract also-on` asks for every stored track and album at once. The duplicate
@@ -979,7 +1037,7 @@ recording (its works, only when it has no item of its own with an English articl
 page of its official releases for a cover); Wikidata one
 read-back of the item its own `wikidata` relation names, or, without one, one search and one
 read-back for each lookup (its MBID, then for an artist up to two Discogs pages: three lookups;
-hits over the 8 MB cap together are read back one by one), one read of the item's pages and
+hits over `limits.hub_body_bytes` together are read back one by one), one read of the item's pages and
 English description, and one of its image claim, and for a recording one read-back and one read
 of its work's item's pages; Wikipedia two summaries
 (English, then one other language), for a recording three (its item's English article, its
@@ -1056,7 +1114,9 @@ records its evidence as group keys: an identifier card's `doi`/`isbn` and the la
 registry names (`registry`), a page's head citations (`cites_doi`, `cites_isbn`) and ICS UIDs
 (`ics_uid`); the exact keys also-on sources vouch for join too (`hub:{key}`, below). Groups form
 only from those (see [the API](api.md#groups)): an identifier card with
-a named landing page that cites it, one UID within one feed, and curation. A group stores
+a named landing page that cites it, one UID within one feed, and curation. An operator curates
+a group on the admin listener with `PUT /v1/groups/{id}` and undoes a curation with
+`DELETE /v1/groups/{id}`: its members then group again by their keys. A group stores
 membership only; cards read it when they are served. Each key of a run may
 make a capped number of compatibility checks (`limits.group_max_members`² × 2, between 100,000
 and 2,000,000). A key that alone exceeds the cap is parked (its unions undone) and the later
@@ -1120,8 +1180,10 @@ only the version, what the instance resolves, the limits a client must respect a
 licence. Stored errors are sanitized classes (dns, connect, timeout, http_3xx for a redirect the
 OSM upstream answered, http_4xx, http_5xx, parse,
 policy, too_large for an answer past its size cap, too_complex for a page whose parse ran past
-its CPU, memory or node limit; rate_limited for a link waiting for its host's budget). A link that only
-waits for the daemon's own pace (its host's budget, or a cached failure replayed) is logged at
+its CPU, memory or node limit; rate_limited for a link waiting for its host's budget; quota for
+a rate limit on the operator's own quota). A link that only
+waits for the daemon's own pace (its host's budget, a cached failure replayed, the operator's
+quota) is logged at
 debug (`resolution waits for its host`). A failed resolve
 is logged at warn as `resolution failed`, with the resource id (`resource_id`), the link's host
 (`host`; its scheme for a link without one, never its path), this class (`kind`) and the

@@ -1,9 +1,12 @@
 # Searching the links people share on Pubky (Pinakes)
 
-Pinakes is a public, read-only index of the external links people reference on Pubky: web pages,
-places, events, books, music, videos, papers, posts on other networks and objects of other Pubky
-apps. Each link is read into a small typed card. You ask by text, type, tag, map area, time or an
-exact identifier, and get cards back as JSON. No account, no API key, no install.
+Pinakes is a public index of the external links people reference on Pubky: web pages, places,
+events, books, music, videos, papers, posts on other networks and objects of other Pubky apps.
+Each link is read into a small typed card. You ask by text, type, tag, map area, time or an exact
+identifier, and get cards back as JSON. No account, no API key, no install. Asking stores no new
+link, except `POST /v1/resolve` (the MCP `card` tool with `resolve: true`): it fetches a link this
+instance does not hold yet and stores it as a preview. A lookup or resolve of a held card that is
+overdue moves it to the front of the refresh queue.
 
 **Base URL: the host that served you this document**, `{{BASE}}` here. Every instance indexes the
 links its own Nexus reported, so another instance answers a different question.
@@ -81,8 +84,10 @@ such as OpenStreetMap's `amenity/cafe`, as `category=` takes them), e.g. `facet=
 curl -s '{{BASE}}/v1/resources/by-uri?uri=https://www.imdb.com/title/tt0111161/'
 ```
 
-Any spelling works (`http`, `www.`, a trailing slash, tracking parameters, a short link the
-index knows as an alias). A read is one flat object: the card's fields, and beside them the
+A spelling people referenced works (the index keeps it as an alias), and so do tracking
+parameters, a `doi.org` or ISBN link and a service's other URL forms of a known card, worked out
+from the URI alone; `http` for `https`, `www.` or a trailing slash is another link unless someone
+referenced it. A read is one flat object: the card's fields, and beside them the
 address, facts from official APIs, `also_on` (one link per service, as on every card), the keys
 `key=` takes (`keys`) and the other spellings (`aliases`). A Bitcoin or Lightning card also lists
 the objects it points at in `related` (a transaction's block, inputs and outputs, an address's
@@ -223,9 +228,10 @@ only links your network referenced, search here with `reach=following&viewer=<pu
 
 ## MCP
 
-`POST {{BASE}}/mcp` is a Model Context Protocol endpoint (Streamable HTTP, stateless, read-only,
-no auth). Its tools are thin calls into the routes above, and each answer names the REST URL with
-the full result:
+`POST {{BASE}}/mcp` is a Model Context Protocol endpoint (Streamable HTTP, stateless, no auth).
+No tool stores a new link, except `card` with `resolve: true`, which stores an unknown link as a
+preview and has this instance fetch it from its site. Its tools are thin calls into the routes
+above, and each answer names the REST URL with the full result:
 
 | tool | does |
 | --- | --- |
@@ -234,7 +240,7 @@ the full result:
 | `lookup` | Every card with one identifier (`isbn:…`, `doi:…`, `isrc:…`, `osm:…`, …) |
 | `group` | A group's members by group id |
 | `types` | The card types this instance holds, with counts, and the kinds of links it resolves |
-| `social` | Tags and taggers per card, from the Nexus this instance reads: card `ids` (asked by their `uri` and `refs`, merged; an alias's id answers with its `root`) or plain `uris`, 1–100 together |
+| `social` | Tags and taggers per card, from the Nexus this instance reads: card `ids` (asked by their `uri` and `refs`, merged; an alias's id answers with its `root`) or plain `uris` this instance holds (others come back in `unknown_uris`, unasked), 1–100 together |
 
 Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
 

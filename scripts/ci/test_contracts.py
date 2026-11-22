@@ -288,6 +288,7 @@ class Container(unittest.TestCase):
         self.assertIn('PINAKES__ADMIN_LISTEN=127.0.0.1:9090', s)
         self.assertIn('PINAKES__OSM__DUMP_DIR=/var/lib/pinakes/dumps', s)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/pinakesd"]', s)
+        self.assertRegex(s, r'(?m)^HEALTHCHECK [^\n]*\\\n\s*CMD \["/usr/local/bin/pinakesd", "healthcheck"\]$')
         self.assertNotIn('COPY . ', s)
         context = (ROOT / '.dockerignore').read_text().splitlines()
         self.assertIn('**', context)
@@ -353,7 +354,13 @@ elif a[0] == 'exec' and a[2:] == ['cat', '/proc/net/tcp']:
     print('  sl  local_address rem_address   st')
     print('   0: 0100007F:2382 00000000:0000 0A')
     print('   1: 00000000:1F9A 00000000:0000 0A')
-elif a[:2] == ['image', 'inspect']:
+elif a[0] == 'exec' and a[2:] == ['/usr/local/bin/pinakesd', 'healthcheck']:
+    if os.environ.get('FAKE_UNHEALTHY'):
+        sys.exit(1)
+    print('healthy')
+elif a[:2] == ['image', 'inspect'] and a[-1] == '{{json .Config.Healthcheck.Test}}':
+    print(json.dumps(['CMD', '/usr/local/bin/pinakesd', 'healthcheck'], separators=(',', ':')))
+elif a[:2] == ['image', 'inspect'] and a[-1] == '{{json .Config.ExposedPorts}}':
     print(json.dumps({'8090/tcp': {}}, separators=(',', ':')))
 elif a[0] == 'inspect':
     print(os.environ['FAKE_EXIT'])
@@ -377,19 +384,21 @@ elif url.endswith('.ndjson.gz'):
                 (p / 'bin' / name).write_text(body)
                 (p / 'bin' / name).chmod(0o755)
             name = 'pinakes-smoke-7-1'
-            for exit_code, down, ok in [('0', '', True), ('143', '', False), ('0', '1', False)]:
+            for exit_code, down, unhealthy, ok in [('0', '', '', True), ('143', '', '', False),
+                                                   ('0', '1', '', False), ('0', '', '1', False)]:
                 (p / 'docker.jsonl').write_text('')
                 env = {**os.environ, 'PATH': f'{p / "bin"}{os.pathsep}{os.environ["PATH"]}',
                        'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': d, 'FAKE_DIR': d, 'GITHUB_RUN_ID': '7',
                        'GITHUB_RUN_ATTEMPT': '1', 'DATABASE_URL': 'postgresql://ci@/postgres',
-                       'FAKE_EXIT': exit_code, 'FAKE_DOWN': down}
+                       'FAKE_EXIT': exit_code, 'FAKE_DOWN': down, 'FAKE_UNHEALTHY': unhealthy}
                 run = subprocess.run(['scripts/ci/container-smoke', 'pinakes:ci'], cwd=ROOT, env=env,
                                      capture_output=True, text=True)
                 calls = [json.loads(line) for line in (p / 'docker.jsonl').read_text().splitlines()]
-                self.assertEqual(run.returncode == 0, ok, (exit_code, down, run.stdout, run.stderr))
+                self.assertEqual(run.returncode == 0, ok,
+                                 (exit_code, down, unhealthy, run.stdout, run.stderr))
                 # The container and its volume are removed on success and on failure.
                 self.assertEqual(calls[-2:], [['rm', '--force', name], ['volume', 'rm', f'{name}-dumps']])
-                if not down:
+                if not down and not unhealthy:
                     stop = calls.index(['stop', '--time', '30', name])
                     self.assertEqual(calls[stop + 1], ['inspect', '--format', '{{.State.ExitCode}}', name])
 

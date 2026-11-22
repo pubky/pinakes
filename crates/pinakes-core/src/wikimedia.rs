@@ -16,9 +16,6 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::Value;
 
 const API: &str = "https://commons.wikimedia.org/w/api.php";
-/// How long Commons' answer about a file stays in the egress cache (seconds); a card is read
-/// again at its own refresh.
-const CACHE_SECS: u64 = 3600;
 
 /// One field's outcome, read from a Wikimedia project (Wikidata, Commons, Wikipedia).
 #[derive(Clone, Debug, PartialEq)]
@@ -38,7 +35,11 @@ pub enum Found {
 pub async fn credited_image(egress: &Egress, name: &str, width: u32, subject: &str) -> Found {
     let options = FetchOptions::json();
     let fetched = match egress
-        .discover(&file_query(name, width), &options, CACHE_SECS)
+        .discover(
+            &file_query(name, width),
+            &options,
+            egress.config().discovery_secs,
+        )
         .await
     {
         Ok(fetched) if fetched.status == 200 => fetched,
