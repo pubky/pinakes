@@ -1237,7 +1237,10 @@ dated episodes no older than its own oldest. When the stored list is full (1,000
 every one of them is newer than the cut's newest, the feed is longer than is kept and the cut is
 its old end, when the cut's feed names the same show as the stored card (the same title, or for a
 Podcast Index show the same website): the stored list stays as it is. A cut that names another show stands alone. A Podcast Index or Apple show's feed that does not parse
-past the page cap is read within it, and keeps a longer stored list's other episodes the same way. A page's alternate feed is read within the page cap. Why a route and not a fact: a fact is one string per name, and a card's document is
+past the page cap is read within it. Every read that stops before its feed ends (cut at 8 MiB or
+at the page cap, or with items past the first 2000) is a cut read, a feed card's, Podcast Index's
+and Apple's alike, and keeps a longer stored list's other episodes the same way; a whole read is
+not, however many episodes past the 1000 kept it has. A page's alternate feed is read within the page cap. Why a route and not a fact: a fact is one string per name, and a card's document is
 bounded; why not occurrences: an episode has no instant to window by, no recurrence and no
 document of its own here.
 

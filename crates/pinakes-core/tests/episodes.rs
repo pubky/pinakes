@@ -2160,6 +2160,85 @@ async fn a_cut_of_another_show_on_the_same_feed_replaces_a_full_stored_list(pool
     assert_eq!(page["truncated"], true, "{page}");
 }
 
+/// A feed of the dated items `order` names, each the episode [`episode`] makes, in that order.
+fn dated_feed(order: impl Iterator<Item = u32>) -> String {
+    let items: String = order
+        .map(|n| {
+            let e = episode(n, true);
+            format!(
+                r#"<item><title>Episode {n}</title><guid>ep-{n}</guid><link>{}</link><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#,
+                e.uri,
+                e.published.unwrap().to_rfc2822()
+            )
+        })
+        .collect();
+    feed(&items)
+}
+/// A show's save of a feed read as a Podcast Index or Apple show's is (`episodes::fetch`).
+fn read_show(uri: &str, listed: pinakes_core::episodes::Listed) -> ResourceMeta {
+    let mut d = ResourceMeta::new(uri, "web", 86_400);
+    d.set_type("PodcastSeries");
+    d.name = Some("Show".into());
+    d.episodes = Some(listed.episodes);
+    d.episodes_older = listed.older;
+    d.episodes_cut = listed.cut;
+    d.episodes_oldest_first = listed.oldest_first;
+    d.episodes_channel = listed.channel;
+    d
+}
+
+/// A read that stops at the item limit (the feed's first 2000 items are looked at) is a cut read:
+/// for a feed that lists oldest first, the stored episodes newer than the part read stay. A
+/// newest-first feed's cut at the limit holds its newest episodes, and keeps the stored older
+/// ones under them, to the 1000 kept.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_read_stopped_by_the_item_limit_keeps_the_newer_stored_episodes(pool: PgPool) {
+    let uri = "https://feeds.example.org/show.xml";
+    let id = show(
+        &pool,
+        uri,
+        Some((1801..=2100).rev().map(|n| episode(n, true)).collect()),
+    )
+    .await;
+    assert_eq!(rows(&pool, &id).await, 300);
+    // 2100 items, oldest first: the read looks at the first 2000, so its newest is Episode 2000.
+    let listed = pinakes_core::episodes::from_feed_listed(&fetched(dated_feed(1..=2100))).unwrap();
+    assert!(listed.cut && listed.oldest_first && listed.older);
+    assert_eq!(listed.episodes[0].name.as_deref(), Some("Episode 2000"));
+    store::save_document(&pool, &id, 0, &read_show(uri, listed))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2100", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=999")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 1101", "{page}");
+    // The same feed newest first: the read's first 2000 items are its newest, and the stored
+    // older ones the cut lacks join under them, to the 1000 kept.
+    let newest = "https://feeds.example.org/newest-first.xml";
+    let other = show(
+        &pool,
+        newest,
+        Some((1..=1500).rev().map(|n| episode(n, true)).collect()),
+    )
+    .await;
+    assert_eq!(rows(&pool, &other).await, 1000);
+    let listed =
+        pinakes_core::episodes::from_feed_listed(&fetched_at(newest, dated_feed((1..=2100).rev())))
+            .unwrap();
+    assert!(listed.cut && !listed.oldest_first);
+    assert_eq!(listed.episodes[0].name.as_deref(), Some("Episode 2100"));
+    store::save_document(&pool, &other, 0, &read_show(newest, listed))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &other).await, 1000);
+    let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2100", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+}
+
 /// A feed card's cut read whose read on gave nothing (`ResourceMeta::episodes_cut`: too slow, or
 /// the read failed) keeps the older episodes a longer stored list holds under its own, newer
 /// ones first, and what that list says of its feed, when it names the stored list's two newest

@@ -977,17 +977,11 @@ pub async fn enrich_until(
                         .filter(|d| d.type_name == wanted && d.status == Status::Ok)
                 };
                 let until = crate::episodes::feed_deadline(deadline);
-                match tokio::time::timeout_at(until, longer).await {
-                    Ok(Some(d)) => parsed = Ok(Some(d)),
-                    // The show's list is then the cut read's: the save joins the other episodes
-                    // an earlier, longer read stored to it, so one slow or failed read on does
-                    // not cut the stored list back to the page cap.
-                    _ if !item && reads_on(&f) => {
-                        if let Ok(Some(d)) = &mut parsed {
-                            d.episodes_cut = d.episodes.is_some();
-                        }
-                    }
-                    _ => {}
+                // Else the show's list is the cut read's (`ResourceMeta::episodes_cut`): the save
+                // joins the other episodes an earlier, longer read stored to it, so one slow or
+                // failed read on does not cut the stored list back to the page cap.
+                if let Ok(Some(d)) = tokio::time::timeout_at(until, longer).await {
+                    parsed = Ok(Some(d));
                 }
             }
             let referenced = uri.to_owned();
@@ -1286,6 +1280,9 @@ fn podcast_body(
         let listed = crate::episodes::listed(&items, &f.url, partial);
         d.episodes = Some(listed.episodes);
         d.episodes_older = listed.older;
+        // A read that stopped before the feed ended (cut at its cap, or past the item cap) is a
+        // cut read: the save keeps the other episodes a longer stored list holds.
+        d.episodes_cut = listed.cut;
         d.episodes_oldest_first = listed.oldest_first;
         // The show the list's feed names, for the save: by the name this card stores (the
         // channel's first title, as read above) and the channel's link.
@@ -1623,7 +1620,8 @@ mod tests {
     }
 
     /// A whole feed of more items than the item cap is read to its first `cap` items, as a cut
-    /// one is: still the show's card (no error), and an episode past them is not missing.
+    /// one is: still the show's card (no error), its list a cut read's, and an episode past them
+    /// is not missing. A feed of `cap` items is read whole.
     #[test]
     fn a_whole_feed_past_the_item_cap_is_read_to_it() {
         let f = crate::sources::fixture::page(
@@ -1635,6 +1633,10 @@ mod tests {
         let d = podcast(f.url.as_str(), &f, 3600, 10).unwrap().unwrap();
         assert_eq!(d.type_name, "PodcastSeries");
         assert!(d.episodes_older, "two items past the cap");
+        assert!(
+            d.episodes_cut,
+            "a read that stopped before the feed ended: the save keeps a stored list's others"
+        );
         let episodes = d.episodes.unwrap();
         assert_eq!(episodes.len(), 10);
         assert_eq!(episodes[9].name.as_deref(), Some("E3"));
@@ -1647,6 +1649,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(e.type_name, "PodcastEpisode");
+        let whole = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            long_feed(10, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(whole.url.as_str(), &whole, 3600, 10)
+            .unwrap()
+            .unwrap();
+        assert!(!d.episodes_older);
+        assert!(!d.episodes_cut, "a whole read");
     }
 
     /// A show's feed cut at the page cap is read on (`read_on`, at the address the cut read ended

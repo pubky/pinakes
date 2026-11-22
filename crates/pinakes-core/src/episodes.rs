@@ -86,9 +86,11 @@ pub struct Listed {
     /// (cut at its cap, or past its item cap), it has items past the [`SCANNED`] looked at, or
     /// more episodes than the [`KEPT`] kept (`EpisodePage::truncated`).
     pub older: bool,
-    /// The read went past the page cap but only the part within it parsed
-    /// ([`from_feed_listed`]): a show's save keeps the older episodes a longer stored list holds
-    /// (`ResourceMeta::episodes_cut`).
+    /// The read stopped before the feed ended: its body was cut at its cap (at [`FEED_READ`], or
+    /// within the page cap when only that part parsed: [`from_feed_listed`]), or the feed has
+    /// items past the [`SCANNED`] looked at. A show's save keeps the other episodes a longer
+    /// stored list holds (`ResourceMeta::episodes_cut`). A whole read is not cut, however many
+    /// episodes it has past the [`KEPT`] kept.
     pub cut: bool,
     /// The feed lists its oldest episode first: as read, its dated items' dates ascend (at least
     /// two, the last later than the first). A cut read of such a feed holds its oldest episodes,
@@ -142,7 +144,9 @@ impl Channel {
 }
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
-/// episode. `partial`: the items are a part of the feed's (the read ended before the feed did).
+/// episode. `partial`: the items are a part of the feed's (the read ended before the feed did);
+/// such a list, or one of a feed with items past the [`SCANNED`] looked at, is a cut read's
+/// ([`Listed::cut`]).
 pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> Listed {
     let mut episodes: Vec<(usize, Episode)> = items
         .iter()
@@ -150,14 +154,15 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
         .enumerate()
         .filter_map(|(n, item)| Some((n, episode(*item, feed)?)))
         .collect();
-    let older = partial || items.len() > SCANNED || episodes.len() > KEPT;
+    let cut = partial || items.len() > SCANNED;
+    let older = cut || episodes.len() > KEPT;
     let oldest_first = ascending(episodes.iter().filter_map(|(_, e)| e.published));
     episodes.sort_by(|a, b| b.1.published.cmp(&a.1.published).then(a.0.cmp(&b.0)));
     episodes.truncate(KEPT);
     Listed {
         episodes: episodes.into_iter().map(|(_, e)| e).collect(),
         older,
-        cut: false,
+        cut,
         oldest_first,
         channel: Channel::default(),
     }
@@ -185,7 +190,8 @@ pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
 /// The episodes a fetched feed lists: an RSS channel's items, a body cut at the fetch cap read
 /// to its last whole item. A body read past the page cap that does not parse (a malformed byte
 /// or entity past the first megabyte) is read to its last whole item within the page cap, as a
-/// read cut there would be. `None` when the body is no feed.
+/// read cut there would be. Either read cut at a cap is a cut read ([`Listed::cut`]). `None` when
+/// the body is no feed.
 pub fn from_feed_listed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
     use crate::resolver::egress::BODY_CAP;
     read_feed(f).or_else(|| {
@@ -195,7 +201,6 @@ pub fn from_feed_listed(f: &crate::resolver::egress::Fetched) -> Option<Listed> 
             truncated: true,
             ..f.clone()
         })
-        .map(|l| Listed { cut: true, ..l })
     })
 }
 fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
@@ -538,8 +543,9 @@ fn bounded(mut s: String, max: usize) -> String {
 /// path that replaces a document passes here: a save, a clear): a list replaces the show's rows
 /// whole; a document that is no podcast show, or a show found missing or cleared, clears them;
 /// a show's document without a list (a record read without its feed) leaves them as they are.
-/// A cut read's list (`ResourceMeta::episodes_cut`: its read on gave nothing, or only the part
-/// within the page cap parsed) is joined by the stored list's other episodes ([`under_stored`]).
+/// A cut read's list (`ResourceMeta::episodes_cut`: the read stopped before the feed ended, or a
+/// feed card's read on gave nothing) is joined by the stored list's other episodes
+/// ([`under_stored`]).
 ///
 /// `stored`: the show the stored card named ([`stored_show`], read before the document replaced
 /// it).
@@ -1758,6 +1764,8 @@ mod tests {
             .collect();
         let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
         assert!(listed.older, "items past the ones looked at");
+        assert!(listed.cut, "the read stopped before the feed ended");
+        assert!(listed.oldest_first);
         let episodes = listed.episodes;
         assert_eq!(episodes.len(), KEPT);
         assert_eq!(KEPT, 1000);
@@ -1779,11 +1787,19 @@ mod tests {
             .collect();
         let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
         assert_eq!((listed.episodes.len(), listed.older), (1000, false));
-        // Cut at its read's cap: the feed has more.
-        assert!(
-            from_feed_listed(&fetched(&feed(&items), true))
-                .unwrap()
-                .older
+        assert!(!listed.cut, "a whole read");
+        // Cut at its read's cap: the feed has more, and the read is a cut one.
+        let listed = from_feed_listed(&fetched(&feed(&items), true)).unwrap();
+        assert!(listed.older);
+        assert!(listed.cut);
+        // A whole read of more episodes than are kept, all looked at, is no cut.
+        let items: String = (1..=1500)
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#))
+            .collect();
+        let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
+        assert_eq!(
+            (listed.episodes.len(), listed.older, listed.cut),
+            (1000, true, false)
         );
     }
 
