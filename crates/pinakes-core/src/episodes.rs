@@ -1419,6 +1419,19 @@ fn publisher_page(page: &str, item: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn channels_name_the_same_show_by_a_title_or_a_link_they_both_have() {
+        let show = |title: Option<&str>, link: Option<&str>| {
+            Channel::new(title.map(str::to_owned), link.map(str::to_owned))
+        };
+        let stored = show(Some("Show"), Some("https://show.example/"));
+        assert!(stored.same_show(&show(Some(" Show "), None)));
+        assert!(stored.same_show(&show(Some("Renamed"), Some("https://show.example/"))));
+        assert!(!stored.same_show(&show(Some("Other"), Some("https://other.example/"))));
+        // Neither naming anything is no evidence: a card and a feed without a title or link.
+        assert!(!show(None, None).same_show(&show(Some("  "), None)));
+        assert!(!show(Some("Show"), None).same_show(&show(None, Some("https://show.example/"))));
+    }
     /// A publisher's page is a web page on the feed's own site, never a directory's page of the
     /// item: not Podcast Index's even for a feed it hosts, nor a sibling host, another site, a
     /// site's root, a feed or a feed item.

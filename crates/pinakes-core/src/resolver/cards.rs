@@ -1287,7 +1287,12 @@ fn podcast_body(
         d.episodes = Some(listed.episodes);
         d.episodes_older = listed.older;
         d.episodes_oldest_first = listed.oldest_first;
-        d.episodes_channel = crate::episodes::Channel::of(channel);
+        // The show the list's feed names, for the save: by the name this card stores (the
+        // channel's first title, as read above) and the channel's link.
+        d.episodes_channel = crate::episodes::Channel::new(
+            d.name.clone(),
+            crate::episodes::Channel::of(channel).link,
+        );
     }
     Ok(Some(d.bounded(web::ATTRIBUTES)?))
 }
@@ -1725,18 +1730,20 @@ mod tests {
             })
             .collect();
         let ascending = format!(
-            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Show</title><atom:link href="https://feeds.example/show.xml" rel="self"/><link>https://show.example/</link>{ascending}</channel></rss>"#
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom"><channel><itunes:title>Show (iTunes)</itunes:title><title>Show</title><atom:link href="https://feeds.example/show.xml" rel="self"/><link>https://show.example/</link>{ascending}</channel></rss>"#
         );
         let (egress, _) =
             crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
         let d = read(egress, uri, cut_of(&ascending, uri)).await;
         assert!(d.episodes_cut);
         assert!(d.episodes_oldest_first, "the cut read of an ascending feed");
-        // And names its show, as a stored card would (the save asks whether it is the same one).
+        // And names its show as the card does (the save asks whether it is the stored card's):
+        // by the card's own name, the channel's first title, and the channel's link.
+        assert_eq!(d.name.as_deref(), Some("Show (iTunes)"));
         assert_eq!(
             d.episodes_channel,
             crate::episodes::Channel::new(
-                Some("Show".into()),
+                Some("Show (iTunes)".into()),
                 Some("https://show.example/".into())
             )
         );
