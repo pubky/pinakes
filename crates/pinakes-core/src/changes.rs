@@ -381,8 +381,12 @@ pub async fn save(
     // Read before the document's copy below, which leaves out what is never stored.
     let withheld = doc.withheld;
     let shape_only = doc.shape_only;
-    let (episodes, episodes_older, episodes_cut) =
-        (doc.episodes.clone(), doc.episodes_older, doc.episodes_cut);
+    let (episodes, episodes_older, episodes_cut, episodes_oldest_first) = (
+        doc.episodes.clone(),
+        doc.episodes_older,
+        doc.episodes_cut,
+        doc.episodes_oldest_first,
+    );
     let mut prepared = if let Some(container) = &doc.container {
         Some(
             crate::event::storage::prepare(pool, id, container, doc.fetched_at, doc.ttl_secs)
@@ -467,6 +471,7 @@ pub async fn save(
     doc.episodes = episodes;
     doc.episodes_older = episodes_older;
     doc.episodes_cut = episodes_cut;
+    doc.episodes_oldest_first = episodes_oldest_first;
     if let Some(plan) = prepared.as_ref().filter(|p| !p.warnings.is_empty()) {
         doc.event.warnings.extend(plan.warnings.iter().cloned());
         doc.event.warnings.sort();

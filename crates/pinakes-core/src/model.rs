@@ -537,6 +537,13 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_cut: bool,
+    /// The feed `episodes` was read from lists its oldest episode first
+    /// (`episodes::Listed::oldest_first`): a cut read's list then holds its oldest episodes, and
+    /// the save keeps the newer ones a stored list holds (`episodes::store`). Never stored in the
+    /// document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episodes_oldest_first: bool,
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,

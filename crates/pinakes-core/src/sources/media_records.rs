@@ -523,6 +523,7 @@ impl Source for MediaRecords {
                                 doc.episodes = Some(listed.episodes);
                                 doc.episodes_older = listed.older;
                                 doc.episodes_cut = listed.cut;
+                                doc.episodes_oldest_first = listed.oldest_first;
                             }
                         }
                         Some(doc)

@@ -1286,6 +1286,7 @@ fn podcast_body(
         let listed = crate::episodes::listed(&items, &f.url, partial);
         d.episodes = Some(listed.episodes);
         d.episodes_older = listed.older;
+        d.episodes_oldest_first = listed.oldest_first;
     }
     Ok(Some(d.bounded(web::ATTRIBUTES)?))
 }

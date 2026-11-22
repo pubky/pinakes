@@ -90,6 +90,10 @@ pub struct Listed {
     /// ([`from_feed_listed`]): a show's save keeps the older episodes a longer stored list holds
     /// (`ResourceMeta::episodes_cut`).
     pub cut: bool,
+    /// The feed lists its oldest episode first: as read, its dated items' dates ascend (at least
+    /// two, the last later than the first). A cut read of such a feed holds its oldest episodes,
+    /// so a save keeps the newer ones a longer stored list holds ([`under_stored`]).
+    pub oldest_first: bool,
 }
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
@@ -102,13 +106,31 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
         .filter_map(|(n, item)| Some((n, episode(*item, feed)?)))
         .collect();
     let older = partial || items.len() > SCANNED || episodes.len() > KEPT;
+    let oldest_first = ascending(episodes.iter().filter_map(|(_, e)| e.published));
     episodes.sort_by(|a, b| b.1.published.cmp(&a.1.published).then(a.0.cmp(&b.0)));
     episodes.truncate(KEPT);
     Listed {
         episodes: episodes.into_iter().map(|(_, e)| e).collect(),
         older,
         cut: false,
+        oldest_first,
     }
+}
+/// Whether dates in the order read ascend: at least two, none earlier than the one before, the
+/// last later than the first ([`Listed::oldest_first`]).
+fn ascending(dates: impl Iterator<Item = DateTime<Utc>>) -> bool {
+    let mut dates = dates;
+    let Some(first) = dates.next() else {
+        return false;
+    };
+    let mut last = first;
+    for date in dates {
+        if date < last {
+            return false;
+        }
+        last = date;
+    }
+    last > first
 }
 /// The episodes a fetched feed lists ([`from_feed_listed`]).
 pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
@@ -478,7 +500,8 @@ pub(crate) async fn store(
     let show = is_show(&doc.type_path, doc.status.as_str());
     match &doc.episodes {
         Some(list) if show && doc.episodes_cut => {
-            let (list, older) = under_stored(tx, id, list, doc.episodes_older).await?;
+            let (list, older) =
+                under_stored(tx, id, list, doc.episodes_older, doc.episodes_oldest_first).await?;
             replace(tx, id, &list, older).await
         }
         Some(list) if show => replace(tx, id, list, doc.episodes_older).await,
@@ -504,11 +527,18 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
 /// does not reach the stored list (it lacks the stored list's newest episode no newer than its
 /// own, or the one after it: another feed's list, or more new episodes than the cut holds) or the
 /// stored list holds nothing besides.
+///
+/// A cut read of a feed that lists its oldest episode first (`oldest_first`, from the parse)
+/// holds the feed's oldest episodes: the stored episodes newer than its newest are the part the
+/// read did not reach, not episodes the feed took down, and they join it too. Such a cut reaches
+/// the stored list when it names the stored list's two oldest dated episodes (its one, when it
+/// holds one).
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     list: &[Episode],
     older: bool,
+    oldest_first: bool,
 ) -> Result<(Vec<Episode>, bool)> {
     // A stored episode's GUID, URI, name, image, date and stream (as JSON text), and whether
     // the stored list's feed lists older ones.
@@ -528,17 +558,30 @@ async fn under_stored(
     .fetch_all(&mut **tx)
     .await?;
     let named: std::collections::HashSet<&str> = list.iter().map(|e| e.guid.as_str()).collect();
-    // A stored episode newer than the cut list's newest is one the feed has taken down.
+    // A stored episode newer than the cut list's newest is one the feed has taken down, unless
+    // the feed lists its oldest first: then it is one the cut did not reach.
     let newest = list.iter().filter_map(|e| e.published).max();
     let kept: Vec<&Stored> = rows
         .iter()
-        .filter(|r| !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
+        .filter(|r| oldest_first || !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
         .collect();
-    // The cut list reaches the stored one only when it names the stored list's two newest
-    // episodes left (its one, when it holds one): else between the two lie episodes neither read
-    // has (more new ones than the cut holds; one of them alone may be a re-release at the top of
-    // the feed), or the stored list is another feed's, and the cut list stands alone.
-    if kept.is_empty() || !kept.iter().take(2).all(|r| named.contains(r.0.as_str())) {
+    // The cut list reaches the stored one only when it names the two stored episodes at its own
+    // end of the feed (the newest two left; for an oldest-first feed the oldest two dated ones;
+    // its one, when it holds one): else between the two lie episodes neither read has (more new
+    // ones than the cut holds; one of them alone may be a re-release at the top of the feed), or
+    // the stored list is another feed's, and the cut list stands alone.
+    let reaches = if oldest_first {
+        let mut oldest = kept
+            .iter()
+            .rev()
+            .filter(|r| r.4.is_some())
+            .take(2)
+            .peekable();
+        oldest.peek().is_some() && oldest.all(|r| named.contains(r.0.as_str()))
+    } else {
+        kept.iter().take(2).all(|r| named.contains(r.0.as_str()))
+    };
+    if kept.is_empty() || !reaches {
         return Ok((list.to_vec(), older));
     }
     let joining: Vec<&Stored> = kept
@@ -1297,6 +1340,45 @@ mod tests {
         assert!(publisher_page("https://show.example.com/t/episode/6", item));
     }
     use super::*;
+
+    /// A feed whose dated items ascend as read lists oldest first; one that descends, one with
+    /// a single dated item, or one whose dates go back and forth does not.
+    #[test]
+    fn the_parse_says_whether_a_feed_lists_oldest_first() {
+        let day = |n: i64| chrono::DateTime::from_timestamp(1_760_000_000 + n * 86_400, 0).unwrap();
+        assert!(ascending([day(1), day(2), day(3)].into_iter()));
+        assert!(ascending([day(1), day(1), day(2)].into_iter()));
+        assert!(!ascending([day(3), day(2), day(1)].into_iter()));
+        assert!(!ascending([day(1), day(3), day(2)].into_iter()));
+        assert!(!ascending([day(1), day(1)].into_iter()));
+        assert!(!ascending([day(1)].into_iter()));
+        assert!(!ascending(std::iter::empty()));
+        let feed = |order: &[i64]| {
+            let items: String = order
+                .iter()
+                .map(|n| {
+                    format!(
+                        "<item><title>{n}</title><guid>g{n}</guid><pubDate>{}</pubDate><enclosure url=\"https://show.example/{n}.mp3\" type=\"audio/mpeg\" length=\"1\"/></item>",
+                        day(*n).to_rfc2822()
+                    )
+                })
+                .collect();
+            format!("<rss version=\"2.0\"><channel><title>S</title>{items}</channel></rss>")
+        };
+        let url = Url::parse("https://show.example/feed.xml").unwrap();
+        for (order, oldest_first) in [(&[1, 2, 3][..], true), (&[3, 2, 1][..], false)] {
+            let xml = feed(order);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let items: Vec<_> = doc
+                .descendants()
+                .filter(|n| n.has_tag_name("item"))
+                .collect();
+            let listed = listed(&items, &url, false);
+            assert_eq!(listed.oldest_first, oldest_first, "{order:?}");
+            // Either way the list is newest first.
+            assert_eq!(listed.episodes[0].guid, "g3");
+        }
+    }
 
     fn feed(items: &str) -> String {
         format!(

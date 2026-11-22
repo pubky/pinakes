@@ -214,6 +214,7 @@ impl Source for PodcastIndex {
                 doc.episodes = Some(listed.episodes);
                 doc.episodes_older = listed.older;
                 doc.episodes_cut = listed.cut;
+                doc.episodes_oldest_first = listed.oldest_first;
             }
         }
         Ok(doc)
