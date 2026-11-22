@@ -2083,6 +2083,31 @@ async fn a_first_hold_is_checked_after_held_retry_secs(pool: PgPool) {
     }
 }
 
+/// A snapshot no newer than the stored one is not held, and waits the normal cadence, not the
+/// quick first-hold check.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stale_snapshot_not_held_waits_the_normal_cadence(pool: PgPool) {
+    let uri = "https://example.org/stale.ics";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut d = dynamic_parse(uri, &future_calendar(6));
+    d.ttl_secs = 86400;
+    d.container.as_mut().unwrap().held_retry_secs = 600;
+    d.container.as_mut().unwrap().limits.cadence_floor = 300;
+    let d = fresh(&d);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    let plan = pinakes_core::event::storage::prepare(
+        &pool,
+        &id,
+        d.container.as_ref().unwrap(),
+        d.fetched_at,
+        d.ttl_secs,
+    )
+    .await
+    .unwrap();
+    assert!(!plan.applied);
+    assert_eq!(plan.retry_secs, 86400);
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn container_caps_patches_rotation_backoff_retention_and_labels(pool: PgPool) {
     let uri = "https://example.org/limits.ics";
