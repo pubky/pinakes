@@ -169,7 +169,10 @@ pub fn post_card(
     };
     social::post_text(&mut doc, caption, by);
     if doc.description.is_none() {
-        doc.description = tags.description.as_deref().map(|d| social::excerpt(d, 200));
+        doc.description = tags
+            .description
+            .as_deref()
+            .map(|d| social::excerpt_lines(d, 200));
     }
     doc.image = tags.image.clone();
     social::fact(&mut doc, "author_name", by.map(str::to_owned));
@@ -403,6 +406,24 @@ mod tests {
             .unwrap()
             .starts_with("https://scontent-hel3-1.cdninstagram.com/"));
         assert!(Instagram.social(&doc));
+        // A post without a caption is named by its author, and its page's description keeps
+        // its line breaks.
+        let uncaptioned = OpenGraph {
+            title: Some("Motorsport on Instagram: \"\"".into()),
+            description: Some("12 likes  -  motorsport\n\n\non May 1".into()),
+            ..recorded_tags("post-Df_H64Tul-0.html.gz")
+        };
+        let doc = post_card(
+            ResourceMeta::new(&target.root(), "instagram", 3600),
+            &target,
+            &uncaptioned,
+            &ended_at,
+        );
+        assert_eq!(doc.name.as_deref(), Some("Post by Motorsport"));
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("12 likes - motorsport\n\non May 1")
+        );
         // The same page read for a reel link of that code is the reel's own page too.
         let reel = Target::Reel("Df_H64Tul-0".into());
         let doc = post_card(
