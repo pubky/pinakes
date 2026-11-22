@@ -386,7 +386,9 @@ pub async fn on_youtube_music(pool: &sqlx::PgPool, id: &str, uri: &str) -> anyho
 /// Type and name a resolved card by what its link is, whatever the service's page or oEmbed
 /// says: a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a
 /// `Person` when MusicBrainz says the artist is one: `artist_type`), a playlist a
-/// `MusicPlaylist`; a video stays as resolved. YouTube is not only music: its channel is music
+/// `MusicPlaylist`; a video stays as resolved, but for a label's upload on YouTube, a
+/// `MusicRecording` with its `artist` (`youtube_match::label_artist`: an artist's Topic channel,
+/// "Provided to YouTube by"). YouTube is not only music: its channel is music
 /// only when it is a Topic channel (named `{Artist} - Topic`, YouTube's own channel of an
 /// artist's releases) or a link on YouTube Music, and its playlist only on YouTube Music
 /// (`on_youtube_music`: the card's link, or another spelling of it, is on `music.youtube.com`);
@@ -423,8 +425,28 @@ pub fn type_card(
     // A YouTube channel is music when it is a Topic channel or on YouTube Music; a playlist only
     // on YouTube Music (a playlist's name is its maker's).
     let youtube = link.service == Service::YouTube && !on_youtube_music;
+    // A label's upload on YouTube (its channel an artist's Topic channel, or its description
+    // "Provided to YouTube by …") is the recording, by that artist, on whichever spelling the
+    // link was read; any other video stays a video, on YouTube Music too (an official music video
+    // plays there as well).
+    let video = link.service == Service::YouTube && link.level == Level::Video;
+    let label_artist = video
+        .then(|| {
+            crate::also_on::youtube_match::label_artist(
+                doc.attributes.get("author").map(String::as_str),
+                doc.description.as_deref(),
+            )
+        })
+        .flatten()
+        .filter(|a| a.len() <= crate::model::ATTRIBUTE_VALUE_CAP);
+    let label_upload = label_artist.is_some();
     match link.level {
-        Level::Video => {}
+        Level::Video => {
+            if let Some(artist) = label_artist {
+                doc.set_type(Level::Track.type_name());
+                doc.attributes.insert("artist".into(), artist);
+            }
+        }
         Level::Artist if youtube && !topic() => {}
         Level::Playlist if youtube => {}
         Level::Artist if artist_type == Some("Person") => doc.set_type("Person"),
@@ -438,7 +460,9 @@ pub fn type_card(
             .map(|v| v.trim())
             .filter(|v| !v.is_empty())
     };
-    if let Some(artist) = attribute("artist") {
+    // A label's upload keeps its own description (none, or YouTube's "Provided to" text naming
+    // its album and label): its artist is a fact (`resolver::cards::media_facts`).
+    if let Some(artist) = attribute("artist").filter(|_| !label_upload) {
         let mut parts = vec![artist.to_owned()];
         match link.level {
             Level::Track => {
@@ -1019,6 +1043,105 @@ mod tests {
             )
         );
         assert!(parse("https://www.youtube.com/channel/short").is_none());
+    }
+
+    /// A label's upload on YouTube (an artist's Topic channel, or a description "Provided to
+    /// YouTube by") is a song by that artist, whichever spelling was read, its player still
+    /// YouTube's video and its description its own; any other video stays a video with its
+    /// channel as `author`, on YouTube Music too.
+    #[test]
+    fn a_label_upload_on_youtube_is_a_song() {
+        use crate::{
+            embed::EmbedKind,
+            model::{ResourceMeta, Status},
+            resolver::cards::media_facts,
+        };
+        let oembed = |file: &str| -> serde_json::Value {
+            let path = format!("{}/tests/fixtures/media/{file}", env!("CARGO_MANIFEST_DIR"));
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        };
+        // A card as the media route stores it from the video's oEmbed answer.
+        let card = |uri: &str, author: &str, description: Option<&str>| {
+            let mut d = ResourceMeta::new(uri, "media", 3600);
+            d.set_type("VideoObject");
+            d.status = Status::Ok;
+            d.attributes.insert("author".into(), author.into());
+            d.description = description.map(str::to_owned);
+            type_card(uri, None, false, &mut d);
+            d
+        };
+        let facts = |d: &ResourceMeta| -> Vec<(String, String)> {
+            media_facts(d).into_iter().flatten().collect()
+        };
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let queen = oembed("youtube_match/oembed-bSnlKl_PoQU.json");
+        let queen = queen["author_name"].as_str().unwrap();
+        for uri in [
+            "https://www.youtube.com/watch?v=bSnlKl_PoQU",
+            "https://music.youtube.com/watch?v=bSnlKl_PoQU&si=x",
+        ] {
+            let topic = card(uri, queen, None);
+            assert_eq!(topic.type_name, "MusicRecording", "{uri}");
+            assert_eq!(topic.attributes["artist"], "Queen");
+            assert_eq!(
+                (topic.site.as_str(), topic.description.as_deref()),
+                ("YouTube", None)
+            );
+            assert_eq!(facts(&topic), [pair("artist", "Queen")]);
+            let embed = crate::embed::link(uri).unwrap().settled(&topic.type_path);
+            assert_eq!(
+                (embed.provider.as_str(), embed.kind),
+                ("youtube", EmbedKind::Video)
+            );
+            assert!(embed.height.is_none() && embed.aspect.is_some());
+        }
+        // A label's description names the artist when the channel is not a Topic channel.
+        let provided =
+            "Provided to YouTube by Universal Music Group\n\nBohemian Rhapsody · Queen · \
+                        Freddie Mercury\n\nA Night At The Opera\n\n℗ 1975";
+        let label = card(
+            "https://www.youtube.com/watch?v=bSnlKl_PoQU",
+            "Queen Official",
+            Some(provided),
+        );
+        assert_eq!(label.type_name, "MusicRecording");
+        assert_eq!(label.description.as_deref(), Some(provided));
+        assert_eq!(facts(&label), [pair("artist", "Queen")]);
+        // Any other video, on YouTube Music too, stays a video: its channel is its author, and a
+        // length its page stated is its duration.
+        let rick = oembed("youtube-oembed.json");
+        let rick = rick["author_name"].as_str().unwrap();
+        let mut video = card("https://music.youtube.com/watch?v=dQw4w9WgXcQ", rick, None);
+        assert_eq!(video.type_name, "VideoObject");
+        assert!(!video.attributes.contains_key("artist"));
+        assert_eq!(facts(&video), [pair("author", "Rick Astley")]);
+        video.attributes.insert("duration".into(), "PT3M33S".into());
+        assert_eq!(
+            facts(&video),
+            [pair("author", "Rick Astley"), pair("duration", "213")]
+        );
+        // A Topic suffix with no name before it is no artist.
+        assert_eq!(
+            card(
+                "https://www.youtube.com/watch?v=bSnlKl_PoQU",
+                " - Topic",
+                None
+            )
+            .type_name,
+            "VideoObject"
+        );
+        // A Vimeo video's channel is its author; a page that is no video has no such facts.
+        let mut vimeo = ResourceMeta::new("https://vimeo.com/76979871", "media", 3600);
+        vimeo.set_type("VideoObject");
+        vimeo.attributes.insert("author".into(), "Vimeo".into());
+        assert_eq!(facts(&vimeo), [pair("author", "Vimeo")]);
+        let mut page = ResourceMeta::new(
+            "https://www.youtube.com/channel/UCq19-LqvG35A-30oyAiPiqA",
+            "web",
+            3600,
+        );
+        page.attributes.insert("author".into(), "Someone".into());
+        assert!(facts(&page).is_empty());
     }
 
     /// A YouTube channel or playlist is music only as a Topic channel or a link on YouTube

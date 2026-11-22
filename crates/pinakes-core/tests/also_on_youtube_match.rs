@@ -249,6 +249,15 @@ async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
             .unwrap();
     assert_eq!(keys, 0);
     assert!(links(&pool, &vevo).await.is_empty());
+    // The watch page's length is the video's `duration` fact (its stored card has none).
+    let facts: Vec<String> = sqlx::query_scalar(
+        "SELECT name||'='||value FROM resource_fact WHERE resource_id=$1 AND source='youtube_match' ORDER BY 1",
+    )
+    .bind(&queen)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(facts, ["duration=354"]);
 }
 
 /// A sign-in page instead of the video's: nothing is searched or recorded, and the lookup is

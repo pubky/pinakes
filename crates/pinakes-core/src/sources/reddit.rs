@@ -150,7 +150,7 @@ pub fn post_card(doc: ResourceMeta, id: &str, v: &Value) -> Result<Option<Resour
     // A deleted account's posts stay up, under `[deleted]`: no author.
     let author = text(&post["author"]).filter(|a| a != "[deleted]");
     social::post_text(&mut doc, &title, author.as_deref());
-    doc.description = Some(social::excerpt(
+    doc.description = Some(social::excerpt_lines(
         if body.is_empty() { &title } else { &body },
         200,
     ));

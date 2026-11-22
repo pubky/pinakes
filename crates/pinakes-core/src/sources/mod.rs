@@ -1092,6 +1092,32 @@ pub fn excerpt(text: &str, max: usize) -> String {
     cut(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
 
+/// `text` with its line breaks kept: the white space inside each line collapsed to single
+/// spaces, at most one blank line in a row (a paragraph break), none at the start or end.
+pub fn lines(text: &str) -> String {
+    let mut out: Vec<String> = vec![];
+    let mut blank = false;
+    for line in text.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            blank = !out.is_empty();
+        } else {
+            if blank {
+                out.push(String::new());
+                blank = false;
+            }
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+/// At most `max` characters of `text`, its line breaks kept ([`lines`]), with an ellipsis when
+/// cut.
+pub fn excerpt_lines(text: &str, max: usize) -> String {
+    cut(&lines(text), max)
+}
+
 /// `[text](url)` as `text`, without `**`, `__`, backticks and single `*`/`_` emphasis around
 /// words (`*local*`, `_here_`); a backslash-escaped mark (`\*`) is the mark itself. A mark
 /// between spaces or inside a word (`5 * 3`, `snake_case`, `2*3`) stays.

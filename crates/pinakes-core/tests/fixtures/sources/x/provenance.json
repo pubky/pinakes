@@ -8,6 +8,16 @@
     "status": 200,
     "url": "https://publish.x.com/oembed?url=https://x.com/jack/status/20&omit_script=true&dnt=true"
   },
+  "oembed-joenakamoto-2119830751713829276": {
+    "bytes": 905,
+    "content_type": "application/json; charset=utf-8",
+    "file": "oembed-joenakamoto-2119830751713829276.json",
+    "note": "a post with a line break, a blank line and an attached photo (pic.twitter.com link)",
+    "recorded_at": "2026-11-22T17:11:31+00:00",
+    "sha256": "831c3fff76b9b7718d476aedcb0b5981d2d4a99531c3014a3a918d72bf237638",
+    "status": 200,
+    "url": "https://publish.x.com/oembed?url=https://x.com/joenakamoto/status/2119830751713829276&omit_script=true&dnt=true"
+  },
   "oembed-missing": {
     "bytes": 3656,
     "content_type": "text/html;charset=utf-8",

@@ -1602,6 +1602,38 @@ fn media_type(d: &mut ResourceMeta, uri: &str) {
     }
 }
 
+/// The facts a video's card states, on YouTube (any spelling) and Vimeo: a label's upload's
+/// `artist` (`music::type_card` types it a `MusicRecording`), else the channel that put it up as
+/// `author` (its oEmbed `author_name`), and its length (`duration`, in seconds) when the page
+/// stated one. Read from the stored card, so every stored video has them at once.
+pub(crate) fn media_facts(d: &ResourceMeta) -> Option<std::collections::BTreeMap<String, String>> {
+    let youtube = crate::music::parse(&d.url).is_some_and(|l| {
+        l.service == crate::music::Service::YouTube && l.level == crate::music::Level::Video
+    });
+    let vimeo = Url::parse(&d.url)
+        .ok()
+        .is_some_and(|u| matches!(u.host_str(), Some("vimeo.com" | "www.vimeo.com")));
+    if !(youtube || vimeo) || !matches!(d.type_name.as_str(), "VideoObject" | "MusicRecording") {
+        return None;
+    }
+    let attribute = |name: &str| {
+        d.attributes
+            .get(name)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+    };
+    let mut facts = std::collections::BTreeMap::new();
+    if let Some(artist) = attribute("artist").filter(|_| d.type_name == "MusicRecording") {
+        facts.insert("artist".to_owned(), artist.to_owned());
+    } else if let Some(author) = attribute("author") {
+        facts.insert("author".to_owned(), author.to_owned());
+    }
+    if let Some(secs) = attribute("duration").and_then(crate::music_sources::duration_secs) {
+        facts.insert("duration".to_owned(), secs.to_string());
+    }
+    (!facts.is_empty()).then_some(facts)
+}
+
 /// How long a resolver of this kind may take. Nostr and the official APIs leave their own fetch
 /// timeouts (10 seconds, slot wait included) room to answer first.
 fn budget(kind: &str) -> Duration {

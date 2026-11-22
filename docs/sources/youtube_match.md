@@ -11,7 +11,9 @@ YouTube by". The source reads the video's watch page (`https://www.youtube.com/w
 its title, channel, length and description (`ytInitialPlayerResponse.videoDetails`:
 `title`, `author`, `lengthSeconds`, `shortDescription`; the page's `<meta itemprop="duration">`
 when the length is missing), as the stored card has no length. The artist is the Topic channel's
-name, else the first artist of the description's "Title · Artist" line.
+name, else the first artist of the description's "Title · Artist" line (the same rule types the
+video's card a `MusicRecording` with that `artist`). The length read is the card's `duration` fact
+(seconds), whatever the searches find.
 
 It then searches, for the artist and title as `same_recording` compares them (lower case, the tags
 that keep a recording's identity such as a remaster dropped, the first credited artist):

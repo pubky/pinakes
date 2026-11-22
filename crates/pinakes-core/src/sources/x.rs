@@ -122,11 +122,7 @@ pub fn post_card(mut doc: ResourceMeta, id: &str, v: &Value) -> Result<ResourceM
     doc = Shape::Post.card(doc, SITE);
     let html = crate::resolver::html::fragment(v["html"].as_str().unwrap_or_default())?;
     let select = |s: &str| scraper::Selector::parse(s).expect("static selector");
-    let body: String = html
-        .select(&select("blockquote > p"))
-        .map(|p| p.text().collect::<String>())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let body = post_body(html.select(&select("blockquote > p")));
     let by = text(&v["author_name"]).or_else(|| author.clone());
     social::post_text(&mut doc, &body, by.as_deref());
     let published = html
@@ -142,6 +138,31 @@ pub fn post_card(mut doc: ResourceMeta, id: &str, v: &Value) -> Result<ResourceM
         doc.source_root = Some(format!("https://x.com/{author}/status/{id}"));
     }
     Ok(doc)
+}
+
+/// A post's text from the paragraphs of its oEmbed `blockquote`: line breaks (`<br>`) and
+/// paragraphs kept (`social::html_lines`), without the links X appends to the text for the
+/// post's photos and videos (`pic.twitter.com/…`, `pic.x.com/…`): the post shows its media, not
+/// that link.
+fn post_body<'a>(paragraphs: impl Iterator<Item = scraper::ElementRef<'a>>) -> String {
+    let mut text = paragraphs
+        .map(|p| social::lines(&social::html_lines(p)))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    loop {
+        let kept = text.trim_end();
+        let last = kept.rfind(char::is_whitespace).map_or(0, |at| {
+            at + kept[at..].chars().next().map_or(1, char::len_utf8)
+        });
+        let media = ["pic.twitter.com/", "pic.x.com/"]
+            .iter()
+            .any(|host| kept[last..].starts_with(host));
+        if !media {
+            break;
+        }
+        text.truncate(last);
+    }
+    text.trim_end().to_owned()
 }
 
 /// The card of a profile from its page: the name and handle its Open Graph title carries
@@ -397,6 +418,59 @@ mod tests {
             Some("https://x.com/jack/status/20")
         );
         assert!(post_card(base, "21", &v).is_err());
+    }
+
+    /// A post's line breaks stay in its description (`<br>` a line, `<br><br>` a blank line), its
+    /// name is one line, and the `pic.twitter.com` link X appends for its photo is left out.
+    #[test]
+    fn a_post_keeps_its_line_breaks_without_the_photo_link() {
+        let v: Value =
+            serde_json::from_slice(&read("oembed-joenakamoto-2119830751713829276.json")).unwrap();
+        let base = ResourceMeta::new(
+            "https://x.com/joenakamoto/status/2119830751713829276",
+            "x",
+            3600,
+        );
+        let doc = post_card(base, "2119830751713829276", &v).unwrap();
+        let description = doc.description.as_deref().unwrap();
+        assert_eq!(
+            description,
+            "this guy has been on a rampage trying to dunk on me for saying bitcoin is dying in el \
+             salvador\n\nwhen his own viral post from just 3 months ago concludes with the exact \
+             same thing"
+        );
+        let name = doc.name.as_deref().unwrap();
+        assert!(name.starts_with("this guy has been on a rampage"));
+        assert!(!name.contains('\n') && !name.contains("pic.twitter.com"));
+        assert_eq!(doc.attributes["published"], "2026-11-09");
+    }
+
+    /// Only the media links at the end go: one in the text stays, and a post of a photo alone is
+    /// named by its author.
+    #[test]
+    fn only_trailing_media_links_are_left_out() {
+        let body = |html: &str| {
+            let html = crate::resolver::html::fragment(html).unwrap();
+            post_body(html.select(&scraper::Selector::parse("blockquote > p").unwrap()))
+        };
+        assert_eq!(
+            body("<blockquote><p>a  b<br>c<br><br><br>see pic.x.com/1 here</p><p>second <a href=\"https://t.co/2\">pic.twitter.com/2</a> <a href=\"https://t.co/3\">pic.x.com/3</a></p></blockquote>"),
+            "a b\nc\n\nsee pic.x.com/1 here\n\nsecond"
+        );
+        assert_eq!(
+            body("<blockquote><p>caption <a>pic.twitter.com/2</a></p></blockquote>"),
+            "caption"
+        );
+        let v = serde_json::json!({
+            "url": "https://x.com/jack/status/20",
+            "author_name": "jack",
+            "author_url": "https://x.com/jack",
+            "html": "<blockquote><p><a href=\"https://t.co/1\">pic.twitter.com/1</a></p>&mdash; jack</blockquote>",
+        });
+        let base = ResourceMeta::new("https://x.com/jack/status/20", "x", 3600);
+        let doc = post_card(base, "20", &v).unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Post by jack"));
+        assert_eq!(doc.description, None);
     }
 
     #[test]

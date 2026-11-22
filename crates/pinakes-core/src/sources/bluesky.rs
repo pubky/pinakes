@@ -1,7 +1,7 @@
 //! Bluesky posts and profiles, read from the public AppView (`public.api.bsky.app`). No key. A
 //! post's identity is its at-URI: every address of it, by handle or by DID, becomes one resource
 //! named by the DID.
-use super::{excerpt, text, web_url, Context, Example, Source};
+use super::{excerpt, excerpt_lines, text, web_url, Context, Example, Source};
 use crate::model::ResourceMeta;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -180,7 +180,7 @@ pub fn post_card(
     } else {
         Some(excerpt(&body_text, 120))
     };
-    doc.description = (!body_text.is_empty()).then(|| excerpt(&body_text, 200));
+    doc.description = (!body_text.is_empty()).then(|| excerpt_lines(&body_text, 200));
     doc.image = post["embed"]["images"][0]["thumb"]
         .as_str()
         .or(author["avatar"].as_str())

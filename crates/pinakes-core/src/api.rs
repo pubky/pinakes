@@ -1955,7 +1955,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 crate::kinds::facts(
                     crate::sources::facts(d)
                         .or_else(|| crate::resolver::pubky_apps::facts(d))
-                        .or_else(|| crate::music_sources::card_facts(d)),
+                        .or_else(|| crate::music_sources::card_facts(d))
+                        .or_else(|| crate::resolver::cards::media_facts(d)),
                     d,
                     Utc::now(),
                 ),
