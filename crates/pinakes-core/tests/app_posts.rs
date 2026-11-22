@@ -669,7 +669,9 @@ async fn a_post_line_of_a_never_fetched_namespace_creates_nothing(pool: PgPool) 
         "pubky.app",
         "%73ocial",
         "%73%6F%63%69%61%6C",
+        "%73%6f%63%69%61%6c",
         "pubky%2Eapp",
+        "pubky%2eapp",
     ]
     .iter()
     .map(|namespace| post(namespace, &id()))
