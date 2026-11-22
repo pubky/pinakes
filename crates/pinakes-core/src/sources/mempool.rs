@@ -292,7 +292,7 @@ pub struct Explorer {
     /// reading, as everywhere.
     hosts: &'static [&'static str],
     /// Whether a card lists it in Also on. Sites that refuse a plain client (bot walls), are
-    /// down or copy another listed site (a mempool instance) are only read.
+    /// down or copy the cards' own site (a mempool.space instance) are only read.
     listed: bool,
     /// Whether a two-letter language may lead its paths (`/de/tx/…`), as on mempool sites.
     languages: bool,
