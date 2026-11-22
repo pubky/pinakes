@@ -2064,13 +2064,25 @@ mod tests {
             assert_eq!(found[0], found[1], "{id}");
         }
         // A derived link of an aliased page, an alias's root, a derived link of nobody's page,
-        // the root of an alias derived from a page only its alias's references keep.
-        for n in [1150, 1, 1250, 151] {
+        // the root of an alias derived from a page only its alias's references keep; each with
+        // a plan for its value and with the generic plan a prepared statement may switch to.
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::raw_sql(&format!("PREPARE sponsors(text) AS {SPONSORS}"))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        for (n, mode) in [1150, 1, 1250, 151]
+            .into_iter()
+            .flat_map(|n| [(n, "force_custom_plan"), (n, "force_generic_plan")])
+        {
+            sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await
+                .unwrap();
             let plan: serde_json::Value = sqlx::query_scalar(&format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) {}",
-                SPONSORS.replace("$1", &format!("md5('r{n}')"))
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE sponsors(md5('r{n}'))"
             ))
-            .fetch_one(&pool)
+            .fetch_one(&mut *conn)
             .await
             .unwrap();
             let (mut rows, mut seq) = (0.0, false);
@@ -2085,7 +2097,7 @@ mod tests {
                 }
             }
             walk(&plan[0]["Plan"], &mut rows, &mut seq);
-            assert!(!seq && rows <= 100.0, "r{n}: {rows} rows\n{plan}");
+            assert!(!seq && rows <= 100.0, "r{n} {mode}: {rows} rows\n{plan}");
         }
     }
 
