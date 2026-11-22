@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
-    episodes::Episode,
+    episodes::{Channel, Episode},
     model::{ResourceMeta, Stream},
     store,
 };
@@ -2000,6 +2000,269 @@ async fn an_entry_names_the_publishers_episode_page_and_its_other_links(pool: Pg
     let card_seven = on_card.iter().find(|e| e["guid"] == "ep-7").unwrap();
     assert_eq!(card_seven["id"], older, "{show_card}");
     assert_eq!(*card_seven, seven, "{show_card}");
+}
+
+/// A feed that lists oldest first: its cut read holds the feed's oldest episodes, so the stored
+/// episodes newer than the cut's newest are the part the read did not reach, not episodes the
+/// feed has taken down. The stored list stays whole, with what it says of its feed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cut_read_of_an_oldest_first_feed_keeps_the_newer_stored_episodes(pool: PgPool) {
+    let uri = "https://feeds.example.org/oldest-first.xml";
+    let whole: Vec<Episode> = (1..=300).rev().map(|n| episode(n, true)).collect();
+    let id = show(&pool, uri, Some(whole)).await;
+    assert_eq!(rows(&pool, &id).await, 300);
+    // The first megabyte of the feed: its 100 oldest episodes, ordered as a read orders them,
+    // and the parse's word that the feed lists oldest first.
+    let mut d = ResourceMeta::new(uri, "web", 86_400);
+    d.set_type("PodcastSeries");
+    d.episodes = Some((1..=100).rev().map(|n| episode(n, true)).collect());
+    d.episodes_older = true;
+    d.episodes_cut = true;
+    d.episodes_oldest_first = true;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 300);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 300", "{page}");
+    assert_eq!(page["truncated"], false, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=199")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 101", "{page}");
+    assert_eq!(page["items"][1]["name"], "Episode 100", "{page}");
+    // The feed has dropped its oldest episode since: a cut of its next 100 still reaches the
+    // stored list, and the dropped one stays listed until a read reads the whole feed again.
+    d.episodes = Some((2..=101).rev().map(|n| episode(n, true)).collect());
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 300);
+    // A cut that lacks a stored episode at its own end (here the second oldest) does not reach
+    // the stored list: between the two lie episodes neither read has, and the cut stands alone.
+    let gap = "https://feeds.example.org/oldest-first-gap.xml";
+    let whole: Vec<Episode> = (1..=300).rev().map(|n| episode(n, true)).collect();
+    let other = show(&pool, gap, Some(whole)).await;
+    let mut cut = ResourceMeta::new(gap, "web", 86_400);
+    cut.set_type("PodcastSeries");
+    cut.episodes = Some(
+        (50..=148)
+            .rev()
+            .chain(std::iter::once(1))
+            .map(|n| episode(n, true))
+            .collect(),
+    );
+    cut.episodes_older = true;
+    cut.episodes_cut = true;
+    cut.episodes_oldest_first = true;
+    store::save_document(&pool, &other, 0, &cut).await.unwrap();
+    assert_eq!(rows(&pool, &other).await, 100);
+    d.episodes = Some((1..=100).rev().map(|n| episode(n, true)).collect());
+    // The same cut from a feed that lists newest first: the newer stored episodes are ones the
+    // feed took down, and the cut stands alone.
+    d.episodes_oldest_first = false;
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 100);
+}
+
+/// An oldest-first feed longer than is kept: the stored list holds its newest 1000 episodes, and
+/// a cut read its oldest 100, all older than any stored one. The cut is the old end of the same
+/// feed, not a shorter feed: the stored list stays as it is, and says its feed lists older
+/// episodes (the stored read, of the feed's 1000 then, did not).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cut_of_an_oldest_first_feed_longer_than_is_kept_leaves_the_stored_list(pool: PgPool) {
+    let uri = "https://feeds.example.org/oldest-first-long.xml";
+    let whole: Vec<Episode> = (1001..=2000).rev().map(|n| episode(n, true)).collect();
+    let id = show(&pool, uri, Some(whole)).await;
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["truncated"], false, "{page}");
+    // The first megabyte of the feed: its 100 oldest episodes.
+    let cut = |uri: &str| {
+        let mut d = ResourceMeta::new(uri, "web", 86_400);
+        d.set_type("PodcastSeries");
+        d.episodes = Some((1..=100).rev().map(|n| episode(n, true)).collect());
+        d.episodes_older = true;
+        d.episodes_cut = true;
+        d.episodes_oldest_first = true;
+        d.episodes_channel = Channel::new(Some("Show".into()), None);
+        d
+    };
+    store::save_document(&pool, &id, 0, &cut(uri))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2000", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=999")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 1001", "{page}");
+    // A stored list short of the cap is no newest part of a longer feed: the cut, which does
+    // not reach it, stands alone.
+    let short = "https://feeds.example.org/oldest-first-short.xml";
+    let list: Vec<Episode> = (1001..=1999).rev().map(|n| episode(n, true)).collect();
+    let other = show(&pool, short, Some(list)).await;
+    assert_eq!(rows(&pool, &other).await, 999);
+    store::save_document(&pool, &other, 0, &cut(short))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &other).await, 100);
+}
+
+/// A cut of an oldest-first feed shares no episode with a full stored list of the feed's newest,
+/// so only the show it names says it is the old end of the same feed: a cut whose channel names
+/// another show (another title and link, on the same feed address) replaces the stored list as
+/// any list that does not reach it does; one that names the stored card's show by its link (a
+/// Podcast Index card's `website`) leaves it, as by its title.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cut_of_another_show_on_the_same_feed_replaces_a_full_stored_list(pool: PgPool) {
+    let uri = "https://feeds.example.org/reused.xml";
+    let whole: Vec<Episode> = (1001..=2000).rev().map(|n| episode(n, true)).collect();
+    let id = show(&pool, uri, Some(whole.clone())).await;
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let cut = |channel: Channel| {
+        let mut d = ResourceMeta::new(uri, "web", 86_400);
+        d.set_type("PodcastSeries");
+        d.name = channel.title.clone();
+        d.episodes = Some((1..=100).rev().map(|n| episode(n, true)).collect());
+        d.episodes_older = true;
+        d.episodes_cut = true;
+        d.episodes_oldest_first = true;
+        d.episodes_channel = channel;
+        d
+    };
+    let other = Channel::new(
+        Some("Another Show".into()),
+        Some("https://another.example/".into()),
+    );
+    store::save_document(&pool, &id, 0, &cut(other))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 100);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 100", "{page}");
+    // The same show named by its link alone: the full stored list stays.
+    let mut d = ResourceMeta::new(uri, "web", 86_400);
+    d.set_type("PodcastSeries");
+    d.name = Some("Show".into());
+    d.attributes
+        .insert("website".into(), "https://show.example/".into());
+    d.episodes = Some(whole);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let renamed = Channel::new(
+        Some("Show, renamed".into()),
+        Some("https://show.example/".into()),
+    );
+    store::save_document(&pool, &id, 0, &cut(renamed))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2000", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+}
+
+/// A feed of the dated items `order` names, in that order: each the episode [`episode`] makes
+/// when `listed` says so, else a dated note that is no episode (no GUID, link or enclosure).
+fn dated_feed(order: impl Iterator<Item = u32>, listed: impl Fn(u32) -> bool) -> String {
+    let items: String = order
+        .map(|n| {
+            let e = episode(n, true);
+            if !listed(n) {
+                return format!(
+                    "<item><title>Note {n}</title><pubDate>{}</pubDate></item>",
+                    e.published.unwrap().to_rfc2822()
+                );
+            }
+            format!(
+                r#"<item><title>Episode {n}</title><guid>ep-{n}</guid><link>{}</link><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#,
+                e.uri,
+                e.published.unwrap().to_rfc2822()
+            )
+        })
+        .collect();
+    feed(&items)
+}
+/// A show's save of a feed read as a Podcast Index or Apple show's is (`episodes::fetch`).
+fn read_show(uri: &str, listed: pinakes_core::episodes::Listed) -> ResourceMeta {
+    let mut d = ResourceMeta::new(uri, "web", 86_400);
+    d.set_type("PodcastSeries");
+    d.name = Some("Show".into());
+    d.episodes = Some(listed.episodes);
+    d.episodes_older = listed.older;
+    d.episodes_cut = listed.cut;
+    d.episodes_oldest_first = listed.oldest_first;
+    d.episodes_channel = listed.channel;
+    d
+}
+
+/// A read that stops at the item limit (the feed's first 2000 items are looked at) is a cut read
+/// when the feed lists oldest first: the stored episodes newer than the part read stay. A
+/// newest-first feed's read stopped at the limit holds its newest episodes and is no cut: it
+/// replaces the stored list, so an episode the feed has taken down goes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_read_stopped_by_the_item_limit_is_cut_only_when_the_feed_lists_oldest_first(
+    pool: PgPool,
+) {
+    let uri = "https://feeds.example.org/show.xml";
+    let id = show(
+        &pool,
+        uri,
+        Some((1801..=2100).rev().map(|n| episode(n, true)).collect()),
+    )
+    .await;
+    assert_eq!(rows(&pool, &id).await, 300);
+    // 2100 items, oldest first: the read looks at the first 2000, so its newest is Episode 2000.
+    let listed =
+        pinakes_core::episodes::from_feed_listed(&fetched(dated_feed(1..=2100, |_| true))).unwrap();
+    assert!(listed.cut && listed.oldest_first && listed.older);
+    assert_eq!(listed.episodes[0].name.as_deref(), Some("Episode 2000"));
+    store::save_document(&pool, &id, 0, &read_show(uri, listed))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2100", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=999")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 1101", "{page}");
+    // A feed newest first whose 2100 items list 499 episodes among notes (1601-2100 but 1650,
+    // which the feed has taken down): the read's first 2000 items hold them all, and the list
+    // replaces the stored one, 1650 and the stored older ones too.
+    let newest = "https://feeds.example.org/newest-first.xml";
+    let other = show(
+        &pool,
+        newest,
+        Some((1101..=1700).rev().map(|n| episode(n, true)).collect()),
+    )
+    .await;
+    assert_eq!(rows(&pool, &other).await, 600);
+    let listed = pinakes_core::episodes::from_feed_listed(&fetched_at(
+        newest,
+        dated_feed((1..=2100).rev(), |n| n > 1600 && n != 1650),
+    ))
+    .unwrap();
+    assert!(listed.older && !listed.oldest_first);
+    assert!(
+        !listed.cut,
+        "a newest-first read stopped at the limit stands"
+    );
+    assert_eq!(listed.episodes.len(), 499);
+    store::save_document(&pool, &other, 0, &read_show(newest, listed))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &other).await, 499);
+    let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2100", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes?q=1650")).await;
+    assert_eq!(
+        page["items"].as_array().map(Vec::len),
+        Some(0),
+        "taken down: {page}"
+    );
+    let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes?offset=498")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 1601", "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1, "{page}");
 }
 
 /// A feed card's cut read whose read on gave nothing (`ResourceMeta::episodes_cut`: too slow, or

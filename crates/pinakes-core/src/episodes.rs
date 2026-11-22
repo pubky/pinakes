@@ -86,16 +86,73 @@ pub struct Listed {
     /// (cut at its cap, or past its item cap), it has items past the [`SCANNED`] looked at, or
     /// more episodes than the [`KEPT`] kept (`EpisodePage::truncated`).
     pub older: bool,
-    /// The read went past the page cap but only the part within it parsed
-    /// ([`from_feed_listed`]): a show's save keeps the older episodes a longer stored list holds
-    /// (`ResourceMeta::episodes_cut`).
+    /// A cut read: a show's save keeps the other episodes a longer stored list holds
+    /// (`ResourceMeta::episodes_cut`). A read within the page cap of a body that did not parse
+    /// past it ([`from_feed_listed`]) is one, as is any read of an oldest-first feed that stopped
+    /// before the feed ended (its body cut at its cap, or items past the [`SCANNED`] looked at):
+    /// such a read holds the feed's oldest episodes, not its newest. A newest-first feed's read
+    /// that stopped early holds its newest episodes and stands as the show's list; a feed card's
+    /// read cut at the page cap is made a cut one when its read on gives nothing
+    /// (`resolver::cards::enrich_until`). A whole read is not cut, however many episodes it has
+    /// past the [`KEPT`] kept.
     pub cut: bool,
+    /// The feed lists its oldest episode first: as read, its dated items' dates ascend (at least
+    /// two, the last later than the first). A cut read of such a feed holds its oldest episodes,
+    /// so a save keeps the newer ones a longer stored list holds ([`under_stored`]).
+    pub oldest_first: bool,
+    /// The show the feed's channel names ([`Channel::of`]): a cut read of an oldest-first feed
+    /// leaves a full stored list only when it names the stored card's show ([`under_stored`]).
+    pub channel: Channel,
+}
+/// What a feed's channel names its show by, as a card stores it: its title (the card's name)
+/// and its link (a Podcast Index card's `website`), each trimmed, none when empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Channel {
+    pub title: Option<String>,
+    pub link: Option<String>,
+}
+impl Channel {
+    /// A channel's title and its link: its first `<link>` with text (an `atom:link` names the
+    /// feed itself, by an attribute).
+    pub fn of(channel: roxmltree::Node<'_, '_>) -> Self {
+        let text = |name: &str| {
+            channel
+                .children()
+                .filter(|c| c.is_element() && c.tag_name().name() == name)
+                .filter(|c| c.tag_name().namespace().is_none())
+                .find_map(|c| c.text().filter(|t| !t.trim().is_empty()))
+                .map(str::to_owned)
+        };
+        Self::new(text("title"), text("link"))
+    }
+    /// `title` and `link` cut as a card's name and attribute are (`ResourceMeta::bounded`), then
+    /// trimmed.
+    pub fn new(title: Option<String>, link: Option<String>) -> Self {
+        let bounded = |s: Option<String>, max: usize| {
+            s.map(|mut s| {
+                crate::model::truncate(&mut s, max);
+                s.trim().to_owned()
+            })
+            .filter(|s| !s.is_empty())
+        };
+        Self {
+            title: bounded(title, 512),
+            link: bounded(link, crate::model::ATTRIBUTE_VALUE_CAP),
+        }
+    }
+    /// Whether two name the same show: the same title, or the same link.
+    pub fn same_show(&self, other: &Channel) -> bool {
+        let same = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
+        same(&self.title, &other.title) || same(&self.link, &other.link)
+    }
 }
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
 /// episode. Items of one identity (a repeated GUID, or no GUID and a shared link) are listed
 /// once, as the first of them in the feed, which is the one their URI reads.
-/// `partial`: the items are a part of the feed's (the read ended before the feed did).
+/// `partial`: the items are a part of the feed's (the read ended before the feed did); such a
+/// list, or one of a feed with items past the [`SCANNED`] looked at, is a cut read's
+/// ([`Listed::cut`]) when the feed lists its oldest episode first.
 pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> Listed {
     let mut seen = std::collections::HashSet::new();
     let mut episodes: Vec<(usize, Episode)> = items
@@ -105,14 +162,36 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
         .filter_map(|(n, item)| Some((n, episode(*item, feed)?)))
         .filter(|(_, episode)| seen.insert(episode.guid.clone()))
         .collect();
-    let older = partial || items.len() > SCANNED || episodes.len() > KEPT;
+    let stopped = partial || items.len() > SCANNED;
+    let older = stopped || episodes.len() > KEPT;
+    let oldest_first = ascending(episodes.iter().filter_map(|(_, e)| e.published));
+    // A newest-first feed's read that stopped early holds its newest episodes: it stands.
+    let cut = stopped && oldest_first;
     episodes.sort_by(|a, b| b.1.published.cmp(&a.1.published).then(a.0.cmp(&b.0)));
     episodes.truncate(KEPT);
     Listed {
         episodes: episodes.into_iter().map(|(_, e)| e).collect(),
         older,
-        cut: false,
+        cut,
+        oldest_first,
+        channel: Channel::default(),
     }
+}
+/// Whether dates in the order read ascend: at least two, none earlier than the one before, the
+/// last later than the first ([`Listed::oldest_first`]).
+fn ascending(dates: impl Iterator<Item = DateTime<Utc>>) -> bool {
+    let mut dates = dates;
+    let Some(first) = dates.next() else {
+        return false;
+    };
+    let mut last = first;
+    for date in dates {
+        if date < last {
+            return false;
+        }
+        last = date;
+    }
+    last > first
 }
 /// The episodes a fetched feed lists ([`from_feed_listed`]).
 pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
@@ -121,7 +200,9 @@ pub fn from_feed(f: &crate::resolver::egress::Fetched) -> Option<Vec<Episode>> {
 /// The episodes a fetched feed lists: an RSS channel's items, a body cut at the fetch cap read
 /// to its last whole item. A body read past the page cap that does not parse (a malformed byte
 /// or entity past the first megabyte) is read to its last whole item within the page cap, as a
-/// read cut there would be. `None` when the body is no feed.
+/// read cut there would be: that read is a cut read whatever the feed's order; a read cut at
+/// [`FEED_READ`] or past the [`SCANNED`] items looked at is one when the feed lists its oldest
+/// episode first ([`Listed::cut`]). `None` when the body is no feed.
 pub fn from_feed_listed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
     use crate::resolver::egress::BODY_CAP;
     read_feed(f).or_else(|| {
@@ -144,17 +225,19 @@ fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
         &text
     };
     let xml = crate::resolver::xml::parse(body).ok()?;
-    if !xml.root_element().has_tag_name("rss")
-        || !xml.descendants().any(|n| n.has_tag_name("channel"))
-    {
+    if !xml.root_element().has_tag_name("rss") {
         return None;
     }
+    let channel = xml.descendants().find(|n| n.has_tag_name("channel"))?;
     let items: Vec<_> = xml
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
         .take(SCANNED + 1)
         .collect();
-    Some(listed(&items, &f.url, f.truncated))
+    Some(Listed {
+        channel: Channel::of(channel),
+        ..listed(&items, &f.url, f.truncated)
+    })
 }
 /// The longest a show's read gives its feed's episodes: the fetch, the wait for a parse permit
 /// and the parse together. The list is optional: a feed slower than this leaves the show's
@@ -472,17 +555,26 @@ fn bounded(mut s: String, max: usize) -> String {
 /// path that replaces a document passes here: a save, a clear): a list replaces the show's rows
 /// whole; a document that is no podcast show, or a show found missing or cleared, clears them;
 /// a show's document without a list (a record read without its feed) leaves them as they are.
-/// A cut read's list (`ResourceMeta::episodes_cut`: its read on gave nothing, or only the part
-/// within the page cap parsed) is joined by the stored list's other episodes ([`under_stored`]).
+/// A cut read's list (`ResourceMeta::episodes_cut`, [`Listed::cut`]) is joined by the stored
+/// list's other episodes ([`under_stored`]).
+///
+/// `stored`: the show the stored card named ([`stored_show`], read before the document replaced
+/// it).
 pub(crate) async fn store(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     doc: &crate::model::ResourceMeta,
+    stored: Option<&Channel>,
 ) -> Result<()> {
     let show = is_show(&doc.type_path, doc.status.as_str());
     match &doc.episodes {
         Some(list) if show && doc.episodes_cut => {
-            let (list, older) = under_stored(tx, id, list, doc.episodes_older).await?;
+            let read = Cut {
+                older: doc.episodes_older,
+                oldest_first: doc.episodes_oldest_first,
+                same_show: stored.is_some_and(|s| s.same_show(&doc.episodes_channel)),
+            };
+            let (list, older) = under_stored(tx, id, list, read).await?;
             replace(tx, id, &list, older).await
         }
         Some(list) if show => replace(tx, id, list, doc.episodes_older).await,
@@ -490,12 +582,46 @@ pub(crate) async fn store(
         _ => clear(tx, id).await.map(|_| ()),
     }
 }
+/// The show a stored card names (its name, and its `website`: a Podcast Index card's channel
+/// link), read before a save replaces the card: only for a show's cut read of an oldest-first
+/// feed, the one save that asks whether its feed is still the stored card's show
+/// ([`under_stored`]). `None` for any other save, or no stored card.
+pub(crate) async fn stored_show(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    doc: &crate::model::ResourceMeta,
+) -> Result<Option<Channel>> {
+    if doc.episodes.is_none()
+        || !doc.episodes_cut
+        || !doc.episodes_oldest_first
+        || !is_show(&doc.type_path, doc.status.as_str())
+    {
+        return Ok(None);
+    }
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT doc->>'name',doc->'attributes'->>'website' FROM resource WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(title, link)| Channel::new(title, link)))
+}
 /// Whether a card is a podcast show that has episodes to keep or to list: a `PodcastSeries`
 /// whose status is `ok`. The one test for the store (which keeps or clears a card's rows by it)
 /// and the route (which falls back to a group member's list only for such a card: a cleared or
 /// missing card lists nothing, grouped or not).
 pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
     type_path.iter().any(|t| t == "PodcastSeries") && status == "ok"
+}
+/// What a save says of its cut read ([`under_stored`]).
+#[derive(Clone, Copy, Debug)]
+struct Cut {
+    /// The feed lists older episodes than the cut's list (`Listed::older`).
+    older: bool,
+    /// The feed lists its oldest episode first (`Listed::oldest_first`).
+    oldest_first: bool,
+    /// The cut's feed names the stored card's show ([`Channel::same_show`]).
+    same_show: bool,
 }
 /// A cut read's `list` (whose feed lists older episodes: `older`) with the stored list's other
 /// episodes: every stored one `list` does not name (by GUID) and that is no newer than `list`'s
@@ -508,12 +634,29 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
 /// does not reach the stored list (it lacks the stored list's newest episode no newer than its
 /// own, or the one after it: another feed's list, or more new episodes than the cut holds) or the
 /// stored list holds nothing besides.
+///
+/// A cut read of a feed that lists its oldest episode first (`oldest_first`, from the parse)
+/// holds the feed's oldest episodes: the stored episodes newer than its newest are the part the
+/// read did not reach, not episodes the feed took down, and they join it too. Such a cut reaches
+/// the stored list when it names the stored list's two oldest dated episodes no older than its
+/// own oldest (its one, when it holds one); an older stored one the feed has dropped stays, as
+/// it does for a newest-first feed. A stored list of [`KEPT`] episodes, each newer than such a
+/// cut's newest, holds the newest part of a feed longer than is kept when the cut's feed names
+/// the stored card's show (`same_show`: the same title or link; the cut shares no episode with
+/// the stored list, so only the show can say it is the same feed): the cut is that feed's old
+/// end, and the stored list stays as it is, its feed listing older episodes than it. A cut that
+/// names another show stands alone.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     list: &[Episode],
-    older: bool,
+    read: Cut,
 ) -> Result<(Vec<Episode>, bool)> {
+    let Cut {
+        older,
+        oldest_first,
+        same_show,
+    } = read;
     // A stored episode's GUID, URI, name, image, date and stream (as JSON text), and whether
     // the stored list's feed lists older ones.
     type Stored = (
@@ -532,17 +675,52 @@ async fn under_stored(
     .fetch_all(&mut **tx)
     .await?;
     let named: std::collections::HashSet<&str> = list.iter().map(|e| e.guid.as_str()).collect();
-    // A stored episode newer than the cut list's newest is one the feed has taken down.
+    // A stored episode newer than the cut list's newest is one the feed has taken down, unless
+    // the feed lists its oldest first: then it is one the cut did not reach.
     let newest = list.iter().filter_map(|e| e.published).max();
+    let as_episode = |(guid, uri, name, image, published, stream, _): &Stored| Episode {
+        id: None,
+        uri: uri.clone(),
+        aliases: Vec::new(),
+        name: name.clone(),
+        image: image.clone(),
+        published: *published,
+        guid: guid.clone(),
+        stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
+    };
+    // A full stored list wholly newer than an oldest-first cut of the same show is the newest
+    // part of a feed longer than is kept, and the cut is the old end of the same feed: the list
+    // stays as it is, and the feed lists older episodes than it (the cut's).
+    if oldest_first
+        && same_show
+        && rows.len() >= KEPT
+        && newest.is_some_and(|n| rows.iter().all(|r| r.4.is_some_and(|d| d > n)))
+    {
+        return Ok((rows.iter().map(as_episode).collect(), true));
+    }
     let kept: Vec<&Stored> = rows
         .iter()
-        .filter(|r| !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
+        .filter(|r| oldest_first || !matches!((r.4, newest), (Some(d), Some(n)) if d > n))
         .collect();
-    // The cut list reaches the stored one only when it names the stored list's two newest
-    // episodes left (its one, when it holds one): else between the two lie episodes neither read
-    // has (more new ones than the cut holds; one of them alone may be a re-release at the top of
-    // the feed), or the stored list is another feed's, and the cut list stands alone.
-    if kept.is_empty() || !kept.iter().take(2).all(|r| named.contains(r.0.as_str())) {
+    // The cut list reaches the stored one only when it names the two stored episodes at its own
+    // end of the feed (the newest two left; for an oldest-first feed the oldest two dated ones no
+    // older than its oldest, as one the feed has dropped since is no older episode the cut
+    // lacks; its one, when it holds one): else between the two lie episodes neither read has
+    // (more new ones than the cut holds; one of them alone may be a re-release at the top of the
+    // feed), or the stored list is another feed's, and the cut list stands alone.
+    let reaches = if oldest_first {
+        let first = list.iter().filter_map(|e| e.published).min();
+        let mut oldest = kept
+            .iter()
+            .rev()
+            .filter(|r| matches!((r.4, first), (Some(d), Some(f)) if d >= f))
+            .take(2)
+            .peekable();
+        oldest.peek().is_some() && oldest.all(|r| named.contains(r.0.as_str()))
+    } else {
+        kept.iter().take(2).all(|r| named.contains(r.0.as_str()))
+    };
+    if kept.is_empty() || !reaches {
         return Ok((list.to_vec(), older));
     }
     let joining: Vec<&Stored> = kept
@@ -553,20 +731,7 @@ async fn under_stored(
         return Ok((list.to_vec(), older));
     };
     let mut merged = list.to_vec();
-    merged.extend(
-        joining
-            .into_iter()
-            .map(|(guid, uri, name, image, published, stream, _)| Episode {
-                id: None,
-                uri: uri.clone(),
-                aliases: Vec::new(),
-                name: name.clone(),
-                image: image.clone(),
-                published: *published,
-                guid: guid.clone(),
-                stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
-            }),
-    );
+    merged.extend(joining.into_iter().map(as_episode));
     // Stable: equal dates keep the order above, as `listed` keeps the feed's.
     merged.sort_by_key(|e| std::cmp::Reverse(e.published));
     Ok((merged, stored_older))
@@ -1271,6 +1436,19 @@ fn publisher_page(page: &str, item: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn channels_name_the_same_show_by_a_title_or_a_link_they_both_have() {
+        let show = |title: Option<&str>, link: Option<&str>| {
+            Channel::new(title.map(str::to_owned), link.map(str::to_owned))
+        };
+        let stored = show(Some("Show"), Some("https://show.example/"));
+        assert!(stored.same_show(&show(Some(" Show "), None)));
+        assert!(stored.same_show(&show(Some("Renamed"), Some("https://show.example/"))));
+        assert!(!stored.same_show(&show(Some("Other"), Some("https://other.example/"))));
+        // Neither naming anything is no evidence: a card and a feed without a title or link.
+        assert!(!show(None, None).same_show(&show(Some("  "), None)));
+        assert!(!show(Some("Show"), None).same_show(&show(None, Some("https://show.example/"))));
+    }
     /// A publisher's page is a web page on the feed's own site, never a directory's page of the
     /// item: not Podcast Index's even for a feed it hosts, nor a sibling host, another site, a
     /// site's root, a feed or a feed item.
@@ -1301,6 +1479,45 @@ mod tests {
         assert!(publisher_page("https://show.example.com/t/episode/6", item));
     }
     use super::*;
+
+    /// A feed whose dated items ascend as read lists oldest first; one that descends, one with
+    /// a single dated item, or one whose dates go back and forth does not.
+    #[test]
+    fn the_parse_says_whether_a_feed_lists_oldest_first() {
+        let day = |n: i64| chrono::DateTime::from_timestamp(1_760_000_000 + n * 86_400, 0).unwrap();
+        assert!(ascending([day(1), day(2), day(3)].into_iter()));
+        assert!(ascending([day(1), day(1), day(2)].into_iter()));
+        assert!(!ascending([day(3), day(2), day(1)].into_iter()));
+        assert!(!ascending([day(1), day(3), day(2)].into_iter()));
+        assert!(!ascending([day(1), day(1)].into_iter()));
+        assert!(!ascending([day(1)].into_iter()));
+        assert!(!ascending(std::iter::empty()));
+        let feed = |order: &[i64]| {
+            let items: String = order
+                .iter()
+                .map(|n| {
+                    format!(
+                        "<item><title>{n}</title><guid>g{n}</guid><pubDate>{}</pubDate><enclosure url=\"https://show.example/{n}.mp3\" type=\"audio/mpeg\" length=\"1\"/></item>",
+                        day(*n).to_rfc2822()
+                    )
+                })
+                .collect();
+            format!("<rss version=\"2.0\"><channel><title>S</title>{items}</channel></rss>")
+        };
+        let url = Url::parse("https://show.example/feed.xml").unwrap();
+        for (order, oldest_first) in [(&[1, 2, 3][..], true), (&[3, 2, 1][..], false)] {
+            let xml = feed(order);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let items: Vec<_> = doc
+                .descendants()
+                .filter(|n| n.has_tag_name("item"))
+                .collect();
+            let listed = listed(&items, &url, false);
+            assert_eq!(listed.oldest_first, oldest_first, "{order:?}");
+            // Either way the list is newest first.
+            assert_eq!(listed.episodes[0].guid, "g3");
+        }
+    }
 
     fn feed(items: &str) -> String {
         format!(
@@ -1582,12 +1799,26 @@ mod tests {
             .collect();
         let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
         assert!(listed.older, "items past the ones looked at");
+        assert!(listed.cut, "the read stopped before the feed ended");
+        assert!(listed.oldest_first);
         let episodes = listed.episodes;
         assert_eq!(episodes.len(), KEPT);
         assert_eq!(KEPT, 1000);
         // Items 2001-2300 are past the part of the feed that is read: E2000 is the newest seen.
         assert_eq!(episodes[0].name.as_deref(), Some("E2000"));
         assert_eq!(episodes[999].name.as_deref(), Some("E1001"));
+        // The same items newest first: the first 2000 are its newest, and the read stands.
+        let items: String = (1..=2300)
+            .rev()
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, chrono::DateTime::<Utc>::from_timestamp(1_700_000_000 + n * 86_400, 0).unwrap().to_rfc2822()))
+            .collect();
+        let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
+        assert!(listed.older && !listed.oldest_first);
+        assert!(
+            !listed.cut,
+            "a newest-first read stopped at the items looked at"
+        );
+        assert_eq!(listed.episodes[0].name.as_deref(), Some("E2300"));
         // A shorter feed is kept whole, to its oldest item.
         let items: String = (1..=183)
             .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, chrono::DateTime::<Utc>::from_timestamp(1_700_000_000 + n * 86_400, 0).unwrap().to_rfc2822()))
@@ -1603,11 +1834,31 @@ mod tests {
             .collect();
         let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
         assert_eq!((listed.episodes.len(), listed.older), (1000, false));
-        // Cut at its read's cap: the feed has more.
+        assert!(!listed.cut, "a whole read");
+        // Cut at its read's cap: the feed has more. Its first items are its newest (no date says
+        // otherwise), so the read stands; an oldest-first feed's is a cut one.
+        let listed = from_feed_listed(&fetched(&feed(&items), true)).unwrap();
+        assert!(listed.older);
+        assert!(!listed.cut, "a newest-first read stopped at its cap");
+        let items: String = (1..=1000)
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, chrono::DateTime::<Utc>::from_timestamp(1_700_000_000 + n * 86_400, 0).unwrap().to_rfc2822()))
+            .collect();
+        let listed = from_feed_listed(&fetched(&feed(&items), true)).unwrap();
+        assert!(listed.older && listed.oldest_first);
+        assert!(listed.cut, "an oldest-first read stopped at its cap");
         assert!(
-            from_feed_listed(&fetched(&feed(&items), true))
+            !from_feed_listed(&fetched(&feed(&items), false))
                 .unwrap()
-                .older
+                .cut
+        );
+        // A whole read of more episodes than are kept, all looked at, is no cut.
+        let items: String = (1..=1500)
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#))
+            .collect();
+        let listed = from_feed_listed(&fetched(&feed(&items), false)).unwrap();
+        assert_eq!(
+            (listed.episodes.len(), listed.older, listed.cut),
+            (1000, true, false)
         );
     }
 

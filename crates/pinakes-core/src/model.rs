@@ -529,14 +529,29 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_older: bool,
-    /// `episodes` is a cut read's list: a feed card's whose read on gave nothing this time
-    /// (`resolver::cards`: too slow, or the read failed or did not parse), or a show's feed read
-    /// of which only the part within the page cap parsed (`episodes::Listed::cut`). The save
-    /// joins the other episodes a stored list holds to it (`episodes::store`). Never stored in
-    /// the document.
+    /// `episodes` is a cut read's list (`episodes::Listed::cut`): a feed card's whose read on
+    /// gave nothing this time (`resolver::cards`: too slow, or the read failed or did not parse),
+    /// a read within the page cap of a feed that did not parse past it, or an oldest-first feed's
+    /// read that stopped before the feed ended (cut at its cap, or past the items looked at). The
+    /// save joins the other episodes a stored list holds to it (`episodes::store`). Never stored
+    /// in the document.
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_cut: bool,
+    /// The feed `episodes` was read from lists its oldest episode first
+    /// (`episodes::Listed::oldest_first`): a cut read's list then holds its oldest episodes, and
+    /// the save keeps the newer ones a stored list holds (`episodes::store`). Never stored in the
+    /// document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episodes_oldest_first: bool,
+    /// The show the channel of the feed `episodes` was read from names
+    /// (`episodes::Listed::channel`): a cut read of an oldest-first feed leaves a full stored
+    /// list only when it names the stored card's show (`episodes::store`). Never stored in the
+    /// document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episodes_channel: crate::episodes::Channel,
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,
