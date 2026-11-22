@@ -2016,7 +2016,8 @@ mod tests {
         ) sponsors ORDER BY author";
 
     /// 2,000 links with 5 references each (one a post's own row), 200 of them aliases of
-    /// others, 300 derived from referenced, aliased or unreferenced pages, statistics taken:
+    /// others, 300 derived from referenced, aliased or unreferenced pages, 50 aliases derived
+    /// from pages only their aliases' references keep, statistics taken:
     /// every link's sponsors are the join's, and the statement reads the job's references (and
     /// its aliases' and pages') by index, never every reference.
     #[sqlx::test(migrations = "../../migrations")]
@@ -2024,7 +2025,7 @@ mod tests {
         let mut seed = pool.acquire().await.unwrap();
         for statement in [
             "SET session_replication_role = replica",
-            "INSERT INTO resource(id,uri) SELECT md5('r'||n),'https://example.org/'||n FROM generate_series(1,2100) n",
+            "INSERT INTO resource(id,uri) SELECT md5('r'||n),'https://example.org/'||n FROM generate_series(1,2200) n",
             // Links 1801..2000 are aliases of links 1..200.
             "INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('r'||(1800+n)),md5('r'||n),'canonical' FROM generate_series(1,200) n",
             // Links 2001..2100 have no references.
@@ -2035,6 +2036,11 @@ mod tests {
             // 2001..2100 (nobody's).
             "INSERT INTO resource_derivation(parent_id,child_id,adapter) SELECT md5('r'||p),md5('r'||(1000+n)),'ical' \
                FROM generate_series(1,300) n,LATERAL (SELECT CASE WHEN n<=100 THEN n WHEN n<=200 THEN 1700+n ELSE 1800+n END AS p) x",
+            // Links 2101..2150 have no references of their own; their aliases 2151..2200 have.
+            // The aliases 1951..2000 (of links 151..200) are derived from them.
+            "INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('r'||(2150+n)),md5('r'||(2100+n)),'canonical' FROM generate_series(1,50) n",
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at) SELECT md5('r'||(2150+n)),'embed',lpad(n::text,52,'z'),'/pub/app/a/'||n,'2026-03-01' FROM generate_series(1,50) n",
+            "INSERT INTO resource_derivation(parent_id,child_id,adapter) SELECT md5('r'||(2100+n)),md5('r'||(1950+n)),'ical' FROM generate_series(1,50) n",
             "RESET session_replication_role",
             "ANALYZE",
         ] {
@@ -2057,8 +2063,9 @@ mod tests {
             }
             assert_eq!(found[0], found[1], "{id}");
         }
-        // A derived link of an aliased page, an alias's root, a derived link of nobody's page.
-        for n in [1150, 1, 1250] {
+        // A derived link of an aliased page, an alias's root, a derived link of nobody's page,
+        // the root of an alias derived from a page only its alias's references keep.
+        for n in [1150, 1, 1250, 151] {
             let plan: serde_json::Value = sqlx::query_scalar(&format!(
                 "EXPLAIN (ANALYZE, FORMAT JSON) {}",
                 SPONSORS.replace("$1", &format!("md5('r{n}')"))
