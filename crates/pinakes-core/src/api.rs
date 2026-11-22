@@ -2383,9 +2383,7 @@ fn like_anywhere(text: &str) -> String {
 /// [`TAG_WEIGHT`], then the text (the phrase as words in the description 2, every word in the
 /// name and description together 1). Tags count as the filters do: the row's references and its
 /// aliases' (posts' own rows left out), in the author/reach scope. They are read by resource
-/// through the reference index, never through `effective_reference`'s computed root, which no
-/// index serves: a correlated probe of the view in a select list would scan every reference
-/// once per row.
+/// through the reference index.
 fn relevance(
     sql: &mut QueryBuilder<'_, Postgres>,
     q: &SearchQuery,

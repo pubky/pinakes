@@ -42,7 +42,7 @@ pub async fn claim_batch(
 /// Whether somebody references the row of `resource`, as `effective_reference` counts it (an
 /// alias's references count for its root, a post's own row for nothing), written against the
 /// tables so each probe reads an index: `reference` by resource, `resource_alias` by alias and
-/// by root. The view's resource is computed (`coalesce(root, resource)`), which no index serves.
+/// by root (the view's probes read the same indexes).
 macro_rules! referenced {
     () => {
         "(EXISTS(SELECT 1 FROM reference f WHERE f.resource_id=resource.id AND f.kind<>'post') \
@@ -1136,6 +1136,18 @@ async fn run_batch_within(
 /// The links one refusal puts off at most (`AuthorBudget::admit_or_spread`). Fixed: it bounds
 /// one statement's row writes, and a longer backlog is put off a batch at a time.
 const SPREAD_BATCH: i64 = 1000;
+/// The sponsors of the job for `$1`: the authors of its references and its aliases', and of the
+/// references of the pages it is derived from, or the deriving adapter where nobody references
+/// the page. The view is read by arrays of ids: a probe by value reaches its indexes, a join to
+/// it would read every reference.
+const SPONSORS: &str = "WITH inputs AS (SELECT $1::text AS id UNION SELECT alias_id FROM resource_alias WHERE root_id=$1),
+    parents AS (SELECT d.parent_id,d.adapter FROM inputs i JOIN resource_derivation d ON d.child_id=i.id),
+    parent_refs AS (SELECT f.resource_id,f.author FROM effective_reference f WHERE f.resource_id=ANY(ARRAY(SELECT parent_id FROM parents)))
+    SELECT DISTINCT author FROM (
+        SELECT f.author FROM effective_reference f WHERE f.resource_id=ANY(ARRAY(SELECT id FROM inputs))
+        UNION ALL SELECT author FROM parent_refs
+        UNION ALL SELECT 'adapter:'||p.adapter FROM parents p WHERE NOT EXISTS(SELECT 1 FROM parent_refs f WHERE f.resource_id=p.parent_id)
+    ) sponsors ORDER BY author";
 /// Limits new work attributable to a public author, across both resolver kinds.
 #[derive(Default)]
 pub struct AuthorBudget(Mutex<HashMap<String, Instant>>);
@@ -1152,17 +1164,10 @@ impl AuthorBudget {
     /// Links with another sponsor (an alias, a derived link's parent, another author) are left
     /// to their own claim.
     async fn admit_or_spread(&self, pool: &PgPool, job: &Job, rate: f64) -> Result<Option<u64>> {
-        let authors: Vec<String> = sqlx::query_scalar(
-            "WITH inputs AS (SELECT $1::text AS id UNION SELECT alias_id FROM resource_alias WHERE root_id=$1)
-            SELECT DISTINCT author FROM (
-                SELECT f.author FROM inputs i JOIN effective_reference f ON f.resource_id=i.id
-                UNION ALL SELECT f.author FROM inputs i JOIN resource_derivation d ON d.child_id=i.id JOIN effective_reference f ON f.resource_id=d.parent_id
-                UNION ALL SELECT 'adapter:'||d.adapter FROM inputs i JOIN resource_derivation d ON d.child_id=i.id WHERE NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=d.parent_id)
-            ) sponsors ORDER BY author",
-        )
-        .bind(&job.id)
-        .fetch_all(pool)
-        .await?;
+        let authors: Vec<String> = sqlx::query_scalar(SPONSORS)
+            .bind(&job.id)
+            .fetch_all(pool)
+            .await?;
         if authors.is_empty() {
             return Ok(None);
         }
@@ -2000,6 +2005,100 @@ mod tests {
             *worker.rate.lock().await <= Instant::now(),
             "the slot is back"
         );
+    }
+
+    /// The sponsors as a join to the view finds them: what [`SPONSORS`] must mean.
+    const JOINED_SPONSORS: &str = "WITH inputs AS (SELECT $1::text AS id UNION SELECT alias_id FROM resource_alias WHERE root_id=$1)
+        SELECT DISTINCT author FROM (
+            SELECT f.author FROM inputs i JOIN effective_reference f ON f.resource_id=i.id
+            UNION ALL SELECT f.author FROM inputs i JOIN resource_derivation d ON d.child_id=i.id JOIN effective_reference f ON f.resource_id=d.parent_id
+            UNION ALL SELECT 'adapter:'||d.adapter FROM inputs i JOIN resource_derivation d ON d.child_id=i.id WHERE NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=d.parent_id)
+        ) sponsors ORDER BY author";
+
+    /// 2,000 links with 5 references each (one a post's own row), 200 of them aliases of
+    /// others, 300 derived from referenced, aliased or unreferenced pages, 50 aliases derived
+    /// from pages only their aliases' references keep, statistics taken:
+    /// every link's sponsors are the join's, and the statement reads the job's references (and
+    /// its aliases' and pages') by index, never every reference.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn the_sponsors_read_the_jobs_references_alone(pool: PgPool) {
+        let mut seed = pool.acquire().await.unwrap();
+        for statement in [
+            "SET session_replication_role = replica",
+            "INSERT INTO resource(id,uri) SELECT md5('r'||n),'https://example.org/'||n FROM generate_series(1,2200) n",
+            // Links 1801..2000 are aliases of links 1..200.
+            "INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('r'||(1800+n)),md5('r'||n),'canonical' FROM generate_series(1,200) n",
+            // Links 2001..2100 have no references.
+            "INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) \
+               SELECT md5('r'||n),(ARRAY['tag','reply','embed','post','tag'])[k],lpad((n*7+k)::text,52,'y'),CASE WHEN k IN (1,5) THEN 't' END, \
+                 '/pub/app/'||n||'/'||k,timestamptz '2026-01-01'+(n*5+k)*interval '1 minute' FROM generate_series(1,2000) n,generate_series(1,5) k",
+            // Links 1001..1300 derived from pages 1..100 (roots), 1801..1900 (aliases) and
+            // 2001..2100 (nobody's).
+            "INSERT INTO resource_derivation(parent_id,child_id,adapter) SELECT md5('r'||p),md5('r'||(1000+n)),'ical' \
+               FROM generate_series(1,300) n,LATERAL (SELECT CASE WHEN n<=100 THEN n WHEN n<=200 THEN 1700+n ELSE 1800+n END AS p) x",
+            // Links 2101..2150 have no references of their own; their aliases 2151..2200 have.
+            // The aliases 1951..2000 (of links 151..200) are derived from them.
+            "INSERT INTO resource_alias(alias_id,root_id,basis) SELECT md5('r'||(2150+n)),md5('r'||(2100+n)),'canonical' FROM generate_series(1,50) n",
+            "INSERT INTO reference(resource_id,kind,author,object_path,created_at) SELECT md5('r'||(2150+n)),'embed',lpad(n::text,52,'z'),'/pub/app/a/'||n,'2026-03-01' FROM generate_series(1,50) n",
+            "INSERT INTO resource_derivation(parent_id,child_id,adapter) SELECT md5('r'||(2100+n)),md5('r'||(1950+n)),'ical' FROM generate_series(1,50) n",
+            "RESET session_replication_role",
+            "ANALYZE",
+        ] {
+            sqlx::query(statement).execute(&mut *seed).await.unwrap();
+        }
+        drop(seed);
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM resource ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for id in &ids {
+            let mut found = Vec::new();
+            for sql in [SPONSORS, JOINED_SPONSORS] {
+                let authors: Vec<String> = sqlx::query_scalar(sql)
+                    .bind(id)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+                found.push(authors);
+            }
+            assert_eq!(found[0], found[1], "{id}");
+        }
+        // A derived link of an aliased page, an alias's root, a derived link of nobody's page,
+        // the root of an alias derived from a page only its alias's references keep; each with
+        // a plan for its value and with the generic plan a prepared statement may switch to.
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::raw_sql(&format!("PREPARE sponsors(text) AS {SPONSORS}"))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        for (n, mode) in [1150, 1, 1250, 151]
+            .into_iter()
+            .flat_map(|n| [(n, "force_custom_plan"), (n, "force_generic_plan")])
+        {
+            sqlx::raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            let plan: serde_json::Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE sponsors(md5('r{n}'))"
+            ))
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            let (mut rows, mut seq) = (0.0, false);
+            fn walk(node: &serde_json::Value, rows: &mut f64, seq: &mut bool) {
+                let n = |k: &str| node[k].as_f64().unwrap_or(0.0);
+                if node["Relation Name"] == "reference" {
+                    *rows += (n("Actual Rows") + n("Rows Removed by Filter")) * n("Actual Loops");
+                    *seq |= node["Node Type"] == "Seq Scan";
+                }
+                for child in node["Plans"].as_array().into_iter().flatten() {
+                    walk(child, rows, seq);
+                }
+            }
+            walk(&plan[0]["Plan"], &mut rows, &mut seq);
+            assert!(!seq && rows <= 100.0, "r{n} {mode}: {rows} rows\n{plan}");
+        }
     }
 
     /// The claim's reference test, alone.
