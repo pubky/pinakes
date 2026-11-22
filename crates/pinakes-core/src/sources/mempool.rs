@@ -2588,7 +2588,7 @@ mod tests {
         assert_eq!(card.details["tx_count"], 67019);
         assert_eq!(card.details["balance"], 5767070988u64);
         assert_eq!(
-            links(&from_root(&card.id).unwrap())[3],
+            links(&from_root(&card.id).unwrap())[2],
             (
                 "Blockchain.com",
                 format!("https://www.blockchain.com/explorer/addresses/btc/{GENESIS}")
