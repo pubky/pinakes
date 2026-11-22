@@ -375,8 +375,8 @@ mod tests {
         social::open_graph(&String::from_utf8_lossy(&body)).unwrap()
     }
 
-    /// A public post's page, as Instagram answers this host's request (recorded 2026-11-22), names
-    /// the post: the caption, its author and its image, and its own address with the code.
+    /// A public post's page, as Instagram answers this host's request, names the post: the
+    /// caption, its author and its image, and its own address with the code.
     #[test]
     fn a_public_post_page_names_the_post() {
         let target = Target::Post("Df_H64Tul-0".into());
