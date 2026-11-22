@@ -215,6 +215,7 @@ impl Source for PodcastIndex {
                 doc.episodes_older = listed.older;
                 doc.episodes_cut = listed.cut;
                 doc.episodes_oldest_first = listed.oldest_first;
+                doc.episodes_channel = listed.channel;
             }
         }
         Ok(doc)
@@ -433,7 +434,7 @@ mod tests {
             })
             .collect();
         let ascending = format!(
-            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Show</title>{ascending}</channel></rss>"#
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title> Show </title><link>https://show.example/</link>{ascending}</channel></rss>"#
         );
         let (egress, _) = fixture::egress(vec![
             (api, 200, "application/json", read("feed-577105.json")),
@@ -459,6 +460,14 @@ mod tests {
         *CREDENTIALS.write().unwrap() = None;
         assert_eq!(doc.episodes.as_ref().map(Vec::len), Some(3));
         assert!(doc.episodes_oldest_first);
+        // And the show its feed's channel names, trimmed, for the save.
+        assert_eq!(
+            doc.episodes_channel,
+            crate::episodes::Channel::new(
+                Some("Show".into()),
+                Some("https://show.example/".into())
+            )
+        );
         // An episode page asked as such reads no feed.
         let (egress, recorded) = fixture::egress(vec![(
             "https://api.podcastindex.org/api/1.0/episodes/byid?id=61684996715",

@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
-    episodes::Episode,
+    episodes::{Channel, Episode},
     model::{ResourceMeta, Stream},
     store,
 };
@@ -2081,6 +2081,7 @@ async fn a_cut_of_an_oldest_first_feed_longer_than_is_kept_leaves_the_stored_lis
         d.episodes_older = true;
         d.episodes_cut = true;
         d.episodes_oldest_first = true;
+        d.episodes_channel = Channel::new(Some("Show".into()), None);
         d
     };
     store::save_document(&pool, &id, 0, &cut(uri))
@@ -2102,6 +2103,61 @@ async fn a_cut_of_an_oldest_first_feed_longer_than_is_kept_leaves_the_stored_lis
         .await
         .unwrap();
     assert_eq!(rows(&pool, &other).await, 100);
+}
+
+/// A cut of an oldest-first feed shares no episode with a full stored list of the feed's newest,
+/// so only the show it names says it is the old end of the same feed: a cut whose channel names
+/// another show (another title and link, on the same feed address) replaces the stored list as
+/// any list that does not reach it does; one that names the stored card's show by its link (a
+/// Podcast Index card's `website`) leaves it, as by its title.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cut_of_another_show_on_the_same_feed_replaces_a_full_stored_list(pool: PgPool) {
+    let uri = "https://feeds.example.org/reused.xml";
+    let whole: Vec<Episode> = (1001..=2000).rev().map(|n| episode(n, true)).collect();
+    let id = show(&pool, uri, Some(whole.clone())).await;
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let cut = |channel: Channel| {
+        let mut d = ResourceMeta::new(uri, "web", 86_400);
+        d.set_type("PodcastSeries");
+        d.name = channel.title.clone();
+        d.episodes = Some((1..=100).rev().map(|n| episode(n, true)).collect());
+        d.episodes_older = true;
+        d.episodes_cut = true;
+        d.episodes_oldest_first = true;
+        d.episodes_channel = channel;
+        d
+    };
+    let other = Channel::new(
+        Some("Another Show".into()),
+        Some("https://another.example/".into()),
+    );
+    store::save_document(&pool, &id, 0, &cut(other))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 100);
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 100", "{page}");
+    // The same show named by its link alone: the full stored list stays.
+    let mut d = ResourceMeta::new(uri, "web", 86_400);
+    d.set_type("PodcastSeries");
+    d.name = Some("Show".into());
+    d.attributes
+        .insert("website".into(), "https://show.example/".into());
+    d.episodes = Some(whole);
+    store::save_document(&pool, &id, 0, &d).await.unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let renamed = Channel::new(
+        Some("Show, renamed".into()),
+        Some("https://show.example/".into()),
+    );
+    store::save_document(&pool, &id, 0, &cut(renamed))
+        .await
+        .unwrap();
+    assert_eq!(rows(&pool, &id).await, 1000);
+    let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 2000", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
 }
 
 /// A feed card's cut read whose read on gave nothing (`ResourceMeta::episodes_cut`: too slow, or

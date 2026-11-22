@@ -1287,6 +1287,7 @@ fn podcast_body(
         d.episodes = Some(listed.episodes);
         d.episodes_older = listed.older;
         d.episodes_oldest_first = listed.oldest_first;
+        d.episodes_channel = crate::episodes::Channel::of(channel);
     }
     Ok(Some(d.bounded(web::ATTRIBUTES)?))
 }
@@ -1724,13 +1725,21 @@ mod tests {
             })
             .collect();
         let ascending = format!(
-            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title>{ascending}</channel></rss>"#
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Show</title><atom:link href="https://feeds.example/show.xml" rel="self"/><link>https://show.example/</link>{ascending}</channel></rss>"#
         );
         let (egress, _) =
             crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
         let d = read(egress, uri, cut_of(&ascending, uri)).await;
         assert!(d.episodes_cut);
         assert!(d.episodes_oldest_first, "the cut read of an ascending feed");
+        // And names its show, as a stored card would (the save asks whether it is the same one).
+        assert_eq!(
+            d.episodes_channel,
+            crate::episodes::Channel::new(
+                Some("Show".into()),
+                Some("https://show.example/".into())
+            )
+        );
         assert_eq!(
             d.episodes.unwrap().last().unwrap().name.as_deref(),
             Some("E1")

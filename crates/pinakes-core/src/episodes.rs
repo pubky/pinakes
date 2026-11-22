@@ -94,6 +94,51 @@ pub struct Listed {
     /// two, the last later than the first). A cut read of such a feed holds its oldest episodes,
     /// so a save keeps the newer ones a longer stored list holds ([`under_stored`]).
     pub oldest_first: bool,
+    /// The show the feed's channel names ([`Channel::of`]): a cut read of an oldest-first feed
+    /// leaves a full stored list only when it names the stored card's show ([`under_stored`]).
+    pub channel: Channel,
+}
+/// What a feed's channel names its show by, as a card stores it: its title (the card's name)
+/// and its link (a Podcast Index card's `website`), each trimmed, none when empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Channel {
+    pub title: Option<String>,
+    pub link: Option<String>,
+}
+impl Channel {
+    /// A channel's title and its link: its first `<link>` with text (an `atom:link` names the
+    /// feed itself, by an attribute).
+    pub fn of(channel: roxmltree::Node<'_, '_>) -> Self {
+        let text = |name: &str| {
+            channel
+                .children()
+                .filter(|c| c.is_element() && c.tag_name().name() == name)
+                .filter(|c| c.tag_name().namespace().is_none())
+                .find_map(|c| c.text().filter(|t| !t.trim().is_empty()))
+                .map(str::to_owned)
+        };
+        Self::new(text("title"), text("link"))
+    }
+    /// `title` and `link` cut as a card's name and attribute are (`ResourceMeta::bounded`), then
+    /// trimmed.
+    pub fn new(title: Option<String>, link: Option<String>) -> Self {
+        let bounded = |s: Option<String>, max: usize| {
+            s.map(|mut s| {
+                crate::model::truncate(&mut s, max);
+                s.trim().to_owned()
+            })
+            .filter(|s| !s.is_empty())
+        };
+        Self {
+            title: bounded(title, 512),
+            link: bounded(link, crate::model::ATTRIBUTE_VALUE_CAP),
+        }
+    }
+    /// Whether two name the same show: the same title, or the same link.
+    pub fn same_show(&self, other: &Channel) -> bool {
+        let same = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
+        same(&self.title, &other.title) || same(&self.link, &other.link)
+    }
 }
 /// The latest [`KEPT`] episodes among a feed's items: newest first by `pubDate`, undated ones
 /// after them in the feed's order; an item without a GUID, an enclosure or a link is no
@@ -114,6 +159,7 @@ pub fn listed(items: &[roxmltree::Node<'_, '_>], feed: &Url, partial: bool) -> L
         older,
         cut: false,
         oldest_first,
+        channel: Channel::default(),
     }
 }
 /// Whether dates in the order read ascend: at least two, none earlier than the one before, the
@@ -162,17 +208,19 @@ fn read_feed(f: &crate::resolver::egress::Fetched) -> Option<Listed> {
         &text
     };
     let xml = crate::resolver::xml::parse(body).ok()?;
-    if !xml.root_element().has_tag_name("rss")
-        || !xml.descendants().any(|n| n.has_tag_name("channel"))
-    {
+    if !xml.root_element().has_tag_name("rss") {
         return None;
     }
+    let channel = xml.descendants().find(|n| n.has_tag_name("channel"))?;
     let items: Vec<_> = xml
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
         .take(SCANNED + 1)
         .collect();
-    Some(listed(&items, &f.url, f.truncated))
+    Some(Listed {
+        channel: Channel::of(channel),
+        ..listed(&items, &f.url, f.truncated)
+    })
 }
 /// The longest a show's read gives its feed's episodes: the fetch, the wait for a parse permit
 /// and the parse together. The list is optional: a feed slower than this leaves the show's
@@ -492,16 +540,24 @@ fn bounded(mut s: String, max: usize) -> String {
 /// a show's document without a list (a record read without its feed) leaves them as they are.
 /// A cut read's list (`ResourceMeta::episodes_cut`: its read on gave nothing, or only the part
 /// within the page cap parsed) is joined by the stored list's other episodes ([`under_stored`]).
+///
+/// `stored`: the show the stored card named ([`stored_show`], read before the document replaced
+/// it).
 pub(crate) async fn store(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     doc: &crate::model::ResourceMeta,
+    stored: Option<&Channel>,
 ) -> Result<()> {
     let show = is_show(&doc.type_path, doc.status.as_str());
     match &doc.episodes {
         Some(list) if show && doc.episodes_cut => {
-            let (list, older) =
-                under_stored(tx, id, list, doc.episodes_older, doc.episodes_oldest_first).await?;
+            let read = Cut {
+                older: doc.episodes_older,
+                oldest_first: doc.episodes_oldest_first,
+                same_show: stored.is_some_and(|s| s.same_show(&doc.episodes_channel)),
+            };
+            let (list, older) = under_stored(tx, id, list, read).await?;
             replace(tx, id, &list, older).await
         }
         Some(list) if show => replace(tx, id, list, doc.episodes_older).await,
@@ -509,12 +565,46 @@ pub(crate) async fn store(
         _ => clear(tx, id).await.map(|_| ()),
     }
 }
+/// The show a stored card names (its name, and its `website`: a Podcast Index card's channel
+/// link), read before a save replaces the card: only for a show's cut read of an oldest-first
+/// feed, the one save that asks whether its feed is still the stored card's show
+/// ([`under_stored`]). `None` for any other save, or no stored card.
+pub(crate) async fn stored_show(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    doc: &crate::model::ResourceMeta,
+) -> Result<Option<Channel>> {
+    if doc.episodes.is_none()
+        || !doc.episodes_cut
+        || !doc.episodes_oldest_first
+        || !is_show(&doc.type_path, doc.status.as_str())
+    {
+        return Ok(None);
+    }
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT doc->>'name',doc->'attributes'->>'website' FROM resource WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(title, link)| Channel::new(title, link)))
+}
 /// Whether a card is a podcast show that has episodes to keep or to list: a `PodcastSeries`
 /// whose status is `ok`. The one test for the store (which keeps or clears a card's rows by it)
 /// and the route (which falls back to a group member's list only for such a card: a cleared or
 /// missing card lists nothing, grouped or not).
 pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
     type_path.iter().any(|t| t == "PodcastSeries") && status == "ok"
+}
+/// What a save says of its cut read ([`under_stored`]).
+#[derive(Clone, Copy, Debug)]
+struct Cut {
+    /// The feed lists older episodes than the cut's list (`Listed::older`).
+    older: bool,
+    /// The feed lists its oldest episode first (`Listed::oldest_first`).
+    oldest_first: bool,
+    /// The cut's feed names the stored card's show ([`Channel::same_show`]).
+    same_show: bool,
 }
 /// A cut read's `list` (whose feed lists older episodes: `older`) with the stored list's other
 /// episodes: every stored one `list` does not name (by GUID) and that is no newer than `list`'s
@@ -534,15 +624,22 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
 /// the stored list when it names the stored list's two oldest dated episodes no older than its
 /// own oldest (its one, when it holds one); an older stored one the feed has dropped stays, as
 /// it does for a newest-first feed. A stored list of [`KEPT`] episodes, each newer than such a
-/// cut's newest, holds the newest part of a feed longer than is kept: the cut is that feed's old
-/// end, and the stored list stays as it is, its feed listing older episodes than it.
+/// cut's newest, holds the newest part of a feed longer than is kept when the cut's feed names
+/// the stored card's show (`same_show`: the same title or link; the cut shares no episode with
+/// the stored list, so only the show can say it is the same feed): the cut is that feed's old
+/// end, and the stored list stays as it is, its feed listing older episodes than it. A cut that
+/// names another show stands alone.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
     list: &[Episode],
-    older: bool,
-    oldest_first: bool,
+    read: Cut,
 ) -> Result<(Vec<Episode>, bool)> {
+    let Cut {
+        older,
+        oldest_first,
+        same_show,
+    } = read;
     // A stored episode's GUID, URI, name, image, date and stream (as JSON text), and whether
     // the stored list's feed lists older ones.
     type Stored = (
@@ -574,10 +671,11 @@ async fn under_stored(
         guid: guid.clone(),
         stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
     };
-    // A full stored list wholly newer than an oldest-first cut is the newest part of a feed
-    // longer than is kept, and the cut is the old end of the same feed: the list stays as it is,
-    // and the feed lists older episodes than it (the cut's).
+    // A full stored list wholly newer than an oldest-first cut of the same show is the newest
+    // part of a feed longer than is kept, and the cut is the old end of the same feed: the list
+    // stays as it is, and the feed lists older episodes than it (the cut's).
     if oldest_first
+        && same_show
         && rows.len() >= KEPT
         && newest.is_some_and(|n| rows.iter().all(|r| r.4.is_some_and(|d| d > n)))
     {

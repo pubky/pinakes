@@ -544,6 +544,13 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_oldest_first: bool,
+    /// The show the channel of the feed `episodes` was read from names
+    /// (`episodes::Listed::channel`): a cut read of an oldest-first feed leaves a full stored
+    /// list only when it names the stored card's show (`episodes::store`). Never stored in the
+    /// document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub episodes_channel: crate::episodes::Channel,
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,
