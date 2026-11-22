@@ -1707,10 +1707,33 @@ mod tests {
             d.episodes_cut,
             "the save keeps a longer stored list's older episodes"
         );
+        assert!(!d.episodes_oldest_first, "undated items list nothing first");
         assert_eq!(
             recorded.asked(),
             [uri],
             "a read just made is not made again"
+        );
+        // A feed that lists its oldest episode first (its items' dates ascend): the cut read says
+        // so, and the save keeps the newer episodes a longer stored list holds.
+        let ascending: String = (1..=300)
+            .map(|n| {
+                let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
+                    .unwrap()
+                    .to_rfc2822();
+                format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{date}</pubDate><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(8000))
+            })
+            .collect();
+        let ascending = format!(
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title>{ascending}</channel></rss>"#
+        );
+        let (egress, _) =
+            crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
+        let d = read(egress, uri, cut_of(&ascending, uri)).await;
+        assert!(d.episodes_cut);
+        assert!(d.episodes_oldest_first, "the cut read of an ascending feed");
+        assert_eq!(
+            d.episodes.unwrap().last().unwrap().name.as_deref(),
+            Some("E1")
         );
         // A longer read that does not parse (an undefined entity past the cut): the cut read's
         // card and list.

@@ -1019,6 +1019,35 @@ mod tests {
         assert!(stream.url.starts_with("https://"), "{stream:?}");
         assert_eq!(stream.media_type, "audio/mpeg");
         assert!(episodes[0].published.is_some());
+        assert!(!doc.episodes_oldest_first, "the feed lists newest first");
+        // A feed that lists its oldest episode first: the card says so, for the save.
+        let ascending: String = (1..=3)
+            .map(|n| {
+                let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
+                    .unwrap()
+                    .to_rfc2822();
+                format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{date}</pubDate><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#)
+            })
+            .collect();
+        let ascending = format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Show</title>{ascending}</channel></rss>"#
+        );
+        let (egress, _) = fixture::egress(vec![
+            (
+                lookup,
+                200,
+                "text/javascript",
+                read("itunes-podcast-1584274529.json"),
+            ),
+            (feed, 200, "application/xml", ascending.into_bytes()),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = MediaRecords.walled(&cx, uri).await.unwrap().unwrap();
+        assert_eq!(doc.episodes.as_ref().map(Vec::len), Some(3));
+        assert!(doc.episodes_oldest_first);
         // The feed unanswered: the card, without a list.
         let (egress, _) = fixture::egress(vec![(
             lookup,
