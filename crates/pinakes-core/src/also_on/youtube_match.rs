@@ -5,7 +5,8 @@
 //! A label upload is a video whose channel is an artist's "Topic" channel (`<Artist> - Topic`) or
 //! whose description starts "Provided to YouTube by", as the stored card's oEmbed author and
 //! description show. The source reads the video's watch page for its title, channel, length and
-//! description (`ytInitialPlayerResponse.videoDetails`; a stored card has no length), then searches
+//! description (`ytInitialPlayerResponse.videoDetails`; a stored card has no length, so the length
+//! read becomes the card's `duration` fact), then searches
 //! Deezer (while `deezer` runs) and TIDAL (while `tidal_isrc` runs, with its credentials) for the
 //! artist and title. Of each service's answers, exactly one track must have the same artist and
 //! title, compared as `same_recording` compares them (`matching`), and a length within
@@ -23,7 +24,9 @@ use super::{
 };
 use crate::{
     matching::{artist_name, recording_title},
-    music::{self, Level, Service},
+    music::{
+        self, label_artist, Level, Service, YOUTUBE_PROVIDED as PROVIDED, YOUTUBE_TOPIC as TOPIC,
+    },
     music_sources::{derived, duration_secs},
     resolver::{egress::FetchOptions, RetryLater},
 };
@@ -35,10 +38,6 @@ use serde_json::Value;
 pub const MATCH_WINDOW_SECS: i64 = 2;
 /// When a lookup YouTube answered with a sign-in page is tried again.
 const LOGIN_WAIT_SECS: u64 = 6 * 3600;
-/// The description YouTube gives a label's upload.
-const PROVIDED: &str = "Provided to YouTube by";
-/// The suffix of an artist's Topic channel.
-const TOPIC: &str = " - Topic";
 
 /// A video's watch page, as far as this source reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +121,11 @@ impl Source for YoutubeMatch {
         let Some(upload) = upload else {
             return Ok(found);
         };
+        // The video's length, as the watch page states it: a fact of the card (a stored card has
+        // no length of its own), whatever the searches find.
+        found
+            .facts
+            .push(super::Fact::new("duration", upload.seconds.to_string()));
         let query = format!(
             "{} {}",
             artist_name(&upload.artist),
@@ -273,20 +277,11 @@ fn meta_duration(html: &str) -> Option<i64> {
     duration_secs(&rest[..rest.find('"')?])
 }
 
-/// The artist, title and length of a label's upload: the artist is its Topic channel's name, else
-/// the first artist of the description's "Title · Artist" line. `None` for any other video.
+/// The artist, title and length of a label's upload (`music::label_artist`). `None` for any other
+/// video.
 pub fn upload(page: &Page) -> Option<Upload> {
-    let provided = page.description.trim_start().starts_with(PROVIDED);
-    let artist = match page.author.trim_end().strip_suffix(TOPIC) {
-        Some(artist) => artist.trim().to_owned(),
-        None if provided => {
-            // "Provided to YouTube by …\n\nTitle · Artist · Artist\n\nAlbum\n\n…"
-            let line = page.description.split("\n\n").nth(1)?;
-            line.split(" · ").nth(1)?.trim().to_owned()
-        }
-        None => return None,
-    };
-    (!artist.is_empty() && !page.title.trim().is_empty()).then(|| Upload {
+    let artist = label_artist(Some(&page.author), Some(&page.description))?;
+    (!page.title.trim().is_empty()).then(|| Upload {
         artist,
         title: page.title.trim().to_owned(),
         seconds: page.seconds,
@@ -420,6 +415,17 @@ mod tests {
             ..page.clone()
         };
         assert_eq!(upload(&renamed).unwrap().artist, "Queen");
+        // As a stored card gives them: the channel alone, the description alone, neither.
+        assert_eq!(
+            label_artist(Some("Queen - Topic "), None).as_deref(),
+            Some("Queen")
+        );
+        assert_eq!(
+            label_artist(None, Some(&page.description)).as_deref(),
+            Some("Queen")
+        );
+        assert_eq!(label_artist(Some(" - Topic"), None), None);
+        assert_eq!(label_artist(Some("Queen"), Some("Official audio")), None);
         // Without either, it is no label's upload.
         let other = Page {
             author: "Queen".into(),

@@ -1602,6 +1602,42 @@ fn media_type(d: &mut ResourceMeta, uri: &str) {
     }
 }
 
+/// The facts a video's card states, on YouTube (any spelling) and Vimeo (any of its video
+/// links, its player's too): a label's upload's `artist` (`music::label_artist`, read from the
+/// channel and description the card stores; `music::type_card` types it a `MusicRecording`),
+/// else the channel that put it up as `author` (its oEmbed `author_name`), and its length
+/// (`duration`, in seconds) when the page stated one. Read from the stored card, so every
+/// stored video has them at once.
+pub(crate) fn media_facts(d: &ResourceMeta) -> Option<std::collections::BTreeMap<String, String>> {
+    let youtube = crate::music::parse(&d.url).is_some_and(|l| {
+        l.service == crate::music::Service::YouTube && l.level == crate::music::Level::Video
+    });
+    let vimeo = crate::embed::link(&d.url).is_some_and(|e| e.provider == "vimeo");
+    if !(youtube || vimeo) || !matches!(d.type_name.as_str(), "VideoObject" | "MusicRecording") {
+        return None;
+    }
+    let attribute = |name: &str| {
+        d.attributes
+            .get(name)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+    };
+    let artist = (youtube && d.type_name == "MusicRecording")
+        .then(|| crate::music::label_artist(attribute("author"), d.description.as_deref()))
+        .flatten()
+        .filter(|a| a.len() <= crate::model::ATTRIBUTE_VALUE_CAP);
+    let mut facts = std::collections::BTreeMap::new();
+    if let Some(artist) = artist {
+        facts.insert("artist".to_owned(), artist);
+    } else if let Some(author) = attribute("author") {
+        facts.insert("author".to_owned(), author.to_owned());
+    }
+    if let Some(secs) = attribute("duration").and_then(crate::music_sources::duration_secs) {
+        facts.insert("duration".to_owned(), secs.to_string());
+    }
+    (!facts.is_empty()).then_some(facts)
+}
+
 /// How long a resolver of this kind may take. Nostr and the official APIs leave their own fetch
 /// timeouts (10 seconds, slot wait included) room to answer first.
 fn budget(kind: &str) -> Duration {

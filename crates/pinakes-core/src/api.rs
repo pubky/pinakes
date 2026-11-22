@@ -1125,10 +1125,11 @@ pub struct Details {
     pub from: Option<String>,
     /// The fields that API names for the object, or a Pubky app profile's facts, or a
     /// MusicBrainz page's own (`artist`, `duration` in seconds, `genre`, `disambiguation`, an
-    /// artist's `country_code`, an album's `release_type`, …; docs/api.md), then the facts the also-on
-    /// sources read for it (such as a music link's `isrc`, `upc` and `mbid`; each source's page
-    /// in docs/sources lists its own), by name; several values are joined with "; ".
-    /// `null` when there are none.
+    /// artist's `country_code`, an album's `release_type`, …; docs/api.md), or a YouTube or Vimeo
+    /// video's (a label upload's `artist`, else the channel as `author`; `duration`), then the
+    /// facts the also-on sources read for it (such as a music link's `isrc`, `upc` and `mbid`;
+    /// each source's page in docs/sources lists its own), by name; several values are joined
+    /// with "; ". `null` when there are none.
     #[schema(value_type = Option<Object>)]
     pub facts: Option<std::collections::BTreeMap<String, String>>,
     /// The objects the card points at, each with its own card (docs/api.md, Related objects): a
@@ -1955,7 +1956,8 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 crate::kinds::facts(
                     crate::sources::facts(d)
                         .or_else(|| crate::resolver::pubky_apps::facts(d))
-                        .or_else(|| crate::music_sources::card_facts(d)),
+                        .or_else(|| crate::music_sources::card_facts(d))
+                        .or_else(|| crate::resolver::cards::media_facts(d)),
                     d,
                     Utc::now(),
                 ),

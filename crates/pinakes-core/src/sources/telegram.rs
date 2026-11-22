@@ -120,10 +120,11 @@ pub fn post_card(doc: ResourceMeta, target: &Target, body: &str) -> Result<Optio
             .filter(|t| !t.is_empty())
     };
     let by = text(".tgme_widget_message_owner_name");
+    // Its text as the widget shows it: a `<br>` a line break, so `<br><br>` a blank line.
     let body = message
         .select(&select(".tgme_widget_message_text"))
         .next()
-        .and_then(|e| super::kit::html_text(&e.inner_html()))
+        .map(|e| social::lines(&social::html_lines(e)))
         .unwrap_or_default();
     social::post_text(&mut doc, &body, by.as_deref());
     doc.image = message
@@ -354,11 +355,12 @@ mod tests {
         .unwrap();
         assert_eq!(doc.type_name, "SocialMediaPosting");
         assert!(doc.name.as_deref().unwrap().starts_with("Birthdays."));
-        assert!(doc
-            .description
-            .as_deref()
-            .unwrap()
-            .contains("date of birth"));
+        // The post's blank line and line breaks stay in its description.
+        assert!(doc.description.as_deref().unwrap().starts_with(
+            "Birthdays. You can add your date of birth to your profile – reminding contacts when \
+             to bring gifts and celebrate.\n\nApril Update\n1 • 2 • 3"
+        ));
+        assert!(!doc.name.as_deref().unwrap().contains('\n'));
         assert_eq!(doc.attributes["author"], "telegram");
         assert_eq!(doc.attributes["author_name"], "Telegram News");
         assert_eq!(doc.attributes["published"], "2024-04-29T12:29:41+00:00");

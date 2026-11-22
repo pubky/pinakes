@@ -26,7 +26,10 @@ groups and counts. So does a profile page X withholds where the request came fro
 ## Card
 
 A post is a `SocialMediaPosting` named by the start of its text (else "Post by {author}"),
-with its text as description; the oEmbed answer carries no image. A profile is a `Person`
+with its text as description (its line breaks and paragraphs kept, without the
+`pic.twitter.com/…` and `pic.x.com/…` links X appends to the text for the post's photos and
+videos); the oEmbed
+answer carries no image. A profile is a `Person`
 named by its display name, with its bio and its avatar; the page's title must name the
 handle the link does (`Name (@handle) on X`), else the card is the plain one. A card takes its
 name, bio and avatar only from the profile's own page: when the fetch ended at another address

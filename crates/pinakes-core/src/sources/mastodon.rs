@@ -70,10 +70,12 @@ impl Target {
     }
 }
 
-/// HTML post content as plain text.
+/// HTML post content as plain text, its line breaks and paragraphs kept (`social::html_lines`).
 fn plain(html: &str) -> String {
-    let text = crate::resolver::cards::plain(&html.replace("</p>", "</p> "));
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    match crate::resolver::html::fragment(html) {
+        Ok(fragment) => super::lines(&super::social::html_lines(fragment.root_element())),
+        Err(_) => String::new(),
+    }
 }
 
 /// The card of a status, or `None` when the instance says it does not exist. A body that is not
@@ -113,9 +115,9 @@ pub fn card(
     doc.name = if shown.is_empty() {
         by.as_ref().map(|by| format!("Post by {by}"))
     } else {
-        Some(super::cut(&shown, 120))
+        Some(super::excerpt(&shown, 120))
     };
-    doc.description = (!shown.is_empty()).then(|| super::cut(&shown, 200));
+    doc.description = (!shown.is_empty()).then(|| super::excerpt_lines(&shown, 200));
     doc.image = v["media_attachments"][0]["preview_url"]
         .as_str()
         .filter(|_| v["sensitive"] != true)
@@ -339,6 +341,17 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(doc.image.as_deref().unwrap().starts_with("https://"));
+        // Its paragraphs stay apart in the description; the name is one line.
+        assert!(doc
+            .description
+            .as_deref()
+            .unwrap()
+            .starts_with("New in Mastodon 4.6: Newsletters 📬\n\nMastodon servers now support"));
+        assert!(doc
+            .name
+            .as_deref()
+            .unwrap()
+            .starts_with("New in Mastodon 4.6: Newsletters 📬 Mastodon servers now support"));
         assert!(
             card(base.clone(), &target, 404, &read("status-missing.json"))
                 .unwrap()

@@ -50,7 +50,10 @@ Every route returns the same card for a resource or an occurrence.
 Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`, and every
 text a read adds) are plain text, decoded from the source's HTML entities once: escape them
 before rendering them as HTML. A source text that holds markup (a page's JSON-LD `description`,
-a DOI's title with `<i>`) is read as text, its tags dropped.
+a DOI's title with `<i>`) is read as text, its tags dropped. A post's `description` (X, Mastodon,
+Bluesky, Threads, Telegram, Reddit, Instagram) keeps the post's line breaks (`\n`, at most one blank
+line in a row) with the spaces inside a line collapsed; its `name` is the start of the text on one
+line.
 
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
@@ -59,7 +62,15 @@ service ([music service links](#aliases)). YouTube is not only music: its channe
 `MusicGroup` only when it is a Topic channel (named `{Artist} - Topic`) or on YouTube Music, and
 its playlist a `MusicPlaylist` only on YouTube Music (`music.youtube.com`, the tagged spelling or
 another of the same channel or playlist, from the card's next read); any other channel or
-playlist keeps the type its page gives. A video stays a `VideoObject`; a track's, album's or
+playlist keeps the type its page gives. A video stays a `VideoObject`, but for a label's upload
+on YouTube: a video whose channel is an artist's Topic channel (`{Artist} - Topic`) or whose
+description starts "Provided to YouTube by" is a `MusicRecording`, with the fact `artist` (the
+Topic channel's name, else the first artist of the description's "Title · Artist" line), whichever
+spelling of the link was read (`music.youtube.com` alone does not make a video a song: an official
+music video plays there too); its `embed` stays YouTube's video player. Any other YouTube or Vimeo
+video has its channel as the fact `author`. A video's `duration` fact (seconds) is there when Pinakes
+read its length: from the page, or from the watch page read to find a label's upload on other
+music services (YouTube asks hosts it distrusts to sign in instead, so it may be missing). A track's, album's or
 artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a part of the page, not its
 card ([lists](#lists)). The card's `site` is the
 service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in
@@ -353,7 +364,7 @@ answer `If-None-Match` with 304.
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
 | `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, e.g. `federal_register` |
-| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), or a MusicBrainz page's own facts (its `artist`, `duration` in seconds, `genre`, …: [MusicBrainz facts](#also-on)), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
+| `facts` | The fields that API names for the object, by name (`document_type`, `citation`, …), or the facts a [Pubky app's](pubky-apps.md) profile reads (`card_count`, `price`, `rating`, …), or a MusicBrainz page's own facts (its `artist`, `duration` in seconds, `genre`, …: [MusicBrainz facts](#also-on)), or a YouTube or Vimeo video's (`artist` or `author`, `duration`: [music links](#response-shapes)), then the facts the [also-on](#also-on) sources read for it (such as a music link's `isrc`, `upc` and `mbid`); several values of one name are joined with `; `. Each source keeps at most `limits.also_on_facts_per_source` (32, at least 8) facts per resource, cutting the many values of one name (a recording's ISRCs) before a name's one value (its MBID, artist). Each source's page lists its facts. `null` when there are none. Facts never join anything |
 | `related` | The objects the card points at, each with its own card ([Related objects](#related-objects)): on a Bitcoin or Lightning card, a transaction's block, inputs and outputs, a block's previous and next block and coinbase transaction, an address's latest transactions, a node's biggest channels and their peers, a channel's nodes and funding transaction; on a podcast episode's card, its show; `[]` on every other card |
 | `related_total` | How many entries of a `rel` there are when `related` lists fewer of them (`{"input": 400}`); `null` when it lists them all |
 | `keys` | The public identifiers the resource is keyed by, as `GET /v1/search?key=` takes them (`isrc:…`, `upc:…`, `doi:…`, `isbn:…`, `mb:recording:…`, `wikidata:Q…`, `osm:node/…`): the keys its sources vouch for ([Also on](#also-on)), sorted; `[]` when there are none |

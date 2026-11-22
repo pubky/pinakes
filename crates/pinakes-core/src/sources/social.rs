@@ -5,8 +5,8 @@
 //! still gets a card, of the link's shape alone, marked `blocked`: the link resolves, groups and
 //! counts while the platform shows the object to accounts only or withholds it where the request
 //! came from. A refusal on a refresh keeps the card read before, as a wall on the web route does.
-pub use super::excerpt;
 use super::Context;
+pub use super::{excerpt, excerpt_lines, lines};
 use crate::{
     model::{ResourceMeta, Status},
     resolver::{
@@ -246,8 +246,8 @@ pub fn open_graph(body: &str) -> Result<OpenGraph> {
     Ok(tags)
 }
 
-/// A post's text as its card's name (its first 120 characters) and description (200); a post
-/// without text is named by its author.
+/// A post's text as its card's name (its first 120 characters, on one line) and description
+/// (200, its line breaks kept: [`lines`]); a post without text is named by its author.
 pub fn post_text(doc: &mut ResourceMeta, text: &str, by: Option<&str>) {
     let flat = excerpt(text, usize::MAX);
     if flat.is_empty() {
@@ -257,8 +257,86 @@ pub fn post_text(doc: &mut ResourceMeta, text: &str, by: Option<&str>) {
         doc.description = None;
     } else {
         doc.name = Some(excerpt(&flat, 120));
-        doc.description = Some(excerpt(&flat, 200));
+        doc.description = Some(excerpt_lines(text, 200));
     }
+}
+
+/// The text of a post's HTML as the post shows it: a `<br>` is a line break, a `<p>` a
+/// paragraph of its own (a blank line before the next), every other block (`div`, `li`, `pre`,
+/// `blockquote`, a heading, a list, a table cell, …) lines of its own; scripts and styles are
+/// left out, every other tag is dropped and its text kept. Text nodes are joined as written (a
+/// link split into spans reads whole), a line break in their source being a space as a browser
+/// shows it (but inside `<pre>`). Normalise it with [`lines`].
+pub fn html_lines(element: scraper::ElementRef<'_>) -> String {
+    use scraper::Node;
+    // The elements that start and end a line, as `kit::html_text` reads them (`br` apart).
+    const BLOCKS: &[&str] = &[
+        "address",
+        "blockquote",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    ];
+    // Iterative: a fragment's depth is the input's to decide, never the stack's. A block opens
+    // its line when it is entered and ends it when it is left (a paragraph with a blank line).
+    enum Step<N> {
+        Enter(N),
+        /// Leaving a block: whether it is a paragraph (a blank line after it), whether a `pre`.
+        Leave(bool, bool),
+    }
+    // Ends the text's line (and, for a paragraph, adds a blank line) unless it already ends so:
+    // two blocks side by side are two lines, never a blank line between them.
+    fn end(out: &mut String, paragraph: bool) {
+        let have = out[out.trim_end().len()..].matches('\n').count();
+        for _ in have..usize::from(paragraph) + 1 {
+            out.push('\n');
+        }
+    }
+    let mut out = String::new();
+    let mut pre = 0usize;
+    let mut steps: Vec<Step<_>> = element.children().rev().map(Step::Enter).collect();
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Leave(paragraph, was_pre) => {
+                pre -= usize::from(was_pre);
+                end(&mut out, paragraph);
+            }
+            Step::Enter(node) => match node.value() {
+                Node::Text(t) if pre > 0 => out.push_str(t),
+                Node::Text(t) => {
+                    out.extend(t.chars().map(|c| if c.is_whitespace() { ' ' } else { c }))
+                }
+                Node::Element(e) if e.name() == "br" => out.push('\n'),
+                Node::Element(e) if !matches!(e.name(), "script" | "style") => {
+                    if BLOCKS.contains(&e.name()) {
+                        end(&mut out, false);
+                        pre += usize::from(e.name() == "pre");
+                        steps.push(Step::Leave(e.name() == "p", e.name() == "pre"));
+                    }
+                    steps.extend(node.children().rev().map(Step::Enter));
+                }
+                _ => {}
+            },
+        }
+    }
+    out
 }
 
 /// The name and the handle an Open Graph title carries: `Name (@handle) on X`,
@@ -328,7 +406,14 @@ mod tests {
         let mut doc = ResourceMeta::new("https://x.com/a/status/1", "x", 3600);
         post_text(&mut doc, "  just   setting\nup my twttr ", Some("jack"));
         assert_eq!(doc.name.as_deref(), Some("just setting up my twttr"));
-        assert_eq!(doc.description.as_deref(), Some("just setting up my twttr"));
+        // The description keeps the line break; the name is one line.
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("just setting\nup my twttr")
+        );
+        post_text(&mut doc, "\n\n a \r\n\n\n\n  b\t c\n\n", None);
+        assert_eq!(doc.name.as_deref(), Some("a b c"));
+        assert_eq!(doc.description.as_deref(), Some("a\n\nb c"));
         post_text(&mut doc, " ", Some("jack"));
         assert_eq!(doc.name.as_deref(), Some("Post by jack"));
         assert_eq!(doc.description, None);
@@ -339,6 +424,28 @@ mod tests {
             Some(121)
         );
         assert!(doc.description.as_deref().unwrap().ends_with('…'));
+    }
+
+    /// A post's HTML as it shows: `<br>` a line, `<p>` a paragraph, a link's spans whole, no
+    /// script; at most one blank line once normalised.
+    #[test]
+    fn a_post_s_html_keeps_its_lines() {
+        let text = |html: &str| {
+            let html = crate::resolver::html::fragment(html).unwrap();
+            lines(&html_lines(html.root_element()))
+        };
+        assert_eq!(
+            text("<p>one<br>two</p><p>three <a href=\"https://e.example.com/x\"><span class=\"invisible\">https://</span><span>e.example.com/x</span></a></p><script>no</script><style>p{}</style><ul><li>a</li><li>b</li></ul>"),
+            "one\ntwo\n\nthree https://e.example.com/x\n\na\nb"
+        );
+        assert_eq!(text("<p></p><p> </p><br><br><br>x"), "x");
+        // Text beside any block is on a line of its own, never run into the next word; a line
+        // break in the source is a space, but in `pre`.
+        assert_eq!(
+            text("<pre>code\nmore</pre>x<blockquote>quo\nted</blockquote>\n  <h2>head</h2>y<ul>\n<li>a</li>\n<li>b</li>\n</ul>"),
+            "code\nmore\nx\nquo ted\nhead\ny\na\nb"
+        );
+        assert_eq!(text(""), "");
     }
 
     #[test]
