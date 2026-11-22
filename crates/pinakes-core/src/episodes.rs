@@ -535,7 +535,7 @@ pub(crate) fn is_show(type_path: &[String], status: &str) -> bool {
 /// own oldest (its one, when it holds one); an older stored one the feed has dropped stays, as
 /// it does for a newest-first feed. A stored list of [`KEPT`] episodes, each newer than such a
 /// cut's newest, holds the newest part of a feed longer than is kept: the cut is that feed's old
-/// end, and the stored list stays as it is.
+/// end, and the stored list stays as it is, its feed listing older episodes than it.
 async fn under_stored(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -575,13 +575,13 @@ async fn under_stored(
         stream: stream.as_deref().and_then(|s| serde_json::from_str(s).ok()),
     };
     // A full stored list wholly newer than an oldest-first cut is the newest part of a feed
-    // longer than is kept, and the cut is the old end of the same feed: the list stays as it is.
+    // longer than is kept, and the cut is the old end of the same feed: the list stays as it is,
+    // and the feed lists older episodes than it (the cut's).
     if oldest_first
         && rows.len() >= KEPT
         && newest.is_some_and(|n| rows.iter().all(|r| r.4.is_some_and(|d| d > n)))
     {
-        let stored_older = rows.first().and_then(|r| r.6).unwrap_or(older);
-        return Ok((rows.iter().map(as_episode).collect(), stored_older));
+        return Ok((rows.iter().map(as_episode).collect(), true));
     }
     let kept: Vec<&Stored> = rows
         .iter()

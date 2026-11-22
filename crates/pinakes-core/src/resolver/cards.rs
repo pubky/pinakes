@@ -1714,7 +1714,7 @@ mod tests {
             "a read just made is not made again"
         );
         // A feed that lists its oldest episode first (its items' dates ascend): the cut read says
-        // so, and the save keeps the newer episodes a longer stored list holds.
+        // so (`ResourceMeta::episodes_oldest_first`, for the save).
         let ascending: String = (1..=300)
             .map(|n| {
                 let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
