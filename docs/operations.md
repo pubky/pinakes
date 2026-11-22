@@ -475,7 +475,7 @@ magic bytes or extension, so JSON arrives as `application/octet-stream`). The ob
 JSON whatever its declared type; one that is not JSON becomes a card with only its content type
 and size (no card, for a kind an app's profile reads). Which objects are fetched and what their
 cards hold is per app ([Pubky apps](pubky-apps.md)); after an upgrade that adds or changes an
-app's profile, run `pinakesd reextract pubky`. Because the request carries a header, a redirect is refused rather than followed.
+app's profile, or takes a namespace off those never fetched, run `pinakesd reextract pubky`. Because the request carries a header, a redirect is refused rather than followed.
 Refusals by the policy (a redirect, a content type outside the list, a non-public address, an
 owner host that is not the canonical z32 key, a path that changes when read as an HTTPS path, an
 endpoint that is an IP address rather than a domain) are stored as `policy` and dead-lettered at
@@ -623,7 +623,7 @@ versionless (`pubky://<author>/pub/<namespace>/v1/posts/{id}`), and its `object_
 file written (`…/{id}/{editId}.json`). The URI must be a post in its author's own storage (else
 `uri`) and the object path a version file directly in it (else `object_path`). Social events and
 rsvps are indexed by Nexus. A `post` line in a namespace
-Pinakes never fetches (`social`, `pubky.app`, `mapky.app` and `eventky.app`, read
+Pinakes never fetches (`social` and `pubky.app`, read
 decoded, so `%73ocial` is `social`) is rejected (`never_fetched`), creating no resource or
 reference and fetching nothing. Letter case is kept, as the resolver keeps it: `Social` is another
 app's namespace. A namespace that is not one path segment once decoded (not UTF-8, an encoded `/`,

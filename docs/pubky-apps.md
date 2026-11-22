@@ -4,12 +4,9 @@ People tag objects that Pubky apps other than pubky.app keep in their public sto
 deck, a room, a marketplace listing. Pinakes fetches such a `pubky://` object from its owner's
 homeserver and gives it a card. pubky.app's own objects (posts, profiles) and the social specs'
 objects (`/pub/social/…`, any version: posts, events, rsvps, availability, tags, ratings) are
-Nexus's and never fetched: social events and availability come from Nexus.
-Objects under `/pub/mapky.app/…` and `/pub/eventky.app/…` are never fetched either: routes come
-as [posts](#posts), events and availability as social posts. An object of any of these namespaces
-has no card, as a
-left-out path of a profiled app (below): its post lines are dropped, a link to it gets no route,
-and the resolver gives it no card without a request.
+Nexus's and never fetched: social events and availability come from Nexus. An object of either
+namespace has no card, as a left-out path of a profiled app (below): its post lines are dropped,
+a link to it gets no route, and the resolver gives it no card without a request.
 
 For an app Pinakes has a profile for, the card is that app's: a schema.org type, the name,
 description, image and a few facts the app's format holds, and `open_in`, the clients that open
@@ -33,8 +30,9 @@ read from the apps themselves or from a registry outside this repository.
 
 ## Any other app
 
-An object of an app without a profile, and a post of a namespace without one
-([posts](#posts)), gets the general card: a `CreativeWork` whose name is
+An object of an app without a profile (the old Mapky and Eventky layouts, `/pub/mapky.app/…` and
+`/pub/eventky.app/…`, among them), and a post of a namespace without one ([posts](#posts)), gets
+the general card: a `CreativeWork` whose name is
 the first of `name`, `title`, `summary`, `topic`, `caption`, whose description is `description`
 or `bio`, and whose image is `image`, `image_uri`, `imageUrl`, `cover` or `avatarUrl` (relative
 to the object's folder). An object with none of those names or descriptions but a `content` or

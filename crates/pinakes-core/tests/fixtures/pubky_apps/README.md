@@ -1,7 +1,9 @@
 # Pubky app objects
 
 Public objects of the apps in `resolver/pubky_apps/`, as their owners' homeservers served them
-on 2026-10-22 (read-only GETs, nothing under `/priv/`). Each `<name>.json` holds the bytes
+on 2026-10-22 (read-only GETs, nothing under `/priv/`); `old-layouts/` holds objects of the old
+Mapky and Eventky layouts, which get the general card, as `homeserver.pubky.app` served them on
+2026-11-22. Each `<name>.json` holds the bytes
 served and `<name>.uri` the object's `pubky://` URI. Rooms objects came from Synonym's staging
 homeserver, the others from `homeserver.pubky.app`. The marketplace's records are the ones its
 client wrote; their `.uri` is where the tests read them, in the marketplace's namespace.
@@ -17,3 +19,9 @@ client wrote; their `.uri` is where the tests read them, in the marketplace's na
 | `marketplace/shop.json` | `pubky://rxtcr8ezoja67qq3wcrxtueefpzaau65tr8nf5o8d8e8oc7a33jo/pub/app.marketplace/v1/shop.json` |
 | `rooms/0035SFYCGVBV2-introductions.json` | `pubky://47ccxgzt77jgnffqn1rp7neba3os3py3649cz9e9or3fy76ohqao/pub/pubky-rooms/rooms/0035SFYCGVBV2` |
 | `rooms/0035TNXH48JYE-null-topic.json` | `pubky://8febau67zieo93b9ejk947msc7oc9e6b7jo6whkj5smtzsrmrigo/pub/pubky-rooms/rooms/0035TNXH48JYE` |
+| `old-layouts/eventky-event-0034M8WQCPK20.json` | `pubky://gabri5dk51q1c1kzi53hjpqw5yhmw1nqsryzsfx5kubd7jpm63jy/pub/eventky.app/events/0034M8WQCPK20` |
+| `old-layouts/mapky-collection-00351MVGE211G.json` | `pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/collections/00351MVGE211G` |
+| `old-layouts/mapky-geo-capture-0035C4V0GVX90.json` | `pubky://9g3zsjpwijn3gsh7ibghjxxadpjidceos5rw4387a6hhziqi8aoy/pub/mapky.app/geo_captures/0035C4V0GVX90` |
+| `old-layouts/mapky-post-review-00351MT54YS9G.json` | `pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/posts/00351MT54YS9G` |
+| `old-layouts/mapky-review-rating-only-003529F35DWWG.json` | `pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/reviews/003529F35DWWG` |
+| `old-layouts/mapky-route-00351MV7WF0WG.json` | `pubky://c5nr657md9g8mut1xhjgf9h3cxaio3et9xyupo4fsgi5f7etocey/pub/mapky.app/routes/00351MV7WF0WG` |

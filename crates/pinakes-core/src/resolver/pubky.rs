@@ -681,18 +681,16 @@ mod tests {
         }
     }
 
-    /// An object of a namespace Pinakes never fetches (the old Mapky and Eventky layouts, the
-    /// social specs', pubky.app's), however its namespace is spelt, stored before the rule and
-    /// read again: missing with no card, and its homeserver is never asked.
+    /// An object of a namespace Pinakes never fetches (the social specs', pubky.app's), however
+    /// its namespace is spelt, stored before the rule and read again: missing with no card, and
+    /// its homeserver is never asked.
     #[tokio::test]
     async fn an_object_of_a_namespace_never_fetched_is_missing_without_a_request() {
         let owner = Keypair::random();
         let key = owner.public_key().to_z32();
         for path in [
-            "mapky.app/posts/00358SJCCNK1G",
-            "eventky.app/events/0034FED2YCDKG",
-            "mapky.ap%70/routes/0034FED2YCDKH",
             "social/v1/posts/0034FED2YCDKJ",
+            "%73ocial/v1/events/0034FED2YCDKG",
             "pubky.app/posts/0034A0X7NJ52G",
             "%70ubky.app/posts/0034A0X7NJ52G",
         ] {
@@ -707,6 +705,47 @@ mod tests {
             assert_eq!(doc.type_name, "CreativeWork", "{path}");
             assert_eq!((doc.name, doc.description), (None, None));
             assert!(homeserver.requests.lock().unwrap().is_empty(), "{path}");
+        }
+    }
+
+    /// The old Mapky and Eventky layouts are apps no profile knows: their objects, however the
+    /// namespace is spelt, are fetched from the owner's homeserver and get the general card.
+    #[tokio::test]
+    async fn an_object_of_the_old_mapky_or_eventky_layout_gets_the_general_card() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for (path, body, name) in [
+            (
+                "eventky.app/events/0034M8WQCPK20",
+                include_str!(
+                    "../../tests/fixtures/pubky_apps/old-layouts/eventky-event-0034M8WQCPK20.json"
+                ),
+                "Pubky Public Dev Call",
+            ),
+            (
+                "mapky.ap%70/routes/00351MV7WF0WG",
+                include_str!(
+                    "../../tests/fixtures/pubky_apps/old-layouts/mapky-route-00351MV7WF0WG.json"
+                ),
+                "Giggelitrain",
+            ),
+        ] {
+            let uri = format!("pubky://{key}/pub/{path}");
+            assert_eq!(crate::resolver::classify(&uri), Some("pubky"), "{uri}");
+            let homeserver = Arc::new(Homeserver {
+                status: 200,
+                body,
+                ..Default::default()
+            });
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&uri)
+                .await
+                .unwrap();
+            assert_eq!(doc.status, Status::Ok, "{path}");
+            assert_eq!(doc.type_name, "CreativeWork", "{path}");
+            assert_eq!(doc.name.as_deref(), Some(name), "{path}");
+            assert_eq!(homeserver.requests.lock().unwrap().len(), 1, "{path}");
         }
     }
 
