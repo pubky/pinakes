@@ -1115,7 +1115,14 @@ pub fn lines(text: &str) -> String {
 /// At most `max` characters of `text`, its line breaks kept ([`lines`]), with an ellipsis when
 /// cut.
 pub fn excerpt_lines(text: &str, max: usize) -> String {
-    cut(&lines(text), max)
+    let all = lines(text);
+    let mut out: String = all.chars().take(max).collect();
+    if out.len() < all.len() {
+        // A cut at a line break ends the text where it stops, not on a line of its own.
+        out.truncate(out.trim_end().len());
+        out.push('…');
+    }
+    out
 }
 
 /// `[text](url)` as `text`, without `**`, `__`, backticks and single `*`/`_` emphasis around

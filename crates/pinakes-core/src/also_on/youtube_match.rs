@@ -24,7 +24,9 @@ use super::{
 };
 use crate::{
     matching::{artist_name, recording_title},
-    music::{self, Level, Service},
+    music::{
+        self, label_artist, Level, Service, YOUTUBE_PROVIDED as PROVIDED, YOUTUBE_TOPIC as TOPIC,
+    },
     music_sources::{derived, duration_secs},
     resolver::{egress::FetchOptions, RetryLater},
 };
@@ -36,10 +38,6 @@ use serde_json::Value;
 pub const MATCH_WINDOW_SECS: i64 = 2;
 /// When a lookup YouTube answered with a sign-in page is tried again.
 const LOGIN_WAIT_SECS: u64 = 6 * 3600;
-/// The description YouTube gives a label's upload.
-const PROVIDED: &str = "Provided to YouTube by";
-/// The suffix of an artist's Topic channel.
-const TOPIC: &str = " - Topic";
 
 /// A video's watch page, as far as this source reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -279,29 +277,7 @@ fn meta_duration(html: &str) -> Option<i64> {
     duration_secs(&rest[..rest.find('"')?])
 }
 
-/// The artist of a label's upload, from its channel's name and its description (as its watch
-/// page or its stored card gives them): the Topic channel's name without ` - Topic`, else, for a
-/// description that starts "Provided to YouTube by", the first artist of its "Title · Artist"
-/// line. `None` for any other video, and for a blank artist. Its card is the recording's
-/// (`music::type_card`).
-pub fn label_artist(channel: Option<&str>, description: Option<&str>) -> Option<String> {
-    let artist = match channel.and_then(|c| c.trim_end().strip_suffix(TOPIC)) {
-        Some(artist) => artist,
-        None => {
-            let description = description?;
-            if !description.trim_start().starts_with(PROVIDED) {
-                return None;
-            }
-            // "Provided to YouTube by …\n\nTitle · Artist · Artist\n\nAlbum\n\n…"
-            let line = description.split("\n\n").nth(1)?;
-            line.split(" · ").nth(1)?
-        }
-    };
-    let artist = artist.trim();
-    (!artist.is_empty()).then(|| artist.to_owned())
-}
-
-/// The artist, title and length of a label's upload ([`label_artist`]). `None` for any other
+/// The artist, title and length of a label's upload (`music::label_artist`). `None` for any other
 /// video.
 pub fn upload(page: &Page) -> Option<Upload> {
     let artist = label_artist(Some(&page.author), Some(&page.description))?;

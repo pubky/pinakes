@@ -262,30 +262,73 @@ pub fn post_text(doc: &mut ResourceMeta, text: &str, by: Option<&str>) {
 }
 
 /// The text of a post's HTML as the post shows it: a `<br>` is a line break, a `<p>` a
-/// paragraph of its own (a blank line before the next), `<div>` and `<li>` lines of their own;
-/// scripts and styles are left out, every other tag is dropped and its text kept. Text nodes are
-/// joined as written (a link split into spans reads whole). Normalise it with [`lines`].
+/// paragraph of its own (a blank line before the next), every other block (`div`, `li`, `pre`,
+/// `blockquote`, a heading, a list, a table cell, …) lines of its own; scripts and styles are
+/// left out, every other tag is dropped and its text kept. Text nodes are joined as written (a
+/// link split into spans reads whole), a line break in their source being a space as a browser
+/// shows it (but inside `<pre>`). Normalise it with [`lines`].
 pub fn html_lines(element: scraper::ElementRef<'_>) -> String {
     use scraper::Node;
-    // Iterative: a fragment's depth is the input's to decide, never the stack's. Each element
-    // is entered and left (a paragraph or a line ends when it is left).
+    // The elements that start and end a line, as `kit::html_text` reads them (`br` apart).
+    const BLOCKS: &[&str] = &[
+        "address",
+        "blockquote",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "li",
+        "ol",
+        "p",
+        "pre",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    ];
+    // Iterative: a fragment's depth is the input's to decide, never the stack's. A block opens
+    // its line when it is entered and ends it when it is left (a paragraph with a blank line).
     enum Step<N> {
         Enter(N),
-        Leave(&'static str),
+        /// Leaving a block: whether it is a paragraph (a blank line after it), whether a `pre`.
+        Leave(bool, bool),
+    }
+    // Ends the text's line (and, for a paragraph, adds a blank line) unless it already ends so:
+    // two blocks side by side are two lines, never a blank line between them.
+    fn end(out: &mut String, paragraph: bool) {
+        let have = out[out.trim_end().len()..].matches('\n').count();
+        for _ in have..usize::from(paragraph) + 1 {
+            out.push('\n');
+        }
     }
     let mut out = String::new();
+    let mut pre = 0usize;
     let mut steps: Vec<Step<_>> = element.children().rev().map(Step::Enter).collect();
     while let Some(step) = steps.pop() {
         match step {
-            Step::Leave(end) => out.push_str(end),
+            Step::Leave(paragraph, was_pre) => {
+                pre -= usize::from(was_pre);
+                end(&mut out, paragraph);
+            }
             Step::Enter(node) => match node.value() {
-                Node::Text(t) => out.push_str(t),
+                Node::Text(t) if pre > 0 => out.push_str(t),
+                Node::Text(t) => {
+                    out.extend(t.chars().map(|c| if c.is_whitespace() { ' ' } else { c }))
+                }
                 Node::Element(e) if e.name() == "br" => out.push('\n'),
                 Node::Element(e) if !matches!(e.name(), "script" | "style") => {
-                    match e.name() {
-                        "p" => steps.push(Step::Leave("\n\n")),
-                        "div" | "li" => steps.push(Step::Leave("\n")),
-                        _ => {}
+                    if BLOCKS.contains(&e.name()) {
+                        end(&mut out, false);
+                        pre += usize::from(e.name() == "pre");
+                        steps.push(Step::Leave(e.name() == "p", e.name() == "pre"));
                     }
                     steps.extend(node.children().rev().map(Step::Enter));
                 }
@@ -396,6 +439,12 @@ mod tests {
             "one\ntwo\n\nthree https://e.example.com/x\n\na\nb"
         );
         assert_eq!(text("<p></p><p> </p><br><br><br>x"), "x");
+        // Text beside any block is on a line of its own, never run into the next word; a line
+        // break in the source is a space, but in `pre`.
+        assert_eq!(
+            text("<pre>code\nmore</pre>x<blockquote>quo\nted</blockquote>\n  <h2>head</h2>y<ul>\n<li>a</li>\n<li>b</li>\n</ul>"),
+            "code\nmore\nx\nquo ted\nhead\ny\na\nb"
+        );
         assert_eq!(text(""), "");
     }
 

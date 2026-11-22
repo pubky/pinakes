@@ -51,9 +51,9 @@ Absent values are `null`, never `""`. Text fields (`name`, `description`, `site`
 text a read adds) are plain text, decoded from the source's HTML entities once: escape them
 before rendering them as HTML. A source text that holds markup (a page's JSON-LD `description`,
 a DOI's title with `<i>`) is read as text, its tags dropped. A post's `description` (X, Mastodon,
-Bluesky, Threads, Telegram, Reddit, Instagram) keeps the post's line breaks (`\n`; a blank line
-between paragraphs, never two in a row) with the spaces inside a line collapsed; its `name` is the
-start of the text on one line.
+Bluesky, Threads, Telegram, Reddit, Instagram) keeps the post's line breaks (`\n`, at most one blank
+line in a row) with the spaces inside a line collapsed; its `name` is the start of the text on one
+line.
 
 A music link is typed by what it is, whatever the service's page or player calls it: a track is a
 `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a `Person` from the next
@@ -69,8 +69,8 @@ Topic channel's name, else the first artist of the description's "Title · Artis
 spelling of the link was read (`music.youtube.com` alone does not make a video a song: an official
 music video plays there too); its `embed` stays YouTube's video player. Any other YouTube or Vimeo
 video has its channel as the fact `author`. A video's `duration` fact (seconds) is there when Pinakes
-read its length: from the page, or from the watch page `youtube_match` reads for a label's upload
-(YouTube asks hosts it distrusts to sign in instead, so it may be missing). A track's, album's or
+read its length: from the page, or from the watch page read to find a label's upload on other
+music services (YouTube asks hosts it distrusts to sign in instead, so it may be missing). A track's, album's or
 artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a part of the page, not its
 card ([lists](#lists)). The card's `site` is the
 service's name (`Spotify`, `Apple Music`, `TIDAL`, `YouTube`, …), as derived links show it, in

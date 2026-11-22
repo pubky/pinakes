@@ -383,12 +383,39 @@ pub async fn on_youtube_music(pool: &sqlx::PgPool, id: &str, uri: &str) -> anyho
     .await?)
 }
 
+/// The description YouTube gives a label's upload.
+pub const YOUTUBE_PROVIDED: &str = "Provided to YouTube by";
+/// The suffix of an artist's Topic channel on YouTube.
+pub const YOUTUBE_TOPIC: &str = " - Topic";
+/// The artist of a label's upload, from its channel's name and its description (as its watch
+/// page or its stored card gives them): the Topic channel's name without ` - Topic`, else, for a
+/// description that starts "Provided to YouTube by", the first artist of its "Title · Artist"
+/// line. `None` for any other video, and for a blank artist. Its card is the recording's
+/// ([`type_card`]) and the artist its fact (`resolver::cards::media_facts`); the
+/// `youtube_match` also-on source reads the same rule from its watch page.
+pub fn label_artist(channel: Option<&str>, description: Option<&str>) -> Option<String> {
+    let artist = match channel.and_then(|c| c.trim_end().strip_suffix(YOUTUBE_TOPIC)) {
+        Some(artist) => artist,
+        None => {
+            let description = description?;
+            if !description.trim_start().starts_with(YOUTUBE_PROVIDED) {
+                return None;
+            }
+            // "Provided to YouTube by …\n\nTitle · Artist · Artist\n\nAlbum\n\n…"
+            let line = description.split("\n\n").nth(1)?;
+            line.split(" · ").nth(1)?
+        }
+    };
+    let artist = artist.trim();
+    (!artist.is_empty()).then(|| artist.to_owned())
+}
+
 /// Type and name a resolved card by what its link is, whatever the service's page or oEmbed
 /// says: a track is a `MusicRecording`, an album a `MusicAlbum`, an artist a `MusicGroup` (a
 /// `Person` when MusicBrainz says the artist is one: `artist_type`), a playlist a
 /// `MusicPlaylist`; a video stays as resolved, but for a label's upload on YouTube, a
-/// `MusicRecording` with its `artist` (`youtube_match::label_artist`: an artist's Topic channel,
-/// "Provided to YouTube by"). YouTube is not only music: its channel is music
+/// `MusicRecording` ([`label_artist`]: an artist's Topic channel, "Provided to YouTube by").
+/// YouTube is not only music: its channel is music
 /// only when it is a Topic channel (named `{Artist} - Topic`, YouTube's own channel of an
 /// artist's releases) or a link on YouTube Music, and its playlist only on YouTube Music
 /// (`on_youtube_music`: the card's link, or another spelling of it, is on `music.youtube.com`);
@@ -432,21 +459,17 @@ pub fn type_card(
     let video = link.service == Service::YouTube && link.level == Level::Video;
     let label_artist = video
         .then(|| {
-            crate::also_on::youtube_match::label_artist(
+            label_artist(
                 doc.attributes.get("author").map(String::as_str),
                 doc.description.as_deref(),
             )
         })
-        .flatten()
-        .filter(|a| a.len() <= crate::model::ATTRIBUTE_VALUE_CAP);
-    let label_upload = label_artist.is_some();
+        .flatten();
     match link.level {
-        Level::Video => {
-            if let Some(artist) = label_artist {
-                doc.set_type(Level::Track.type_name());
-                doc.attributes.insert("artist".into(), artist);
-            }
-        }
+        // Its artist is a fact read from the card (`resolver::cards::media_facts`): nothing is
+        // added to the stored document.
+        Level::Video if label_artist.is_some() => doc.set_type(Level::Track.type_name()),
+        Level::Video => {}
         Level::Artist if youtube && !topic() => {}
         Level::Playlist if youtube => {}
         Level::Artist if artist_type == Some("Person") => doc.set_type("Person"),
@@ -460,9 +483,7 @@ pub fn type_card(
             .map(|v| v.trim())
             .filter(|v| !v.is_empty())
     };
-    // A label's upload keeps its own description (none, or YouTube's "Provided to" text naming
-    // its album and label): its artist is a fact (`resolver::cards::media_facts`).
-    if let Some(artist) = attribute("artist").filter(|_| !label_upload) {
+    if let Some(artist) = attribute("artist") {
         let mut parts = vec![artist.to_owned()];
         match link.level {
             Level::Track => {
@@ -1056,10 +1077,6 @@ mod tests {
             model::{ResourceMeta, Status},
             resolver::cards::media_facts,
         };
-        let oembed = |file: &str| -> serde_json::Value {
-            let path = format!("{}/tests/fixtures/media/{file}", env!("CARGO_MANIFEST_DIR"));
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
-        };
         // A card as the media route stores it from the video's oEmbed answer.
         let card = |uri: &str, author: &str, description: Option<&str>| {
             let mut d = ResourceMeta::new(uri, "media", 3600);
@@ -1074,15 +1091,16 @@ mod tests {
             media_facts(d).into_iter().flatten().collect()
         };
         let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
-        let queen = oembed("youtube_match/oembed-bSnlKl_PoQU.json");
-        let queen = queen["author_name"].as_str().unwrap();
+        // The channel YouTube's oEmbed names for Queen's upload of Bohemian Rhapsody.
+        let queen = "Queen - Topic";
         for uri in [
             "https://www.youtube.com/watch?v=bSnlKl_PoQU",
             "https://music.youtube.com/watch?v=bSnlKl_PoQU&si=x",
         ] {
             let topic = card(uri, queen, None);
             assert_eq!(topic.type_name, "MusicRecording", "{uri}");
-            assert_eq!(topic.attributes["artist"], "Queen");
+            // The artist is read from the card, not added to it.
+            assert!(!topic.attributes.contains_key("artist"));
             assert_eq!(
                 (topic.site.as_str(), topic.description.as_deref()),
                 ("YouTube", None)
@@ -1109,8 +1127,7 @@ mod tests {
         assert_eq!(facts(&label), [pair("artist", "Queen")]);
         // Any other video, on YouTube Music too, stays a video: its channel is its author, and a
         // length its page stated is its duration.
-        let rick = oembed("youtube-oembed.json");
-        let rick = rick["author_name"].as_str().unwrap();
+        let rick = "Rick Astley";
         let mut video = card("https://music.youtube.com/watch?v=dQw4w9WgXcQ", rick, None);
         assert_eq!(video.type_name, "VideoObject");
         assert!(!video.attributes.contains_key("artist"));
@@ -1134,6 +1151,8 @@ mod tests {
         let mut vimeo = ResourceMeta::new("https://vimeo.com/76979871", "media", 3600);
         vimeo.set_type("VideoObject");
         vimeo.attributes.insert("author".into(), "Vimeo".into());
+        assert_eq!(facts(&vimeo), [pair("author", "Vimeo")]);
+        vimeo.url = "https://player.vimeo.com/video/76979871".into();
         assert_eq!(facts(&vimeo), [pair("author", "Vimeo")]);
         let mut page = ResourceMeta::new(
             "https://www.youtube.com/channel/UCq19-LqvG35A-30oyAiPiqA",
