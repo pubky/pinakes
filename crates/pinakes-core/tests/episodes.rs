@@ -2194,12 +2194,14 @@ fn read_show(uri: &str, listed: pinakes_core::episodes::Listed) -> ResourceMeta 
     d
 }
 
-/// A read that stops at the item limit (the feed's first 2000 items are looked at) is a cut read:
-/// for a feed that lists oldest first, the stored episodes newer than the part read stay. A
-/// newest-first feed's cut at the limit holds its newest episodes, and the stored older ones it
-/// lacks join under them.
+/// A read that stops at the item limit (the feed's first 2000 items are looked at) is a cut read
+/// when the feed lists oldest first: the stored episodes newer than the part read stay. A
+/// newest-first feed's read stopped at the limit holds its newest episodes and is no cut: it
+/// replaces the stored list, so an episode the feed has taken down goes.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_read_stopped_by_the_item_limit_keeps_the_newer_stored_episodes(pool: PgPool) {
+async fn a_read_stopped_by_the_item_limit_is_cut_only_when_the_feed_lists_oldest_first(
+    pool: PgPool,
+) {
     let uri = "https://feeds.example.org/show.xml";
     let id = show(
         &pool,
@@ -2223,8 +2225,9 @@ async fn a_read_stopped_by_the_item_limit_keeps_the_newer_stored_episodes(pool: 
     assert_eq!(page["truncated"], true, "{page}");
     let (_, page) = request(&app, &format!("/v1/resources/{id}/episodes?offset=999")).await;
     assert_eq!(page["items"][0]["name"], "Episode 1101", "{page}");
-    // A feed newest first whose 2100 items list 500 episodes among notes: the read's first 2000
-    // items hold its newest 500 (1601-2100), and the stored older ones join under them.
+    // A feed newest first whose 2100 items list 499 episodes among notes (1601-2100 but 1650,
+    // which the feed has taken down): the read's first 2000 items hold them all, and the list
+    // replaces the stored one, 1650 and the stored older ones too.
     let newest = "https://feeds.example.org/newest-first.xml";
     let other = show(
         &pool,
@@ -2235,19 +2238,31 @@ async fn a_read_stopped_by_the_item_limit_keeps_the_newer_stored_episodes(pool: 
     assert_eq!(rows(&pool, &other).await, 600);
     let listed = pinakes_core::episodes::from_feed_listed(&fetched_at(
         newest,
-        dated_feed((1..=2100).rev(), |n| n > 1600),
+        dated_feed((1..=2100).rev(), |n| n > 1600 && n != 1650),
     ))
     .unwrap();
-    assert!(listed.cut && !listed.oldest_first);
-    assert_eq!(listed.episodes.len(), 500);
+    assert!(listed.older && !listed.oldest_first);
+    assert!(
+        !listed.cut,
+        "a newest-first read stopped at the limit stands"
+    );
+    assert_eq!(listed.episodes.len(), 499);
     store::save_document(&pool, &other, 0, &read_show(newest, listed))
         .await
         .unwrap();
-    assert_eq!(rows(&pool, &other).await, 1000);
+    assert_eq!(rows(&pool, &other).await, 499);
     let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes")).await;
     assert_eq!(page["items"][0]["name"], "Episode 2100", "{page}");
-    let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes?offset=999")).await;
-    assert_eq!(page["items"][0]["name"], "Episode 1101", "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes?q=1650")).await;
+    assert_eq!(
+        page["items"].as_array().map(Vec::len),
+        Some(0),
+        "taken down: {page}"
+    );
+    let (_, page) = request(&app, &format!("/v1/resources/{other}/episodes?offset=498")).await;
+    assert_eq!(page["items"][0]["name"], "Episode 1601", "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1, "{page}");
 }
 
 /// A feed card's cut read whose read on gave nothing (`ResourceMeta::episodes_cut`: too slow, or

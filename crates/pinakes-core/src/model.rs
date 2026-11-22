@@ -529,11 +529,12 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_older: bool,
-    /// `episodes` is a cut read's list: a feed read that stopped before the feed ended
-    /// (`episodes::Listed::cut`: cut at its cap, or past the items looked at), such as a feed
-    /// card's whose read on gave nothing this time (`resolver::cards`: too slow, or the read
-    /// failed or did not parse). The save joins the other episodes a stored list holds to it
-    /// (`episodes::store`). Never stored in the document.
+    /// `episodes` is a cut read's list (`episodes::Listed::cut`): a feed card's whose read on
+    /// gave nothing this time (`resolver::cards`: too slow, or the read failed or did not parse),
+    /// a read within the page cap of a feed that did not parse past it, or an oldest-first feed's
+    /// read that stopped before the feed ended (cut at its cap, or past the items looked at). The
+    /// save joins the other episodes a stored list holds to it (`episodes::store`). Never stored
+    /// in the document.
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_cut: bool,
