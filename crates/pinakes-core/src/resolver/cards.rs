@@ -1715,6 +1715,30 @@ mod tests {
         assert!(!d.episodes_older, "the whole feed was read");
         assert!(!d.episodes_cut, "the longer read's list");
         assert_eq!(recorded.asked(), [uri]);
+        // A longer read that stops before the feed ends (past the item cap) is a cut read.
+        let capped = CardConfig {
+            podcast_items: 200,
+            ..CardConfig::default()
+        };
+        let (egress, _) = feed(&whole);
+        let d = enrich(
+            uri,
+            &cut(uri),
+            ResourceMeta::new(uri, "web", 100),
+            None,
+            &egress,
+            &capped,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            d.episodes.as_ref().map(Vec::len),
+            Some(200),
+            "the longer read's"
+        );
+        assert!(d.episodes_older);
+        assert!(d.episodes_cut, "the longer read stopped at the item cap");
         // Not read again: the cut read's list stands.
         let (egress, recorded) =
             crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);

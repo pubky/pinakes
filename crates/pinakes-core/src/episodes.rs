@@ -543,9 +543,8 @@ fn bounded(mut s: String, max: usize) -> String {
 /// path that replaces a document passes here: a save, a clear): a list replaces the show's rows
 /// whole; a document that is no podcast show, or a show found missing or cleared, clears them;
 /// a show's document without a list (a record read without its feed) leaves them as they are.
-/// A cut read's list (`ResourceMeta::episodes_cut`: the read stopped before the feed ended, or a
-/// feed card's read on gave nothing) is joined by the stored list's other episodes
-/// ([`under_stored`]).
+/// A cut read's list (`ResourceMeta::episodes_cut`: the read stopped before the feed ended) is
+/// joined by the stored list's other episodes ([`under_stored`]).
 ///
 /// `stored`: the show the stored card named ([`stored_show`], read before the document replaced
 /// it).
