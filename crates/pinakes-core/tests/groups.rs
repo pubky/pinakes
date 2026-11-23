@@ -676,6 +676,23 @@ async fn forged_or_colon_uids_never_join_across_feeds(pool: PgPool) {
         reconciled(&pool, id, &cfg).await;
     }
     drained(&pool, &cfg).await;
+    // The forger and the third feed share the keys of their two equal UIDs; the forged UID
+    // shares none with the victim.
+    let shared = |a: String, b: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(DISTINCT x.key) FROM resource_group x JOIN resource_group y ON y.key=x.key WHERE x.key LIKE 'ics_uid:%' AND x.resource_id=$1 AND y.resource_id=$2",
+            )
+            .bind(a)
+            .bind(b)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(shared(forger.clone(), third.clone()).await, 2);
+    assert_eq!(shared(forger.clone(), victim.clone()).await, 0);
     // Reconciled: the forger and the third feed share two UIDs, names, place and start, and
     // still stay apart; the forged UID never reaches the victim.
     assert_eq!(
@@ -1571,6 +1588,44 @@ async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
             .unwrap(),
         1
     );
+}
+
+/// An instance whose stored policy names the removed `cross_container_occurrences` (every one
+/// that ran a build with the setting, `off` or `corroborated`) re-queues every membership once
+/// on its first start with the fixed rule, then settles: the next start re-queues nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stored_policy_naming_the_removed_uid_setting_requeues_once(pool: PgPool) {
+    let (a, _) = save(&pool, "member", &[], None).await;
+    let cfg = groups::GroupConfig::default();
+    let dirty = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT coalesce(array_agg(resource_id ORDER BY resource_id),'{}') FROM group_dirty",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    for mode in ["off", "corroborated"] {
+        let mut old = cfg.policy();
+        old["cross_container_occurrences"] = json!(mode);
+        sqlx::query("UPDATE group_runtime SET settings=$1 WHERE id")
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM group_dirty")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(groups::configure(&pool, &cfg).await.unwrap(), "{mode}");
+        assert_eq!(dirty(pool.clone()).await, [a.clone()], "{mode}");
+        sqlx::query("DELETE FROM group_dirty")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!groups::configure(&pool, &cfg).await.unwrap(), "{mode}");
+        assert!(dirty(pool.clone()).await.is_empty(), "{mode}");
+    }
 }
 
 fn recorded_json(url: &str, body: &[u8]) -> pinakes_core::resolver::egress::Fetched {

@@ -1555,11 +1555,17 @@ mod tests {
     /// Units for the UID rule, all dated at one instant and named alike, joined by one
     /// `ics_uid:` key, with the default (and only) grouping rules.
     fn uid_join(units: &[UidUnit]) -> Joined {
-        let at = chrono::DateTime::from_timestamp(1_800_000_000, 0);
+        uid_join_at(units, &vec![0; units.len()])
+    }
+    /// `uid_join`, each unit starting the given seconds after one instant.
+    fn uid_join_at(units: &[UidUnit], offsets: &[i64]) -> Joined {
         let n = units.len();
         let names: Vec<String> = (0..n).map(|i| format!("u{i}")).collect();
         let points: Vec<_> = units.iter().map(|u| u.2).collect();
-        let starts = vec![at; n];
+        let starts: Vec<_> = offsets
+            .iter()
+            .map(|s| chrono::DateTime::from_timestamp(1_800_000_000 + s, 0))
+            .collect();
         let occurrences: Vec<bool> = units.iter().map(|u| u.1).collect();
         let calendars: Vec<_> = units
             .iter()
@@ -1631,6 +1637,13 @@ mod tests {
             (located, true, here),
         ]);
         assert!(same(&mut joined, 0, 1) && !same(&mut joined, 1, 2) && !same(&mut joined, 0, 2));
+        // A UID its calendar repeats (a series): the page joins only the instance at its own
+        // start, within 300 s, and the series' other instance stays apart.
+        let units = [(page, false, None), (feed, true, None), (feed, true, None)];
+        let mut joined = uid_join_at(&units, &[0, 240, 86_400]);
+        assert!(same(&mut joined, 0, 1) && !same(&mut joined, 0, 2) && !same(&mut joined, 1, 2));
+        let mut joined = uid_join_at(&units[..2], &[0, 301]);
+        assert!(!same(&mut joined, 0, 1));
         // Too far apart for a page and its organiser's calendar too (`max_distance_m`).
         let mut joined = uid_join(&[(page, false, here), (feed, true, Some((46.0, 7.0)))]);
         assert!(!same(&mut joined, 0, 1));

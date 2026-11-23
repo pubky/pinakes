@@ -284,8 +284,8 @@ UPDATE resource SET dead_letter=false, attempts=0, timeout_streak=0, last_error=
 daemon stopped and reads the whole route again.
 
 **Grouping rebuild.** The daemon stores its grouping policy (its limits) and re-queues every
-membership when it changes, so a changed grouping limit or rule takes effect as that queue
-drains. To rebuild by hand:
+membership when it changes, so a changed grouping setting takes effect as that queue drains.
+To rebuild by hand:
 
 ```sql
 DELETE FROM group_input;

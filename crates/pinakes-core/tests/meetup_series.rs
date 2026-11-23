@@ -491,13 +491,12 @@ async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
     assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
 }
 
-/// The join needs no setting: with the configuration loaded from no file, the page and its own
-/// date in the group's calendar are one group, and its card says so.
+/// The join needs no setting: with the default configuration, the page and its own date in the
+/// group's calendar are one group, and its card says so.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_date_page_joins_its_calendar_with_no_grouping_setting(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
-    let config = Config::load(None).unwrap();
-    assert!(config.ignored.is_empty());
+    let config = Config::default();
     let cfg = config.queue.clone();
     read(&pool, &r, &cfg, &numeric()).await;
     let token_id = read(&pool, &r, &cfg, &token()).await;
