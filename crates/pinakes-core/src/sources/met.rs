@@ -157,6 +157,10 @@ impl Source for Met {
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("met:") && from_root(uri).is_none()
     }
+    /// The work's Wikidata item, as the museum's record names it.
+    fn own_ids(&self) -> &'static [super::kit::OwnId] {
+        &[super::kit::OwnId::Wikidata]
+    }
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
@@ -290,6 +294,18 @@ mod tests {
         assert_eq!(card.id, "met:436532");
         assert!(card.image.is_some());
         assert_eq!(card.details["artist"], "Vincent van Gogh");
+    }
+
+    /// The work's Wikidata item joins groups; its artist's item is another object and stays the
+    /// fact `artist_wikidata`.
+    #[test]
+    fn the_works_wikidata_item_joins() {
+        use crate::sources::kit::{checked, own_keys};
+        let card = parse(200, &read("object-436535.json"), 436535)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_keys(&Met, &card), ["wikidata:Q18689458"]);
+        assert_eq!(checked(&Met, &card).attributes["artist_wikidata"], "Q5582");
     }
 
     #[test]

@@ -411,6 +411,20 @@ mod tests {
         }
     }
 
+    /// An entry's DOI is a fact that joins no group.
+    #[test]
+    fn its_doi_joins_nothing() {
+        use crate::sources::kit::{checked, own_keys};
+        let card = parse(200, &read("entry-4hhb.json"), "4HHB")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            checked(&Pdb, &card).attributes["doi"],
+            "10.2210/pdb4hhb/pdb"
+        );
+        assert_eq!(own_keys(&Pdb, &card), Vec::<String>::new());
+    }
+
     #[test]
     fn documents() {
         for (file, id) in [("entry-4hhb.json", "4HHB"), ("entry-6vxx.json", "6VXX")] {

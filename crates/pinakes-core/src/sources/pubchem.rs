@@ -483,6 +483,17 @@ mod tests {
         }
     }
 
+    /// A compound's InChIKey is a fact that joins no group.
+    #[test]
+    fn its_inchikey_joins_nothing() {
+        use crate::sources::kit::{checked, own_keys};
+        let card = parse(200, &read("compound-2244.json"), 2244)
+            .unwrap()
+            .unwrap();
+        assert!(checked(&Pubchem, &card).attributes.contains_key("inchikey"));
+        assert_eq!(own_keys(&Pubchem, &card), Vec::<String>::new());
+    }
+
     #[test]
     fn documents() {
         for (file, cid) in [("compound-2244.json", 2244), ("compound-2519.json", 2519)] {

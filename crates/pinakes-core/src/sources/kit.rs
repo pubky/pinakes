@@ -1,6 +1,6 @@
 //! What the data sources share on top of `super`: the request a builder returns, the card a
-//! parser returns (with its conversion to a resource document), exact keys and derived links,
-//! and small readers for JSON values.
+//! parser returns (with its conversion to a resource document), the ids a record states (`Key`)
+//! and derived links, and small readers for JSON values.
 //!
 //! Builders and parsers perform no I/O. A builder returns the `Request` to send; `fetch` sends it
 //! through Egress and the status and body go to the matching parser. The sources that read one
@@ -144,8 +144,9 @@ pub async fn fetch(cx: &Context<'_>, request: &Request) -> Result<Fetched> {
     cx.fetch(request.url.as_str(), &request.options()).await
 }
 
-/// An exact join key, `{namespace}:{value}`, e.g. `doi:10.5281/zenodo.1234567` or
-/// `wikidata:Q12418`.
+/// An id of the object that its record states, `{namespace}:{value}`, e.g.
+/// `doi:10.5281/zenodo.1234567` or `wikidata:Q12418`: a fact of its card (`Card::into_doc`).
+/// Only the namespaces its source declares its own (`Source::own_ids`) also join groups.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(String);
 impl Key {
@@ -160,6 +161,18 @@ impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// A namespace of a source's ids ([`Key`]) whose values join groups (`Source::own_ids`): the
+/// service's own record of its own id. Every other id of the card stays a fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnId {
+    /// A DOI the service issued itself: one under this prefix, in lower case and ending at a
+    /// separator, e.g. `10.5281/zenodo.`. A DOI under another prefix (a publisher's, which the
+    /// depositor typed) stays a fact.
+    Doi(&'static str),
+    /// The Wikidata item that the service's own record names for the object (`wikidata:Q…`).
+    Wikidata,
 }
 
 /// A point, in degrees.
@@ -203,7 +216,7 @@ pub struct Card {
     pub attribution: Option<String>,
     /// Source-specific values (magnitude, licence, capacity…), by stable name.
     pub details: BTreeMap<&'static str, Value>,
-    /// Other ids of the same object that it proves, e.g. `doi:…`.
+    /// Other ids of the same object that its record states, e.g. `doi:…` ([`Key`]).
     pub keys: Vec<Key>,
     /// The objects it points at (`model::Related`), in the order a client lists them.
     pub related: Vec<crate::model::Related>,
@@ -380,6 +393,19 @@ pub fn checked(source: &dyn super::Source, card: &Card) -> ResourceMeta {
         "related totals changed"
     );
     bounded
+}
+
+/// The join keys of a parsed card's document (`super::own_keys`, the document `checked`), each
+/// via `source`; none when it has none.
+#[cfg(test)]
+pub fn own_keys(source: &dyn super::Source, card: &Card) -> Vec<String> {
+    match super::own_keys(&checked(source, card)) {
+        Some((via, keys)) => {
+            assert_eq!(via, source.name());
+            keys
+        }
+        None => vec![],
+    }
 }
 
 /// The body of a response, `None` for a status that means "no such object", or an error.

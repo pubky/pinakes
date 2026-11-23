@@ -257,6 +257,10 @@ impl Source for Figshare {
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("figshare:") && from_root(uri).is_none()
     }
+    /// Figshare's own article DOIs. A publisher's DOI on a portal article stays a fact.
+    fn own_ids(&self) -> &'static [super::kit::OwnId] {
+        &[super::kit::OwnId::Doi("10.6084/m9.figshare.")]
+    }
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
@@ -505,6 +509,42 @@ mod tests {
             [Key::new("doi", "10.3389/fmars.2026.1969697.s001")]
         );
         assert!(card.image.is_some());
+    }
+
+    /// Figshare's own article DOI joins groups; a version DOI and a publisher's DOI on a portal
+    /// article stay facts.
+    #[test]
+    fn only_figshares_own_dois_join() {
+        use crate::sources::kit::{checked, own_keys};
+        for (file, id, key) in [
+            (
+                "article-1018700.json",
+                1018700,
+                "doi:10.6084/m9.figshare.1018700",
+            ),
+            (
+                "article-5616445.json",
+                5616445,
+                "doi:10.6084/m9.figshare.5616445",
+            ),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            assert_eq!(own_keys(&Figshare, &card), [key], "{file}");
+        }
+        let card = parse(200, &read("article-5616445.json"), 5616445)
+            .unwrap()
+            .unwrap();
+        let doc = checked(&Figshare, &card);
+        assert_eq!(
+            doc.attributes["version_doi"],
+            "10.6084/m9.figshare.5616445.v2"
+        );
+        let card = parse(200, &read("article-34700883.json"), 34700883)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_keys(&Figshare, &card), Vec::<String>::new());
+        let doc = checked(&Figshare, &card);
+        assert_eq!(doc.attributes["doi"], "10.3389/fmars.2026.1969697.s001");
     }
 
     #[test]

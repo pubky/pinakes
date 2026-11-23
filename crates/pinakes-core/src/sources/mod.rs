@@ -194,6 +194,12 @@ pub trait Source: Send + Sync {
     fn facts(&self) -> &'static [&'static str] {
         &[]
     }
+    /// The namespaces of its cards' ids (`kit::Card::key`) that join groups ([`own_keys`]):
+    /// its own DOIs, by the prefix it issues them under, or the Wikidata item its record names.
+    /// Every other id stays a fact.
+    fn own_ids(&self) -> &'static [kit::OwnId] {
+        &[]
+    }
     /// The facts of its stored card a read of the link sees again (`Context::stored`): what an
     /// earlier read learnt that the link alone does not say. Each is one of `facts`.
     fn reads_back(&self) -> &'static [&'static str] {
@@ -829,6 +835,41 @@ pub fn token_refusals() -> Vec<(&'static str, u64)> {
 
 pub fn by_name(name: &str) -> Option<&'static dyn Source> {
     REGISTRY.iter().copied().find(|s| s.name() == name)
+}
+/// The join keys of a card an official source read, and that source: its facts in the
+/// namespaces the source declares its own ([`Source::own_ids`]). A DOI is normalized
+/// (`resolver::cards::doi`, lower case) before its prefix is checked; a Wikidata item is
+/// `wikidata:Q…`. `None` when there are none, and for a card of a page hook: what a page says
+/// about itself joins nothing.
+pub fn own_keys(doc: &ResourceMeta) -> Option<(&'static str, Vec<String>)> {
+    let source = by_name(&doc.source).filter(|s| !s.hooks_pages())?;
+    let values = |name: &str| -> Vec<String> {
+        doc.attributes
+            .get(name)
+            .map(|v| v.split("; ").map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let mut keys = vec![];
+    for own in source.own_ids() {
+        match own {
+            kit::OwnId::Doi(prefix) => keys.extend(
+                values("doi")
+                    .iter()
+                    .filter_map(|d| crate::resolver::cards::doi(&format!("doi:{}", d.trim())))
+                    .filter(|d| d.starts_with(prefix))
+                    .map(|d| format!("doi:{d}")),
+            ),
+            kit::OwnId::Wikidata => keys.extend(
+                values("wikidata")
+                    .iter()
+                    .filter_map(|q| crate::hubs::qid(q.trim()))
+                    .map(|q| format!("wikidata:{q}")),
+            ),
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    (!keys.is_empty()).then_some((source.name(), keys))
 }
 /// The source that reads `uri`, switched on or not.
 pub fn reading(uri: &str) -> Option<&'static dyn Source> {
@@ -1474,6 +1515,64 @@ mod tests {
     fn repo(path: &str) -> String {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// A source's own DOI prefix is a DOI prefix in lower case that ends at a separator, so it
+    /// takes no other registrant's DOIs; an id it declares is one of its facts; a page hook
+    /// declares none.
+    #[test]
+    fn own_ids_are_facts_and_whole_prefixes() {
+        for source in REGISTRY {
+            for own in source.own_ids() {
+                let fact = match own {
+                    kit::OwnId::Doi(prefix) => {
+                        let doi = crate::resolver::cards::doi(&format!("doi:{prefix}1"));
+                        assert_eq!(doi, Some(format!("{prefix}1")), "{}", source.name());
+                        assert!(prefix.ends_with(['.', '/']), "{}: {prefix}", source.name());
+                        "doi"
+                    }
+                    kit::OwnId::Wikidata => "wikidata",
+                };
+                assert!(source.facts().contains(&fact), "{}", source.name());
+                assert!(!source.hooks_pages(), "{}", source.name());
+            }
+        }
+    }
+
+    /// The join keys of a card: its own ids, each normalized, and none of a card that no
+    /// official source read or that a page hook made.
+    #[test]
+    fn own_keys_read_the_declared_facts() {
+        let Some((source, prefix)) = REGISTRY.iter().find_map(|s| {
+            s.own_ids().iter().find_map(|o| match o {
+                kit::OwnId::Doi(prefix) => Some((*s, *prefix)),
+                kit::OwnId::Wikidata => None,
+            })
+        }) else {
+            return;
+        };
+        let mut doc = ResourceMeta::new("https://example.org/r/1", source.name(), 60);
+        let own = format!("{}1", prefix.to_ascii_uppercase());
+        doc.attributes
+            .insert("doi".into(), format!("10.1000/other; {own}; {prefix}1"));
+        let (via, keys) = own_keys(&doc).unwrap();
+        assert_eq!(via, source.name());
+        assert_eq!(keys, [format!("doi:{prefix}1")]);
+        doc.attributes.insert("doi".into(), "10.1000/other".into());
+        assert_eq!(own_keys(&doc), None);
+        for name in ["web", "jsonld"] {
+            let mut doc = doc.clone();
+            doc.source = name.into();
+            doc.attributes.insert("doi".into(), format!("{prefix}1"));
+            assert_eq!(own_keys(&doc), None, "{name}");
+        }
+        if let Some(hook) = REGISTRY.iter().find(|s| s.hooks_pages()) {
+            let mut doc = doc.clone();
+            doc.source = hook.name().into();
+            doc.attributes.insert("doi".into(), format!("{prefix}1"));
+            doc.attributes.insert("wikidata".into(), "Q42".into());
+            assert_eq!(own_keys(&doc), None, "{}", hook.name());
+        }
     }
 
     /// Everything that reads with an operator's credential has its refusals series: each official

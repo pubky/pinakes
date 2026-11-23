@@ -211,6 +211,10 @@ impl Source for Cleveland {
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("cleveland:") && from_root(uri).is_none()
     }
+    /// The work's Wikidata item, as the museum's record names it.
+    fn own_ids(&self) -> &'static [super::kit::OwnId] {
+        &[super::kit::OwnId::Wikidata]
+    }
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
@@ -384,6 +388,19 @@ mod tests {
         assert_eq!(card.name.as_deref(), Some("Adeline Ravoux"));
         assert_eq!(card.details["former_accession_numbers"][0], "1642.43");
         assert_eq!(card.keys, [Key::new("wikidata", "Q26221230")]);
+    }
+
+    /// The work's Wikidata item joins groups.
+    #[test]
+    fn the_works_wikidata_item_joins() {
+        use crate::sources::kit::own_keys;
+        for (file, artwork, key) in [
+            ("artwork-1958.39.json", acc("1958.39"), "wikidata:Q50772913"),
+            ("artwork-1958.31.json", acc("1958.31"), "wikidata:Q26221230"),
+        ] {
+            let card = parse(200, &read(file), &artwork).unwrap().unwrap();
+            assert_eq!(own_keys(&Cleveland, &card), [key], "{file}");
+        }
     }
 
     #[test]
