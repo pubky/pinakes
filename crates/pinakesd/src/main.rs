@@ -248,6 +248,9 @@ async fn start(
     pinakes_core::resolver::html::check_worker()
         .context("the parse worker (`pinakesd parse-worker`) does not run")?;
     let config = Config::load(config.as_deref())?;
+    for key in &config.ignored {
+        tracing::warn!(key, "config key ignored: this build no longer reads it");
+    }
     pinakes_core::configure_sources(&config);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(POOL_CONNECTIONS)

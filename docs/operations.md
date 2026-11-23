@@ -283,9 +283,9 @@ UPDATE resource SET dead_letter=false, attempts=0, timeout_streak=0, last_error=
 `dead_letter=false`, `attempts=0`, `timeout_streak=0` and `last_error=NULL`. It runs with the
 daemon stopped and reads the whole route again.
 
-**Grouping rebuild.** The daemon stores its grouping policy (its limits and mode) and
-re-queues every membership when it changes, so a changed `groups.cross_container_occurrences`
-takes effect as that queue drains. To rebuild by hand:
+**Grouping rebuild.** The daemon stores its grouping policy (its limits) and re-queues every
+membership when it changes, so a changed grouping limit or rule takes effect as that queue
+drains. To rebuild by hand:
 
 ```sql
 DELETE FROM group_input;
@@ -1134,15 +1134,15 @@ run did not finish keeps each member's group, and no other set takes that group'
 stopped run so does every set that `limits.group_max_members` kept from joining another, since a
 resumed run meets the keys in another order. A member deleted by orphan expiry leaves its group
 at once. Writer lock contention retries after one to three seconds; curation waits up to two
-seconds and answers 503 with Retry-After. `groups.cross_container_occurrences = "corroborated"`
-also joins one UID across feeds when the instances are within 500 m, 300 s and a name similarity
-of 0.5; a determined publisher can copy that, so the code default is `off`. `pinakes.example.toml`
-sets `"corroborated"`: the Meetup join below needs that mode, and the general join still needs both
-feeds to agree on the place, the start and the name. In that mode an event page
-also joins the occurrence with its own calendar file's UID in the organiser calendar its platform
-names for it (a Meetup date's group calendar), within 300 s, without the place and name checks.
-A page's calendar file gives its UID only when answered from the page's own URL origin (scheme,
-host and port, after redirects), on every route.
+seconds and answers 503 with Retry-After. One ICS UID joins across containers in one case only,
+with no setting: an event page and the occurrence with its own calendar file's UID in the
+organiser calendar its platform names for it (a Meetup date's group calendar), within 300 s,
+without place and name checks. Two feeds or two publishers never join on a UID, since a
+publisher can copy another's UID, place, start and name; they get at most the possibly-the-same
+hint (`event.same_event_hint`). A page's calendar file gives its UID only when answered from the
+page's own URL origin (scheme, host and port, after redirects), on every route.
+`groups.cross_container_occurrences` is not a setting: a configuration that still sets it
+starts, and the daemon logs one warning naming the key as ignored.
 
 `groups.same_recording_hint` (default `"on"`; `"off"`) puts `maybe_same` on `MusicRecording`
 cards: other recordings that are possibly the same one ([the

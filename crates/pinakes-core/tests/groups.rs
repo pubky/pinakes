@@ -574,7 +574,7 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn recurring_uid_is_scoped_to_start_and_a_page_joins_only_when_corroborated(pool: PgPool) {
+async fn a_recurring_uid_is_scoped_to_start_and_another_publishers_page_never_joins(pool: PgPool) {
     use pinakes_core::{config::EventConfig, event::calendar};
     let date = chrono::Utc::now() + chrono::Duration::days(1);
     let feed = "https://example.org/test.ics";
@@ -610,42 +610,26 @@ async fn recurring_uid_is_scoped_to_start_and_a_page_joins_only_when_corroborate
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 0); // Default off: a page's copied UID cannot join a feed.
-    let cfg = groups::GroupConfig {
-        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
-        ..Default::default()
-    };
-    assert!(reconciled(&pool, &page, &cfg).await);
-    assert_ne!(gid(&pool, &page).await, page);
+    // Another publisher's page with the feed's UID, name, place and start: no join, as it
+    // names no organiser calendar of the feed's (only an event page and its own calendar join
+    // on a UID).
+    assert_eq!(count, 0);
+    let cfg = groups::GroupConfig::default();
+    reconciled(&pool, &page, &cfg).await;
     drained(&pool, &cfg).await;
+    assert_eq!(gid(&pool, &page).await, page);
+    let grouped: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(grouped, 0);
     let count: i64 = sqlx::query_scalar("SELECT count(DISTINCT coalesce(group_id,unit_id)) FROM group_unit WHERE resource_id=$1 AND occurrence_key<>''")
         .bind(&id).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 2);
-    let members: i64 = sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id=$1")
-        .bind(gid(&pool, &page).await)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(members, 2);
-    // The occurrence route names the joined instance's group, as every card does.
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
-    let joined = json!(gid(&pool, &page).await);
-    let items = get(&app, &format!("/v1/resources/{id}/occurrences")).await["items"].clone();
-    let groups: Vec<&Value> = items
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|o| &o["group"])
-        .collect();
-    assert_eq!(
-        groups.iter().filter(|g| g["id"] == joined).count(),
-        1,
-        "{items}"
-    );
-    assert_eq!(groups.iter().filter(|g| g.is_null()).count(), 1, "{items}");
 }
 /// A UID is free text: a NIP-52 coordinate, a URN or `{feed}:{uid}` never spells another
-/// feed's key, and no UID joins across feeds unless the corroborated mode is on.
+/// feed's key, and no UID joins two feeds, even with equal UIDs, names, places and starts.
 #[sqlx::test(migrations = "../../migrations")]
 async fn forged_or_colon_uids_never_join_across_feeds(pool: PgPool) {
     use pinakes_core::{config::EventConfig, event::calendar};
@@ -686,29 +670,19 @@ async fn forged_or_colon_uids_never_join_across_feeds(pool: PgPool) {
             .await
             .unwrap()
     };
-    assert_eq!(
-        grouped(pool.clone()).await,
-        0,
-        "the default mode never joins feeds"
-    );
-    let cfg = groups::GroupConfig {
-        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
-        ..Default::default()
-    };
+    assert_eq!(grouped(pool.clone()).await, 0, "saved feeds never join");
+    let cfg = groups::GroupConfig::default();
     for id in [&victim, &forger, &third] {
         reconciled(&pool, id, &cfg).await;
     }
     drained(&pool, &cfg).await;
-    // Corroborated: the two equal UIDs join pairwise; the forged one never reaches the victim.
-    let groups: Vec<(i64, Vec<String>)> = sqlx::query_as(
-        "SELECT count(*),array_agg(DISTINCT resource_id ORDER BY resource_id) FROM group_unit WHERE group_id IS NOT NULL GROUP BY group_id",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    let mut pair = vec![forger.clone(), third.clone()];
-    pair.sort();
-    assert_eq!(groups, vec![(2, pair.clone()), (2, pair)]);
+    // Reconciled: the forger and the third feed share two UIDs, names, place and start, and
+    // still stay apart; the forged UID never reaches the victim.
+    assert_eq!(
+        grouped(pool.clone()).await,
+        0,
+        "reconciled feeds never join"
+    );
 }
 /// Saves the calendar feed `uri` with one event per `(uid, summary)`, each at `date` and at one
 /// place: the feed's ID.
@@ -732,12 +706,10 @@ async fn calendar_feed(pool: &PgPool, uri: &str, date: &str, events: &[(&str, &s
     store_document(pool, &id, &d).await;
     id
 }
-/// In the corroborated mode one UID joins two feeds' events only when their names are alike
-/// too: at one time and place, the pair with one name joins and the pair with unlike names
-/// stays apart. Alike is half of the names' trigrams in common: a pair at exactly half joins,
-/// one just under it does not.
+/// One UID never joins two feeds' events, at one time and place and under one name: two
+/// publishers' calendars stay apart (the possibly-the-same hint is their only link).
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_uid_joins_two_feeds_only_under_like_names(pool: PgPool) {
+async fn a_uid_never_joins_two_feeds_under_one_name(pool: PgPool) {
     let date = (chrono::Utc::now() + chrono::Duration::days(1))
         .format("%Y%m%dT%H%M%SZ")
         .to_string();
@@ -745,46 +717,35 @@ async fn a_uid_joins_two_feeds_only_under_like_names(pool: PgPool) {
         &pool,
         "https://one.example/a.ics",
         &date,
-        &[
-            ("alike", "Harbour jazz night"),
-            ("unlike", "Harbour jazz night"),
-            // Against "Alpha" (6 trigrams): 6 of 12 in common, and 6 of 13.
-            ("half", "Alpha Gamma"),
-            ("under", "Alpha Gammas"),
-        ],
+        &[("alike", "Harbour jazz night"), ("same", "Alpha")],
     )
     .await;
     let other = calendar_feed(
         &pool,
         "https://other.example/b.ics",
         &date,
-        &[
-            ("alike", "Harbour Jazz Night"),
-            ("unlike", "Annual budget meeting"),
-            ("half", "Alpha"),
-            ("under", "Alpha"),
-        ],
+        &[("alike", "Harbour Jazz Night"), ("same", "Alpha")],
     )
     .await;
-    let cfg = groups::GroupConfig {
-        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
-        ..Default::default()
-    };
+    let cfg = groups::GroupConfig::default();
     for id in [&one, &other] {
         reconciled(&pool, id, &cfg).await;
     }
     drained(&pool, &cfg).await;
-    // Each group: its events' UID, its size, and how many feeds it spans.
-    let joined: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT occurrence->>'uid',count(*),count(DISTINCT resource_id) FROM group_unit WHERE group_id IS NOT NULL GROUP BY group_id,occurrence->>'uid' ORDER BY 1",
+    // Both feeds hold each UID's key, so the key reached both: the join refused them.
+    let shared: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT key FROM resource_group WHERE key LIKE 'ics_uid:%' GROUP BY key HAVING count(DISTINCT resource_id)=2) k",
     )
-    .fetch_all(&pool)
+    .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        joined,
-        [("alike".to_owned(), 2, 2), ("half".to_owned(), 2, 2)]
-    );
+    assert_eq!(shared, 2);
+    let joined: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(joined, 0);
 }
 use chrono::Timelike;
 
@@ -964,7 +925,7 @@ async fn curated_members_stay_as_curated_through_saves_and_a_policy_change(pool:
     assert_eq!(gids(&pool, &all).await, curated, "a bridged card saved");
     // A policy change runs every unit again.
     let cfg = groups::GroupConfig {
-        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        max_distance_m: 400.0,
         ..Default::default()
     };
     assert!(groups::configure(&pool, &cfg).await.unwrap());
@@ -1175,7 +1136,7 @@ async fn a_curated_occurrence_stays_as_curated_and_a_member_named_twice_is_set_o
     );
     // A policy change runs every unit again.
     let cfg = groups::GroupConfig {
-        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        max_distance_m: 400.0,
         ..Default::default()
     };
     assert!(groups::configure(&pool, &cfg).await.unwrap());
@@ -1599,7 +1560,7 @@ async fn curation_waits_for_writer_and_policy_changes_redirty(pool: PgPool) {
         .unwrap();
     assert!(!groups::configure(&pool, &Default::default()).await.unwrap());
     let cfg = groups::GroupConfig {
-        cross_container_occurrences: groups::CrossContainerOccurrences::Corroborated,
+        max_distance_m: 400.0,
         ..Default::default()
     };
     assert!(groups::configure(&pool, &cfg).await.unwrap());

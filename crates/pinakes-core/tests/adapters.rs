@@ -5618,8 +5618,8 @@ async fn link_sources_follow_tombstones_relinks_and_shared_sites(pool: PgPool) {
     assert_eq!(link("https://example.org/new").await, Some(far));
 }
 
-/// An event page inherits its single-event calendar file's UID (the corroborated mode's
-/// evidence) only when the file is on the page's own origin, not on a host a redirect took the
+/// An event page inherits its single-event calendar file's UID (the evidence that joins it to
+/// its organiser calendar's date) only when the file is on the page's own origin, not on a host a redirect took the
 /// page to.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_page_inherits_an_ics_uid_only_from_its_own_origin(pool: PgPool) {

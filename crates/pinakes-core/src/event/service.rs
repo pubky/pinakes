@@ -401,8 +401,8 @@ impl EventService {
                                 event.source = "ics".into();
                             }
                             super::page::merge_missing(&mut event, fallback)?;
-                            // The UID joins (in the corroborated mode) only when the link is on
-                            // the page's own origin, not where a redirect took the page, and the
+                            // The UID joins the page to its organiser calendar's date only
+                            // when the link is on the page's own origin, not where a redirect took the page, and the
                             // file was answered from the page's own URL origin (scheme, host and
                             // port, after redirects).
                             if let Some(uid) = c

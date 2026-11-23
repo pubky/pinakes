@@ -86,7 +86,14 @@ pub struct Config {
     /// finish.
     #[serde(skip)]
     pub shutdown_grace_secs: u64,
+    /// The [`RETIRED`] keys the file or a `PINAKES__…` override still set, which this build
+    /// ignores; the daemon warns once per key at startup.
+    #[serde(skip)]
+    pub ignored: Vec<&'static str>,
 }
+/// Keys this build no longer reads. A configuration that still sets one loads, without it, and
+/// names it in `Config::ignored`.
+pub const RETIRED: &[&str] = &["groups.cross_container_occurrences"];
 impl Default for Config {
     fn default() -> Self {
         let mut config = Self::base();
@@ -329,6 +336,13 @@ fn apply_override(value: &mut serde_json::Value, key: &str, val: String) -> Resu
             .insert(last.to_string(), new);
         return Ok(());
     }
+    if node.get(last).is_none() && RETIRED.contains(&parts.join(".").as_str()) {
+        // Set as written, so `Config::from_value` takes it out and names it as ignored.
+        node.as_object_mut()
+            .context("unknown config section")?
+            .insert(last.to_string(), serde_json::Value::String(val));
+        return Ok(());
+    }
     let target = node.get_mut(last).context("unknown config key")?;
     *target = if target.is_string() || (target.is_null() && val != "null") {
         serde_json::Value::String(val)
@@ -386,6 +400,7 @@ impl Config {
             preview: PreviewConfig::default(),
             api: ApiConfig::default(),
             shutdown_grace_secs: 30,
+            ignored: Vec::new(),
         }
     }
 }
@@ -1002,11 +1017,23 @@ impl Config {
         Ok(value)
     }
     /// A configuration from its file form (sections plus `[limits]`), validated.
-    pub fn from_value(value: serde_json::Value) -> Result<Self> {
+    pub fn from_value(mut value: serde_json::Value) -> Result<Self> {
+        let mut ignored = Vec::new();
+        for key in RETIRED {
+            let (section, name) = key
+                .split_once('.')
+                .expect("a retired key names its section");
+            if let Some(section) = value.get_mut(section).and_then(|v| v.as_object_mut()) {
+                if section.remove(name).is_some() {
+                    ignored.push(*key);
+                }
+            }
+        }
         let mut cfg: Self = match serde_json::from_value(value.clone()) {
             Ok(cfg) => cfg,
             Err(error) => return Err(shape_error(&value, &error)),
         };
+        cfg.ignored = ignored;
         cfg.nexus_authorization = cfg
             .nexus_authorization
             .take()
@@ -1898,24 +1925,14 @@ mod tests {
     }
     #[test]
     fn operator_choices_reach_workers() {
-        let cfg = with(serde_json::json!({"groups":{"cross_container_occurrences":"corroborated"},"media":{"oembed":"always"},"web":{"discover_feeds":true}})).unwrap();
-        assert_eq!(
-            cfg.groups.cross_container_occurrences,
-            crate::groups::CrossContainerOccurrences::Corroborated
-        );
-        assert_eq!(
-            cfg.queue.groups.cross_container_occurrences,
-            cfg.groups.cross_container_occurrences
-        );
+        let cfg = with(serde_json::json!({"groups":{"enabled":false},"media":{"oembed":"always"},"web":{"discover_feeds":true}})).unwrap();
+        assert!(!cfg.groups.enabled && !cfg.queue.groups.enabled);
         assert_eq!(
             cfg.media.oembed,
             crate::resolver::cards::OembedPolicy::Always
         );
         assert!(cfg.web.discover_feeds);
-        assert_eq!(
-            Config::default().groups.cross_container_occurrences,
-            crate::groups::CrossContainerOccurrences::Off
-        );
+        assert!(Config::default().groups.enabled);
         assert!(!Config::default().web.discover_feeds);
     }
     /// The Nexus and OSM URLs hold no secret: user info, a query or a fragment is refused.
@@ -1986,6 +2003,58 @@ mod tests {
         )
         .and_then(|()| Config::from_value(value));
         assert!(overridden.is_err(), "the override was accepted");
+    }
+    /// `groups.cross_container_occurrences` is retired: a file or override that still sets it
+    /// loads with the one fixed UID rule and names the key as ignored; any other unknown key in
+    /// `[groups]` is still refused.
+    #[test]
+    fn the_retired_uid_join_setting_loads_and_is_named_as_ignored() {
+        let path =
+            std::env::temp_dir().join(format!("pinakes-retired-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[groups]\nenabled = true\ncross_container_occurrences = \"corroborated\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load(Some(&path));
+        std::fs::remove_file(&path).unwrap();
+        let cfg = loaded.unwrap();
+        assert_eq!(cfg.ignored, ["groups.cross_container_occurrences"]);
+        assert!(cfg.groups.enabled);
+        assert_eq!(cfg.groups.policy(), Config::default().groups.policy());
+        for mode in ["off", "corroborated"] {
+            let cfg = with(serde_json::json!({"groups": {"cross_container_occurrences": mode}}));
+            assert_eq!(
+                cfg.unwrap().ignored,
+                ["groups.cross_container_occurrences"],
+                "{mode}"
+            );
+        }
+        let mut value = Config::defaults().unwrap();
+        apply_env(
+            &mut value,
+            [(
+                "PINAKES__GROUPS__CROSS_CONTAINER_OCCURRENCES".to_owned(),
+                "corroborated".to_owned(),
+            )],
+        )
+        .unwrap();
+        let cfg = Config::from_value(value).unwrap();
+        assert_eq!(cfg.ignored, ["groups.cross_container_occurrences"]);
+        // Not set, nothing is ignored; the policy no longer names the key.
+        assert!(
+            Config::default().ignored.is_empty()
+                && with(serde_json::json!({})).unwrap().ignored.is_empty()
+        );
+        assert!(Config::default()
+            .groups
+            .policy()
+            .get("cross_container_occurrences")
+            .is_none());
+        let refused = with(serde_json::json!({"groups": {"cross_feed": "on"}}))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("unknown field `cross_feed`"), "{refused}");
     }
     /// The Nexus's `Authorization` header comes from its own variable, is never shown, and is
     /// none when empty; a value that is no header value is refused without being named.
@@ -2420,8 +2489,7 @@ mod tests {
         assert!(!error.contains("8675309"), "{error}");
         let error = format!(
             "{:#}",
-            with(serde_json::json!({"groups": {"cross_container_occurrences": "s3cret"}}))
-                .unwrap_err()
+            with(serde_json::json!({"groups": {"enabled": "s3cret"}})).unwrap_err()
         );
         assert!(error.contains("`groups`"), "{error}");
         assert!(!error.contains("s3cret"), "{error}");

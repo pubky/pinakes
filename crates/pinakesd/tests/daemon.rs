@@ -175,6 +175,35 @@ async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool:
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A config that still sets the retired `groups.cross_container_occurrences` starts: the daemon
+/// warns once that it ignores the key and carries on (here through `migrate`).
+#[sqlx::test(migrations = false)]
+async fn a_config_with_the_retired_uid_join_setting_starts_with_one_warning(pool: PgPool) {
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
+    let (config, _, _) = config(&pool, &dir);
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[groups]\ncross_container_occurrences = \"corroborated\"\n");
+    std::fs::write(&config, text).unwrap();
+    let migrated = run(&config, &["migrate"]).await;
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&migrated.stdout),
+        String::from_utf8_lossy(&migrated.stderr),
+    );
+    assert!(migrated.status.success(), "{stdout}\n{stderr}");
+    let warnings: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("config key ignored"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{stdout}");
+    assert!(
+        warnings[0].contains("groups.cross_container_occurrences") && warnings[0].contains("WARN"),
+        "{}",
+        warnings[0]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A daemon that loses the instance lock (its lock's database session ends, as in a PostgreSQL
 /// restart) stops by itself with a failure, so its supervisor starts it again and no second
 /// daemon or re-extraction runs beside it.
