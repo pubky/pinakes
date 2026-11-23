@@ -1,0 +1,96 @@
+groups:
+  - name: pinakes
+    rules:
+      - alert: IngestionStalled
+        expr: time() - pinakes_ingest_last_success_timestamp_seconds > 900
+        labels: {severity: critical, reason: no_success}
+        annotations: {summary: "Pinakes has not applied a successful Nexus poll for 15 minutes"}
+      - alert: MetricsMissing
+        expr: absent(pinakes_ingest_last_success_timestamp_seconds)
+        for: 5m
+        labels: {severity: critical, reason: no_series}
+        annotations: {summary: "No Pinakes metrics for five minutes: the daemon is down or its /metrics is not scraped"}
+      - alert: MetricsMissing
+        expr: up{job="pinakes"} == 0
+        for: 5m
+        labels: {severity: critical, reason: target_down}
+        annotations: {summary: "Pinakes target {{ $labels.instance }} has not answered a /metrics scrape for five minutes"}
+      - alert: MetricsStale
+        expr: increase(pinakes_metrics_refresh_failures_total[5m]) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes /metrics failed to read its database repeatedly over fifteen minutes: the queue, canary and ingestion gauges may be stale"}
+      - alert: IngestionStalled
+        expr: pinakes_ingest_lag_lines > 1000
+        for: 10m
+        labels: {severity: critical, reason: lag}
+        annotations: {summary: "Pinakes ingestion lag has exceeded 1000 lines for 10 minutes"}
+      - alert: CanaryDown
+        expr: pinakes_canary_consecutive_failures >= 3
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes canary failed three consecutive runs for {{ $labels.source }}"}
+      - alert: SchemaDrift
+        expr: sum by (source) (increase(pinakes_fetch_total{outcome="drift"}[1h])) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes parser lost expected fields for {{ $labels.source }}"}
+      - alert: WallUp
+        expr: (sum by (source) (increase(pinakes_fetch_total{outcome=~"unreachable|blocked"}[2h])) / sum by (source) (increase(pinakes_fetch_total[2h])) > 0.5) and (sum by (source) (increase(pinakes_fetch_total[2h])) >= 20)
+        labels: {severity: warning}
+        annotations: {summary: "More than half of {{ $labels.source }} fetches are refused (401, 403, 451) or answered by a bot wall"}
+      - alert: FeedHeld
+        expr: increase(pinakes_feed_held_total[1h]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes quarantined a container snapshot for {{ $labels.source }}"}
+      - alert: CancellationBurst
+        expr: sum by (source) (increase(pinakes_changes_total{class="cancelled"}[1h])) > 20
+        labels: {severity: warning}
+        annotations: {summary: "More than twenty cancellations in one hour for {{ $labels.source }}"}
+      - alert: IngestPanics
+        expr: increase(pinakes_ingest_panics_total[30m]) > 0
+        labels: {severity: critical}
+        annotations: {summary: "Pinakes ingestion panicked outside a feed line; the Nexus cursor is held"}
+      - alert: CursorReset
+        expr: (increase(pinakes_source_cursor_resets_total[1h]) > 0) or label_replace(increase(pinakes_ingest_epoch_resets_total[1h]) > 0, "source", "nexus", "", "")
+        labels: {severity: info}
+        annotations: {summary: "Pinakes resynchronized the {{ $labels.source }} cursor"}
+      - alert: RateLimited
+        expr: sum by (source) (increase(pinakes_fetch_total{outcome="rate_limited"}[1h])) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes received HTTP 429 from {{ $labels.source }}"}
+      - alert: DeadLetters
+        expr: delta(pinakes_queue_depth{state="dead"}[1h]) >= 50
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes dead letters grew by fifty in one hour for {{ $labels.resolver }}"}
+      - alert: QueueBacklog
+        expr: sum(pinakes_refresh_overdue) > 1000
+        for: 30m
+        labels: {severity: warning, reason: overdue}
+        annotations: {summary: "More than a thousand Pinakes refreshes overdue for thirty minutes"}
+      - alert: QueueBacklog
+        expr: sum by (resolver) (pinakes_queue_depth{state="pending"}) > 1000
+        for: 30m
+        labels: {severity: warning, reason: pending}
+        annotations: {summary: "More than a thousand {{ $labels.resolver }} jobs due and unclaimed for thirty minutes: links are not being read as fast as they arrive"}
+      - alert: ApiPanics
+        expr: increase(pinakes_api_panics_total[15m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "A Pinakes API handler (public or admin listener) panicked; the request was answered 500"}
+      - alert: ApiErrors
+        expr: (sum(rate(pinakes_api_requests_total{listener="public",status=~"500|504"}[5m])) / sum(rate(pinakes_api_requests_total{listener="public"}[5m])) > 0.05) and (sum(increase(pinakes_api_requests_total{listener="public"}[5m])) >= 20)
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "More than 5% of Pinakes public API requests failed (500) or timed out (504) for five minutes"}
+      - alert: ApiRateLimited
+        expr: (sum(rate(pinakes_api_requests_total{listener="public",status="429"}[5m])) / sum(rate(pinakes_api_requests_total{listener="public"}[5m])) > 0.2) and (sum(increase(pinakes_api_requests_total{listener="public"}[5m])) >= 20)
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "More than a fifth of Pinakes public API requests answered 429 for ten minutes: the per-address budget is too low for the clients, or they share one address behind a proxy"}
+      - alert: PreviewCapacityReached
+        expr: increase(pinakes_preview_refused_total[15m]) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes refused new previews ({{ $labels.limit }}) for fifteen minutes: the hourly preview capacity or a client's share is taken"}
+      - alert: ProviderKeyRefused
+        expr: increase(pinakes_source_token_refusals_total[6h]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "{{ $labels.source }} refused the configured key: check or rotate the {{ $labels.source }} key (a new key needs a Pinakes restart)"}

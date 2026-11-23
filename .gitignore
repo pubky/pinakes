@@ -1,0 +1,9 @@
+/target/
+/.runtime/
+/pinakes-dev.toml
+# The ODbL dump file a local daemon writes (osm.dump_dir).
+/dumps/
+.env
+*.bundle
+
+/e2e/node_modules/

@@ -1,0 +1,282 @@
+//! Pinakes's own resource identity: a URI is normalized, then hashed into a 32-character ID.
+//! The IDs are Pinakes's; to combine its data with another index such as Nexus, match on URIs
+//! (a card's `uri` and `details.aliases`), never on IDs.
+//!
+//! Normalization uses `url` parsing: lowercase scheme and host, strip default HTTP(S) ports,
+//! userinfo and fragments, and keep the parsed path and query order. Opaque schemes keep their
+//! opaque path without the fragment, and a `bitcoin:` payment request also without its query. When URL parsing fails, a valid RFC 3986 scheme is
+//! lowercased and the remainder kept exactly. The ID is the first 16 bytes of BLAKE3 of the
+//! normalized URI, as lowercase hex.
+use url::Url;
+
+/// Normalizes a URI for deterministic resource identification.
+/// Returns `(normalized_uri, scheme)`.
+///
+/// Rules:
+/// - Lowercase scheme and host
+/// - Strip default ports (80 for http, 443 for https)
+/// - Strip fragments and userinfo
+/// - Preserve path and query as-is
+/// - Fallback for non-standard schemes that fail URL parsing
+pub fn normalize_uri(uri: &str) -> Result<(String, String), String> {
+    match Url::parse(uri) {
+        Ok(parsed) => {
+            let scheme = parsed.scheme().to_string();
+            let normalized = normalize_parsed_url(&parsed);
+            Ok((normalized, scheme))
+        }
+        Err(_) => {
+            // Fallback for non-standard schemes (e.g., nostr:note1abc...)
+            // that may not parse as URLs (no // authority)
+            if let Some(colon_pos) = uri.find(':') {
+                let scheme = &uri[..colon_pos];
+                // Validate scheme: RFC 3986 §3.1 — ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+                // The first character must be ALPHA (this also rejects an empty scheme).
+                if !scheme
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphabetic)
+                    || !scheme
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+                {
+                    // The reason, never the input: a link may carry what its owner keeps
+                    // private.
+                    return Err("Invalid URI scheme".into());
+                }
+                let scheme_lower = scheme.to_ascii_lowercase();
+                let remainder = &uri[colon_pos + 1..];
+                Ok((format!("{scheme_lower}:{remainder}"), scheme_lower))
+            } else {
+                Err("Invalid URI: no scheme".into())
+            }
+        }
+    }
+}
+
+fn normalize_parsed_url(parsed: &Url) -> String {
+    let scheme = parsed.scheme(); // already lowercase per url crate
+
+    // For non-hierarchical schemes (no authority, e.g. nostr:note1abc),
+    // the url crate parses them as "cannot-be-a-base" URLs.
+    // Return scheme + ":" + opaque path (no //)
+    if parsed.cannot_be_a_base() {
+        // Strip fragment from the opaque form
+        let full = parsed.as_str();
+        let without_fragment = match full.find('#') {
+            Some(pos) => &full[..pos],
+            None => full,
+        };
+        // A Bitcoin payment request (`bitcoin:{address}?amount=…&label=…&lightning=…&pj=…`) names
+        // its address; the query is the payer's request (amounts, labels, invoices, PayJoin
+        // endpoints), never part of the link that is stored and listed.
+        let without_fragment = match without_fragment.split_once('?') {
+            Some((address, _)) if scheme == "bitcoin" && address.len() > "bitcoin:".len() => {
+                address
+            }
+            _ => without_fragment,
+        };
+        // A space before the fragment would be cut when the result is read again: cut it here,
+        // so a normalized URI normalizes to itself.
+        return without_fragment.trim_end_matches(' ').to_string();
+    }
+
+    let host = parsed
+        .host_str()
+        .map(|h| h.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    // Strip default ports
+    let port = match (parsed.port(), scheme) {
+        (Some(80), "http") => None,
+        (Some(443), "https") => None,
+        (other, _) => other,
+    };
+
+    let path = parsed.path();
+    let query = parsed.query();
+    // Fragment and userinfo are discarded
+
+    let mut result = format!("{scheme}://{host}");
+    if let Some(p) = port {
+        result.push_str(&format!(":{p}"));
+    }
+    result.push_str(path);
+    if let Some(q) = query {
+        result.push('?');
+        result.push_str(q);
+    }
+    result
+}
+
+/// Generates a deterministic 32-character lowercase hex resource ID.
+///
+/// The input must already be normalized with [`normalize_uri`].
+/// `resource_id = hex(BLAKE3(normalized_uri)[0..16])`.
+pub fn resource_id(normalized_uri: &str) -> String {
+    blake3::hash(normalized_uri.as_bytes()).to_hex()[..32].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- normalize_uri test vectors from spec Section 5 --
+
+    #[test]
+    fn test_normalize_https_with_default_port_and_fragment() {
+        let (uri, scheme) = normalize_uri("HTTPS://Example.COM:443/path?q=1#frag").unwrap();
+        assert_eq!(uri, "https://example.com/path?q=1");
+        assert_eq!(scheme, "https");
+    }
+
+    #[test]
+    fn test_normalize_root_trailing_slash() {
+        let (uri, _) = normalize_uri("https://example.com").unwrap();
+        assert_eq!(uri, "https://example.com/");
+    }
+
+    #[test]
+    fn test_normalize_non_default_port() {
+        let (uri, _) = normalize_uri("http://example.com:8080/path").unwrap();
+        assert_eq!(uri, "http://example.com:8080/path");
+    }
+
+    #[test]
+    fn test_normalize_pubky_uri() {
+        let input = "pubky://8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/pub/eventky.app/events/E001";
+        let (uri, scheme) = normalize_uri(input).unwrap();
+        assert_eq!(uri, input);
+        assert_eq!(scheme, "pubky");
+    }
+
+    #[test]
+    fn test_normalize_query_order_preserved() {
+        let (uri, _) = normalize_uri("HTTPS://Example.COM/path?b=2&a=1").unwrap();
+        assert_eq!(uri, "https://example.com/path?b=2&a=1");
+    }
+
+    #[test]
+    fn test_normalize_strip_userinfo() {
+        let (uri, _) = normalize_uri("https://user:pass@example.com/path").unwrap();
+        assert_eq!(uri, "https://example.com/path");
+    }
+
+    #[test]
+    fn test_normalize_nostr_fallback() {
+        let (uri, scheme) = normalize_uri("nostr:note1abc123...").unwrap();
+        assert_eq!(uri, "nostr:note1abc123...");
+        assert_eq!(scheme, "nostr");
+    }
+
+    /// A `bitcoin:` payment request is the address it names: its query is never stored.
+    #[test]
+    fn a_bitcoin_payment_request_is_its_address() {
+        let addr = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+        for uri in [
+            format!("{addr}?amount=0.5&label=Rent%20Alice"),
+            format!("{addr}?lightning=lnbc1pexample&pj=https://payjoin.example/x"),
+            format!("BITCOIN:{}?amount=1", &addr["bitcoin:".len()..]),
+        ] {
+            assert_eq!(normalize_uri(&uri).unwrap().0, addr, "{uri}");
+        }
+        // Without an address there is nothing to keep but the request.
+        assert_eq!(
+            normalize_uri("bitcoin:?lightning=lnbc1pexample").unwrap().0,
+            "bitcoin:?lightning=lnbc1pexample"
+        );
+        // Other schemes keep their query.
+        assert_eq!(
+            normalize_uri("nostr:note1abc?x=1").unwrap().0,
+            "nostr:note1abc?x=1"
+        );
+    }
+
+    /// A normalized URI normalizes to itself, also when a space came before its fragment.
+    #[test]
+    fn a_normalized_opaque_uri_normalizes_to_itself() {
+        for input in [
+            "nostr:abc #x",
+            "nostr:abc  #x",
+            "nostr:abc#x",
+            "mailto:a@example.org #x",
+        ] {
+            let (once, _) = normalize_uri(input).unwrap();
+            let (twice, _) = normalize_uri(&once).unwrap();
+            assert_eq!(once, twice, "{input:?}");
+        }
+        assert_eq!(normalize_uri("nostr:abc #x").unwrap().0, "nostr:abc");
+    }
+
+    #[test]
+    fn test_normalize_http_default_port() {
+        let (uri, _) = normalize_uri("HTTP://Example.COM:80/").unwrap();
+        assert_eq!(uri, "http://example.com/");
+    }
+
+    #[test]
+    fn test_normalize_rejects_malformed_scheme() {
+        // "ht tps" has a space — invalid per RFC 3986 §3.1
+        assert!(normalize_uri("ht tps://example.com").is_err());
+    }
+
+    #[test]
+    fn test_normalize_rejects_no_colon() {
+        assert!(normalize_uri("justtext").is_err());
+    }
+
+    #[test]
+    fn test_normalize_rejects_scheme_starting_with_digit() {
+        // RFC 3986 §3.1 requires the scheme to start with ALPHA.
+        assert!(normalize_uri("1ttp://example.com").is_err());
+    }
+
+    #[test]
+    fn test_normalize_rejects_scheme_starting_with_special_char() {
+        // "+", "-" and "." are only valid after the first ALPHA character.
+        assert!(normalize_uri("+nostr:note1abc").is_err());
+        assert!(normalize_uri("-nostr:note1abc").is_err());
+        assert!(normalize_uri(".nostr:note1abc").is_err());
+    }
+
+    // -- resource_id tests --
+
+    #[test]
+    fn test_resource_id_deterministic() {
+        let uri = "https://example.com/path?q=1";
+        let id1 = resource_id(uri);
+        let id2 = resource_id(uri);
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 32);
+    }
+
+    #[test]
+    fn test_resource_id_different_uris() {
+        let id1 = resource_id("https://example.com/a");
+        let id2 = resource_id("https://example.com/b");
+        assert_ne!(id1, id2);
+    }
+
+    // Stored IDs never change: these values are pinned, raw spellings and canonical forms alike.
+    #[test]
+    fn pinned_resource_ids() {
+        let vectors = [
+            ("https://Example.com", "https://example.com/", "19f876713c227a568d939946496a0d30"),
+            ("https://example.com/", "https://example.com/", "19f876713c227a568d939946496a0d30"),
+            ("HTTPS://user:pass@Example.COM:443/path?q=1#frag", "https://example.com/path?q=1", "2397d03755c83364010ee03600730121"),
+            ("https://example.com/path?q=1", "https://example.com/path?q=1", "2397d03755c83364010ee03600730121"),
+            ("http://example.com:8080/path", "http://example.com:8080/path", "97641daa95b144d61e98627a5d206f43"),
+            ("nostr:note1abc123...", "nostr:note1abc123...", "3252f05dba228a84b22ce7c3136fc152"),
+            ("pubky://8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/pub/eventky.app/events/E001", "pubky://8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/pub/eventky.app/events/E001", "aecd76ae2b6b70783008c0adaf68db6f"),
+            ("ipfs://bafyexample/path", "ipfs://bafyexample/path", "4283fe0231133801e989c931705da90d"),
+        ];
+        for (input, canonical, expected) in vectors {
+            let (normalized, _) = normalize_uri(input).unwrap();
+            assert_eq!(normalized, canonical);
+            assert_eq!(resource_id(&normalized), expected);
+            // A canonical form normalizes to itself and hashes the same.
+            assert_eq!(normalize_uri(canonical).unwrap().0, canonical);
+            assert_eq!(resource_id(canonical), expected);
+        }
+    }
+}
