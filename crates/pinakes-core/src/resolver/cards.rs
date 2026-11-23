@@ -1,0 +1,2128 @@
+//! Generic media/identifier cards. Only metadata is retained: media is never served, and of an
+//! oEmbed answer only the frame Pinakes builds from its player address (`embed`), never its HTML.
+use super::{
+    egress::{Egress, FetchOptions, Fetched},
+    web, Resolver,
+};
+use crate::{
+    adapter::Manifest,
+    config::{Config, ResolverConfig},
+    model::{ResourceMeta, Status, Stream},
+};
+use anyhow::{bail, ensure, Context as _, Result};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+use url::Url;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OembedPolicy {
+    Always,
+    #[default]
+    WhenNeeded,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MediaConfig {
+    pub oembed: OembedPolicy,
+}
+pub fn typed_card(doc: &ResourceMeta) -> bool {
+    !matches!(doc.type_name.as_str(), "Thing" | "WebPage" | "CreativeWork")
+}
+pub fn needs_embed(doc: &ResourceMeta) -> bool {
+    doc.status != Status::Ok
+        || doc.name.is_none()
+        || doc.image.is_none()
+        || doc.event.warnings.iter().any(|w| w == "truncated")
+}
+/// Card routes. `official` reads a service's own API (`crate::sources`).
+pub const KINDS: [&str; 6] = ["media", "isbn", "doi", "nostr", "activitypub", "official"];
+/// Open Library's Books API, which the `isbn` route reads.
+const OPENLIBRARY_URL: &str = "https://openlibrary.org/api/books";
+/// The DOI resolver, which the `doi` route reads.
+const DOI_URL: &str = "https://doi.org/";
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CardConfig {
+    #[serde(with = "crate::config::feed_section")]
+    pub media: ResolverConfig,
+    pub isbn: ResolverConfig,
+    pub doi: ResolverConfig,
+    pub nostr: ResolverConfig,
+    pub activitypub: ResolverConfig,
+    pub official: ResolverConfig,
+    #[serde(skip)]
+    pub podcast_items: usize,
+}
+impl Default for CardConfig {
+    fn default() -> Self {
+        Self {
+            media: Default::default(),
+            isbn: Default::default(),
+            doi: Default::default(),
+            nostr: Default::default(),
+            activitypub: Default::default(),
+            official: Default::default(),
+            podcast_items: 2000,
+        }
+    }
+}
+impl CardConfig {
+    pub fn resolver(&self, kind: &str) -> &ResolverConfig {
+        match kind {
+            "isbn" => &self.isbn,
+            "doi" => &self.doi,
+            "nostr" => &self.nostr,
+            "activitypub" => &self.activitypub,
+            "official" => &self.official,
+            _ => &self.media,
+        }
+    }
+    pub fn validate(&self) -> Result<()> {
+        for kind in KINDS {
+            let c = self.resolver(kind);
+            ensure!(
+                c.concurrency > 0
+                    && c.concurrency <= 32
+                    && c.requests_per_second.is_finite()
+                    && c.requests_per_second > 0.0
+                    && c.requests_per_second <= 100.0
+                    && (3600..=31536000).contains(&c.ttl_secs),
+                "invalid card resolver configuration"
+            );
+        }
+        ensure!(
+            (1..=10000).contains(&self.podcast_items),
+            "invalid podcast item cap"
+        );
+        Ok(())
+    }
+}
+pub fn manifests(c: &CardConfig) -> Vec<Manifest> {
+    KINDS
+        .into_iter()
+        .map(|kind| {
+            let mut m = crate::adapter::manifest(kind);
+            m.enabled = c.resolver(kind).enabled;
+            m.disabled_reason = (!m.enabled).then(|| "disabled by configuration".into());
+            m.expected_fields = vec!["name".into()];
+            m.canary = match kind {
+                "media" => Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+                "isbn" => Some("isbn:9780140328721"),
+                "doi" => Some("doi:10.1038/nphys1170"),
+                _ => None,
+            }
+            .map(|s| s.parse().unwrap());
+            m
+        })
+        .collect()
+}
+#[derive(Deserialize)]
+struct Provider {
+    #[serde(default)]
+    provider_name: String,
+    endpoints: Vec<Endpoint>,
+}
+/// Registry providers whose public endpoint does not serve a server: SoundCloud (a bot challenge
+/// for server addresses), TikTok (its answers carry no metadata), Facebook and Instagram (an app
+/// token). Their links get ordinary web cards.
+pub const SKIPPED_PROVIDERS: &[&str] = &["Facebook", "Instagram", "SoundCloud", "TikTok"];
+#[derive(Deserialize)]
+struct Endpoint {
+    url: String,
+    #[serde(default)]
+    schemes: Vec<String>,
+    formats: Option<Vec<String>>,
+}
+fn providers() -> &'static Vec<Provider> {
+    static P: OnceLock<Vec<Provider>> = OnceLock::new();
+    P.get_or_init(|| {
+        let mut all: Vec<Provider> =
+            serde_json::from_str(include_str!("../../../../data/oembed-providers.json"))
+                .expect("pinned providers");
+        all.retain(|p| !SKIPPED_PROVIDERS.contains(&p.provider_name.as_str()));
+        all
+    })
+}
+fn wildcard(pattern: &str, value: &str) -> bool {
+    // Registry wildcards only. A greedy glob that backtracks to its last `*` (at worst the
+    // pattern's length times the value's), no regex or untrusted expression evaluation.
+    let (p, v) = (pattern.as_bytes(), value.as_bytes());
+    let (mut i, mut j, mut star, mut back) = (0, 0, None, 0);
+    while j < v.len() {
+        if i < p.len() && p[i] == v[j] {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == b'*' {
+            star = Some(i);
+            i += 1;
+            back = j;
+        } else if let Some(s) = star {
+            back += 1;
+            j = back;
+            i = s + 1;
+        } else {
+            return false;
+        }
+    }
+    while i < p.len() && p[i] == b'*' {
+        i += 1;
+    }
+    i == p.len()
+}
+fn scheme_matches(pattern: &str, target: &Url) -> bool {
+    let Some((scheme, rest)) = pattern.split_once("://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // A registry host wildcard never consumes a path or a query string.
+    scheme == target.scheme()
+        && wildcard(
+            host,
+            &target[url::Position::BeforeHost..url::Position::AfterPort],
+        )
+        && wildcard(pattern, target.as_str())
+}
+pub fn provider_endpoint(uri: &str) -> Option<Url> {
+    provider_match(uri).map(|v| v.0)
+}
+fn provider_match(uri: &str) -> Option<(Url, bool)> {
+    let target = Url::parse(uri).ok()?;
+    if !matches!(target.scheme(), "http" | "https")
+        || !target.username().is_empty()
+        || target.password().is_some()
+    {
+        return None;
+    }
+    for p in providers() {
+        for e in &p.endpoints {
+            if e.formats
+                .as_ref()
+                .is_some_and(|v| !v.iter().any(|s| s == "json"))
+            {
+                continue;
+            }
+            let matching: Vec<_> = e
+                .schemes
+                .iter()
+                .filter(|pattern| scheme_matches(pattern, &target))
+                .collect();
+            if !matching.is_empty() {
+                let mut u = Url::parse(&e.url.replace("{format}", "json")).ok()?;
+                if u.scheme() != "https" {
+                    continue;
+                }
+                u.query_pairs_mut()
+                    .append_pair("url", target.as_str())
+                    .append_pair("format", "json");
+                let specific = matching.iter().any(|pattern| {
+                    let path = pattern
+                        .split_once("://")
+                        .and_then(|(_, rest)| rest.split_once('/'))
+                        .map_or("", |(_, path)| path);
+                    !path.trim_matches(['*', '/']).is_empty()
+                });
+                return Some((u, specific));
+            }
+        }
+    }
+    None
+}
+pub fn isbn(uri: &str) -> Option<String> {
+    let s = uri
+        .strip_prefix("isbn:")?
+        .chars()
+        .filter(|c| !matches!(c, '-' | ' '))
+        .collect::<String>()
+        .to_uppercase();
+    let digits: Option<Vec<u32>> = s
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if c == 'X' && i == 9 && s.len() == 10 {
+                Some(10)
+            } else {
+                c.to_digit(10)
+            }
+        })
+        .collect();
+    let d = digits?;
+    let valid = match d.len() {
+        10 => {
+            d.iter()
+                .enumerate()
+                .map(|(i, d)| (10 - i as u32) * d)
+                .sum::<u32>()
+                % 11
+                == 0
+        }
+        13 => {
+            d.iter()
+                .enumerate()
+                .map(|(i, d)| d * if i % 2 == 0 { 1 } else { 3 })
+                .sum::<u32>()
+                % 10
+                == 0
+                && (s.starts_with("978") || s.starts_with("979"))
+        }
+        _ => false,
+    };
+    valid.then_some(s)
+}
+/// The ISBN-13 of a normalized ISBN (`isbn`): an ISBN-10 gains the 978 prefix and a new check
+/// digit; an ISBN-13 is returned as it is.
+pub fn isbn13(number: &str) -> String {
+    if number.len() != 10 {
+        return number.to_owned();
+    }
+    let body = format!("978{}", &number[..9]);
+    let sum: u32 = body
+        .bytes()
+        .enumerate()
+        .map(|(i, n)| u32::from(n - b'0') * if i % 2 == 0 { 1 } else { 3 })
+        .sum();
+    format!("{body}{}", (10 - sum % 10) % 10)
+}
+pub fn doi(uri: &str) -> Option<String> {
+    let raw = if let Some(s) = uri.strip_prefix("doi:") {
+        s.to_owned()
+    } else {
+        let u = Url::parse(uri).ok()?;
+        if !matches!(u.host_str(), Some("doi.org" | "dx.doi.org")) {
+            return None;
+        }
+        percent_encoding::percent_decode_str(u.path().trim_start_matches('/'))
+            .decode_utf8()
+            .ok()?
+            .into_owned()
+    };
+    let (prefix, suffix) = raw.split_once('/')?;
+    (prefix.starts_with("10.")
+        && (4..=9).contains(&prefix[3..].len())
+        && prefix[3..].bytes().all(|b| b.is_ascii_digit())
+        && !suffix.is_empty()
+        && raw.len() <= 512
+        && !raw.chars().any(|c| c.is_control() || c.is_whitespace()))
+    .then(|| raw.to_lowercase())
+}
+pub fn classify(uri: &str) -> Option<&'static str> {
+    if crate::sources::reading(uri).is_some() {
+        return Some("official");
+    }
+    if uri.starts_with("isbn:") {
+        return Some("isbn");
+    }
+    if uri.starts_with("doi:") || doi(uri).is_some() {
+        return Some("doi");
+    }
+    if uri.starts_with("nostr:")
+        || crate::event::adapters::detect(uri).is_some_and(|d| d.id == "nip52")
+    {
+        let target = crate::event::adapters::nostr::Target::decode(uri).ok()?;
+        return if target.kind.is_some_and(|k| (31922..=31925).contains(&k)) {
+            None
+        } else {
+            Some("nostr")
+        };
+    }
+    if provider_endpoint(uri).is_some()
+        && !crate::event::adapters::detect(uri).is_some_and(|d| d.id != "ics")
+    {
+        return Some("media");
+    }
+    None
+}
+pub struct CardResolver {
+    pub kind: &'static str,
+    pub config: Arc<Config>,
+    pub web: web::WebResolver,
+}
+impl CardResolver {
+    /// A card route over `egress`. Its pages follow RSS alternates (podcast feed scanning) only
+    /// on the media route and only with `cards.media.discover_feeds`.
+    pub fn new(
+        kind: &'static str,
+        config: Arc<Config>,
+        egress: crate::resolver::egress::Egress,
+    ) -> Self {
+        let web = web::WebResolver {
+            oembed_policy: config.media.oembed,
+            cards: Some(Arc::new(config.cards.clone())),
+            events: None,
+            egress,
+            config: ResolverConfig {
+                discover_feeds: kind == "media" && config.cards.media.discover_feeds,
+                ..config.web.clone()
+            },
+        };
+        Self { kind, config, web }
+    }
+}
+#[async_trait]
+impl Resolver for CardResolver {
+    fn name(&self) -> &'static str {
+        self.kind
+    }
+    fn manifest(&self) -> Manifest {
+        manifests(&self.config.cards)
+            .into_iter()
+            .find(|m| m.source == self.kind)
+            .unwrap()
+    }
+    fn matches(&self, uri: &str) -> bool {
+        classify(uri) == Some(self.kind)
+    }
+    fn canary_allowed(&self) -> bool {
+        let Some(canary) = self.manifest().canary else {
+            return true;
+        };
+        let endpoint = match self.kind {
+            "isbn" => OPENLIBRARY_URL.to_owned(),
+            "doi" => DOI_URL.to_owned(),
+            "media" => provider_endpoint(canary.as_str())
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| canary.to_string()),
+            _ => canary.to_string(),
+        };
+        self.web.egress.allows(&endpoint)
+    }
+    async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+        let ttl = self.config.cards.resolver(self.kind).ttl_secs;
+        let result = tokio::time::timeout(budget(self.kind), async {
+            match self.kind {
+                "isbn" => {
+                    let Some(number) = isbn(uri) else { return Ok(missing(uri,"isbn",0)); };
+                    let mut url = Url::parse(OPENLIBRARY_URL)?;
+                    url.query_pairs_mut()
+                        .append_pair("bibkeys", &format!("ISBN:{number}"))
+                        .append_pair("format", "json")
+                        .append_pair("jscmd", "data");
+                    let f = self.web.egress.fetch(url.as_str()).await?;
+                    let uri = uri.to_owned();
+                    crate::resolver::html::blocking(move || parse_isbn(&uri, &number, &f, ttl)).await?
+                }
+                "doi" => {
+                    let Some(number) = doi(uri) else { return Ok(missing(uri,"doi",0)); };
+                    let mut url = Url::parse(DOI_URL)?;
+                    url.set_path(&format!(
+                        "{}{}",
+                        url.path().trim_end_matches('/').to_owned() + "/",
+                        number
+                    ));
+                    let f = self
+                        .web
+                        .egress
+                        .fetch_with(
+                            url.as_str(),
+                            &FetchOptions {
+                                accept: Some("application/vnd.citationstyles.csl+json".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    let uri = uri.to_owned();
+                    crate::resolver::html::blocking(move || parse_doi(&uri, &f, ttl)).await?
+                }
+                "nostr" => {
+                    let target = crate::event::adapters::nostr::Target::decode(uri)?;
+                    let event = crate::event::adapters::nostr::lookup(
+                        &target,
+                        &self.web.egress,
+                        &self.config.event,
+                    )
+                    .await?;
+                    let Some(event) = event else {
+                        return Ok(missing(uri, "nostr", ttl));
+                    };
+                    if matches!(event.kind.as_u16(), 31922 | 31923) {
+                        if !self.config.event.enabled {
+                            return Err(super::RetryLater { class: "disabled", seconds: 3600 }.into());
+                        }
+                        return crate::event::adapters::nostr::parse(
+                            uri,
+                            &event,);
+                    }
+                    let uri=uri.to_owned();
+                    crate::resolver::html::blocking(move || parse_nostr(&uri, &event, ttl)).await?
+                }
+                "media" => self.media(uri,ttl).await,
+                "official" => match crate::sources::resolve(&self.web.egress, &self.config, uri, ttl).await? {
+                    Some(mut doc) => {
+                        // A job board's posting is placed as a page's is.
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                        self.web.place_workplace(&mut doc, deadline).await;
+                        Ok(doc)
+                    }
+                    // Queued before its source was switched off.
+                    None if uri.starts_with("http") => self.web.resolve(uri).await,
+                    None => Err(super::RetryLater { class: "disabled", seconds: 3600 }.into()),
+                },
+                "activitypub" => {
+                    let f=self.web.egress.fetch_with(uri,&FetchOptions{accept:Some("application/activity+json, application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"".into()),..Default::default()}).await?;
+                    if (200..300).contains(&f.status) { if let Some(d)=parse_activitypub(uri,&f,ttl).await? {return Ok(d);} }
+                    self.web.resolve(uri).await
+                }
+                _ => self.web.resolve(uri).await,
+            }
+        })
+        .await.map_err(|_| super::RetryLater { class: "timeout", seconds: 60 })??;
+        crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &result);
+        Ok(result)
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        Duration::from_secs(doc.ttl_secs)
+    }
+}
+fn missing(uri: &str, source: &str, ttl: u64) -> ResourceMeta {
+    let mut d = ResourceMeta::new(uri, source, ttl);
+    d.status = Status::Missing;
+    d
+}
+fn retry_status(f: &Fetched) -> Result<()> {
+    if f.status >= 500 || matches!(f.status, 408 | 429) {
+        return Err(super::RetryLater {
+            class: "upstream",
+            seconds: f.retry_after_secs.max(60),
+        }
+        .into());
+    }
+    Ok(())
+}
+fn check_status(uri: &str, source: &str, f: &Fetched, ttl: u64) -> Result<Option<ResourceMeta>> {
+    retry_status(f)?;
+    match f.status {
+        200..=299 => Ok(None),
+        404 | 410 => Ok(Some(missing(uri, source, ttl))),
+        401 | 403 | 451 => {
+            let mut d = ResourceMeta::new(uri, source, ttl);
+            d.status = Status::Unreachable;
+            Ok(Some(d))
+        }
+        _ => bail!("identifier upstream failed"),
+    }
+}
+fn text(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str).map(str::to_owned)
+}
+fn names(v: Option<&Value>) -> Option<String> {
+    let a = v?.as_array()?;
+    let out = a
+        .iter()
+        .take(8)
+        .filter_map(|v| {
+            text(v.get("name")).or_else(|| {
+                let family = v.get("family")?.as_str()?;
+                Some(
+                    format!("{} {family}", v["given"].as_str().unwrap_or(""))
+                        .trim()
+                        .into(),
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!out.is_empty()).then_some(out)
+}
+pub fn parse_isbn(uri: &str, number: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
+    if let Some(d) = check_status(uri, "isbn", f, ttl)? {
+        return Ok(d);
+    }
+    let v: Value = serde_json::from_slice(&f.body)?;
+    let Some(v) = v.get(format!("ISBN:{number}")) else {
+        return Ok(missing(uri, "isbn", ttl));
+    };
+    let mut d = ResourceMeta::new(uri, "isbn", ttl);
+    crate::group_keys::add(&mut d, "isbn", number);
+    d.set_type("Book");
+    d.name = text(v.get("title"));
+    d.image = v
+        .pointer("/cover/medium")
+        .and_then(Value::as_str)
+        .and_then(|s| web::origin_url(&f.url, s));
+    for (k, v) in [
+        ("author", names(v.get("authors"))),
+        ("publisher", names(v.get("publishers"))),
+        ("published", text(v.get("publish_date"))),
+        ("isbn", Some(number.into())),
+    ] {
+        if let Some(v) = v {
+            d.attributes.insert(k.into(), v);
+        }
+    }
+    // Open Library names the edition page; Goodreads/LibraryThing ids stay identifiers only.
+    // Records are wiki-editable, so only the record's own edition key (and its slugged URL)
+    // names a landing page; other listed edition ids could be any book's.
+    let own = v["key"].as_str().filter(|k| {
+        k.strip_prefix("/books/OL")
+            .and_then(|id| id.strip_suffix('M'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    });
+    let slugged = v["url"].as_str().filter(|u| {
+        own.zip(Url::parse(u).ok()).is_some_and(|(key, u)| {
+            u.host_str()
+                .is_some_and(|h| h == "openlibrary.org" || h.ends_with(".openlibrary.org"))
+                && (u.path() == key || u.path().starts_with(&format!("{key}/")))
+        })
+    });
+    let pages = [own, slugged]
+        .into_iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for page in pages {
+        registry_url(&mut d, &f.url, &page);
+    }
+    d.bounded(web::ATTRIBUTES)
+}
+/// URLs on the DOI proxy's registrable domain (doi.org, dx.doi.org, www.doi.org, ...).
+pub fn registry_proxy(url: &str) -> bool {
+    Url::parse(url).ok().is_some_and(|u| {
+        u.host_str()
+            .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+            .is_some_and(|h| psl::domain_str(&h) == Some("doi.org"))
+    })
+}
+/// A landing page named by the identifier registry is authoritative grouping evidence for
+/// that identifier. Legacy `http` registrations also claim the `https` form publishers serve.
+fn registry_url(d: &mut ResourceMeta, base: &Url, s: &str) {
+    let Some(url) = web::origin_url(base, s) else {
+        return;
+    };
+    // The DOI proxy (any doi.org host) is the identifier itself, not a publisher landing page.
+    if registry_proxy(&url) {
+        return;
+    }
+    crate::group_keys::add(d, "registry", &url);
+    if let Some(rest) = url.strip_prefix("http://") {
+        crate::group_keys::add(d, "registry", &format!("https://{rest}"));
+    }
+    if d.aliases.len() < 4 && !d.aliases.contains(&url) {
+        d.aliases.push(url);
+    }
+}
+pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
+    if let Some(d) = check_status(uri, "doi", f, ttl)? {
+        return Ok(d);
+    }
+    let v: Value = serde_json::from_slice(&f.body)?;
+    let mut d = ResourceMeta::new(uri, "doi", ttl);
+    d.set_type(if v["type"] == "book" {
+        "Book"
+    } else {
+        "ScholarlyArticle"
+    });
+    // A title may carry markup (`<i>` for a species name, `<sub>`): its text only.
+    d.name = text(v.get("title")).and_then(crate::resolver::html::plain_text);
+    d.description = text(v.get("abstract")).map(|s| plain(&s));
+    for (k, v) in [
+        ("author", names(v.get("author"))),
+        ("publisher", text(v.get("publisher"))),
+        ("doi", doi(uri)),
+        (
+            "container",
+            text(v.get("container-title")).or_else(|| {
+                v["container-title"]
+                    .as_array()
+                    .and_then(|a| text(a.first()))
+            }),
+        ),
+        ("published", csl_date(&v)),
+    ] {
+        if let Some(v) = v {
+            d.attributes.insert(k.into(), v);
+        }
+    }
+    if let Some(number) = doi(uri) {
+        crate::group_keys::add(&mut d, "doi", &number);
+        d.aliases.push(format!("https://doi.org/{number}"));
+    }
+    // Crossref puts the landing page in resource.primary.URL and its CSL `URL` is the DOI
+    // proxy; DataCite's CSL `URL` is the landing page. Publisher HTML links name it too.
+    let html_links = v["link"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .filter(|l| {
+            l["content-type"]
+                .as_str()
+                .is_some_and(|t| t.eq_ignore_ascii_case("text/html"))
+        })
+        .filter_map(|l| l["URL"].as_str());
+    let pages = [v.pointer("/resource/primary/URL"), v.get("URL")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain(html_links)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for page in pages {
+        registry_url(&mut d, &f.url, &page);
+    }
+    d.bounded(web::ATTRIBUTES)
+}
+pub fn parse_nostr(uri: &str, e: &nostr::event::Event, ttl: u64) -> Result<ResourceMeta> {
+    e.verify()?;
+    let mut d = ResourceMeta::new(uri, "nostr", ttl);
+    d.attributes.insert("author".into(), e.pubkey.to_hex());
+    match e.kind.as_u16() {
+        0 => {
+            let v: Value = serde_json::from_str(&e.content)?;
+            d.set_type("Person");
+            d.name = text(v.get("display_name")).or_else(|| text(v.get("name")));
+            d.description = text(v.get("about"));
+            d.image = v["picture"]
+                .as_str()
+                .and_then(|s| Url::parse(s).ok())
+                .filter(|u| matches!(u.scheme(), "http" | "https"))
+                .map(|u| u.to_string());
+        }
+        1 | 30023 => {
+            d.set_type(if e.kind.as_u16() == 1 {
+                "SocialMediaPosting"
+            } else {
+                "Article"
+            });
+            d.name = e
+                .tags
+                .iter()
+                .find_map(|t| {
+                    let a = t.as_slice();
+                    (a.first().is_some_and(|s| s == "title"))
+                        .then(|| a.get(1).cloned())
+                        .flatten()
+                })
+                .or_else(|| Some(e.content.chars().take(120).collect()));
+            d.description = Some(e.content.chars().take(200).collect());
+            d.ttl_secs = ttl.min(3600);
+        }
+        _ => {
+            d.set_type("CreativeWork");
+            d.name = Some(format!("Nostr event (kind {})", e.kind.as_u16()));
+            d.description = Some(e.content.chars().take(200).collect());
+            d.ttl_secs = ttl.min(3600);
+        }
+    }
+    d.bounded(web::ATTRIBUTES)
+}
+pub fn plain(s: &str) -> String {
+    let Ok(html) = crate::resolver::html::fragment(s) else {
+        return String::new();
+    };
+    html.root_element().text().collect::<Vec<_>>().join(" ")
+}
+pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<ResourceMeta> {
+    let kind = match v["type"].as_str()? {
+        "Note" => "SocialMediaPosting",
+        "Article" => "Article",
+        "Person" => "Person",
+        _ => return None,
+    };
+    let id = v["id"].as_str()?;
+    if !crate::group_keys::same_origin(uri, base.as_str())
+        || !crate::group_keys::same_origin(uri, id)
+    {
+        return None;
+    }
+    let mut d = ResourceMeta::new(uri, "activitypub", ttl);
+    // An object's id that carries a credential is never published as an alias.
+    if !crate::capability::is_capability(id) {
+        d.aliases.push(id.into());
+    }
+    if matches!(kind, "SocialMediaPosting" | "Article") {
+        d.ttl_secs = ttl.min(3600);
+        let public = "https://www.w3.org/ns/activitystreams#Public";
+        if (v.get("to").is_some() || v.get("cc").is_some())
+            && !(v["to"] == public
+                || v["to"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|x| x == public)))
+        {
+            d.name = Some(base.host_str().unwrap_or("ActivityPub object").into());
+            d.description = Some(String::new());
+            return Some(d);
+        }
+    }
+    d.set_type(kind);
+    d.name = text(v.get("name")).or_else(|| text(v.get("preferredUsername")));
+    d.description = text(v.get("summary"))
+        .or_else(|| text(v.get("content")))
+        .map(|s| plain(&s));
+    if matches!(kind, "SocialMediaPosting" | "Article") {
+        d.description = d.description.map(|s| s.chars().take(200).collect());
+    }
+    if d.name.is_none() {
+        d.name = d
+            .description
+            .as_ref()
+            .map(|s| s.chars().take(120).collect());
+    }
+    d.image = v
+        .pointer("/icon/url")
+        .or_else(|| v.pointer("/image/url"))
+        .and_then(Value::as_str)
+        .and_then(|s| web::origin_url(base, s));
+    if let Some(author) = v["attributedTo"].as_str() {
+        d.attributes.insert("author".into(), author.into());
+    }
+    Some(d)
+}
+async fn parse_activitypub(uri: &str, f: &Fetched, ttl: u64) -> Result<Option<ResourceMeta>> {
+    // An ActivityPub object is a JSON object: a body that starts otherwise (an HTML page) is
+    // none, and takes no copy and no parse slot.
+    let object = f
+        .body
+        .iter()
+        .find(|&&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        .is_some_and(|&b| b == b'{');
+    if !object {
+        return Ok(None);
+    }
+    let (uri, f) = (uri.to_owned(), f.clone());
+    crate::resolver::html::blocking(move || {
+        let Ok(v) = serde_json::from_slice::<Value>(&f.body) else {
+            return Ok(None);
+        };
+        activitypub(&uri, &v, &web::read_at(&f.url), ttl)
+            .map(|d| d.bounded(web::ATTRIBUTES))
+            .transpose()
+    })
+    .await?
+}
+/// The metadata endpoints a page's head advertises: its ActivityPub object and its RSS feed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Alternates {
+    pub activitypub: Option<String>,
+    pub rss: Option<String>,
+}
+/// The first of each among the first 64 `head link[rel='alternate']` of `html`, read at `base`.
+pub(crate) fn alternates(html: &scraper::Html, base: &Url) -> Alternates {
+    let mut found = Alternates::default();
+    for el in html
+        .select(&scraper::Selector::parse("head link[rel='alternate']").unwrap())
+        .take(64)
+    {
+        let Some(ty) = el.value().attr("type") else {
+            continue;
+        };
+        let Some(href) = el
+            .value()
+            .attr("href")
+            .and_then(|s| web::origin_url(base, s))
+        else {
+            continue;
+        };
+        if found.activitypub.is_none()
+            && (ty.contains("activity+json")
+                || (ty.contains("ld+json") && ty.contains("activitystreams")))
+        {
+            found.activitypub = Some(href.clone());
+        }
+        if found.rss.is_none() && ty.contains("rss+xml") {
+            found.rss = Some(href);
+        }
+    }
+    found
+}
+/// `alternates` are the page's (`web::Extracted::alternates`): `None` when its body was not read
+/// as HTML there, and it is parsed for them here.
+pub async fn enrich(
+    uri: &str,
+    f: &Fetched,
+    doc: ResourceMeta,
+    alternates: Option<Alternates>,
+    egress: &Egress,
+    cfg: &CardConfig,
+    discover_feeds: bool,
+) -> Result<ResourceMeta> {
+    enrich_until(uri, f, doc, alternates, egress, cfg, discover_feeds, None).await
+}
+/// [`enrich`] within the read's own `deadline`: a feed card's feed read on for its episodes
+/// ([`read_on`]) gives up in time to hand the card back.
+#[allow(clippy::too_many_arguments)]
+pub async fn enrich_until(
+    uri: &str,
+    f: &Fetched,
+    mut doc: ResourceMeta,
+    alternates: Option<Alternates>,
+    egress: &Egress,
+    cfg: &CardConfig,
+    discover_feeds: bool,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<ResourceMeta> {
+    if doc.status != Status::Ok || doc.type_path.iter().any(|s| s == "Event") {
+        return Ok(doc);
+    }
+    if cfg.activitypub.enabled {
+        if let Some(d) = parse_activitypub(uri, f, cfg.activitypub.ttl_secs).await? {
+            return Ok(d);
+        }
+    }
+    // Only advertised metadata endpoints. Never follow arbitrary links. They are read where the
+    // page was served, without a credential its address carries (`direct` below still compares
+    // the address itself). A body the page read did not parse gets one bounded parse here.
+    let Alternates {
+        activitypub: ap,
+        rss,
+    } = match alternates {
+        Some(found) => found,
+        None => {
+            let (body, base) = (f.body.clone(), web::read_at(&f.url));
+            super::html::blocking(move || -> anyhow::Result<_> {
+                let html = crate::resolver::html::document(&String::from_utf8_lossy(&body))?;
+                Ok(self::alternates(&html, &base))
+            })
+            .await??
+        }
+    };
+    let ap = ap.or_else(|| {
+        crate::event::service::header_alternate(f.validators.link.as_deref(), &web::read_at(&f.url))
+            .map(|v| v.0)
+    });
+    if let Some(url) =
+        ap.filter(|url| cfg.activitypub.enabled && crate::group_keys::same_origin(uri, url))
+    {
+        if let Ok(Ok(f)) = tokio::time::timeout(
+            Duration::from_secs(2),
+            egress.discover(
+                &url,
+                &FetchOptions {
+                    accept: Some("application/activity+json".into()),
+                    ..Default::default()
+                },
+                cfg.activitypub.ttl_secs,
+            ),
+        )
+        .await
+        {
+            if f.status == 200 {
+                if let Some(d) = parse_activitypub(uri, &f, cfg.activitypub.ttl_secs).await? {
+                    doc = d;
+                }
+            }
+        }
+    }
+    if cfg.media.enabled && doc.source != "activitypub" {
+        let is_feed = f.content_type.contains("xml") || f.content_type.contains("rss");
+        let direct = crate::model::identity(uri).ok().map(|v| v.0)
+            == crate::model::identity(f.url.as_str()).ok().map(|v| v.0);
+        // A page may advertise any feed; only a same-publisher feed lends it episode GUIDs.
+        let borrowed = rss
+            .as_deref()
+            .is_some_and(|rss| !is_feed && !crate::group_keys::same_origin(uri, rss));
+        let feed = if is_feed {
+            Some(f.clone())
+        } else if let Some(url) = rss {
+            if !discover_feeds || typed_card(&doc) {
+                crate::telemetry::discovery(
+                    "feed",
+                    if discover_feeds {
+                        "skipped"
+                    } else {
+                        "disabled"
+                    },
+                );
+                return doc.bounded(web::ATTRIBUTES);
+            }
+            crate::telemetry::discovery("feed", "requested");
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                egress.discover(&url, &Default::default(), cfg.media.ttl_secs),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .filter(|f| f.status == 200)
+        } else {
+            None
+        };
+        if let Some(f) = feed {
+            let (cap, ttl) = (cfg.podcast_items, cfg.media.ttl_secs);
+            let read = |f: Fetched| {
+                let uri = uri.to_owned();
+                crate::resolver::html::blocking(move || {
+                    podcast_body(&uri, &f, ttl, cap, direct && is_feed)
+                })
+            };
+            let mut parsed = read(f.clone()).await?;
+            // A feed card's own read, cut at the page cap: its feed is read on for the show's
+            // whole list, or for an item past the part read. The cut read's card stands unless the
+            // longer read makes one (a malformed tail past the cut costs nothing).
+            let item = Url::parse(uri).is_ok_and(|u| u.query_pairs().any(|(k, _)| k == "guid"));
+            let more = match &parsed {
+                Ok(Some(d)) => d.type_name == "PodcastSeries",
+                Ok(None) => item,
+                Err(_) => false,
+            };
+            if is_feed && more {
+                // The read on and its parse together, within the read's own time
+                // (`episodes::feed_deadline`): late, the cut read's card stands. It is taken
+                // only as what the cut read gave or lacked: the show, or the item's episode.
+                let wanted = if item {
+                    "PodcastEpisode"
+                } else {
+                    "PodcastSeries"
+                };
+                let longer = async {
+                    let longer = read_on(egress, &f, ttl).await?;
+                    read(longer)
+                        .await
+                        .ok()?
+                        .ok()
+                        .flatten()
+                        .filter(|d| d.type_name == wanted && d.status == Status::Ok)
+                };
+                let until = crate::episodes::feed_deadline(deadline);
+                match tokio::time::timeout_at(until, longer).await {
+                    Ok(Some(d)) => parsed = Ok(Some(d)),
+                    // The show's list is then the cut read's, whatever the feed's order: the save
+                    // joins the other episodes an earlier, longer read stored to it, so one slow
+                    // or failed read on does not cut the stored list back to the page cap.
+                    _ if !item && reads_on(&f) => {
+                        if let Ok(Some(d)) = &mut parsed {
+                            d.episodes_cut = d.episodes.is_some();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let referenced = uri.to_owned();
+            if let Ok(Some(mut d)) = parsed {
+                // A multi-episode feed must not replace an episode page with the whole series.
+                if (is_feed && !direct) || borrowed {
+                    // A redirecting URI, or a page advertising another origin's feed, is a
+                    // different publisher. Keep the card but withhold borrowed GUIDs.
+                    d.attributes.insert("podcast_feed".into(), referenced);
+                    d.group_keys.retain(|k| {
+                        !matches!(k.basis.as_str(), "podcast_guid" | "podcast_series_guid")
+                    });
+                }
+                // A feed that is no podcast keeps the card the page read made of it
+                // (`web::extract`: its own fields as plain text); a podcast's card, or an episode
+                // the feed doesn't have, replaces it.
+                if d.type_name != "DataFeed" && (is_feed || d.type_name == "PodcastEpisode") {
+                    doc = d;
+                }
+            }
+        }
+    }
+    doc.bounded(web::ATTRIBUTES)
+}
+/// The rest of a feed card's own feed, whose read `f` was cut at the page cap
+/// (`Fetched::truncated`): the feed read again as a show's episodes are read
+/// (`episodes::feed_options`: on to `episodes::FEED_READ`, cut there) at the show's feed address
+/// (`episodes::show_feed`: an item card's `?guid=` dropped, so a show's items share one read), as
+/// read at `f`'s address. A read just made is taken as it is. An answer the discovery cache held
+/// is taken by the feed card when it begins with the cut read's bytes (the feed as the cut read
+/// has it), else the feed is read afresh once; an item card takes it as it is (the caller keeps
+/// its parse only when it is the item's own episode). `None`, and the cut read stands, when that
+/// fails, ends elsewhere or is no longer, and for a feed whose address carries a credential. The
+/// caller bounds its time. So a show's
+/// card lists, and an old episode's card reads, a back catalogue past the first megabyte, while
+/// the page read (`web::extract`) keeps the page cap.
+async fn read_on(egress: &Egress, f: &Fetched, ttl: u64) -> Option<Fetched> {
+    if !reads_on(f) {
+        return None;
+    }
+    let at = crate::episodes::show_feed(&f.url);
+    let own = at == f.url;
+    let options = crate::episodes::feed_options();
+    let longer = |l: &Fetched| l.status == 200 && l.url == at && l.body.len() > f.body.len();
+    let begins = |l: &Fetched| l.body.starts_with(&f.body);
+    let held = egress
+        .discovered(at.as_str(), &options)
+        .await
+        .unwrap_or(false);
+    // Boxed: keeps the reads' state machines off the enrichment's future.
+    let first = Box::pin(egress.discover(at.as_str(), &options, ttl))
+        .await
+        .ok()
+        .filter(|l| longer(l));
+    let read = match first {
+        Some(l) if !own || !held || begins(&l) => Some(l),
+        _ if own && held => Box::pin(egress.fetch_with(at.as_str(), &options))
+            .await
+            .ok()
+            .filter(|l| longer(l)),
+        _ => None,
+    }?;
+    Some(Fetched {
+        url: f.url.clone(),
+        ..read
+    })
+}
+/// Whether [`read_on`] reads on from `f`: a feed's read cut at the page cap, short of
+/// `episodes::FEED_READ`, at an address that carries no credential.
+fn reads_on(f: &Fetched) -> bool {
+    f.truncated
+        && super::egress::xml_feed_type(&f.content_type)
+        && f.body.len() < crate::episodes::FEED_READ
+        && !crate::capability::is_capability_url(&f.url)
+}
+/// The deepest a feed's elements may nest for `feed_prefix` to complete it: an RSS item ends at
+/// depth 2 (`rss`, `channel`), an Atom entry at 1, and nothing in a real feed comes near this.
+const FEED_DEPTH: usize = 64;
+/// The longest element name `feed_prefix` keeps open (`itunes:new-feed-url` is 19 bytes).
+const FEED_NAME_BYTES: usize = 256;
+
+/// An RSS or Atom body cut off at the fetch cap (`Fetched::truncated`), completed so an XML
+/// parser reads it: up to the end of its last whole `item` or `entry` (at most `cap` of them),
+/// then the elements still open there closed. `None` when no item is whole. Streams the prefix,
+/// so a feed of any length costs the cap and no more.
+///
+/// Its work stays linear whatever the feed: elements nest at most `FEED_DEPTH` deep with names of
+/// at most `FEED_NAME_BYTES` (the prefix ends with the last item whole before a deeper element or
+/// a longer name), and the open elements at an item's end are kept as shared names, so keeping
+/// them copies at most `FEED_DEPTH` pointers. It stops, with no prefix, when its parse job is over (its caller gone,
+/// its deadline passed).
+pub fn feed_prefix(body: &str, cap: usize) -> Option<String> {
+    use quick_xml::events::Event;
+    use std::rc::Rc;
+    let mut reader = quick_xml::Reader::from_str(body);
+    let mut open: Vec<Rc<str>> = vec![];
+    let mut last: Option<(usize, Vec<Rc<str>>)> = None;
+    let mut items = 0;
+    for event in 0u64.. {
+        if event % 1024 == 0 && super::html::job_over() {
+            return None;
+        }
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                // Deeper or longer than any feed: the items whole before it are the prefix.
+                if open.len() >= FEED_DEPTH || name.as_ref().len() > FEED_NAME_BYTES {
+                    break;
+                }
+                open.push(String::from_utf8_lossy(name.as_ref()).into());
+            }
+            Ok(Event::End(e)) => {
+                open.pop();
+                if matches!(e.local_name().as_ref(), b"item" | b"entry") {
+                    items += 1;
+                    let end = usize::try_from(reader.buffer_position()).ok()?;
+                    last = Some((end, open.clone()));
+                    if items == cap {
+                        break;
+                    }
+                }
+            }
+            // The cut, wherever it fell (inside a tag, a text, a CDATA section).
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    let (end, open) = last?;
+    let mut completed = body.get(..end)?.to_owned();
+    for name in open.iter().rev() {
+        completed.push_str("</");
+        completed.push_str(name);
+        completed.push('>');
+    }
+    Some(completed)
+}
+pub fn podcast(uri: &str, f: &Fetched, ttl: u64, cap: usize) -> Result<Option<ResourceMeta>> {
+    let direct = crate::model::identity(uri).ok().map(|v| v.0)
+        == crate::model::identity(f.url.as_str()).ok().map(|v| v.0);
+    podcast_body(uri, f, ttl, cap, direct)
+}
+fn podcast_body(
+    uri: &str,
+    f: &Fetched,
+    ttl: u64,
+    cap: usize,
+    direct: bool,
+) -> Result<Option<ResourceMeta>> {
+    let body = match std::str::from_utf8(&f.body) {
+        Ok(body) => body,
+        // Cut off inside a character: the whole characters before it.
+        Err(e) if f.truncated && e.error_len().is_none() => {
+            std::str::from_utf8(&f.body[..e.valid_up_to()])?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    // A feed cut off at its read's cap reads up to its last whole item.
+    let completed;
+    let body = if f.truncated {
+        completed = feed_prefix(body, cap).context("a feed cut off before its first item")?;
+        completed.as_str()
+    } else {
+        body
+    };
+    let xml = super::xml::parse(body)?;
+    let mut items: Vec<_> = xml
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .take(cap + 1)
+        .collect();
+    // A whole feed of more items than the cap is read to its first `cap`, as a cut one is.
+    let partial = f.truncated || items.len() > cap;
+    items.truncate(cap);
+    let Some(channel) = xml.descendants().find(|n| n.has_tag_name("channel")) else {
+        return Ok(None);
+    };
+    let podcast_namespace = channel.namespaces().any(|ns| {
+        matches!(
+            ns.uri().trim_end_matches('/'),
+            "http://www.itunes.com/dtds/podcast-1.0.dtd"
+                | "https://www.itunes.com/dtds/podcast-1.0.dtd"
+                | "https://podcastindex.org/namespace/1.0"
+                | "http://podcastindex.org/namespace/1.0"
+        )
+    });
+    let enclosure = |n: roxmltree::Node<'_, '_>| {
+        n.children().any(|c| {
+            c.has_tag_name("enclosure")
+                && c.attribute("type")
+                    .is_some_and(|ty| ty.starts_with("audio/") || ty.starts_with("video/"))
+        })
+    };
+    let field = |n: roxmltree::Node<'_, '_>, name: &str| {
+        n.children()
+            .find(|c| c.is_element() && c.tag_name().name() == name)
+            .and_then(|c| c.text())
+            .map(str::to_owned)
+    };
+    let guid = Url::parse(uri)?
+        .query_pairs()
+        .find(|(k, _)| k == "guid")
+        .map(|(_, v)| v.into_owned());
+    // The wanted item, named as the episode list names it (`episodes::item_identity`): by the
+    // GUID the URI asks for, or as the page the URI is.
+    let wanted = crate::model::identity(uri).ok().map(|v| v.0);
+    let chosen = items.iter().find_map(|n| {
+        let identity = crate::episodes::item_identity(*n, &f.url)?;
+        (guid.as_ref() == Some(&identity.guid)
+            || identity
+                .page
+                .as_deref()
+                .is_some_and(|p| crate::model::identity(p).ok().map(|v| v.0) == wanted))
+        .then_some((*n, identity))
+    });
+    let mut d = ResourceMeta::new(uri, "media", ttl);
+    // Where the fetch ended, unless that carries a credential: then the link asked for.
+    let feed = if crate::capability::is_capability_url(&f.url) {
+        uri.to_owned()
+    } else {
+        f.url.to_string()
+    };
+    d.attributes.insert("podcast_feed".into(), feed);
+    let episode = chosen.filter(|_| !direct || guid.is_some());
+    let is_podcast = episode
+        .as_ref()
+        .map(|(item, _)| podcast_namespace || enclosure(*item))
+        .unwrap_or_else(|| items.iter().any(|n| enclosure(*n)));
+    if !is_podcast {
+        if !direct {
+            return Ok(None);
+        }
+        d.source = "web".into();
+        d.set_type("DataFeed");
+        d.name = field(channel, "title");
+        return Ok(Some(d.bounded(web::ATTRIBUTES)?));
+    }
+    if let Some((item, identity)) = episode {
+        d.set_type("PodcastEpisode");
+        d.name = field(item, "title");
+        d.description = field(item, "description").map(|s| plain(&s));
+        if let Some(duration) = field(item, "duration") {
+            d.attributes.insert("duration".into(), duration);
+        }
+        d.attributes
+            .insert("podcast_guid".into(), identity.guid.clone());
+        d.stream = item_stream(item);
+        // Its show: the feed, which `POST /v1/resolve` reads as the show's card, by its title.
+        // Never a feed whose address carries a credential.
+        if !crate::capability::is_capability_url(&f.url) {
+            let mut show = crate::model::Related::new(
+                "show",
+                Some(crate::episodes::show_feed(&f.url).to_string()),
+            );
+            show.name = field(channel, "title")
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty())
+                .map(|mut t| {
+                    crate::model::truncate(&mut t, 128);
+                    t
+                });
+            d.related.push(show);
+        }
+        // A read of a feed item from a feed that carries no credential: a page joined to this card
+        // that the item no longer names as its own lets go. Only one read from the address the
+        // URI names (no redirect to another feed) names a page to join: the item's own, which
+        // joins when the feed's publisher publishes it.
+        d.episode_item = guid.is_some() && !crate::capability::is_capability_url(&f.url);
+        if let Some(link) = identity.page {
+            if direct && d.episode_item && crate::episodes::own_page(&link, &items, channel, &f.url)
+            {
+                d.episode_page = Some(link.clone());
+            }
+            d.aliases.push(link);
+        }
+        d.image = item
+            .children()
+            .find(|n| n.tag_name().name() == "image")
+            .and_then(|n| n.attribute("href"))
+            .and_then(|s| web::origin_url(&f.url, s))
+            // Relative to the feed's address, it can land on a link that carries a credential.
+            .filter(|u| !crate::capability::is_capability(u));
+    } else {
+        if guid.is_some() {
+            // An episode past the part of the feed that was read is not missing.
+            if partial {
+                return Ok(None);
+            }
+            return Ok(Some(missing(uri, "media", ttl)));
+        }
+        d.set_type("PodcastSeries");
+        d.name = xml
+            .descendants()
+            .find(|n| n.has_tag_name("channel"))
+            .and_then(|n| field(n, "title"));
+        // The show's latest episodes, listed and played from its card (`episodes`).
+        let listed = crate::episodes::listed(&items, &f.url, partial);
+        d.episodes = Some(listed.episodes);
+        d.episodes_older = listed.older;
+        // An oldest-first feed's read that stopped before the feed ended (cut at its cap, or past
+        // the item cap) is a cut read: the save keeps the other episodes a longer stored list
+        // holds. A newest-first one's stands, unless its read on fails (`enrich_until`).
+        d.episodes_cut = listed.cut;
+        d.episodes_oldest_first = listed.oldest_first;
+        // The show the list's feed names, for the save: by the name this card stores (the
+        // channel's first title, as read above) and the channel's link.
+        d.episodes_channel = crate::episodes::Channel::new(
+            d.name.clone(),
+            crate::episodes::Channel::of(channel).link,
+        );
+    }
+    Ok(Some(d.bounded(web::ATTRIBUTES)?))
+}
+
+/// A feed item's audio: its first audio or video `<enclosure>`, with its `itunes:duration`, when
+/// that is a public stream ([`Stream::public`]).
+pub fn item_stream(item: roxmltree::Node<'_, '_>) -> Option<Stream> {
+    let enclosure = item.children().find(|c| {
+        c.has_tag_name("enclosure")
+            && c.attribute("type")
+                .is_some_and(|ty| ty.starts_with("audio/") || ty.starts_with("video/"))
+    })?;
+    let duration = item
+        .children()
+        .find(|c| c.is_element() && c.tag_name().name() == "duration")
+        .and_then(|c| c.text())
+        .and_then(feed_duration);
+    Stream::public(
+        enclosure.attribute("url")?,
+        enclosure.attribute("type")?,
+        duration,
+        false,
+    )
+}
+/// An `itunes:duration` in seconds: `3557` (a fraction is dropped), `59:17` or `1:02:03`.
+pub fn feed_duration(v: &str) -> Option<u64> {
+    let parts: Vec<&str> = v.trim().split(':').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut total = 0u64;
+    for (i, part) in parts.iter().enumerate() {
+        let whole = match (i + 1 == parts.len()).then(|| part.split_once('.')) {
+            Some(Some((whole, fraction))) if fraction.bytes().all(|b| b.is_ascii_digit()) => whole,
+            _ => part,
+        };
+        if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let n: u64 = whole.parse().ok()?;
+        if i > 0 && n >= 60 {
+            return None;
+        }
+        total = total.checked_mul(60)?.checked_add(n)?;
+    }
+    Some(total)
+}
+
+pub fn invalid_identifier(uri: &str) -> bool {
+    (uri.starts_with("isbn:") && isbn(uri).is_none())
+        || (uri.starts_with("doi:") && doi(uri).is_none())
+        || crate::sources::invalid(uri)
+}
+fn csl_date(v: &Value) -> Option<String> {
+    let parts = v.pointer("/issued/date-parts/0")?.as_array()?;
+    let year = i32::try_from(parts.first()?.as_i64()?).ok()?;
+    let month = u32::try_from(parts.get(1).and_then(Value::as_u64).unwrap_or(1)).ok()?;
+    let day = u32::try_from(parts.get(2).and_then(Value::as_u64).unwrap_or(1)).ok()?;
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    Some(
+        date.format(match parts.len() {
+            1 => "%Y",
+            2 => "%Y-%m",
+            _ => "%Y-%m-%d",
+        })
+        .to_string(),
+    )
+}
+/// Social content: a note or post whose card quotes its text (Nostr, ActivityPub, a Pubky
+/// object described by its content, an official-API source's posts and comments). Its excerpt
+/// is short, refreshes within the hour and is purged, with its change history, once the object
+/// is confirmed gone.
+pub fn social(doc: &ResourceMeta) -> bool {
+    match doc.source.as_str() {
+        "nostr" | "activitypub" => matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "Article" | "CreativeWork"
+        ),
+        "pubky" => doc.type_name == "SocialMediaPosting",
+        name => crate::sources::by_name(name).is_some_and(|s| s.social(doc)),
+    }
+}
+impl CardResolver {
+    async fn fetch_embed(
+        &self,
+        uri: &str,
+        endpoint: Url,
+        ttl: u64,
+    ) -> Option<(ResourceMeta, Value, Url)> {
+        // An endpoint that names a link carrying a credential is never asked.
+        if crate::capability::names_capability(&endpoint) {
+            return None;
+        }
+        crate::telemetry::discovery("oembed", "requested");
+        if let Ok(Ok(f)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.web
+                .egress
+                .discover(endpoint.as_str(), &Default::default(), ttl),
+        )
+        .await
+        {
+            if f.status == 200 {
+                if let Ok(v) = serde_json::from_slice::<Value>(&f.body) {
+                    let mut d = ResourceMeta::new(uri, "web", ttl);
+                    let base = web::read_at(&f.url);
+                    web::apply_oembed(&mut d, &v, &base);
+                    // An answer with a frame but no title still gives the page its frame.
+                    if d.name.is_some() || d.embed.is_some() {
+                        d.source = "media".into();
+                        media_type(&mut d, uri);
+                        return Some((d, v, base));
+                    }
+                }
+            }
+        }
+        None
+    }
+    /// The frame alone of `endpoint`'s oEmbed answer (`embed::from_oembed`), for a page that is
+    /// complete without one: nothing else of the answer is used, and an answer without a title
+    /// counts. An endpoint whose refusal (400, 401, 403) names an access token (Facebook's and
+    /// Instagram's) is not asked again for a day; a link whose answer was otherwise refused (a
+    /// bare 401 may be that object's alone; 403: an embed-restricted video) or was a video or
+    /// rich object without a frame is not asked again for a day either (`NO_FRAME`), the
+    /// provider's other links still are.
+    async fn fetch_frame(&self, endpoint: Url, ttl: u64) -> Option<crate::embed::Embed> {
+        let key = format!(
+            "{}{}",
+            endpoint.host_str()?.to_ascii_lowercase(),
+            endpoint.path()
+        );
+        let link_key = endpoint.as_str().to_owned();
+        if crate::capability::names_capability(&endpoint)
+            || NO_FRAME.get(&key) == Some(true)
+            || NO_FRAME.get(&link_key) == Some(true)
+        {
+            crate::telemetry::discovery("oembed", "skipped");
+            return None;
+        }
+        crate::telemetry::discovery("oembed", "frame");
+        let answer = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.web
+                .egress
+                .discover(endpoint.as_str(), &Default::default(), ttl),
+        )
+        .await;
+        let Ok(Ok(f)) = answer else {
+            return None;
+        };
+        if matches!(f.status, 400 | 401 | 403) {
+            NO_FRAME.set(
+                if wants_token(&f.body) {
+                    &key
+                } else {
+                    &link_key
+                },
+                true,
+            );
+            return None;
+        }
+        let answer = (f.status == 200)
+            .then(|| serde_json::from_slice::<Value>(&f.body).ok())
+            .flatten()?;
+        let frame = crate::embed::from_oembed(&answer, &web::read_at(&f.url));
+        // Only a player's answer (video, rich) without a frame says the provider gives none; a
+        // photo or a link answer, or a failed one, may be the link's alone.
+        let player = matches!(
+            answer.get("type").and_then(Value::as_str),
+            Some("video" | "rich")
+        );
+        if frame.is_none() && player {
+            NO_FRAME.set(&link_key, true);
+        }
+        frame
+    }
+    async fn media(&self, uri: &str, ttl: u64) -> Result<ResourceMeta> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+        // A link that carries a credential is never sent to an oEmbed provider: its page alone
+        // is read.
+        let endpoint = provider_match(uri).filter(|_| !crate::capability::is_capability(uri));
+        let first = endpoint.as_ref().is_some_and(|(_, specific)| {
+            *specific || self.config.media.oembed == OembedPolicy::Always
+        });
+        let mut embed = if first {
+            self.fetch_embed(uri, endpoint.as_ref().unwrap().0.clone(), ttl)
+                .await
+        } else {
+            None
+        };
+        let page_deadline = if endpoint.is_some() && !first {
+            deadline - Duration::from_secs(3)
+        } else {
+            deadline
+        };
+        let page = tokio::time::timeout_at(
+            page_deadline,
+            self.web.resolve_with_policy(uri, self.config.media.oembed),
+        )
+        .await;
+        let mut frame = None;
+        if let Some((endpoint, _)) = endpoint.filter(|_| !first) {
+            if !page
+                .as_ref()
+                .is_ok_and(|r| r.as_ref().is_ok_and(|d| !needs_embed(d)))
+            {
+                if page.as_ref().is_ok_and(|r| {
+                    r.as_ref().is_ok_and(|d| {
+                        d.status == Status::Ok && d.name.is_some() && d.image.is_none()
+                    })
+                }) {
+                    crate::telemetry::discovery("oembed", "missing_image");
+                }
+                embed = tokio::time::timeout_at(deadline, self.fetch_embed(uri, endpoint, ttl))
+                    .await
+                    .ok()
+                    .flatten();
+            } else if page
+                .as_ref()
+                .is_ok_and(|r| r.as_ref().is_ok_and(|d| d.embed.is_none()))
+                && crate::embed::link(uri).is_none()
+            {
+                // A complete page that names no frame, for a link whose player does not follow
+                // from the link: the provider is asked for its frame alone.
+                frame = tokio::time::timeout_at(deadline, self.fetch_frame(endpoint, ttl))
+                    .await
+                    .ok()
+                    .flatten();
+            } else {
+                crate::telemetry::discovery("oembed", "skipped");
+            }
+        }
+        match page {
+            Ok(Ok(mut page))
+                if page.status == Status::Ok
+                    && !page.event.warnings.iter().any(|w| w == "truncated") =>
+            {
+                if let Some((_, v, base)) = embed {
+                    // A provider that names this link exactly answers for the object first.
+                    if first {
+                        web::apply_oembed_first(&mut page, &v, &base);
+                    } else {
+                        web::apply_oembed(&mut page, &v, &base);
+                    }
+                }
+                if frame.is_some() {
+                    page.embed = frame;
+                }
+                media_type(&mut page, uri);
+                page.bounded(web::ATTRIBUTES)
+            }
+            result => {
+                // The answer alone is the card only when it names the thing.
+                if let Some((mut d, _, _)) = embed.filter(|(d, _, _)| d.name.is_some()) {
+                    if let Ok(Ok(page)) = &result {
+                        d.event.warnings.extend(page.event.warnings.iter().cloned());
+                    }
+                    return d.bounded(web::ATTRIBUTES);
+                }
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(super::RetryLater {
+                        class: "timeout",
+                        seconds: 60,
+                    }
+                    .into()),
+                }
+            }
+        }
+    }
+}
+/// Whether an oEmbed refusal's body names an access token: the endpoint wants one for every link
+/// (Facebook's, Instagram's), not just for the one asked. Its status alone (a 401) does not say:
+/// a provider may refuse one private object so.
+fn wants_token(body: &[u8]) -> bool {
+    let body = String::from_utf8_lossy(&body[..body.len().min(2048)]).to_ascii_lowercase();
+    body.contains("access token") || body.contains("access_token")
+}
+/// For a day: the oEmbed endpoints (host and path) that refused a frame-only request
+/// (`fetch_frame`) for want of a token, and the requests (the endpoint with its link) that were
+/// refused or answered a player without a frame.
+static NO_FRAME: std::sync::LazyLock<crate::sources::HostMemo> =
+    std::sync::LazyLock::new(crate::sources::HostMemo::default);
+fn media_type(d: &mut ResourceMeta, uri: &str) {
+    if !matches!(d.type_name.as_str(), "WebPage" | "CreativeWork") {
+        return;
+    }
+    let host = Url::parse(uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned));
+    let kind = match host.as_deref() {
+        Some("open.spotify.com") => Some("MusicRecording"),
+        Some("soundcloud.com" | "www.soundcloud.com") => Some("AudioObject"),
+        Some("youtube.com" | "www.youtube.com" | "youtu.be" | "vimeo.com" | "www.vimeo.com") => {
+            Some("VideoObject")
+        }
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        d.set_type(kind);
+        d.source = "media".into();
+    }
+}
+
+/// The facts a video's card states, on YouTube (any spelling) and Vimeo (any of its video
+/// links, its player's too): a label's upload's `artist` (`music::label_artist`, read from the
+/// channel and description the card stores; `music::type_card` types it a `MusicRecording`),
+/// else the channel that put it up as `author` (its oEmbed `author_name`), and its length
+/// (`duration`, in seconds) when the page stated one. Read from the stored card, so every
+/// stored video has them at once.
+pub(crate) fn media_facts(d: &ResourceMeta) -> Option<std::collections::BTreeMap<String, String>> {
+    let youtube = crate::music::parse(&d.url).is_some_and(|l| {
+        l.service == crate::music::Service::YouTube && l.level == crate::music::Level::Video
+    });
+    let vimeo = crate::embed::link(&d.url).is_some_and(|e| e.provider == "vimeo");
+    if !(youtube || vimeo) || !matches!(d.type_name.as_str(), "VideoObject" | "MusicRecording") {
+        return None;
+    }
+    let attribute = |name: &str| {
+        d.attributes
+            .get(name)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+    };
+    let artist = (youtube && d.type_name == "MusicRecording")
+        .then(|| crate::music::label_artist(attribute("author"), d.description.as_deref()))
+        .flatten()
+        .filter(|a| a.len() <= crate::model::ATTRIBUTE_VALUE_CAP);
+    let mut facts = std::collections::BTreeMap::new();
+    if let Some(artist) = artist {
+        facts.insert("artist".to_owned(), artist);
+    } else if let Some(author) = attribute("author") {
+        facts.insert("author".to_owned(), author.to_owned());
+    }
+    if let Some(secs) = attribute("duration").and_then(crate::music_sources::duration_secs) {
+        facts.insert("duration".to_owned(), secs.to_string());
+    }
+    (!facts.is_empty()).then_some(facts)
+}
+
+/// How long a resolver of this kind may take. Nostr and the official APIs leave their own fetch
+/// timeouts (10 seconds, slot wait included) room to answer first.
+fn budget(kind: &str) -> Duration {
+    if matches!(kind, "nostr" | "official") {
+        crate::queue::RESOLVE_TIMEOUT - Duration::from_secs(1)
+    } else {
+        Duration::from_secs(10)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A DOI's title is plain text: Crossref's `<i>` around a species name is dropped.
+    #[test]
+    fn a_doi_title_with_markup_is_plain_text() {
+        let f = Fetched::answer(
+            Url::parse("https://api.crossref.org/v1/works/10.5555%2Fx/transform").unwrap(),
+            200,
+            "application/json".into(),
+            br#"{"type":"article-journal","title":"Growth of <i>E. coli</i> at 3 &lt; pH","abstract":"<jats:p>Text.</jats:p>"}"#.to_vec(),
+        );
+        let d = parse_doi("doi:10.5555/x", &f, 86400).unwrap();
+        assert_eq!(d.name.as_deref(), Some("Growth of E. coli at 3 < pH"));
+    }
+
+    use super::*;
+
+    /// A podcast feed of `n` items, newest first, each with `notes` bytes of show notes.
+    fn long_feed(n: u32, notes: usize) -> String {
+        let items: String = (1..=n)
+            .rev()
+            .map(|n| format!(r#"<item><title>E{n}</title><guid>e{n}</guid><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(notes)))
+            .collect();
+        format!(
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>Show</title>{items}</channel></rss>"#
+        )
+    }
+
+    /// A feed of `n` items, its oldest first: each dated a day after the one before, with `notes`
+    /// bytes of notes.
+    fn oldest_first_feed(n: i64, notes: usize) -> String {
+        let items: String = (1..=n)
+            .map(|n| {
+                let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
+                    .unwrap()
+                    .to_rfc2822();
+                format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{date}</pubDate><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(notes))
+            })
+            .collect();
+        format!(
+            r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Show</title>{items}</channel></rss>"#
+        )
+    }
+
+    /// A whole feed of more items than the item cap is read to its first `cap` items, as a cut
+    /// one is: still the show's card (no error), and an episode past them is not missing. Its list
+    /// stands as the show's (a newest-first feed's first items are its newest), or, for a feed
+    /// that lists oldest first, is a cut read's. A feed of `cap` items is read whole.
+    #[test]
+    fn a_whole_feed_past_the_item_cap_is_read_to_it() {
+        let f = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            long_feed(12, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(f.url.as_str(), &f, 3600, 10).unwrap().unwrap();
+        assert_eq!(d.type_name, "PodcastSeries");
+        assert!(d.episodes_older, "two items past the cap");
+        assert!(
+            !d.episodes_cut,
+            "a newest-first read that stopped at the item cap holds the newest: it stands"
+        );
+        let episodes = d.episodes.unwrap();
+        assert_eq!(episodes.len(), 10);
+        assert_eq!(episodes[9].name.as_deref(), Some("E3"));
+        assert!(
+            podcast("https://feeds.example.org/show.xml?guid=e2", &f, 3600, 10)
+                .unwrap()
+                .is_none()
+        );
+        let e = podcast("https://feeds.example.org/show.xml?guid=e3", &f, 3600, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(e.type_name, "PodcastEpisode");
+        let whole = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            long_feed(10, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(whole.url.as_str(), &whole, 3600, 10)
+            .unwrap()
+            .unwrap();
+        assert!(!d.episodes_older);
+        assert!(!d.episodes_cut, "a whole read");
+        // Oldest first: the first `cap` items are its oldest, and the save keeps a stored list's
+        // newer episodes.
+        let f = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            oldest_first_feed(12, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(f.url.as_str(), &f, 3600, 10).unwrap().unwrap();
+        assert!(d.episodes_older && d.episodes_oldest_first);
+        assert!(
+            d.episodes_cut,
+            "an oldest-first read that stopped at the item cap: the save keeps a stored list's others"
+        );
+        assert_eq!(d.episodes.unwrap()[0].name.as_deref(), Some("E10"));
+        let whole = crate::sources::fixture::page(
+            "https://feeds.example.org/show.xml",
+            "application/rss+xml",
+            oldest_first_feed(10, 10).into_bytes(),
+            None,
+        );
+        let d = podcast(whole.url.as_str(), &whole, 3600, 10)
+            .unwrap()
+            .unwrap();
+        assert!(d.episodes_oldest_first);
+        assert!(!d.episodes_cut, "a whole read");
+    }
+
+    /// A show's feed cut at the page cap is read on (`read_on`, at the address the cut read ended
+    /// on) for its episodes: its card lists them to the oldest, and says whether the feed has
+    /// more. The cut read's card stands when the feed cannot be read again or its longer read does
+    /// not parse; a whole read, a page and an address that carries a credential are not read
+    /// again; a cached answer older than the cut read is read afresh; an item card reads on only
+    /// for an item past the cut.
+    #[tokio::test(start_paused = true)]
+    async fn a_feed_cut_at_the_page_cap_is_read_on_for_its_episodes() {
+        use crate::resolver::egress::BODY_CAP;
+        let uri = "https://feeds.example.org/show.xml";
+        let whole = long_feed(300, 8000);
+        assert!(whole.len() > 2 * BODY_CAP);
+        let cut_of = |body: &str, url: &str| Fetched {
+            truncated: true,
+            ..crate::sources::fixture::page(
+                url,
+                "application/rss+xml",
+                body.as_bytes()[..BODY_CAP].to_vec(),
+                None,
+            )
+        };
+        let cut = |url: &str| cut_of(&whole, url);
+        let cfg = &CardConfig::default();
+        let read = |egress: Egress, at: &'static str, f: Fetched| async move {
+            enrich(
+                at,
+                &f,
+                ResourceMeta::new(at, "web", 100),
+                None,
+                &egress,
+                cfg,
+                true,
+            )
+            .await
+            .unwrap()
+        };
+        let feed = |body: &str| {
+            crate::sources::fixture::egress(vec![(
+                uri,
+                200,
+                "application/rss+xml",
+                body.as_bytes().to_vec(),
+            )])
+        };
+        let (egress, recorded) = feed(&whole);
+        let d = read(egress, uri, cut(uri)).await;
+        assert_eq!(d.type_name, "PodcastSeries");
+        let episodes = d.episodes.unwrap();
+        assert_eq!(episodes.len(), 300);
+        assert_eq!(episodes[299].name.as_deref(), Some("E1"));
+        assert!(!d.episodes_older, "the whole feed was read");
+        assert!(!d.episodes_cut, "the longer read's list");
+        assert_eq!(recorded.asked(), [uri]);
+        // A longer read that stops before the feed ends (past the item cap) holds a newest-first
+        // feed's newest episodes: it stands. An oldest-first feed's is a cut read.
+        let capped = &CardConfig {
+            podcast_items: 200,
+            ..CardConfig::default()
+        };
+        let read_capped = |body: &str| {
+            let (egress, _) = feed(body);
+            let f = cut_of(body, uri);
+            async move {
+                enrich(
+                    uri,
+                    &f,
+                    ResourceMeta::new(uri, "web", 100),
+                    None,
+                    &egress,
+                    capped,
+                    true,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let d = read_capped(&whole).await;
+        assert_eq!(
+            d.episodes.as_ref().map(Vec::len),
+            Some(200),
+            "the longer read's"
+        );
+        assert!(d.episodes_older);
+        assert!(
+            !d.episodes_cut,
+            "a newest-first longer read stopped at the item cap"
+        );
+        let ascending = oldest_first_feed(300, 8000);
+        assert!(ascending.len() > 2 * BODY_CAP);
+        let d = read_capped(&ascending).await;
+        assert_eq!(
+            d.episodes.as_ref().map(|e| (e.len(), e[0].name.clone())),
+            Some((200, Some("E200".into()))),
+            "the longer read's"
+        );
+        assert!(d.episodes_older && d.episodes_oldest_first);
+        assert!(
+            d.episodes_cut,
+            "an oldest-first longer read stopped at the item cap"
+        );
+        // Not read again: the cut read's list stands.
+        let (egress, recorded) =
+            crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
+        let d = read(egress, uri, cut(uri)).await;
+        let listed = d.episodes.unwrap().len();
+        assert!((100..300).contains(&listed), "{listed}");
+        assert!(d.episodes_older, "the list is the cut read's");
+        assert!(
+            d.episodes_cut,
+            "the save keeps a longer stored list's older episodes"
+        );
+        assert!(!d.episodes_oldest_first, "undated items list nothing first");
+        assert_eq!(
+            recorded.asked(),
+            [uri],
+            "a read just made is not made again"
+        );
+        // A feed that lists its oldest episode first (its items' dates ascend): the cut read says
+        // so (`ResourceMeta::episodes_oldest_first`, for the save).
+        let ascending: String = (1..=300)
+            .map(|n| {
+                let date = chrono::DateTime::from_timestamp(1_600_000_000 + n * 86_400, 0)
+                    .unwrap()
+                    .to_rfc2822();
+                format!(r#"<item><title>E{n}</title><guid>e{n}</guid><pubDate>{date}</pubDate><description>{}</description><enclosure url="https://cdn.example/{n}.mp3" type="audio/mpeg"/></item>"#, "x".repeat(8000))
+            })
+            .collect();
+        let ascending = format!(
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:atom="http://www.w3.org/2005/Atom"><channel><itunes:title>Show (iTunes)</itunes:title><title>Show</title><atom:link href="https://feeds.example/show.xml" rel="self"/><link>https://show.example/</link>{ascending}</channel></rss>"#
+        );
+        let (egress, _) =
+            crate::sources::fixture::egress(vec![(uri, 503, "text/plain", b"busy".to_vec())]);
+        let d = read(egress, uri, cut_of(&ascending, uri)).await;
+        assert!(d.episodes_cut);
+        assert!(d.episodes_oldest_first, "the cut read of an ascending feed");
+        // And names its show as the card does (the save asks whether it is the stored card's):
+        // by the card's own name, the channel's first title, and the channel's link.
+        assert_eq!(d.name.as_deref(), Some("Show (iTunes)"));
+        assert_eq!(
+            d.episodes_channel,
+            crate::episodes::Channel::new(
+                Some("Show (iTunes)".into()),
+                Some("https://show.example/".into())
+            )
+        );
+        assert_eq!(
+            d.episodes.unwrap().last().unwrap().name.as_deref(),
+            Some("E1")
+        );
+        // A longer read that does not parse (an undefined entity past the cut): the cut read's
+        // card and list.
+        let broken = whole.replacen("<title>E1</title>", "<title>E1 &nbsp;</title>", 1);
+        assert_eq!(broken.as_bytes()[..BODY_CAP], whole.as_bytes()[..BODY_CAP]);
+        let (egress, _) = feed(&broken);
+        let d = read(egress, uri, cut(uri)).await;
+        assert_eq!(d.type_name, "PodcastSeries");
+        assert!(d.episodes_cut);
+        assert_eq!(d.episodes.unwrap().len(), listed);
+        // A cached answer that is not the feed as the cut read has it: read afresh.
+        let (egress, recorded) = feed(&whole);
+        let stale = long_feed(299, 8000);
+        egress
+            .seed(
+                uri,
+                &crate::episodes::feed_options(),
+                3600,
+                crate::sources::fixture::page(uri, "application/rss+xml", stale.into_bytes(), None),
+            )
+            .await
+            .unwrap();
+        let d = read(egress, uri, cut(uri)).await;
+        assert!(!d.episodes_cut);
+        assert_eq!(d.episodes.unwrap()[0].name.as_deref(), Some("E300"));
+        assert_eq!(recorded.asked(), [uri]);
+        // An item card reads on only for an item past the cut, at the show's feed address (one
+        // read for all of its items), and only a read that begins as its cut read does.
+        let old = "https://feeds.example.org/show.xml?guid=e1";
+        let (egress, recorded) = feed(&whole);
+        let e = read(egress, old, cut(old)).await;
+        assert_eq!(
+            (e.type_name.as_str(), e.name.as_deref()),
+            ("PodcastEpisode", Some("E1"))
+        );
+        assert_eq!(recorded.asked(), [uri]);
+        // A held copy older than the cut read (a new episode since) still gives the item.
+        let (egress, recorded) = feed(&whole);
+        egress
+            .seed(
+                uri,
+                &crate::episodes::feed_options(),
+                3600,
+                crate::sources::fixture::page(
+                    uri,
+                    "application/rss+xml",
+                    long_feed(299, 8000).into_bytes(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let e = read(egress, old, cut(old)).await;
+        assert_eq!(e.name.as_deref(), Some("E1"));
+        assert!(recorded.asked().is_empty(), "the held copy, no read");
+        // Another feed at the show's address, without the item, gives nothing: no missing card.
+        let other = long_feed(300, 8000).replace("<guid>e", "<guid>x");
+        let (egress, _) = feed(&other);
+        let e = read(egress, old, cut(old)).await;
+        assert_ne!(e.type_name, "PodcastEpisode");
+        assert_eq!(
+            e.status,
+            Status::Ok,
+            "never a missing card from another feed"
+        );
+        let new = "https://feeds.example.org/show.xml?guid=e300";
+        let (egress, recorded) = feed(&whole);
+        let e = read(egress, new, cut(new)).await;
+        assert_eq!(e.name.as_deref(), Some("E300"));
+        assert!(recorded.asked().is_empty());
+        // A whole read is not read again.
+        let (egress, recorded) = crate::sources::fixture::egress(vec![]);
+        let short = crate::sources::fixture::page(
+            uri,
+            "application/rss+xml",
+            long_feed(3, 10).into_bytes(),
+            None,
+        );
+        let d = read(egress, uri, short).await;
+        assert!(!d.episodes_cut, "a whole read's list is the feed's");
+        assert_eq!(d.episodes.unwrap().len(), 3);
+        assert!(recorded.asked().is_empty());
+        // Nor is an address that carries a credential, nor a page.
+        let secret = "https://feeds.example.org/show.xml?token=SECRET";
+        let (egress, recorded) = feed(&whole);
+        assert!(read_on(&egress, &cut(secret), 3600).await.is_none());
+        let page = Fetched {
+            content_type: "text/html".into(),
+            ..cut(uri)
+        };
+        assert!(read_on(&egress, &page, 3600).await.is_none());
+        assert!(recorded.asked().is_empty());
+    }
+
+    /// Only a refusal that names an access token stops a provider's other frames; a bare 401 (one
+    /// private object) stops only that link's.
+    #[test]
+    fn only_a_token_refusal_is_remembered_for_the_whole_endpoint() {
+        assert!(wants_token(
+            br#"{"error":{"message":"(#200) Provide valid app ID","type":"OAuthException"},"hint":"An access token is required"}"#
+        ));
+        assert!(wants_token(br#"{"error":"missing access_token"}"#));
+        assert!(!wants_token(b"Unauthorized"));
+        assert!(!wants_token(br#"{"error":"This video is private"}"#));
+        assert!(!wants_token(b""));
+        // Only the start of the answer is read.
+        let late = format!("{}access token", " ".repeat(4096));
+        assert!(!wants_token(late.as_bytes()));
+    }
+
+    #[test]
+    fn official_apis_outlast_their_fetch_timeout() {
+        // A fetch gives up after 10 seconds; the route waits at least a second longer, so a
+        // source's own answer to a slow fetch (e.g. USGS's retry) always comes first.
+        for kind in ["official", "nostr"] {
+            assert!(budget(kind) >= Duration::from_secs(11), "{kind}");
+            assert!(budget(kind) < crate::queue::RESOLVE_TIMEOUT, "{kind}");
+        }
+    }
+
+    /// Only a body that starts as a JSON object is read as an ActivityPub object, whatever its
+    /// content type says: any other (an HTML page) asks for no parse job.
+    #[tokio::test]
+    async fn only_a_json_object_is_read_as_an_activitypub_object() {
+        let uri = "https://social.example/notes/1";
+        let note = r#"{"type":"Note","id":"https://social.example/notes/1","to":"https://www.w3.org/ns/activitystreams#Public","content":"<p>Hello</p>"}"#;
+        let read = move |content_type: &'static str, body: String| async move {
+            let f = crate::sources::fixture::page(uri, content_type, body.into(), None);
+            let before = crate::resolver::html::counted::jobs();
+            let doc = parse_activitypub(uri, &f, 100).await.unwrap();
+            (crate::resolver::html::counted::jobs() - before, doc)
+        };
+        // The object, under its own type, another, or none, and after JSON's white space.
+        for (content_type, body) in [
+            ("application/activity+json", note.to_owned()),
+            ("text/html", note.to_owned()),
+            ("", format!(" \t\r\n{note}")),
+        ] {
+            let (jobs, doc) = read(content_type, body).await;
+            assert_eq!(jobs, 1, "{content_type}");
+            let doc = doc.unwrap();
+            assert_eq!(doc.source, "activitypub", "{content_type}");
+            assert_eq!(doc.type_name, "SocialMediaPosting", "{content_type}");
+            assert_eq!(doc.description.as_deref(), Some("Hello"), "{content_type}");
+        }
+        // A JSON object that is no ActivityPub object is read and is none.
+        let (jobs, doc) = read("application/json", r#"{"type":"Video"}"#.into()).await;
+        assert_eq!((jobs, doc.is_none()), (1, true));
+        // Anything else is none without a parse job: a page, a list, text, a byte order mark
+        // before the object (no JSON), nothing.
+        for body in [
+            format!("<html><head><title>{note}</title></head></html>"),
+            format!("[{note}]"),
+            "Note".to_owned(),
+            format!("\u{feff}{note}"),
+            String::new(),
+            "  ".to_owned(),
+        ] {
+            let (jobs, doc) = read("application/activity+json", body.clone()).await;
+            assert_eq!((jobs, doc.is_none()), (0, true), "{body}");
+        }
+    }
+
+    /// `enrich` asks the endpoints the page read found in the head, without parsing the page
+    /// again; a body that read did not parse is parsed here, once.
+    #[tokio::test(start_paused = true)]
+    async fn enrichment_takes_the_alternates_the_page_read_found() {
+        let uri = "https://blog.example/post";
+        let feed = "https://blog.example/feed.xml";
+        let body = r#"<html><head><title>Post</title><link rel="alternate" type="application/rss+xml" href="/feed.xml"></head><body></body></html>"#;
+        let f = crate::sources::fixture::page(uri, "text/html", body.into(), None);
+        let cfg = CardConfig::default();
+        let found = Alternates {
+            activitypub: None,
+            rss: Some(feed.to_owned()),
+        };
+        // What was carried, what a parse of the body costs, and the endpoints asked.
+        for (carried, jobs, asked) in [
+            (Some(found.clone()), 0, vec![feed]),
+            // Nothing found in the head: the body's own link is not read again.
+            (Some(Alternates::default()), 0, vec![]),
+            (None, 1, vec![feed]),
+        ] {
+            // The feed's host answers "gone" as plain text: nothing more to parse.
+            let (egress, recorded) =
+                crate::sources::fixture::egress(vec![(feed, 404, "text/plain", b"gone".to_vec())]);
+            let before = crate::resolver::html::counted::jobs();
+            let doc = enrich(
+                uri,
+                &f,
+                ResourceMeta::new(uri, "web", 100),
+                carried.clone(),
+                &egress,
+                &cfg,
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                crate::resolver::html::counted::jobs() - before,
+                jobs,
+                "{carried:?}"
+            );
+            assert_eq!(recorded.asked(), asked, "{carried:?}");
+            assert_eq!(doc.source, "web", "{carried:?}");
+        }
+        // The head's links, as the page read takes them from its tree.
+        let base = Url::parse(uri).unwrap();
+        let read = crate::resolver::html::blocking(move || {
+            alternates(&crate::resolver::html::document(body).unwrap(), &base)
+        })
+        .await
+        .unwrap();
+        assert_eq!(read, found);
+    }
+}
