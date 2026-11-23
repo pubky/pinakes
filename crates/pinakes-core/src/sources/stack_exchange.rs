@@ -373,6 +373,10 @@ impl Source for StackExchange {
     fn takes_key(&self) -> bool {
         true
     }
+    /// A question card quotes its asker's name and text: social content, as a forum post is.
+    fn social(&self, _doc: &ResourceMeta) -> bool {
+        true
+    }
     fn budgets(&self) -> &'static [super::Budget] {
         // The keyless quota, as its average rate: one request every 288 seconds.
         &[("api.stackexchange.com", KEYLESS_QUOTA / 86_400.0)]
@@ -773,6 +777,45 @@ mod pause_tests {
         error
             .downcast_ref::<crate::resolver::RetryLater>()
             .map(|r| r.seconds)
+    }
+
+    /// A question is social content: its card refreshes within the hour, and once the API no
+    /// longer returns it (deleted, as the recorded question 10567404 was) the gone card is purged.
+    #[tokio::test(start_paused = true)]
+    async fn a_question_is_social_and_a_deleted_one_is_gone_social() {
+        let deleted = format!(
+            "https://api.stackexchange.com/2.3/questions/10567404?site=stackoverflow&filter={FILTER}"
+        );
+        let (egress, _) = fixture::egress(vec![
+            (&api(336), 200, JSON, answer(336, None)),
+            (
+                &deleted,
+                200,
+                JSON,
+                fixture::read("stack_exchange", "se-stackoverflow-10567404.json"),
+            ),
+        ]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let pause = Pause::new();
+        let question = resolve(&pause, &cx, &uri(336), None).await.unwrap();
+        assert_eq!(question.type_name, "Question");
+        assert!(crate::resolver::cards::social(&question));
+        assert!(!crate::changes::gone_social(&question));
+        let gone = resolve(
+            &pause,
+            &cx,
+            "https://stackoverflow.com/questions/10567404/python-global-list",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(gone.status, crate::model::Status::Missing);
+        assert!(crate::changes::gone_social(&gone));
+        let scrubbed = crate::changes::gone_card(&gone);
+        assert!(crate::changes::gone_social(&scrubbed));
     }
 
     #[tokio::test(start_paused = true)]
