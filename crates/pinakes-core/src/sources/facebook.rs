@@ -1,0 +1,374 @@
+//! Facebook pages, posts and videos, from what their public pages carry. A page's Open Graph
+//! tags name it (name, about, picture). Posts and videos are shown to accounts only, so they are
+//! link rules: their card is the link's root and shape, and nothing is asked. Event links (`/events/{id}`) are not
+//! this source's: the event module's Facebook adapter reads them. No key, no account. Every
+//! spelling (m., web., fb.com, a capitalised name) is one resource at
+//! `https://www.facebook.com/…`.
+use super::{
+    social::{self, Body, OpenGraph, Shape},
+    Context, Example, Source,
+};
+use crate::model::ResourceMeta;
+use anyhow::{Context as _, Result};
+use async_trait::async_trait;
+
+pub struct Facebook;
+
+const SITE: &str = "facebook.com";
+/// First path segments that are Facebook's own pages, never a page's name.
+const RESERVED: &[&str] = &[
+    "about",
+    "ads",
+    "business",
+    "dialog",
+    "directory",
+    "events",
+    "friends",
+    "fundraisers",
+    "gaming",
+    "groups",
+    "hashtag",
+    "help",
+    "home.php",
+    "jobs",
+    "l.php",
+    "live",
+    "login",
+    "login.php",
+    "marketplace",
+    "me",
+    "messages",
+    "notifications",
+    "pages",
+    "people",
+    "permalink.php",
+    "pg",
+    "photo",
+    "photo.php",
+    "places",
+    "plugins",
+    "policies",
+    "privacy",
+    "profile.php",
+    "public",
+    "r.php",
+    "reel",
+    "reels",
+    "search",
+    "settings",
+    "share",
+    "sharer",
+    "sharer.php",
+    "stories",
+    "story.php",
+    "video.php",
+    "watch",
+];
+
+/// A page's name: 2–64 letters, digits, dots and underscores (a numeric id too).
+fn name(value: &str) -> bool {
+    (2..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_')
+        && !RESERVED.contains(&value.to_ascii_lowercase().as_str())
+}
+
+/// What a Facebook link names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Page(String),
+    Post { page: String, id: String },
+    Video(String),
+}
+
+impl Target {
+    /// `https://www.facebook.com/{name}`, `/{name}/posts/{id}`, `/reel/{id}` and
+    /// `/watch/?v={id}`, on facebook.com (also m., web., mbasic.) and fb.com.
+    pub fn of_uri(uri: &str) -> Option<Self> {
+        let url = super::kit::web_url(uri)?;
+        if !matches!(
+            url.host_str()?,
+            "facebook.com"
+                | "www.facebook.com"
+                | "m.facebook.com"
+                | "web.facebook.com"
+                | "mbasic.facebook.com"
+                | "fb.com"
+                | "www.fb.com"
+        ) {
+            return None;
+        }
+        let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+        match segments.as_slice() {
+            ["reel", id] if social::numeric(id) => Some(Self::Video((*id).to_owned())),
+            ["watch"] => url
+                .query_pairs()
+                .find(|(k, _)| k == "v")
+                .filter(|(_, v)| social::numeric(v))
+                .map(|(_, v)| Self::Video(v.into_owned())),
+            [page, "posts", id] if name(page) && social::numeric(id) => Some(Self::Post {
+                page: page.to_ascii_lowercase(),
+                id: (*id).to_owned(),
+            }),
+            [page] if name(page) => Some(Self::Page(page.to_ascii_lowercase())),
+            _ => None,
+        }
+    }
+    pub fn root(&self) -> String {
+        match self {
+            Self::Page(name) => format!("https://www.facebook.com/{name}"),
+            Self::Post { page, id } => format!("https://www.facebook.com/{page}/posts/{id}"),
+            Self::Video(id) => format!("https://www.facebook.com/watch/?v={id}"),
+        }
+    }
+}
+
+/// Whether the page read at `address` (`OpenGraph::address`) is the page `name`. Facebook reads
+/// a name without its dots and in any case, so they do not count.
+fn own_page(name: &str, address: &str) -> bool {
+    let plain = |name: &str| name.replace('.', "").to_ascii_lowercase();
+    matches!(Target::of_uri(address), Some(Target::Page(read)) if plain(&read) == plain(name))
+}
+
+/// The card of a page by its link alone, "Profile on facebook.com" with the name the link
+/// spells: what a page without tags gives. Such a page (a consent page, Facebook's generic
+/// page) does not say whether the page exists.
+fn plain_page(doc: ResourceMeta, name: &str) -> ResourceMeta {
+    let mut doc = Shape::Profile.card(doc, SITE);
+    doc.set_type("Organization");
+    social::fact(&mut doc, "handle", Some(name.to_owned()));
+    doc
+}
+
+/// The card of a page from its tags, or `None` when the page names nothing: its name, its about
+/// text (the description after `Name. N followers · N talking about this.`, in the page's
+/// language) and its picture.
+pub fn page_card(doc: ResourceMeta, name: &str, tags: &OpenGraph) -> Option<ResourceMeta> {
+    let title = tags.title.as_deref()?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let mut doc = plain_page(doc, name);
+    doc.name = Some(title.to_owned());
+    doc.description = tags.description.as_deref().and_then(|d| {
+        let rest = d
+            .strip_prefix(title)
+            .and_then(|d| d.strip_prefix(". "))
+            .unwrap_or(d);
+        // The counts sentence (`N followers · N talking about this.`) comes first.
+        let about = match rest.split_once(". ") {
+            Some((counts, about)) if counts.contains(" · ") => about,
+            _ => rest,
+        };
+        let about = about.trim();
+        (!about.is_empty()).then(|| social::excerpt(about, 200))
+    });
+    doc.image = tags.image.clone();
+    Some(doc)
+}
+
+#[async_trait]
+impl Source for Facebook {
+    fn name(&self) -> &'static str {
+        "facebook"
+    }
+    fn e2e(&self) -> Option<super::E2e> {
+        use super::{E2e, E2eAnswer, E2eSample};
+        Some(E2e {
+            samples: &[E2eSample {
+                kind: "facebook",
+                uri: "https://www.facebook.com/facebook",
+                card_type: "Organization",
+                group_with: None,
+            }],
+            answers: &[E2eAnswer {
+                host: "www.facebook.com",
+                path: "/facebook",
+                query: &[],
+                header: None,
+                content_type: "text/html",
+                file: "page-facebook.html.gz",
+            }],
+        })
+    }
+    fn reads(&self, uri: &str) -> bool {
+        Target::of_uri(uri).is_some()
+    }
+    fn alias_root(&self, uri: &str) -> Option<String> {
+        let root = Target::of_uri(uri)?.root();
+        let (_, normalized, _) = crate::model::identity(uri).ok()?;
+        (root != normalized).then_some(root)
+    }
+    fn facts(&self) -> &'static [&'static str] {
+        &["author", "handle", "blocked"]
+    }
+    fn social(&self, doc: &ResourceMeta) -> bool {
+        // A post, and a page (its about text is its owner's own).
+        matches!(
+            doc.type_name.as_str(),
+            "SocialMediaPosting" | "Organization"
+        )
+    }
+    fn examples(&self) -> &'static [Example] {
+        &[Example {
+            uri: "https://www.facebook.com/facebook",
+            card_type: "Organization",
+        }]
+    }
+    async fn resolve(&self, cx: &Context<'_>, uri: &str) -> Result<ResourceMeta> {
+        let target = Target::of_uri(uri).context("not a Facebook link")?;
+        let doc = cx.card(uri, self);
+        let mut doc = match &target {
+            Target::Page(name) => match social::page_body(cx, &target.root(), &[]).await? {
+                Body::Read { body, url } => {
+                    let tags = crate::resolver::html::blocking(move || social::open_graph(&body))
+                        .await??;
+                    // Only the page's own tags name it: a fetch may end on another page.
+                    Some(&tags)
+                        .filter(|tags| own_page(name, tags.address(&url)))
+                        .and_then(|tags| page_card(doc.clone(), name, tags))
+                        .unwrap_or_else(|| social::shape_only(plain_page(doc, name)))
+                }
+                Body::Missing => cx.missing(uri, self),
+                // A walled page keeps the link's type.
+                Body::Blocked => {
+                    let mut doc = social::blocked(doc, Shape::Profile, SITE);
+                    doc.set_type("Organization");
+                    doc
+                }
+            },
+            // Posts and videos are shown to accounts only, so their pages are never asked: the
+            // card is the link's (its root, its shape and the page that posted it).
+            Target::Post { page, .. } => {
+                let mut doc = Shape::Post.card(doc, SITE);
+                social::fact(&mut doc, "author", Some(page.clone()));
+                doc
+            }
+            Target::Video(_) => Shape::Video.card(doc, SITE),
+        };
+        doc.source_root = Some(target.root());
+        Ok(doc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addresses() {
+        for (uri, target) in [
+            (
+                "https://www.facebook.com/Facebook/",
+                Target::Page("facebook".into()),
+            ),
+            ("https://fb.com/zuck", Target::Page("zuck".into())),
+            (
+                "https://m.facebook.com/facebook/posts/10162533193146729",
+                Target::Post {
+                    page: "facebook".into(),
+                    id: "10162533193146729".into(),
+                },
+            ),
+            (
+                "https://www.facebook.com/watch/?v=123456789",
+                Target::Video("123456789".into()),
+            ),
+            (
+                "https://www.facebook.com/reel/123456789",
+                Target::Video("123456789".into()),
+            ),
+        ] {
+            assert_eq!(Target::of_uri(uri), Some(target), "{uri}");
+        }
+        for uri in [
+            "https://www.facebook.com/events/123456789/",
+            "https://www.facebook.com/login/",
+            "https://www.facebook.com/groups/123",
+            "https://www.facebook.com/facebook/photos",
+            "https://www.facebook.com/share/p/abc/",
+            "https://www.facebook.com/profile.php?id=4",
+            "https://example.com/facebook",
+        ] {
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+        }
+        assert_eq!(
+            Facebook
+                .alias_root("https://m.facebook.com/Facebook/")
+                .as_deref(),
+            Some("https://www.facebook.com/facebook")
+        );
+        assert_eq!(
+            Facebook
+                .alias_root("https://www.facebook.com/reel/123456789")
+                .as_deref(),
+            Some("https://www.facebook.com/watch/?v=123456789")
+        );
+        assert_eq!(
+            Facebook.alias_root("https://www.facebook.com/facebook"),
+            None
+        );
+    }
+
+    /// Facebook's own pages (sign-in, sign-up, the reels feed, about, the viewer's own profile)
+    /// are no page's name.
+    #[test]
+    fn facebooks_own_pages_are_no_page() {
+        for uri in [
+            "https://www.facebook.com/login.php",
+            "https://www.facebook.com/r.php",
+            "https://www.facebook.com/reels/",
+            "https://www.facebook.com/about",
+            "https://m.facebook.com/Me",
+        ] {
+            assert_eq!(Target::of_uri(uri), None, "{uri}");
+            assert!(!Facebook.reads(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn a_page_from_its_tags() {
+        let body = crate::sources::fixture::read("facebook", "page-facebook.html.gz");
+        let tags = social::open_graph(&String::from_utf8_lossy(&body)).unwrap();
+        let base = ResourceMeta::new("https://www.facebook.com/facebook", "facebook", 3600);
+        let doc = page_card(base.clone(), "facebook", &tags).unwrap();
+        assert_eq!(doc.type_name, "Organization");
+        assert_eq!(doc.name.as_deref(), Some("Facebook"));
+        let about = doc.description.as_deref().unwrap();
+        assert!(about.starts_with("Community Values"), "{about}");
+        assert!(doc.image.as_deref().unwrap().starts_with("https://"));
+        assert_eq!(doc.attributes["handle"], "facebook");
+        assert!(page_card(base, "x", &OpenGraph::default()).is_none());
+    }
+
+    /// A 200 page without tags (a consent page, Facebook's generic page) does not say whether
+    /// the page exists: the plain card, not `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_page_without_tags_is_the_plain_card() {
+        let page = "https://www.facebook.com/facebook";
+        let (egress, _) = crate::sources::fixture::egress(vec![(
+            page,
+            200,
+            "text/html",
+            b"<html><head><title>Facebook</title></head><body><p>Allow cookies to continue.</p></body></html>"
+                .to_vec(),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Facebook
+            .resolve(&cx, "https://m.facebook.com/Facebook/")
+            .await
+            .unwrap();
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "Organization");
+        assert_eq!(doc.name.as_deref(), Some("Profile on facebook.com"));
+        assert_eq!(doc.attributes["handle"], "facebook");
+        assert!(!doc.attributes.contains_key("blocked"));
+        // It never replaces a stored card that says more.
+        assert!(doc.shape_only);
+        assert_eq!(doc.source_root.as_deref(), Some(page));
+    }
+}
