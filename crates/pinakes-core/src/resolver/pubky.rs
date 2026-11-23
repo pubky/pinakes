@@ -1,0 +1,1604 @@
+use super::{
+    egress::{Egress, FetchOptions, Fetched},
+    pkarr_relays::Relays,
+    ErrorClass, Resolver,
+};
+use crate::{
+    config::ResolverConfig,
+    model::{ResourceMeta, Status},
+};
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use pkarr::PublicKey;
+use std::time::Duration;
+use url::Url;
+
+pub const ATTRIBUTES: &[&str] = &["content_type", "content_length"];
+/// What homeservers label objects with beside the general allowlist: they type a body by its
+/// magic bytes or file extension, so JSON without an extension arrives as octet-stream.
+pub const OBJECT_TYPES: &[&str] = &["application/octet-stream", "text/plain", ""];
+/// Pubky objects are fetched through `Egress` from the homeserver's public HTTPS (ICANN)
+/// endpoint, which the owner's PKARR record names; the record comes from the PKARR relays
+/// (`[pubky] pkarr_relays`), also through `Egress`, and its signature is checked locally
+/// (`pkarr_relays`).
+pub struct PubkyResolver {
+    egress: Egress,
+    relays: Relays,
+    config: ResolverConfig,
+}
+impl PubkyResolver {
+    /// One object of an owner's homeserver, fetched as the resolver fetches it: the owner's
+    /// canonical z32 key as the host, its homeserver from the pkarr relays, the path unchanged as
+    /// an HTTPS path (its query kept: a folder's listing options), through the egress policy.
+    pub async fn fetch_object(&self, object: &Url) -> Result<super::egress::Fetched> {
+        let host = object.host_str().context("missing Pubky owner")?;
+        // One spelling per object: the owner's key as the whole host, in z32.
+        let owner = host
+            .parse::<PublicKey>()
+            .ok()
+            .filter(|owner| owner.to_z32() == host)
+            .ok_or_else(|| {
+                anyhow::Error::new(ErrorClass("policy"))
+                    .context("the Pubky owner is not a canonical z32 key")
+            })?;
+        let (domain, port) = self.relays.homeserver(&owner).await?;
+        // The `pubky-host` form the SDK uses for ICANN endpoints. Egress pins the checked
+        // addresses, refuses non-public ones and, because of the header, every redirect.
+        let mut url = Url::parse(&format!("https://{domain}/"))
+            .map_err(|_| ErrorClass("policy"))
+            .context("homeserver domain")?;
+        // A domain only: an IP literal as the target names no homeserver.
+        if !matches!(url.host(), Some(url::Host::Domain(_))) {
+            return Err(anyhow::Error::new(ErrorClass("policy"))
+                .context("the homeserver endpoint is an IP address, not a domain"));
+        }
+        url.set_port(port)
+            .map_err(|_| anyhow::Error::new(ErrorClass("policy")))?;
+        url.set_path(object.path());
+        url.set_query(object.query());
+        // In a `pubky:` URL a backslash or a dot segment is literal, in an `https:` one it is
+        // not: the path fetched must be the path classified, or the namespace check is moot.
+        if url.path() != object.path() {
+            return Err(anyhow::Error::new(ErrorClass("policy"))
+                .context("the Pubky object path changes as an HTTPS path"));
+        }
+        // Homeservers serve many objects as `application/octet-stream`; `card` reads JSON
+        // whatever the declared type.
+        let options = FetchOptions {
+            headers: vec![("pubky-host", owner.to_z32())],
+            accept: Some(format!(
+                "{}, application/octet-stream",
+                super::egress::ALLOWED_TYPES.join(", ")
+            )),
+            extra_types: OBJECT_TYPES,
+            ..Default::default()
+        };
+        self.egress.fetch_with(url.as_str(), &options).await
+    }
+
+    /// The latest version of a post (`pubky_apps::Kind::versions`): its folder listed newest
+    /// first, one entry, a version file directly in it. `Err` with the listing when the folder
+    /// answers no version (a listing that fails, or holds none, as 404). A listing whose first
+    /// line is no entry of this owner is not read as "no version": it fails as `parse`, so a
+    /// homeserver that lists in another form does not turn every post `missing`.
+    async fn latest(&self, post: &Url) -> Result<std::result::Result<Url, Fetched>> {
+        let mut folder = post.clone();
+        folder.set_path(&format!("{}/", post.path().trim_end_matches('/')));
+        folder.set_query(Some("reverse=true&limit=1"));
+        let mut listed = self.fetch_object(&folder).await?;
+        if !(200..=299).contains(&listed.status) {
+            return Ok(Err(listed));
+        }
+        let owner = post.host_str().unwrap_or_default();
+        let unread = || {
+            anyhow::Error::new(ErrorClass("parse"))
+                .context("the folder listing's first line is no entry of this owner")
+        };
+        let first = std::str::from_utf8(&listed.body)
+            .map_err(|_| unread())?
+            .lines()
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty());
+        let entry = match first {
+            // An empty folder.
+            None => None,
+            Some(line) => Some(
+                line.strip_prefix("pubky://")
+                    .or_else(|| line.strip_prefix("pubky"))
+                    .and_then(|rest| rest.strip_prefix(owner))
+                    .filter(|path| path.starts_with('/'))
+                    .ok_or_else(unread)?,
+            ),
+        };
+        let version = entry
+            .and_then(|path| path.strip_prefix(folder.path()))
+            .filter(|file| {
+                file.ends_with(".json")
+                    && file.len() > ".json".len()
+                    && file
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+            })
+            .map(|file| {
+                let mut version = post.clone();
+                version.set_path(&format!("{}{file}", folder.path()));
+                version
+            });
+        Ok(version.ok_or_else(|| {
+            listed.status = 404;
+            listed
+        }))
+    }
+
+    pub fn new(config: ResolverConfig, egress: Egress) -> Result<Self> {
+        Ok(Self {
+            relays: Relays::new(
+                &config.pkarr_relays,
+                Duration::from_millis(config.pkarr_relay_timeout_ms),
+                egress.clone(),
+            )?,
+            egress,
+            config,
+        })
+    }
+}
+
+#[async_trait]
+impl Resolver for PubkyResolver {
+    fn name(&self) -> &'static str {
+        "pubky"
+    }
+    fn matches(&self, uri: &str) -> bool {
+        super::classify(uri) == Some("pubky")
+    }
+    async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let object = Url::parse(uri)?;
+            // A path an app's profile does not read, or any path in a namespace Pinakes never
+            // fetches (one stored before the profile excluded it, or before the rule), is never
+            // fetched: it keeps no card.
+            if super::pubky_apps::excluded(uri) {
+                return Ok(super::pubky_apps::no_card(uri, self.config.ttl_secs));
+            }
+            // Only objects of other apps, by their decoded path (`classify`).
+            if super::classify(uri) != Some("pubky") {
+                return Err(anyhow::Error::new(ErrorClass("policy"))
+                    .context("not a Pubky object of another app"));
+            }
+            // A post is read in its latest version.
+            let fetched = if super::pubky_apps::versioned(uri) {
+                match self.latest(&object).await? {
+                    Ok(version) => self.fetch_object(&version).await?,
+                    Err(listed) => listed,
+                }
+            } else {
+                self.fetch_object(&object).await?
+            };
+            let mut doc = ResourceMeta::new(uri, "pubky", self.config.ttl_secs);
+            doc.set_type("CreativeWork");
+            match fetched.status {
+                200..=299 => {}
+                404 | 410 => {
+                    doc.status = Status::Missing;
+                    return Ok(doc);
+                }
+                401 | 403 => {
+                    doc.status = Status::Unreachable;
+                    return Ok(doc);
+                }
+                status => {
+                    return Err(anyhow::Error::new(ErrorClass(if status >= 500 {
+                        "http_5xx"
+                    } else {
+                        "http_4xx"
+                    }))
+                    .context(crate::resolver::Upstream(status)))
+                }
+            }
+            let doc = super::pubky_apps::card_at(
+                uri,
+                &fetched.content_type,
+                &fetched.body,
+                self.config.ttl_secs,
+                chrono::Utc::now(),
+            )
+            .bounded(super::pubky_apps::attributes())?;
+            crate::telemetry::document(crate::telemetry::last_fetch(), &self.manifest(), &doc);
+            Ok(doc)
+        })
+        .await?
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        Duration::from_secs(doc.ttl_secs)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::egress::{Dns, Fetched, Transport};
+    use pkarr::{dns::rdata::SVCB, Keypair, SignedPacket};
+    use std::{
+        collections::HashMap,
+        net::SocketAddr,
+        sync::{Arc, Mutex},
+    };
+
+    #[test]
+    fn conventional_card_and_namespace_matching() {
+        let uri =
+            "pubky://ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwi/pub/other.app/item";
+        let doc=super::super::pubky_apps::card_at(uri,"application/json",br#"{"title":"A deck","description":"Cards","image":"https://example.org/cover.png","password":"never keep"}"#,10,chrono::Utc::now());
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert!(!serde_json::to_string(&doc).unwrap().contains("password"));
+        assert_eq!(crate::resolver::classify(uri), Some("pubky"));
+        assert_eq!(
+            crate::resolver::classify(&uri.replace("other.app", "pubky.app")),
+            None
+        );
+        // The social specs' objects are Nexus's too, in any version, their posts, events and
+        // rsvps included: never fetched.
+        for path in [
+            "social/v1/posts/0034A0X7NJ52G",
+            "social/v1/posts/0034A0X7NJ52G/0034A0X7NJ52H.json",
+            "social/v1.1/ratings/1",
+            "social/item",
+        ] {
+            assert_eq!(
+                crate::resolver::classify(&uri.replace("other.app/item", path)),
+                None,
+                "{path}"
+            );
+        }
+        assert_eq!(crate::resolver::classify("geo:1,2"), Some("geo"));
+        assert_eq!(
+            crate::resolver::classify("https://www.openstreetmap.org/node/1"),
+            Some("osm")
+        );
+    }
+
+    /// Public addresses for the relays, `homeserver` for the homeserver's domain.
+    struct FixedDns {
+        homeserver: Vec<SocketAddr>,
+        relay: Vec<SocketAddr>,
+        /// Relay hosts whose lookup never answers.
+        stalling: Arc<Mutex<Vec<&'static str>>>,
+    }
+    #[async_trait]
+    impl Dns for FixedDns {
+        async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+            if self.stalling.lock().unwrap().contains(&host) {
+                return std::future::pending().await;
+            }
+            match (host, port) {
+                ("homeserver.example", 9443 | 443) => Ok(self.homeserver.clone()),
+                ("relay.example" | "relay2.example" | "relay3.example", 443) => {
+                    Ok(self.relay.clone())
+                }
+                other => panic!("unexpected lookup {other:?}"),
+            }
+        }
+    }
+    /// The PKARR relays (each key's packet, as relays serve it) and the homeserver.
+    struct Net {
+        packets: HashMap<String, Vec<u8>>,
+        /// Relay hosts that flip a byte of every payload.
+        tampering: Vec<&'static str>,
+        /// Relay hosts that answer 404.
+        empty: Mutex<Vec<&'static str>>,
+        /// Relay hosts that refuse the connection (a real refusal, from a closed local port).
+        refusing: Mutex<Vec<&'static str>>,
+        /// Relay hosts that accept the request and never answer.
+        stalling: Mutex<Vec<&'static str>>,
+        /// Relay hosts that answer only after this long.
+        slow: Mutex<Vec<(&'static str, Duration)>>,
+        /// Relay hosts that answer every request with a redirect to another path of theirs.
+        redirecting: Mutex<Vec<&'static str>>,
+        /// Relay hosts whose DNS lookup never answers (`FixedDns::stalling`).
+        dns_stalling: Arc<Mutex<Vec<&'static str>>>,
+        /// Relay hosts that answer 429 with this `Retry-After` (seconds).
+        limited: Mutex<Vec<(&'static str, u64)>>,
+        /// Relay hosts that answer this server error, with this `Retry-After` when there is one.
+        down: Mutex<Vec<(&'static str, u16, Option<u64>)>>,
+        /// Relay hosts whose connection times out in the client (its connect timeout).
+        timing_out: Mutex<Vec<&'static str>>,
+        /// What one relay host serves for one key instead.
+        serve: Mutex<HashMap<(&'static str, String), Vec<u8>>>,
+        relay_requests: Mutex<Vec<String>>,
+        homeserver: Arc<dyn Transport>,
+    }
+    #[async_trait]
+    impl Transport for Net {
+        async fn get(&self, _: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            unreachable!("Egress sends its options")
+        }
+        async fn get_with(
+            &self,
+            url: &Url,
+            addresses: &[SocketAddr],
+            options: &FetchOptions,
+        ) -> Result<Fetched> {
+            let host = url.host_str().unwrap();
+            if !host.starts_with("relay") {
+                return self.homeserver.get_with(url, addresses, options).await;
+            }
+            self.relay_requests.lock().unwrap().push(url.to_string());
+            if self.refusing.lock().unwrap().contains(&host) {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let closed = listener.local_addr().unwrap();
+                drop(listener);
+                return crate::resolver::egress::PinnedTransport
+                    .get_with(url, &[closed], options)
+                    .await;
+            }
+            if self.stalling.lock().unwrap().contains(&host) {
+                return std::future::pending().await;
+            }
+            let slow = self
+                .slow
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(h, _)| *h == host)
+                .map(|(_, after)| *after);
+            if let Some(after) = slow {
+                tokio::time::sleep(after).await;
+            }
+            if self.redirecting.lock().unwrap().contains(&host) {
+                let response = axum::http::Response::builder()
+                    .status(302)
+                    .header(
+                        "location",
+                        format!("https://{host}/elsewhere{}", url.path()),
+                    )
+                    .body(vec![]);
+                let response = reqwest::Response::from(response.unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
+                    .await;
+            }
+            let limited = self
+                .limited
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(h, _)| *h == host)
+                .map(|(_, seconds)| *seconds);
+            if let Some(seconds) = limited {
+                let response = axum::http::Response::builder()
+                    .status(429)
+                    .header("retry-after", seconds.to_string())
+                    .body(vec![]);
+                let response = reqwest::Response::from(response.unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
+                    .await;
+            }
+            if self.timing_out.lock().unwrap().contains(&host) {
+                return Err(anyhow::Error::new(crate::resolver::ErrorClass("timeout"))
+                    .context("the connection timed out"));
+            }
+            let down = self
+                .down
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(h, _, _)| *h == host)
+                .map(|(_, status, seconds)| (*status, *seconds));
+            if let Some((status, seconds)) = down {
+                let mut response = axum::http::Response::builder().status(status);
+                if let Some(seconds) = seconds {
+                    response = response.header("retry-after", seconds.to_string());
+                }
+                let response = reqwest::Response::from(response.body(vec![]).unwrap());
+                return crate::resolver::egress::read_response_with(url.clone(), response, options)
+                    .await;
+            }
+            let key = url.path().trim_start_matches('/');
+            let served = self
+                .serve
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|((h, k), _)| *h == host && k == key)
+                .map(|(_, payload)| payload.clone());
+            let empty = self.empty.lock().unwrap().contains(&host);
+            let response = match served
+                .or_else(|| self.packets.get(key).cloned())
+                .filter(|_| !empty)
+            {
+                Some(mut payload) => {
+                    if self.tampering.contains(&host) {
+                        *payload.last_mut().unwrap() ^= 1;
+                    }
+                    axum::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/pkarr.org/relays#payload")
+                        .body(payload)
+                }
+                None => axum::http::Response::builder().status(404).body(vec![]),
+            };
+            let response = reqwest::Response::from(response.unwrap());
+            crate::resolver::egress::read_response_with(url.clone(), response, options).await
+        }
+    }
+    /// A request's URL and headers.
+    type Request = (String, Vec<(&'static str, String)>);
+    /// Answers every request with `status` (and a `Location` for a redirect), recording it.
+    #[derive(Default)]
+    struct Homeserver {
+        status: u16,
+        body: &'static str,
+        requests: Mutex<Vec<Request>>,
+    }
+    #[async_trait]
+    impl Transport for Homeserver {
+        async fn get(&self, _: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            unreachable!("Pubky fetches carry the pubky-host header")
+        }
+        async fn get_with(
+            &self,
+            url: &Url,
+            _: &[SocketAddr],
+            options: &FetchOptions,
+        ) -> Result<Fetched> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((url.to_string(), options.headers.clone()));
+            Ok(Fetched {
+                retry_after_secs: 0,
+                location: Some("https://elsewhere.example/pub/app/item".into()),
+                ..Fetched::answer(
+                    url.clone(),
+                    self.status,
+                    // As homeservers serve JSON without an extension.
+                    "application/octet-stream".into(),
+                    self.body.as_bytes().to_vec(),
+                )
+            })
+        }
+    }
+    /// `name`'s HTTPS record points at `target` (`.` for the packet's own addresses).
+    fn https(
+        key: &Keypair,
+        name: &str,
+        target: &str,
+        port: u16,
+        addresses: &[&str],
+    ) -> SignedPacket {
+        let mut service = SVCB::new(1, target.try_into().unwrap());
+        if port > 0 {
+            service.set_port(port);
+        }
+        let mut packet = SignedPacket::builder().https(name.try_into().unwrap(), service, 3600);
+        for address in addresses {
+            packet = packet.address(".".try_into().unwrap(), address.parse().unwrap(), 3600);
+        }
+        packet.sign(key).unwrap()
+    }
+    fn network(packets: &[SignedPacket], homeserver: Arc<dyn Transport>) -> Arc<Net> {
+        Arc::new(Net {
+            packets: packets
+                .iter()
+                .map(|p| (p.public_key().to_z32(), p.to_relay_payload().to_vec()))
+                .collect(),
+            tampering: vec![],
+            empty: Mutex::default(),
+            refusing: Mutex::default(),
+            stalling: Mutex::default(),
+            slow: Mutex::default(),
+            redirecting: Mutex::default(),
+            dns_stalling: Arc::default(),
+            limited: Mutex::default(),
+            down: Mutex::default(),
+            timing_out: Mutex::default(),
+            serve: Mutex::default(),
+            relay_requests: Mutex::default(),
+            homeserver,
+        })
+    }
+    fn resolver_on(net: Arc<Net>, dns: &[&str], relay: &str, relays: &[&str]) -> PubkyResolver {
+        // No per-host pacing in tests: the relays and the homeserver answer at once.
+        let cfg = crate::config::EgressConfig {
+            host_requests_per_second: 1_000_000.0,
+            ..Default::default()
+        };
+        resolver_with(net, dns, relay, relays, cfg, ResolverConfig::default())
+    }
+    /// [`resolver_on`] with an egress and a resolver configuration of the test's own.
+    fn resolver_with(
+        net: Arc<Net>,
+        dns: &[&str],
+        relay: &str,
+        relays: &[&str],
+        cfg: crate::config::EgressConfig,
+        config: ResolverConfig,
+    ) -> PubkyResolver {
+        let addresses = |list: &[&str], port| {
+            list.iter()
+                .map(|a| SocketAddr::new(a.parse().unwrap(), port))
+                .collect()
+        };
+        let dns = FixedDns {
+            homeserver: addresses(dns, 9443),
+            relay: addresses(&[relay], 443),
+            stalling: net.dns_stalling.clone(),
+        };
+        let egress = Egress::with_backends(cfg, Arc::new(dns), net);
+        let config = ResolverConfig {
+            pkarr_relays: relays.iter().map(|r| r.to_string()).collect(),
+            ..config
+        };
+        PubkyResolver::new(config, egress).unwrap()
+    }
+    fn resolver(
+        packets: &[SignedPacket],
+        dns: &[&str],
+        homeserver: Arc<dyn Transport>,
+    ) -> PubkyResolver {
+        resolver_on(
+            network(packets, homeserver),
+            dns,
+            "8.8.4.4",
+            &["https://relay.example"],
+        )
+    }
+    fn object(owner: &Keypair) -> String {
+        format!("pubky://{}/pub/other.app/item", owner.public_key())
+    }
+
+    #[tokio::test]
+    async fn objects_come_through_egress_from_the_homeservers_https_domain() {
+        // The owner delegates to its homeserver's key, which names its ICANN domain.
+        let (owner, server) = (Keypair::random(), Keypair::random());
+        let delegation = https(&owner, "_pubky", &server.public_key().to_string(), 0, &[]);
+        let endpoint = https(&server, ".", "homeserver.example", 9443, &[]);
+        let homeserver = Arc::new(Homeserver {
+            status: 200,
+            body: r#"{"name":"A deck"}"#,
+            ..Default::default()
+        });
+        let doc = resolver(&[delegation, endpoint], &["8.8.8.8"], homeserver.clone())
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert_eq!(doc.url, object(&owner));
+        assert_eq!(
+            *homeserver.requests.lock().unwrap(),
+            [(
+                "https://homeserver.example:9443/pub/other.app/item".to_owned(),
+                vec![("pubky-host", owner.public_key().to_z32())]
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_domain_on_a_private_address_is_refused() {
+        let owner = Keypair::random();
+        for address in ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1"] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let error = resolver(&[packet], &["8.8.8.8", address], homeserver.clone())
+                .resolve(&object(&owner))
+                .await
+                .unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "policy", "{address}");
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{address}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ip_literal_endpoint_is_refused() {
+        let owner = Keypair::random();
+        for literal in ["127.0.0.1", "8.8.8.8"] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", literal, 9443, &[]);
+            let error = resolver(&[packet], &[], homeserver.clone())
+                .resolve(&object(&owner))
+                .await
+                .unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "policy", "{literal}");
+            assert!(format!("{error:#}").contains("not a domain"), "{error:#}");
+            assert!(homeserver.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn classify_reads_the_path_as_the_homeserver_does() {
+        let key = Keypair::random().public_key().to_z32();
+        for uri in [
+            format!("pubky://{key}/pub/a.app/x%2F..%2F..%2Fpubky.app%2Fposts%2F0034A0X7NJ52G"),
+            format!("pubky://{key}/pub/%70ubky.app/posts/0034A0X7NJ52G"),
+            format!("pubky://{key}/pub/a.app/x%2F..%2F..%2F..%2Fpriv%2Fapp.locks%2Ff"),
+            format!("pubky://{key}/pub/a.app/x%5C..%5Cf"),
+            format!("pubky://{key}/pub//x"),
+            format!("pubky://{key}/priv/a.app/x"),
+            // A folder, a query or a port is no object's spelling.
+            format!("pubky://{key}/pub/a.app/"),
+            format!("pubky://{key}/pub/a.app/x/"),
+            format!("pubky://{key}/pub/a.app//x"),
+            format!("pubky://{key}/pub/a.app/x?y=1"),
+            format!("pubky://{key}/pub/a.app/x?"),
+            format!("pubky://{key}:1/pub/a.app/x"),
+            format!("pubky://{key}:6286/pub/a.app/x"),
+        ] {
+            assert_eq!(crate::resolver::classify(&uri), None, "{uri}");
+        }
+        for uri in [
+            format!("pubky://{key}/pub/a.app/a%20b"),
+            format!("pubky://{key}/pub/%61.app/x"),
+        ] {
+            assert_eq!(crate::resolver::classify(&uri), Some("pubky"), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_object_outside_its_own_spelling_is_refused() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for uri in [
+            // `\` is literal in `pubky:` and a separator in `https:`: this would fetch
+            // `/priv/app.locks/f`.
+            format!("pubky://{key}/pub/other.app/x\\..\\..\\..\\priv/app.locks/f"),
+            format!("pubky://anything.{key}/pub/other.app/item"),
+            format!("pubky://{}/pub/other.app/item", key.to_uppercase()),
+            // A homeserver decodes the path and resolves dot segments: these would read a
+            // pubky.app post or a private file.
+            format!("pubky://{key}/pub/a.app/x%2F..%2F..%2Fpubky.app%2Fposts%2F0034A0X7NJ52G"),
+            format!("pubky://{key}/pub/a.app/x%2F..%2F..%2F..%2Fpriv%2Fapp.locks%2Ff"),
+            format!("pubky://{key}/pub/a.app/x%5C..%5C..%5Cpriv/f"),
+            format!("pubky://{key}/pub/a.app/%2E%2E/%2E%2E/priv/f"),
+        ] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let error = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&uri)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                crate::resolver::error_class(&error),
+                "policy",
+                "{uri}: {error:#}"
+            );
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_path_an_apps_profile_does_not_read_is_missing_and_never_fetched() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for path in ["loopky/settings.json", "pubky-rooms/messages/a/b/c"] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&format!("pubky://{key}/pub/{path}"))
+                .await
+                .unwrap();
+            assert_eq!(doc.status, Status::Missing, "{path}");
+            assert_eq!((doc.name, doc.description), (None, None));
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{path}");
+        }
+    }
+
+    /// An object of a namespace Pinakes never fetches (the social specs', pubky.app's), however
+    /// its namespace is spelt, stored before the rule and read again: missing with no card, and
+    /// its homeserver is never asked.
+    #[tokio::test]
+    async fn an_object_of_a_namespace_never_fetched_is_missing_without_a_request() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for path in [
+            "social/v1/posts/0034FED2YCDKJ",
+            "%73ocial/v1/events/0034FED2YCDKG",
+            "pubky.app/posts/0034A0X7NJ52G",
+            "%70ubky.app/posts/0034A0X7NJ52G",
+        ] {
+            let homeserver = Arc::new(Homeserver::default());
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&format!("pubky://{key}/pub/{path}"))
+                .await
+                .unwrap();
+            assert_eq!(doc.status, Status::Missing, "{path}");
+            assert!(doc.withheld, "{path}");
+            assert_eq!(doc.type_name, "CreativeWork", "{path}");
+            assert_eq!((doc.name, doc.description), (None, None));
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{path}");
+        }
+    }
+
+    /// The old Mapky and Eventky layouts are apps no profile knows: their objects, however the
+    /// namespace is spelt, are fetched from the owner's homeserver and get the general card.
+    #[tokio::test]
+    async fn an_object_of_the_old_mapky_or_eventky_layout_gets_the_general_card() {
+        let owner = Keypair::random();
+        let key = owner.public_key().to_z32();
+        for (path, body, name) in [
+            (
+                "eventky.app/events/0034M8WQCPK20",
+                include_str!(
+                    "../../tests/fixtures/pubky_apps/old-layouts/eventky-event-0034M8WQCPK20.json"
+                ),
+                "Pubky Public Dev Call",
+            ),
+            (
+                "mapky.ap%70/routes/00351MV7WF0WG",
+                include_str!(
+                    "../../tests/fixtures/pubky_apps/old-layouts/mapky-route-00351MV7WF0WG.json"
+                ),
+                "Giggelitrain",
+            ),
+        ] {
+            let uri = format!("pubky://{key}/pub/{path}");
+            assert_eq!(crate::resolver::classify(&uri), Some("pubky"), "{uri}");
+            let homeserver = Arc::new(Homeserver {
+                status: 200,
+                body,
+                ..Default::default()
+            });
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&uri)
+                .await
+                .unwrap();
+            assert_eq!(doc.status, Status::Ok, "{path}");
+            assert_eq!(doc.type_name, "CreativeWork", "{path}");
+            assert_eq!(doc.name.as_deref(), Some(name), "{path}");
+            assert_eq!(homeserver.requests.lock().unwrap().len(), 1, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_redirect_is_refused() {
+        let owner = Keypair::random();
+        for status in [301, 302, 307, 308] {
+            let homeserver = Arc::new(Homeserver {
+                status,
+                ..Default::default()
+            });
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let error = resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+                .resolve(&object(&owner))
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("redirect"),
+                "{status}: {error:#}"
+            );
+            assert_eq!(crate::resolver::error_class(&error), "policy", "{status}");
+            assert_eq!(homeserver.requests.lock().unwrap().len(), 1, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_with_only_key_pinned_endpoints_is_unreachable() {
+        let owner = Keypair::random();
+        let homeserver = Arc::new(Homeserver::default());
+        let packet = https(&owner, "_pubky", ".", 443, &["8.8.8.8"]);
+        let error = resolver(&[packet], &[], homeserver.clone())
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect");
+        // An answer about the link, not a refused connection: it still dead-letters.
+        assert!(!crate::resolver::unreached(&error));
+        assert!(format!("{error:#}").contains("key-pinned"), "{error:#}");
+        assert!(homeserver.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_and_closed_objects_keep_their_status() {
+        let owner = Keypair::random();
+        for (status, expected) in [
+            (404, Status::Missing),
+            (410, Status::Missing),
+            (403, Status::Unreachable),
+        ] {
+            let homeserver = Arc::new(Homeserver {
+                status,
+                ..Default::default()
+            });
+            let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+            let doc = resolver(&[packet], &["8.8.8.8"], homeserver)
+                .resolve(&object(&owner))
+                .await
+                .unwrap();
+            assert_eq!(doc.status, expected, "{status}");
+            assert_eq!(doc.type_name, "CreativeWork", "{status}");
+        }
+    }
+
+    /// A homeserver answering 200 with `content_type` and `body`, read by the real egress rules.
+    struct Served(&'static str, &'static [u8]);
+    #[async_trait]
+    impl Transport for Served {
+        async fn get(&self, _: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            unreachable!("Pubky fetches carry the pubky-host header")
+        }
+        async fn get_with(
+            &self,
+            url: &Url,
+            _: &[SocketAddr],
+            options: &FetchOptions,
+        ) -> Result<Fetched> {
+            let mut response = axum::http::Response::builder().status(200);
+            if !self.0.is_empty() {
+                response = response.header("content-type", self.0);
+            }
+            let response = reqwest::Response::from(response.body(self.1.to_vec()).unwrap());
+            crate::resolver::egress::read_response_with(url.clone(), response, options).await
+        }
+    }
+    fn served(content_type: &'static str, body: &'static [u8]) -> (PubkyResolver, String) {
+        let owner = Keypair::random();
+        let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+        let resolver = resolver(
+            &[packet],
+            &["8.8.8.8"],
+            Arc::new(Served(content_type, body)),
+        );
+        (resolver, object(&owner))
+    }
+
+    #[tokio::test]
+    async fn objects_served_as_octet_stream_are_read_as_json() {
+        for content_type in [
+            "application/octet-stream",
+            "text/plain",
+            "",
+            "application/json",
+        ] {
+            let (resolver, uri) = served(content_type, br#"{"name":"A review","rating":5}"#);
+            let doc = resolver.resolve(&uri).await.unwrap();
+            assert_eq!(doc.status, Status::Ok, "{content_type:?}");
+            assert_eq!(doc.name.as_deref(), Some("A review"), "{content_type:?}");
+        }
+        let (resolver, uri) = served("application/octet-stream", br#"{"content":"A post"}"#);
+        let doc = resolver.resolve(&uri).await.unwrap();
+        assert_eq!(doc.description.as_deref(), Some("A post"));
+        assert_eq!(
+            doc.attributes["content_type"], "application/octet-stream",
+            "{doc:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_binary_object_is_a_plain_card_and_other_types_are_refused() {
+        let (resolver, uri) = served("application/octet-stream", b"\x89PNG\r\n\x1a\n\0\0");
+        let doc = resolver.resolve(&uri).await.unwrap();
+        assert_eq!(doc.status, Status::Ok);
+        assert_eq!(doc.name, None);
+        assert_eq!(doc.attributes["content_length"], "10");
+        for content_type in ["video/mp4", "application/zip"] {
+            let (resolver, uri) = served(content_type, b"x");
+            let error = resolver.resolve(&uri).await.unwrap_err();
+            assert_eq!(
+                crate::resolver::error_class(&error),
+                "policy",
+                "{content_type}: {error:#}"
+            );
+        }
+    }
+
+    /// A homeserver's files by path and query (a folder's listing as `text/plain`), read by the
+    /// real egress rules; every request recorded.
+    #[derive(Default)]
+    struct Folder {
+        files: Mutex<HashMap<String, (u16, &'static str, String)>>,
+        requests: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl Transport for Folder {
+        async fn get(&self, _: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            unreachable!("Pubky fetches carry the pubky-host header")
+        }
+        async fn get_with(
+            &self,
+            url: &Url,
+            _: &[SocketAddr],
+            options: &FetchOptions,
+        ) -> Result<Fetched> {
+            let key = match url.query() {
+                Some(query) => format!("{}?{query}", url.path()),
+                None => url.path().to_owned(),
+            };
+            self.requests.lock().unwrap().push(key.clone());
+            let (status, content_type, body) =
+                self.files.lock().unwrap().get(&key).cloned().unwrap_or((
+                    404,
+                    "text/plain",
+                    String::new(),
+                ));
+            let response = axum::http::Response::builder()
+                .status(status)
+                .header("content-type", content_type)
+                .body(body.into_bytes())
+                .unwrap();
+            crate::resolver::egress::read_response_with(url.clone(), response.into(), options).await
+        }
+    }
+
+    /// A post is read in its latest version: its folder listed newest first, one entry, then that
+    /// version fetched; a folder without a version file is a missing post.
+    #[tokio::test]
+    async fn a_post_is_read_in_its_latest_version() {
+        use pubky_social_specs::{traits::TimestampId, PostEnvelope};
+        let owner = Keypair::random();
+        let packet = https(&owner, "_pubky", "homeserver.example", 9443, &[]);
+        let homeserver = Arc::new(Folder::default());
+        let resolver = resolver(&[packet], &["8.8.8.8"], homeserver.clone());
+        let id = PostEnvelope::<crate::resolver::pubky_apps::posts::AppKind>::default().create_id();
+        let post = format!("/pub/maps/v1/posts/{id}");
+        let uri = format!("pubky://{}{post}", owner.public_key());
+        let listing = format!("{post}/?reverse=true&limit=1");
+        let content = serde_json::json!({"name": "Aare walk", "waypoints": [{"uri": "geo:46.95,7.44"}, {"uri": "geo:46.90,7.50"}]});
+        let version = serde_json::json!({"content": content.to_string(), "kind": "route", "parent": null, "embed": null, "attachments": []});
+        let serve = |path: &str, status, content_type, body: String| {
+            homeserver
+                .files
+                .lock()
+                .unwrap()
+                .insert(path.to_owned(), (status, content_type, body));
+        };
+        serve(
+            &listing,
+            200,
+            "text/plain",
+            format!("pubky://{}{post}/0034B.json\n", owner.public_key()),
+        );
+        serve(
+            &format!("{post}/0034B.json"),
+            200,
+            "application/octet-stream",
+            version.to_string(),
+        );
+        let doc = resolver.resolve(&uri).await.unwrap();
+        assert_eq!(doc.name.as_deref(), Some("Aare walk"));
+        assert_eq!(doc.url, uri);
+        assert_eq!(
+            *homeserver.requests.lock().unwrap(),
+            [listing.clone(), format!("{post}/0034B.json")]
+        );
+
+        // A first line that is no entry of this owner (a listing in a form Pinakes does not
+        // read) is a failure, never "no version": the card and its history stay.
+        for body in [
+            "<html>listing</html>".to_owned(),
+            format!("{post}/0034B.json"),
+            format!(
+                "pubky://{}{post}/0034B.json",
+                Keypair::random().public_key()
+            ),
+        ] {
+            serve(&listing, 200, "text/plain", body.clone());
+            let error = resolver.resolve(&uri).await.unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "parse", "{body}");
+        }
+        // An empty folder, one gone, and one listing a file outside it: missing, nothing more
+        // fetched.
+        for (status, body) in [
+            (200, String::new()),
+            (404, String::new()),
+            (
+                200,
+                format!(
+                    "pubky://{}/pub/maps/v1/posts/other/0034B.json",
+                    owner.public_key()
+                ),
+            ),
+            (
+                200,
+                format!("pubky://{}{post}/sub/0034B.json", owner.public_key()),
+            ),
+        ] {
+            homeserver.requests.lock().unwrap().clear();
+            serve(&listing, status, "text/plain", body.clone());
+            let doc = resolver.resolve(&uri).await.unwrap();
+            assert_eq!(doc.status, Status::Missing, "{body}");
+            assert_eq!(
+                *homeserver.requests.lock().unwrap(),
+                std::slice::from_ref(&listing),
+                "{body}"
+            );
+        }
+    }
+
+    fn direct(owner: &Keypair) -> SignedPacket {
+        https(owner, "_pubky", "homeserver.example", 9443, &[])
+    }
+    fn ok() -> Arc<Homeserver> {
+        Arc::new(Homeserver {
+            status: 200,
+            body: r#"{"name":"A deck"}"#,
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn records_come_verified_from_a_relay_and_are_cached() {
+        let owner = Keypair::random();
+        let homeserver = ok();
+        let net = network(&[direct(&owner)], homeserver.clone());
+        let resolver = resolver_on(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example"],
+        );
+        for _ in 0..3 {
+            let doc = resolver.resolve(&object(&owner)).await.unwrap();
+            assert_eq!(doc.name.as_deref(), Some("A deck"));
+        }
+        // One relay request for three objects: the packet lives for its TTL.
+        assert_eq!(
+            *net.relay_requests.lock().unwrap(),
+            [format!(
+                "https://relay.example/{}",
+                owner.public_key().to_z32()
+            )]
+        );
+        assert_eq!(homeserver.requests.lock().unwrap().len(), 3);
+    }
+
+    /// Relays that refuse the connection never answered about the key: the failure never
+    /// reached an answer, so it never dead-letters. One relay that answers badly beside them, or
+    /// one that has no record, is an answer and still counts.
+    #[tokio::test]
+    async fn refusing_relays_are_unreached() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.refusing
+            .lock()
+            .unwrap()
+            .extend(["relay.example", "relay2.example"]);
+        let error = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(crate::resolver::unreached(&error), "{error:#}");
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+        for answering in ["tampering", "empty"] {
+            let mut net = network(&[direct(&owner)], ok());
+            if answering == "tampering" {
+                Arc::get_mut(&mut net).unwrap().tampering = vec!["relay2.example"];
+            } else {
+                net.empty.lock().unwrap().push("relay2.example");
+            }
+            net.refusing.lock().unwrap().push("relay.example");
+            let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+                .resolve(&object(&owner))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                crate::resolver::error_class(&error),
+                "connect",
+                "{answering} {error:#}"
+            );
+            assert!(!crate::resolver::unreached(&error), "{answering} {error:#}");
+        }
+    }
+
+    /// Relays that answer 5xx (or time out) are down: the link did nothing wrong, so the read
+    /// waits and comes again like after a 429 (the longest wait a relay named, else a minute),
+    /// never toward the dead letter. A relay that could not be reached or made Egress wait does
+    /// not change that; one relay's 404 does: it answered about the key.
+    #[tokio::test]
+    async fn relays_that_answer_5xx_are_an_outage() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let outage = |configure: &dyn Fn(&Net)| {
+            let net = network(&[direct(&owner)], ok());
+            configure(&net);
+            let resolver = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays);
+            let object = object(&owner);
+            async move { resolver.resolve(&object).await.unwrap_err() }
+        };
+        let wait = |error: &anyhow::Error| {
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|r| (r.class, r.seconds))
+        };
+        let error = outage(&|net| {
+            net.down.lock().unwrap().extend([
+                ("relay.example", 503, Some(120)),
+                ("relay2.example", 500, None),
+            ])
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 120)), "{error:#}");
+        assert_eq!(crate::resolver::error_class(&error), "relay_outage");
+        let error = outage(&|net| {
+            net.down.lock().unwrap().push(("relay.example", 502, None));
+            net.refusing.lock().unwrap().push("relay2.example");
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 60)), "{error:#}");
+        let error = outage(&|net| {
+            net.down
+                .lock()
+                .unwrap()
+                .push(("relay.example", 503, Some(30)));
+            net.limited.lock().unwrap().push(("relay2.example", 300));
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 300)), "{error:#}");
+        // A connection that timed out in the client is no answer either.
+        let error = outage(&|net| {
+            net.timing_out.lock().unwrap().push("relay.example");
+            net.down.lock().unwrap().push(("relay2.example", 503, None));
+        })
+        .await;
+        assert_eq!(wait(&error), Some(("relay_outage", 60)), "{error:#}");
+        let error = outage(&|net| {
+            net.down.lock().unwrap().push(("relay.example", 503, None));
+            net.empty.lock().unwrap().push("relay2.example");
+        })
+        .await;
+        assert_eq!(wait(&error), None, "{error:#}");
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(!crate::resolver::unreached(&error), "{error:#}");
+    }
+
+    /// A relay whose DNS lookup never answers is given up with its whole ask, inside the read:
+    /// the other relay's packet is used.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_whose_lookup_stalls_does_not_hold_back_another_s_packet() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.dns_stalling.lock().unwrap().push("relay.example");
+        let started = tokio::time::Instant::now();
+        let doc = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        // Its slot wait, its deadline (4 s) and the margin: 6 s of the 10 s read.
+        assert!(
+            started.elapsed() < Duration::from_secs(7),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A relay that answers with a redirect is a failed relay, asked once: the redirect is not
+    /// followed, and the other relay's packet is used.
+    #[tokio::test]
+    async fn a_relay_that_redirects_is_a_failed_relay() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.redirecting.lock().unwrap().push("relay.example");
+        let doc = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        let asked = |net: &Net| {
+            net.relay_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|u| u.starts_with("https://relay.example/"))
+                .count()
+        };
+        assert_eq!(asked(&net), 1);
+        // The redirecting relay alone: a failed relay, named by its answer.
+        let net = network(&[direct(&owner)], ok());
+        net.redirecting.lock().unwrap().push("relay.example");
+        let error = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays[..1])
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(format!("{error:#}").contains("answered 302"), "{error:#}");
+        assert_eq!(asked(&net), 1);
+    }
+
+    /// A relay that accepts the request and never answers is given up at its own deadline,
+    /// shorter than the resolution's: the other relay's packet is used.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_relay_does_not_hold_back_another_s_packet() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.stalling.lock().unwrap().push("relay.example");
+        let started = tokio::time::Instant::now();
+        let doc = resolver_on(net.clone(), &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        // Every relay stalled: a relay outage, read again in a minute without a charge.
+        net.stalling.lock().unwrap().push("relay2.example");
+        let other = Keypair::random();
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&other))
+            .await
+            .unwrap_err();
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!((wait.class, wait.seconds), ("relay_outage", 60));
+        assert!(
+            format!("{error:#}").contains("did not answer within"),
+            "{error:#}"
+        );
+    }
+
+    /// The relay host paced at `rate` requests a second, a relay deadline of `relay_timeout_ms`:
+    /// a resolver, its network and the objects of two keys.
+    fn paced(rate: f64, relay_timeout_ms: u64) -> (PubkyResolver, Arc<Net>, String, String) {
+        let (first, second) = (Keypair::random(), Keypair::random());
+        let net = network(&[direct(&first), direct(&second)], ok());
+        let mut cfg = crate::config::EgressConfig {
+            host_requests_per_second: 1_000_000.0,
+            ..Default::default()
+        };
+        cfg.host_rates.insert("relay.example".into(), rate);
+        let config = ResolverConfig {
+            pkarr_relay_timeout_ms: relay_timeout_ms,
+            ..Default::default()
+        };
+        let resolver = resolver_with(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example"],
+            cfg,
+            config,
+        );
+        (resolver, net, object(&first), object(&second))
+    }
+
+    /// An ask queued for the relay host's slot is not a relay that failed: it gets its packet
+    /// when the slot comes within `RELAY_SLOT_WAIT`, and when it does not, no request is sent
+    /// and the link is read again later without a charge.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_s_deadline_does_not_count_the_wait_for_its_host_slot() {
+        // One request a second: the second ask waits about a second for its slot, longer than
+        // the relay's half-second deadline, and is answered.
+        let (resolver, net, first, second) = paced(1.0, 500);
+        resolver.resolve(&first).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let doc = resolver.resolve(&second).await.unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() > Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+        // One request every two seconds: the slot is further away than an ask waits.
+        let (resolver, net, first, second) = paced(0.5, 4000);
+        resolver.resolve(&first).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let error = resolver.resolve(&second).await.unwrap_err();
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(wait.class, "rate_limited", "{error:#}");
+        assert!((1..=3).contains(&wait.seconds), "{}", wait.seconds);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 1);
+    }
+
+    /// A request sent after a wait for its slot has the whole deadline to be answered: two
+    /// asks at once at one request a second, the second sent about a second later, each relay
+    /// answer taking 0.8 of the deadline. Both get their packet.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_sent_after_a_wait_for_its_slot_has_the_whole_deadline() {
+        let (resolver, net, first, second) = paced(1.0, 1000);
+        net.slow
+            .lock()
+            .unwrap()
+            .push(("relay.example", Duration::from_millis(800)));
+        let started = tokio::time::Instant::now();
+        let (a, b) = tokio::join!(resolver.resolve(&first), resolver.resolve(&second));
+        assert_eq!(a.unwrap().name.as_deref(), Some("A deck"));
+        assert_eq!(b.unwrap().name.as_deref(), Some("A deck"));
+        // The second request was sent after its slot wait.
+        assert!(
+            started.elapsed() > Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+    }
+
+    /// Two reads at once behind a relay that never answers: the first read's request holds the
+    /// relay host's slot until its deadline, the second read's ask is queued behind it, and
+    /// both use the other relay's packet within about one deadline, not two.
+    #[tokio::test(start_paused = true)]
+    async fn asks_queued_behind_a_stalled_relay_do_not_hold_back_the_other_s_packet() {
+        let (first, second) = (Keypair::random(), Keypair::random());
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&first), direct(&second)], ok());
+        net.stalling.lock().unwrap().push("relay.example");
+        let resolver = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays);
+        let started = tokio::time::Instant::now();
+        let (first, second) = (object(&first), object(&second));
+        let (a, b) = tokio::join!(resolver.resolve(&first), resolver.resolve(&second));
+        assert_eq!(a.unwrap().name.as_deref(), Some("A deck"));
+        assert_eq!(b.unwrap().name.as_deref(), Some("A deck"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A relay's 429 keeps its `Retry-After`: when no relay gave an answer about the key, the
+    /// link is read again then, without a charge. Another relay's packet is still used.
+    #[tokio::test]
+    async fn a_relay_s_429_keeps_its_retry_after() {
+        let owner = Keypair::random();
+        let relays = ["https://relay.example", "https://relay2.example"];
+        let net = network(&[direct(&owner)], ok());
+        net.limited
+            .lock()
+            .unwrap()
+            .extend([("relay.example", 120), ("relay2.example", 300)]);
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        let wait = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!((wait.class, wait.seconds), ("rate_limited", 300));
+        let net = network(&[direct(&owner)], ok());
+        net.limited.lock().unwrap().push(("relay.example", 120));
+        let doc = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &relays)
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+    }
+
+    /// A relay's 429 beside a relay that refuses the connection (or one with no record) still
+    /// keeps its `Retry-After`: the link is read again then, not as soon as the next attempt.
+    #[tokio::test]
+    async fn a_relay_s_429_beside_an_unreached_relay_keeps_its_retry_after() {
+        let owner = Keypair::random();
+        let relays = [
+            "https://relay.example",
+            "https://relay2.example",
+            "https://relay3.example",
+        ];
+        for with_missing in [false, true] {
+            let net = network(&[direct(&owner)], ok());
+            net.limited.lock().unwrap().push(("relay.example", 300));
+            net.refusing.lock().unwrap().push("relay2.example");
+            let mut asked = &relays[..2];
+            if with_missing {
+                net.empty.lock().unwrap().push("relay3.example");
+                asked = &relays[..];
+            }
+            let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", asked)
+                .resolve(&object(&owner))
+                .await
+                .unwrap_err();
+            let wait = error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .unwrap_or_else(|| panic!("{with_missing} {error:#}"));
+            assert_eq!(
+                (wait.class, wait.seconds),
+                ("rate_limited", 300),
+                "{with_missing}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_packet_that_does_not_verify_is_refused() {
+        let owner = Keypair::random();
+        let homeserver = ok();
+        let mut net = network(&[direct(&owner)], homeserver.clone());
+        Arc::get_mut(&mut net).unwrap().tampering = vec!["relay.example"];
+        let error = resolver_on(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example"],
+        )
+        .resolve(&object(&owner))
+        .await
+        .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(
+            format!("{error:#}").contains("does not verify"),
+            "{error:#}"
+        );
+        assert!(homeserver.requests.lock().unwrap().is_empty());
+        // The next relay's genuine packet is used.
+        let doc = resolver_on(
+            net,
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example", "https://relay2.example"],
+        )
+        .resolve(&object(&owner))
+        .await
+        .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+    }
+
+    #[tokio::test]
+    async fn a_relay_without_the_record_answers_404() {
+        let owner = Keypair::random();
+        let homeserver = ok();
+        // No packet anywhere: no record, and no request to any homeserver.
+        let net = network(&[], homeserver.clone());
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &["https://relay.example"])
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "dns", "{error:#}");
+        assert!(
+            format!("{error:#}").contains("no PKARR record"),
+            "{error:#}"
+        );
+        // A relay that has no record is followed by one that has.
+        let net = network(&[direct(&owner)], homeserver.clone());
+        *net.empty.lock().unwrap() = vec!["relay.example"];
+        let doc = resolver_on(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example", "https://relay2.example"],
+        )
+        .resolve(&object(&owner))
+        .await
+        .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_relay_on_a_private_address_is_refused_by_egress() {
+        let owner = Keypair::random();
+        for address in ["10.0.0.1", "127.0.0.1", "169.254.169.254"] {
+            let homeserver = ok();
+            let net = network(&[direct(&owner)], homeserver.clone());
+            let error = resolver_on(
+                net.clone(),
+                &["8.8.8.8"],
+                address,
+                &["https://relay.example"],
+            )
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+            assert_eq!(crate::resolver::error_class(&error), "connect", "{address}");
+            assert!(net.relay_requests.lock().unwrap().is_empty(), "{address}");
+            assert!(homeserver.requests.lock().unwrap().is_empty(), "{address}");
+        }
+    }
+
+    /// One relay's own (older or newer) packet for the owner.
+    fn serve(net: &Net, host: &'static str, packet: &SignedPacket) {
+        net.serve.lock().unwrap().insert(
+            (host, packet.public_key().to_z32()),
+            packet.to_relay_payload().to_vec(),
+        );
+    }
+
+    #[tokio::test]
+    async fn the_newest_packet_any_relay_serves_wins() {
+        let owner = Keypair::random();
+        // An older record names another homeserver; looking it up would fail the test's DNS.
+        let old = https(&owner, "_pubky", "old.example", 9443, &[]);
+        let new = direct(&owner);
+        assert!(new.timestamp() > old.timestamp());
+        let homeserver = ok();
+        let net = network(&[], homeserver.clone());
+        serve(&net, "relay.example", &old);
+        serve(&net, "relay2.example", &new);
+        let doc = resolver_on(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example", "https://relay2.example"],
+        )
+        .resolve(&object(&owner))
+        .await
+        .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        // Both relays were asked.
+        assert_eq!(net.relay_requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_packet_older_than_one_seen_is_never_used() {
+        let owner = Keypair::random();
+        let old = https(&owner, "_pubky", "old.example", 9443, &[]);
+        let new = direct(&owner);
+        let homeserver = ok();
+        let net = network(&[], homeserver.clone());
+        serve(&net, "relay.example", &new);
+        let resolver = resolver_on(
+            net.clone(),
+            &["8.8.8.8"],
+            "8.8.4.4",
+            &["https://relay.example"],
+        );
+        resolver.resolve(&object(&owner)).await.unwrap();
+        // The relay now serves the older packet. With the newer one still held, it stays in use.
+        serve(&net, "relay.example", &old);
+        resolver.relays.expire(false);
+        let doc = resolver.resolve(&object(&owner)).await.unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A deck"));
+        // With the newer packet evicted, the older one is still refused: its timestamp is
+        // remembered apart from the cache.
+        resolver.relays.expire(true);
+        let error = resolver.resolve(&object(&owner)).await.unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(format!("{error:#}").contains("older"), "{error:#}");
+        assert_eq!(homeserver.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_relay_payload_over_eight_kilobytes_is_refused() {
+        let owner = Keypair::random();
+        let homeserver = ok();
+        let net = network(&[], homeserver.clone());
+        net.serve.lock().unwrap().insert(
+            ("relay.example", owner.public_key().to_z32()),
+            vec![0; 9 * 1024],
+        );
+        let error = resolver_on(net, &["8.8.8.8"], "8.8.4.4", &["https://relay.example"])
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "connect", "{error:#}");
+        assert!(format!("{error:#}").contains("exceeds"), "{error:#}");
+        assert!(homeserver.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_alias_mode_record_names_only_its_target() {
+        let owner = Keypair::random();
+        // Priority 0 (AliasMode): the port parameter is ignored, so the default port is used.
+        let mut alias = SVCB::new(0, "homeserver.example".try_into().unwrap());
+        alias.set_port(1234);
+        let packet = SignedPacket::builder()
+            .https("_pubky".try_into().unwrap(), alias, 3600)
+            .sign(&owner)
+            .unwrap();
+        let homeserver = ok();
+        resolver(&[packet], &["8.8.8.8"], homeserver.clone())
+            .resolve(&object(&owner))
+            .await
+            .unwrap();
+        assert!(homeserver.requests.lock().unwrap()[0]
+            .0
+            .starts_with("https://homeserver.example/pub/"));
+        // An alias to `.` says the service is unavailable: no endpoint at all.
+        let unavailable = SignedPacket::builder()
+            .https(
+                "_pubky".try_into().unwrap(),
+                SVCB::new(0, ".".try_into().unwrap()),
+                3600,
+            )
+            .sign(&owner)
+            .unwrap();
+        let error = resolver(&[unavailable], &[], ok())
+            .resolve(&object(&owner))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::resolver::error_class(&error), "dns", "{error:#}");
+    }
+}
