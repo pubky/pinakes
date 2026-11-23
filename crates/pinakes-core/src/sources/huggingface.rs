@@ -338,11 +338,17 @@ pub fn parse(status: u16, raw: &[u8], repo: &Repo) -> Result<Option<Card>> {
         .filter_map(|t| t.strip_prefix("arxiv:"))
         .collect();
     card.detail("arxiv", arxiv);
-    // The Hub mints DOIs for repos under `HUB_DOI`; any other `doi:` tag names a paper.
+    // The Hub mints DOIs for repos under `HUB_DOI`; any other `doi:` tag names a paper. The
+    // tags hold the README's own (`cardData.tags`) too: a DOI the uploader typed there is never
+    // the Hub's.
+    let typed: Vec<String> = texts(&v["cardData"]["tags"])
+        .iter()
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
     let mut papers = vec![];
-    for doi in tags.iter().filter_map(|t| t.strip_prefix("doi:")) {
-        let doi = doi.to_ascii_lowercase();
-        if doi.starts_with(HUB_DOI) {
+    for tag in tags.iter().filter(|t| t.starts_with("doi:")) {
+        let doi = tag["doi:".len()..].to_ascii_lowercase();
+        if doi.starts_with(HUB_DOI) && !typed.contains(&tag.to_ascii_lowercase()) {
             card.key(Key::new("doi", &doi));
         } else {
             papers.push(doi);
@@ -800,6 +806,18 @@ mod tests {
         assert_eq!(own_keys(&HuggingFace, &card), ["doi:10.57967/hf/0039"]);
         let doc = checked(&HuggingFace, &card);
         assert_eq!(doc.attributes["paper_doi"], "10.48550/arxiv.1706.03762");
+        // A Hub DOI the README's own tags name is the uploader's: no key.
+        let typed = "doi:10.57967/hf/9999";
+        v["tags"].as_array_mut().unwrap().push(typed.into());
+        v["cardData"]["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(typed.into());
+        let card = parse(200, &serde_json::to_vec(&v).unwrap(), &r)
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.keys, [Key::new("doi", "10.57967/hf/0039")]);
+        assert_eq!(own_keys(&HuggingFace, &card), ["doi:10.57967/hf/0039"]);
     }
 
     #[test]

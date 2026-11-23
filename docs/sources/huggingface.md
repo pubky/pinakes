@@ -53,8 +53,8 @@ description; a model has none.
 | `app_url` | A Space's running app |
 | `last_modified` | The last commit's time |
 | `arxiv` | arXiv ids of the papers the repo cites (not the repo itself) |
-| `paper_doi` | DOIs of the papers the repo cites |
-| `doi` | The DOIs the Hub minted for the repo (`10.57967/hf/…`) |
+| `paper_doi` | The other DOIs the repo's tags name: the papers it cites, and any DOI the README's own tags name |
+| `doi` | The DOIs the Hub minted for the repo (`10.57967/hf/…`), never one the README's own tags name |
 | `page_url` | The repo's page on huggingface.co |
 
 ## Groups
