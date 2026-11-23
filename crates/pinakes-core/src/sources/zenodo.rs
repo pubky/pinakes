@@ -409,6 +409,16 @@ mod tests {
         assert_eq!(own_keys(&Zenodo, &card), Vec::<String>::new());
         let doc = crate::sources::kit::checked(&Zenodo, &card);
         assert_eq!(doc.attributes["doi"], "10.1175/2010mwr3413.1");
+        // A typed DOI that holds a Zenodo DOI after a `; ` is the depositor's, not Zenodo's.
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&read("record-1234567.json")).unwrap();
+        let typed = "10.1175/2010mwr3413.1; 10.5281/zenodo.7790295";
+        v["doi"] = typed.into();
+        v["metadata"]["doi"] = typed.into();
+        let card = parse(200, &serde_json::to_vec(&v).unwrap(), 1234567)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_keys(&Zenodo, &card), Vec::<String>::new());
     }
 
     #[test]

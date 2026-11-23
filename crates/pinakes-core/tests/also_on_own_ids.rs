@@ -53,23 +53,23 @@ async fn only_a_services_own_doi_is_a_key() {
     for (source, prefix) in doi_sources() {
         let uri = "https://example.org/records/7790295";
         let own = format!("{prefix}7790295");
-        // A publisher's DOI the depositor typed, beside the service's own.
-        let doc = card(
-            source,
-            uri,
-            &[("doi", &format!("10.1175/2010mwr3413.1; {own}"))],
-        );
+        let doc = card(source, uri, &[("doi", &own)]);
         let s = subject(uri, Some("CreativeWork"), Some(doc));
         assert!(OwnIds.applies(&s), "{source}");
         let found = OwnIds.lookup(&cx, &s).await.unwrap();
         assert_eq!(keys(&found), [format!("doi:{own}")], "{source}");
         assert_eq!(found.keys[0].via, source);
         assert!(found.links.is_empty() && found.facts.is_empty());
-        // Only the typed one: no key.
-        let doc = card(source, uri, &[("doi", "10.1175/2010mwr3413.1")]);
-        let s = subject(uri, Some("CreativeWork"), Some(doc));
-        assert!(!OwnIds.applies(&s), "{source}");
-        assert!(OwnIds.lookup(&cx, &s).await.unwrap().keys.is_empty());
+        // A publisher's DOI the depositor typed, alone or written beside one of the service's.
+        for typed in [
+            "10.1175/2010mwr3413.1".to_owned(),
+            format!("10.1175/2010mwr3413.1; {own}"),
+        ] {
+            let doc = card(source, uri, &[("doi", &typed)]);
+            let s = subject(uri, Some("CreativeWork"), Some(doc));
+            assert!(!OwnIds.applies(&s), "{source}: {typed}");
+            assert!(OwnIds.lookup(&cx, &s).await.unwrap().keys.is_empty());
+        }
     }
 }
 

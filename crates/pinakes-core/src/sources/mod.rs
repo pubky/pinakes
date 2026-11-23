@@ -839,32 +839,30 @@ pub fn by_name(name: &str) -> Option<&'static dyn Source> {
 /// The join keys of a card an official source read, and that source: its facts in the
 /// namespaces the source declares its own ([`Source::own_ids`]). A DOI is normalized
 /// (`resolver::cards::doi`, lower case) before its prefix is checked; a Wikidata item is
-/// `wikidata:Q…`. `None` when there are none, and for a card of a page hook: what a page says
-/// about itself joins nothing.
+/// `wikidata:Q…`. A fact holding several values (joined with `; `) gives keys only when every
+/// value is an own id: one value with a `; ` that the record's author typed never yields a part
+/// of it. `None` when there are none, and for a card of a page hook: what a page says about
+/// itself joins nothing.
 pub fn own_keys(doc: &ResourceMeta) -> Option<(&'static str, Vec<String>)> {
     let source = by_name(&doc.source).filter(|s| !s.hooks_pages())?;
-    let values = |name: &str| -> Vec<String> {
+    // Every value of a fact as `own` reads it, or none when one is not.
+    let all = |name: &str, own: &dyn Fn(&str) -> Option<String>| -> Vec<String> {
         doc.attributes
             .get(name)
-            .map(|v| v.split("; ").map(str::to_owned).collect())
+            .and_then(|v| v.split("; ").map(|v| own(v.trim())).collect())
             .unwrap_or_default()
     };
     let mut keys = vec![];
     for own in source.own_ids() {
         match own {
-            kit::OwnId::Doi(prefix) => keys.extend(
-                values("doi")
-                    .iter()
-                    .filter_map(|d| crate::resolver::cards::doi(&format!("doi:{}", d.trim())))
+            kit::OwnId::Doi(prefix) => keys.extend(all("doi", &|d| {
+                crate::resolver::cards::doi(&format!("doi:{d}"))
                     .filter(|d| d.starts_with(prefix))
-                    .map(|d| format!("doi:{d}")),
-            ),
-            kit::OwnId::Wikidata => keys.extend(
-                values("wikidata")
-                    .iter()
-                    .filter_map(|q| crate::hubs::qid(q.trim()))
-                    .map(|q| format!("wikidata:{q}")),
-            ),
+                    .map(|d| format!("doi:{d}"))
+            })),
+            kit::OwnId::Wikidata => keys.extend(all("wikidata", &|q| {
+                crate::hubs::qid(q).map(|q| format!("wikidata:{q}"))
+            })),
         }
     }
     keys.sort();
@@ -1554,12 +1552,20 @@ mod tests {
         let mut doc = ResourceMeta::new("https://example.org/r/1", source.name(), 60);
         let own = format!("{}1", prefix.to_ascii_uppercase());
         doc.attributes
-            .insert("doi".into(), format!("10.1000/other; {own}; {prefix}1"));
+            .insert("doi".into(), format!("{own}; {prefix}1; {prefix}2"));
         let (via, keys) = own_keys(&doc).unwrap();
         assert_eq!(via, source.name());
-        assert_eq!(keys, [format!("doi:{prefix}1")]);
-        doc.attributes.insert("doi".into(), "10.1000/other".into());
-        assert_eq!(own_keys(&doc), None);
+        assert_eq!(keys, [format!("doi:{prefix}1"), format!("doi:{prefix}2")]);
+        // A value that is no own DOI: none of the values is taken, so one typed value holding
+        // `; ` never yields a part of it.
+        for typed in [
+            "10.1000/other".to_owned(),
+            format!("10.1000/other; {prefix}1"),
+            format!("{prefix}1; not a doi"),
+        ] {
+            doc.attributes.insert("doi".into(), typed.clone());
+            assert_eq!(own_keys(&doc), None, "{typed}");
+        }
         for name in ["web", "jsonld"] {
             let mut doc = doc.clone();
             doc.source = name.into();

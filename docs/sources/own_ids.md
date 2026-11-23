@@ -15,8 +15,14 @@ links of the same object:
 `via` names the official source. Each source's page says which of its ids join. Every other id
 stays a fact and joins nothing: a DOI the depositor or the metadata typed (a publisher's DOI, under
 another prefix), an id the source does not declare, and any id on a card a page hook made (what a
-page says about itself). A group holds one DOI and one Wikidata item at most, as for every source.
-It asks no service.
+page says about itself). A fact with several values gives keys only when every value is the
+source's own, so a typed value that holds a `; ` never yields a part of it. A group holds one DOI
+and one Wikidata item at most, as for every source. It asks no service.
+
+The `doi:` card of a DOI holds that DOI as its key from the papers lookups (`datacite`), and a
+Wikidata item's card its Q-id from `wikidata_item`: the record joins them through those keys. The
+sources that run after `own_ids` start from its keys as from any other: `wikidata_osm` reads the
+Wikidata item and adds the OpenStreetMap object it names, if one.
 
 `key=doi:{DOI}` and `key=wikidata:Q…` search these keys as they search every other source's.
 
