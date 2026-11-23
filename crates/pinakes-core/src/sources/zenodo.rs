@@ -207,6 +207,11 @@ impl Source for Zenodo {
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("zenodo:") && from_root(uri).is_none()
     }
+    /// Zenodo's own DOIs: a record's, or a concept's on a concept card. A DOI the depositor
+    /// typed (a publisher's) stays a fact.
+    fn own_ids(&self) -> &'static [super::kit::OwnId] {
+        &[super::kit::OwnId::Doi("10.5281/zenodo.")]
+    }
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
@@ -381,6 +386,39 @@ mod tests {
             "the latest version's date is not the concept's"
         );
         assert!(!card.details.contains_key("version"));
+    }
+
+    /// Zenodo's own DOI joins groups: a record's, or the concept's on a concept card. A
+    /// publisher's DOI the depositor typed, and a version's concept DOI, stay facts.
+    #[test]
+    fn only_zenodos_own_dois_join() {
+        use crate::sources::kit::own_keys;
+        let card = parse(200, &read("record-7790295.json"), 7790295)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_keys(&Zenodo, &card), ["doi:10.5281/zenodo.7790295"]);
+        let doc = crate::sources::kit::checked(&Zenodo, &card);
+        assert_eq!(doc.attributes["concept_doi"], "10.5281/zenodo.7790294");
+        let card = parse(200, &read("concept-7790294-followed.json"), 7790294)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_keys(&Zenodo, &card), ["doi:10.5281/zenodo.7790294"]);
+        let card = parse(200, &read("record-1234567.json"), 1234567)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_keys(&Zenodo, &card), Vec::<String>::new());
+        let doc = crate::sources::kit::checked(&Zenodo, &card);
+        assert_eq!(doc.attributes["doi"], "10.1175/2010mwr3413.1");
+        // A typed DOI that holds a Zenodo DOI after a `; ` is the depositor's, not Zenodo's.
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&read("record-1234567.json")).unwrap();
+        let typed = "10.1175/2010mwr3413.1; 10.5281/zenodo.7790295";
+        v["doi"] = typed.into();
+        v["metadata"]["doi"] = typed.into();
+        let card = parse(200, &serde_json::to_vec(&v).unwrap(), 1234567)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_keys(&Zenodo, &card), Vec::<String>::new());
     }
 
     #[test]

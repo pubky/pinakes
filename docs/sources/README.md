@@ -205,6 +205,7 @@ so one goes without the others needing a change.
 - [`tmdb`](tmdb.md): TMDB's poster and overview for a film or series card (with the operator's TMDB credential).
 - [`podcasts`](podcasts.md): Apple Podcasts, Podcast Index and Wikidata for a show.
 - [`product_keys`](product_keys.md): a product's own barcode as its key.
+- [`own_ids`](own_ids.md): an official record's own DOI or Wikidata item as its key.
 - [`open_food_facts`](open_food_facts.md#also-on): a product's barcode on Open Food, Beauty,
   Products and Pet Food Facts.
 - [`stack_exchange`](stack_exchange.md#also-on): a question's id, and the original of a duplicate.

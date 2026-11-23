@@ -27,6 +27,7 @@ pub mod media;
 pub mod musicbrainz;
 pub mod musicbrainz_containment;
 pub mod musicbrainz_entity;
+pub mod own_ids;
 pub mod performers;
 pub mod podcasts;
 pub mod product_keys;
@@ -547,6 +548,7 @@ pub fn registry() -> Vec<Arc<dyn Source>> {
         Arc::new(tmdb::Tmdb),
         Arc::new(podcasts::Podcasts),
         Arc::new(product_keys::ProductKeys),
+        Arc::new(own_ids::OwnIds),
         Arc::new(crate::sources::open_food_facts::also_on::OpenFoodFacts),
         Arc::new(crate::sources::stack_exchange::also_on::StackExchange),
         Arc::new(crate::sources::media_records::titles::Titles),

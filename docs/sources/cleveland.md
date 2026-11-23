@@ -45,6 +45,11 @@ museum's own text as plain text. `image` is the web-sized image, only for works 
 | `wikidata` | The work's Wikidata id (only when the museum names exactly one) |
 | `page_url` | The artwork's page on clevelandart.org |
 
+## Groups
+
+The work's Wikidata id is also its key `wikidata:Q…` (the `own_ids` also-on source): the card
+joins the group of the Wikidata item's card.
+
 ## Licence and attribution
 
 The data is CC0. The card credits "Cleveland Museum of Art", with ", CC0" for CC0 works.

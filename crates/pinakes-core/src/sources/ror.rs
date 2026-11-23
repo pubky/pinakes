@@ -239,6 +239,10 @@ impl Source for Ror {
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("ror:") && from_root(uri).is_none()
     }
+    /// The organization's Wikidata item. Its other registries' ids stay facts.
+    fn own_ids(&self) -> &'static [super::kit::OwnId] {
+        &[super::kit::OwnId::Wikidata]
+    }
     fn facts(&self) -> &'static [&'static str] {
         &[
             "page_url",
@@ -477,6 +481,23 @@ mod tests {
         assert!(!r.invalid("https://example.org/ror:x"));
         for example in r.examples() {
             assert!(r.reads(example.uri), "{}", example.uri);
+        }
+    }
+
+    /// The organization's Wikidata item joins groups; its ISNI, Crossref Funder and GRID ids
+    /// stay facts.
+    #[test]
+    fn only_the_wikidata_item_joins() {
+        use crate::sources::kit::{checked, own_keys};
+        for (file, id, key) in [
+            ("org-042nb2s44.json", "042nb2s44", "wikidata:Q49108"),
+            ("org-03yrm5c26.json", "03yrm5c26", "wikidata:Q5020447"),
+        ] {
+            let card = parse(200, &read(file), id).unwrap().unwrap();
+            assert_eq!(own_keys(&Ror, &card), [key], "{file}");
+            let doc = checked(&Ror, &card);
+            assert!(doc.attributes.contains_key("grid"), "{file}");
+            assert!(doc.attributes.contains_key("isni"), "{file}");
         }
     }
 

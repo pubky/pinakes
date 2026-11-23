@@ -41,6 +41,12 @@ The API gives only years, so the card has no `start`; they are facts.
 | `wikidata` | The work's Wikidata id |
 | `page_url` | The object's page on metmuseum.org |
 
+## Groups
+
+The work's Wikidata id is also its key `wikidata:Q…` (the `own_ids` also-on source): the card
+joins the group of the Wikidata item's card. `artist_wikidata` names another object and is a fact
+only.
+
 ## Licence and attribution
 
 The data is CC0. The card credits "The Metropolitan Museum of Art", with ", CC0" for

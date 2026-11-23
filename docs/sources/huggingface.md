@@ -53,9 +53,15 @@ description; a model has none.
 | `app_url` | A Space's running app |
 | `last_modified` | The last commit's time |
 | `arxiv` | arXiv ids of the papers the repo cites (not the repo itself) |
-| `paper_doi` | DOIs of the papers the repo cites |
-| `doi` | The DOIs the Hub minted for the repo (`10.57967/hf/…`) |
+| `paper_doi` | The other DOIs the repo's tags name: the papers it cites, and any DOI the README's own tags name |
+| `doi` | The DOIs the Hub minted for the repo (`10.57967/hf/…`), never one the README's own tags name |
 | `page_url` | The repo's page on huggingface.co |
+
+## Groups
+
+A DOI the Hub minted for the repo (`10.57967/hf/…`) is also its key `doi:…` (the `own_ids`
+also-on source): the repo joins the group of the `doi:` card of that DOI (a group holds one DOI,
+so a repo with two joins neither). A `paper_doi` is a fact only and joins nothing.
 
 ## Licence
 

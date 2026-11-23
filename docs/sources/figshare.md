@@ -51,6 +51,12 @@ CC0 or CC BY.
 | `tags` | The article's keywords |
 | `page_url` | The article's page on figshare.com or its portal |
 
+## Groups
+
+The article's DOI, when Figshare issued it (`10.6084/m9.figshare.{id}`), is also its key `doi:…`
+(the `own_ids` also-on source): the article joins the group of the `doi:` card of that DOI. A
+`version_doi`, and a publisher's DOI in `doi`, are facts only and join nothing.
+
 ## Licence
 
 Figshare's metadata is CC0; each article's content is under the licence it states.

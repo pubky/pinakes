@@ -592,6 +592,28 @@ mod tests {
         assert!(!ia.reads("https://archive.org/download/x/y.pdf"));
     }
 
+    /// An item's ISBN, Open Library edition and DOI are what its uploader typed: facts that
+    /// join no group.
+    #[test]
+    fn its_ids_join_nothing() {
+        use crate::sources::kit::{checked, own_keys};
+        for (name, fact) in [
+            ("crimepunishment00dost_0", "isbn"),
+            ("introductiontoal0000unse_t3a6", "openlibrary"),
+            ("aside-cardiovascular-319", "doi"),
+        ] {
+            let card = card(name, name);
+            assert!(checked(&InternetArchive, &card)
+                .attributes
+                .contains_key(fact));
+            assert_eq!(
+                own_keys(&InternetArchive, &card),
+                Vec::<String>::new(),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn documents() {
         let ia = InternetArchive;

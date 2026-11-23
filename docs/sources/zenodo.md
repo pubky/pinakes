@@ -49,6 +49,13 @@ text, licence and image.
 | `latest_version` | On a concept card: the latest version's record id |
 | `page_url` | The record's page on zenodo.org |
 
+## Groups
+
+The record's DOI, when Zenodo issued it (`10.5281/zenodo.…`), is also its key `doi:…` (the
+`own_ids` also-on source): the record joins the group of the `doi:` card of that DOI, and a
+concept card that of the concept DOI's card. A publisher's DOI in `doi`, and a version's
+`concept_doi`, are facts only and join nothing.
+
 ## Licence
 
 Zenodo's metadata is CC0; each record's files and text are under the licence the record states.
