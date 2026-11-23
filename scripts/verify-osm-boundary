@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+for tool in rg psql pg_dump python3; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "verify-osm-boundary: $tool is required but not installed" >&2
+    exit 1
+  fi
+done
+# Adapters may reference accepted OSM facts, but never write the derivative cache.
+if rg -n 'osm[.]save\(|(?:INSERT INTO|UPDATE|DELETE FROM) osm_place' crates/pinakes-core/src/event/adapters; then
+  echo 'Adapter writes to osm_place are forbidden' >&2
+  exit 1
+fi
+# psql and pg_dump connect by the PG* variables of the URL (scripts/pg-env): the URL, and any
+# password in it, never stands on a command line.
+export DATABASE_URL="${DATABASE_URL:-postgresql:///pinakes?host=/var/run/postgresql}"
+scripts/pg-env psql -v ON_ERROR_STOP=1 <<'SQL'
+DO $$ BEGIN
+IF EXISTS(SELECT 1 FROM resource WHERE resolver='osm' AND
+  (osm_type IS NULL OR osm_id IS NULL OR name IS NOT NULL OR point IS NOT NULL OR
+   category IS NOT NULL OR type IS NOT NULL OR type_path IS NOT NULL OR
+   doc->>'type' IS DISTINCT FROM 'Place' OR
+   doc-ARRAY['type','url','osm_id','source','status']::text[]<>'{}'::jsonb))
+THEN RAISE EXCEPTION 'OSM-derived values leaked into resource'; END IF;
+IF EXISTS(SELECT 1 FROM resource r LEFT JOIN osm_place o USING(osm_type,osm_id)
+  WHERE r.resolver='osm' AND r.resolved_at IS NOT NULL AND o.osm_id IS NULL)
+THEN RAISE EXCEPTION 'Resolved OSM reference has no derivative row'; END IF;
+IF EXISTS(SELECT 1 FROM resource WHERE resolver='web' AND lower(rtrim(host,'.')) ~ '(^|[.])(openstreetmap[.]org|osm[.]org)$' AND (name IS NOT NULL OR doc<>'{}'::jsonb))
+THEN RAISE EXCEPTION 'OSM-host web metadata leaked into resource'; END IF;
+END $$;
+DO $$ BEGIN
+IF to_regclass('resource_change') IS NOT NULL THEN
+  IF EXISTS(SELECT 1 FROM resource_change WHERE source='osm' AND
+    (before-ARRAY['osm_id','version']::text[]<>'{}'::jsonb OR after-ARRAY['osm_id','version']::text[]<>'{}'::jsonb))
+  THEN RAISE EXCEPTION 'OSM-derived values leaked into resource_change'; END IF;
+  -- Location links on OSM hosts resolve as geo points named by the URL itself.
+  IF EXISTS(SELECT 1 FROM resource_change WHERE source NOT IN ('osm','geo') AND (coalesce(before->>'url','') ~ '^https?://([a-z0-9-]+[.])*(openstreetmap[.]org|osm[.]org)[.]?(:[0-9]+)?([/?#]|$)' OR coalesce(after->>'url','') ~ '^https?://([a-z0-9-]+[.])*(openstreetmap[.]org|osm[.]org)[.]?(:[0-9]+)?([/?#]|$)'))
+  THEN RAISE EXCEPTION 'OSM-host web facts leaked into historical changes'; END IF;
+END IF;
+END $$;
+DO $$ BEGIN
+IF to_regclass('event_fetch') IS NOT NULL THEN
+  IF EXISTS(SELECT 1 FROM resource WHERE doc#>>'{venue,osm_id}' IS NOT NULL AND (point IS NOT NULL OR doc ? 'location' OR (doc->'venue') ? 'location'))
+    OR EXISTS(SELECT 1 FROM occurrence WHERE doc#>>'{venue,osm_id}' IS NOT NULL AND (point IS NOT NULL OR doc ? 'location' OR (doc->'venue') ? 'location'))
+    OR EXISTS(SELECT 1 FROM resource_change WHERE (before#>>'{venue,osm_id}' IS NOT NULL AND (before ? 'location' OR (before->'venue') ? 'location')) OR (after#>>'{venue,osm_id}' IS NOT NULL AND (after ? 'location' OR (after->'venue') ? 'location')))
+  THEN RAISE EXCEPTION 'Geocoded coordinates leaked outside osm_place'; END IF;
+END IF;
+END $$;
+DO $$ BEGIN
+-- A group is membership only: its rows name no fact about a member, so none can be OSM's.
+IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='group'
+  AND column_name NOT IN ('id','curated'))
+THEN RAISE EXCEPTION 'group rows hold more than membership'; END IF;
+END $$;
+SELECT count(*) AS derivative_rows, count(*) FILTER(WHERE status='ok') AS resolved_places FROM osm_place;
+SELECT table_name,column_name FROM information_schema.columns
+ WHERE table_schema='public' AND column_name IN ('osm_type','osm_id') ORDER BY 1,2;
+SQL
+# Export only the derivative table; caller supplies a destination to retain the proof.
+scripts/pg-env pg_dump --table=osm_place --no-owner --no-acl --file="${1:-/dev/null}"
