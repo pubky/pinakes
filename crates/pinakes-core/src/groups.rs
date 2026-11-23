@@ -589,6 +589,14 @@ fn join(
             .strip_prefix("cite:")
             .and_then(|k| k.strip_suffix(":openlibrary"));
         let ics = uid || key.starts_with("ics_feed:");
+        // A UID joins only an event page and an occurrence (`own_calendar` below): a key without
+        // both, such as a series' dates in feeds alone, makes no join and spends no checks.
+        if uid
+            && !(entries.iter().any(|e| facts.occurrences[e.0])
+                && entries.iter().any(|e| !facts.occurrences[e.0]))
+        {
+            continue;
+        }
         // Each member joins the earliest admitted member of the key it is compatible with.
         let mut spent = 0usize;
         log.clear();

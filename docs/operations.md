@@ -1138,9 +1138,9 @@ at once. Writer lock contention retries after one to three seconds; curation wai
 seconds and answers 503 with Retry-After. One ICS UID joins across containers in one case only,
 with no setting: an event page and the occurrence with its own calendar file's UID in the
 organiser calendar its platform names for it (a Meetup date's group calendar), within 300 s,
-without place and name checks. Two feeds or two publishers never join on a UID, since a
-publisher can copy another's UID, place, start and name; they get at most the possibly-the-same
-hint (`event.same_event_hint`). A page's calendar file gives its UID only when answered from the
+without name checks (when both are located, still within `limits.group_max_distance_m`). Two
+feeds or two publishers never join on a UID, since a publisher can copy another's UID, place,
+start and name; they get at most the possibly-the-same hint (`event.same_event_hint`). A page's calendar file gives its UID only when answered from the
 page's own URL origin (scheme, host and port, after redirects), on every route.
 `groups.cross_container_occurrences` is not a setting: a configuration that still sets it
 starts, and the daemon logs one warning naming the key as ignored.
