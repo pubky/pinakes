@@ -478,6 +478,44 @@ async fn a_gone_profile_is_purged_like_a_post(pool: sqlx::PgPool) {
     assert_eq!((name, description, image), (None, None, None));
 }
 
+/// A Stack Exchange question is social content: once it is deleted (confirmed by a second read)
+/// its card keeps nothing of the question (no title, excerpt or asker), as a gone post does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_deleted_stack_exchange_question_is_purged(pool: sqlx::PgPool) {
+    use pinakes_core::{model::ResourceMeta, store};
+    if !has("stack_exchange") {
+        return;
+    }
+    let uri = "https://stackoverflow.com/questions/10567404";
+    let id = store::ensure_resource(&pool, uri).await.unwrap();
+    let mut good = ResourceMeta::new(uri, "stack_exchange", 3600);
+    good.set_type("Question");
+    good.name = Some("Python global list".into());
+    good.description = Some("How do I change a list defined outside a function…".into());
+    good.attributes.insert("author".into(), "Someone".into());
+    store::save_document(&pool, &id, 0, &good).await.unwrap();
+    for later in [1, 2] {
+        let mut gone = ResourceMeta::new(uri, "stack_exchange", 3600);
+        gone.status = Status::Missing;
+        gone.fetched_at = good.fetched_at + later;
+        store::save_document(&pool, &id, 0, &gone).await.unwrap();
+    }
+    let (status, name, description, author): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT status, doc->>'name', doc->>'description', doc->'attributes'->>'author' FROM resource WHERE id=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "missing");
+    assert_eq!((name, description, author), (None, None, None));
+}
+
 /// An App Store card read from the storefront a link named keeps that storefront with the stored
 /// card: the daemon's next jobs, with nothing in memory naming it (as after a restart), read the
 /// same record, and a link tagged with a code that is no storefront leaves the card ok.

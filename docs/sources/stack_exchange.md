@@ -34,7 +34,9 @@ read as web pages.
 
 `GET https://api.stackexchange.com/2.3/questions/{id}?site={site}&filter=…`, one request per
 question (the filter adds the question's body and closing details to the default fields). A
-question the API does not return (none, or deleted) is `missing`.
+question the API does not return (none, or deleted) is `missing`. Questions are social content:
+the card quotes at most 200 characters of the question, refreshes within the hour and is removed
+once the question is gone (a second read confirms it).
 
 ## Card
 

@@ -36,6 +36,16 @@
     "status": 200,
     "url": "https://api.stackexchange.com/2.3/questions/1?site=stackoverflow&filter=!)4meWwcO75JCcyGuJACpWc-xLmMU"
   },
+  "se-stackoverflow-10567404": {
+    "bytes": 67,
+    "content_type": "application/json; charset=utf-8",
+    "file": "se-stackoverflow-10567404.json",
+    "recorded_at": "2026-11-23T13:34:34+00:00",
+    "sha256": "abcf10eade98d36068af6de7b75d0220ec6400e0f5c6a8b96470e96663dc89e8",
+    "status": 200,
+    "url": "https://api.stackexchange.com/2.3/questions/10567404?site=stackoverflow&filter=!)4meWwcO75JCcyGuJACpWc-xLmMU",
+    "note": "A question that existed and was deleted (removed by moderation): the API returns no items."
+  },
   "se-stackoverflow-11227809": {
     "bytes": 4497,
     "content_type": "application/json; charset=utf-8",
