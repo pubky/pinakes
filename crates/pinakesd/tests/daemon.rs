@@ -176,7 +176,7 @@ async fn the_daemon_saves_a_link_and_reextracts_while_it_owns_its_database(pool:
 }
 
 /// A config that still sets the retired `groups.cross_container_occurrences` starts: the daemon
-/// warns once that it ignores the key and carries on (here through `migrate`).
+/// warns once that it ignores the key and carries on (here through `--migrate`).
 #[sqlx::test(migrations = false)]
 async fn a_config_with_the_retired_uid_join_setting_starts_with_one_warning(pool: PgPool) {
     let dir =
@@ -185,7 +185,7 @@ async fn a_config_with_the_retired_uid_join_setting_starts_with_one_warning(pool
     let mut text = std::fs::read_to_string(&config).unwrap();
     text.push_str("[groups]\ncross_container_occurrences = \"corroborated\"\n");
     std::fs::write(&config, text).unwrap();
-    let migrated = run(&config, &["migrate"]).await;
+    let migrated = run(&config, &["--migrate"]).await;
     let (stdout, stderr) = (
         String::from_utf8_lossy(&migrated.stdout),
         String::from_utf8_lossy(&migrated.stderr),
