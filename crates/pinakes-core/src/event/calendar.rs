@@ -1713,7 +1713,7 @@ pub fn structured_feed(
         Ok(())
     };
     // JSON decoding materialises one DOM before deadline/item checks. Its input is
-    // bounded by feed_body_bytes (32 MB by default); retained occurrence docs have a
+    // bounded by feed_body_bytes (8 MiB by default); retained occurrence docs have a
     // separate byte cap above. Parsing runs on the blocking pool.
     if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
         if !v["items"].is_array() {

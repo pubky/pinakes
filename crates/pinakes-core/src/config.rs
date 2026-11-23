@@ -478,7 +478,7 @@ impl Default for EventConfig {
             geocoding: true,
             utc_series_wall_clock: UtcSeriesWallClock::XWrTimezone,
             same_event_hint: SameEventHint::On,
-            feed_body_bytes: 32 * 1024 * 1024,
+            feed_body_bytes: 8 * 1024 * 1024,
             max_occurrences_per_series: 50,
             max_occurrences_per_feed: 10000,
             max_components: 100000,
