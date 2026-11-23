@@ -574,7 +574,9 @@ async fn members_keep_their_own_cards_and_counts_and_collapse_is_a_view(pool: Pg
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_recurring_uid_is_scoped_to_start_and_another_publishers_page_never_joins(pool: PgPool) {
+async fn a_recurring_uid_is_scoped_to_start_and_a_page_naming_no_calendar_never_joins(
+    pool: PgPool,
+) {
     use pinakes_core::{config::EventConfig, event::calendar};
     let date = chrono::Utc::now() + chrono::Duration::days(1);
     let feed = "https://example.org/test.ics";
@@ -610,9 +612,9 @@ async fn a_recurring_uid_is_scoped_to_start_and_another_publishers_page_never_jo
         .fetch_one(&pool)
         .await
         .unwrap();
-    // Another publisher's page with the feed's UID, name, place and start: no join, as it
-    // names no organiser calendar of the feed's (only an event page and its own calendar join
-    // on a UID).
+    // A page on the feed's site with the feed's UID, name, place and start: no join, as its
+    // platform names no organiser calendar for it (only an event page and its own organiser
+    // calendar join on a UID).
     assert_eq!(count, 0);
     let cfg = groups::GroupConfig::default();
     reconciled(&pool, &page, &cfg).await;
