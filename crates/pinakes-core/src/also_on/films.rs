@@ -1,0 +1,757 @@
+//! Films and series: a title by its IMDb, TMDB, Letterboxd or TVmaze link, and where else it is.
+//!
+//! The IMDb title ID (`tt…`) is the join: an IMDb link names it, TVmaze's record of a show names
+//! it, and a TMDB or Letterboxd link, or a page on any service the item links to (Rotten
+//! Tomatoes, Trakt, MUBI, …), reaches it through the one Wikidata item with that link's ID. The
+//! item (by its IMDb ID) gives the title's other pages. Letterboxd's `imdb/{tt}/`
+//! redirect names its film exactly (an unknown ID answers a page, not a redirect), and TVmaze's
+//! `lookup/shows?imdb=` its show (TVmaze's data is CC BY-SA: its links say `via: "tvmaze"`);
+//! each is asked only when the item has no link there.
+use super::{
+    media::{self, digits, imdb, property, slug, title_type, Deferred, Property},
+    Context, Fact, Found, Key, Link, Source, Subject,
+};
+use crate::{hubs::wikidata, resolver::egress::FetchOptions};
+use anyhow::{Context as _, Result};
+use async_trait::async_trait;
+
+/// What a link names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Film {
+    /// An IMDb title (`tt` and 7 or 8 digits).
+    Imdb(String),
+    /// A TMDB movie, or (`tv`) series.
+    Tmdb { tv: bool, id: String },
+    /// A Letterboxd film, by its slug.
+    Letterboxd(String),
+    /// A TVmaze show.
+    Tvmaze(u64),
+    /// A Netflix title (a movie or a series).
+    Netflix(String),
+    /// A title's page on another service its Wikidata item links to (Rotten Tomatoes, Trakt,
+    /// MUBI, …): the property and the value the link holds.
+    Wikidata {
+        pid: &'static str,
+        site: &'static str,
+        value: String,
+    },
+}
+
+/// The title a link names: `imdb.com/title/{tt}`, `themoviedb.org/movie/{id}` or `/tv/{id}`
+/// (with or without the slug after the ID), `letterboxd.com/film/{slug}/` and
+/// `tvmaze.com/shows/{id}`; else any page of the title [`WIKIDATA`] links to
+/// (`rottentomatoes.com/m/{name}`, `mubi.com/films/{id}`, …), by the value it holds.
+pub fn film(uri: &str) -> Option<Film> {
+    named(uri).or_else(|| {
+        WIKIDATA.iter().find_map(|p| {
+            p.value_in(uri).map(|value| Film::Wikidata {
+                pid: p.pid,
+                site: p.site,
+                value,
+            })
+        })
+    })
+}
+/// The title a link is the own page of: a page under it (IMDb's `fullcredits`, a TMDB season or
+/// episode, TVmaze's episode list) names the title but is not it, and is not looked up. A page
+/// another service's Wikidata property names is matched to its whole address already.
+fn title(uri: &str) -> Option<Film> {
+    film(uri).filter(|f| matches!(f, Film::Wikidata { .. }) || super::media::exact_page(uri))
+}
+fn named(uri: &str) -> Option<Film> {
+    let url = url::Url::parse(uri).ok()?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let s: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    match (host, s.as_slice()) {
+        ("imdb.com" | "m.imdb.com", ["title", tt, ..]) if imdb(tt) => {
+            Some(Film::Imdb((*tt).to_owned()))
+        }
+        ("themoviedb.org", [kind @ ("movie" | "tv"), id, ..]) => {
+            let id = id.split('-').next()?;
+            digits(id).then(|| Film::Tmdb {
+                tv: *kind == "tv",
+                id: id.to_owned(),
+            })
+        }
+        ("letterboxd.com", ["film", name]) if slug(name) => {
+            Some(Film::Letterboxd((*name).to_owned()))
+        }
+        ("tvmaze.com", ["shows", id, ..]) if digits(id) => id.parse().ok().map(Film::Tvmaze),
+        ("netflix.com", ["title", id] | [_, "title", id]) if digits(id) => {
+            Some(Film::Netflix((*id).to_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// The service a link is on, as its links name it.
+fn site(film: &Film) -> &'static str {
+    match film {
+        Film::Imdb(_) => "IMDb",
+        Film::Tmdb { .. } => "TMDB",
+        Film::Letterboxd(_) => "Letterboxd",
+        Film::Tvmaze(_) => "TVmaze",
+        Film::Netflix(_) => "Netflix",
+        Film::Wikidata { site, .. } => site,
+    }
+}
+
+/// The Wikidata property holding a link's own ID, and the ID.
+fn property_of(film: &Film) -> (&'static str, String) {
+    match film {
+        Film::Imdb(tt) => ("P345", tt.clone()),
+        Film::Tmdb { tv: false, id } => ("P4947", id.clone()),
+        Film::Tmdb { tv: true, id } => ("P4983", id.clone()),
+        Film::Letterboxd(name) => ("P6127", name.clone()),
+        Film::Tvmaze(id) => ("P8600", id.to_string()),
+        Film::Netflix(id) => ("P1874", id.clone()),
+        Film::Wikidata { pid, value, .. } => (pid, value.clone()),
+    }
+}
+
+/// Letterboxd's film for an IMDb ID: it redirects to the film's page.
+pub fn letterboxd_request(tt: &str) -> String {
+    format!("https://letterboxd.com/imdb/{tt}/")
+}
+/// The film page a Letterboxd answer ended on, if it redirected to one (`final_url` is where
+/// the request ended).
+pub fn parse_letterboxd(status: u16, final_url: &url::Url) -> Option<Link> {
+    if status != 200 || final_url.host_str() != Some("letterboxd.com") {
+        return None;
+    }
+    let s: Vec<&str> = final_url
+        .path_segments()?
+        .filter(|s| !s.is_empty())
+        .collect();
+    match s.as_slice() {
+        ["film", name] if slug(name) => Some(Link::new(
+            format!("https://letterboxd.com/film/{name}/"),
+            "Letterboxd",
+            "letterboxd",
+        )),
+        _ => None,
+    }
+}
+
+/// TVmaze's show for an IMDb ID (it redirects to the show's record).
+pub fn tvmaze_lookup(tt: &str) -> String {
+    format!("https://api.tvmaze.com/lookup/shows?imdb={tt}")
+}
+/// TVmaze's record of a show.
+pub fn tvmaze_show(id: u64) -> String {
+    format!("https://api.tvmaze.com/shows/{id}")
+}
+/// A show as TVmaze records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Show {
+    pub id: u64,
+    pub imdb: Option<String>,
+}
+/// The show, or `None` when TVmaze has none (404).
+pub fn parse_tvmaze(status: u16, raw: &[u8]) -> Result<Option<Show>> {
+    let Some(v) = media::json(status, raw, &[404])? else {
+        return Ok(None);
+    };
+    Ok(Some(Show {
+        id: v["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .context("no show id")?,
+        imdb: v["externals"]["imdb"]
+            .as_str()
+            .filter(|tt| imdb(tt))
+            .map(str::to_owned),
+    }))
+}
+fn tvmaze_link(id: u64) -> Link {
+    Link::new(
+        format!("https://www.tvmaze.com/shows/{id}"),
+        "TVmaze",
+        "tvmaze",
+    )
+}
+
+/// Trakt's path IDs: `movies/{slug}` or `shows/{slug}`.
+fn trakt(v: &str) -> bool {
+    v.split_once('/').is_some_and(|(kind, name)| {
+        matches!(kind, "movies" | "shows")
+            && !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
+}
+/// Rotten Tomatoes' film and series paths: `m/{name}` or `tv/{name}`.
+fn rotten(v: &str) -> bool {
+    v.split_once('/').is_some_and(|(kind, name)| {
+        matches!(kind, "m" | "tv")
+            && (1..=200).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'\''))
+    })
+}
+/// Apple TV's content IDs (`umc.cmc.…`).
+fn apple_tv(v: &str) -> bool {
+    v.strip_prefix("umc.cmc.").is_some_and(|id| {
+        (22..=25).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    })
+}
+
+/// The title's pages, from its Wikidata item. One link per service: the first property in the
+/// table with exactly one value wins.
+pub const WIKIDATA: &[Property] = &[
+    property("P345", "IMDb", "https://www.imdb.com/title/$1/", imdb),
+    property(
+        "P4947",
+        "TMDB",
+        "https://www.themoviedb.org/movie/$1",
+        digits,
+    ),
+    property("P4983", "TMDB", "https://www.themoviedb.org/tv/$1", digits),
+    property(
+        "P6127",
+        "Letterboxd",
+        "https://letterboxd.com/film/$1/",
+        slug,
+    ),
+    property("P8013", "Trakt", "https://trakt.tv/$1", trakt),
+    property("P12492", "Trakt", "https://trakt.tv/movies/$1", digits),
+    property(
+        "P1258",
+        "Rotten Tomatoes",
+        "https://www.rottentomatoes.com/$1",
+        rotten,
+    ),
+    property(
+        "P12196",
+        "TheTVDB",
+        "https://thetvdb.com/dereferrer/movie/$1",
+        digits,
+    ),
+    property(
+        "P4835",
+        "TheTVDB",
+        "https://thetvdb.com/dereferrer/series/$1",
+        digits,
+    ),
+    property(
+        "P9586",
+        "Apple TV",
+        "https://tv.apple.com/movie/$1",
+        apple_tv,
+    ),
+    property(
+        "P9751",
+        "Apple TV",
+        "https://tv.apple.com/show/$1",
+        apple_tv,
+    ),
+    property(
+        "P1874",
+        "Netflix",
+        "https://www.netflix.com/title/$1",
+        |v| (6..=8).contains(&v.len()) && digits(v),
+    ),
+    property("P7299", "MUBI", "https://mubi.com/films/$1", digits),
+    property("P8600", "TVmaze", "https://www.tvmaze.com/shows/$1", digits),
+    property(
+        "P4086",
+        "MyAnimeList",
+        "https://myanimelist.net/anime/$1",
+        digits,
+    ),
+    property("P8729", "AniList", "https://anilist.co/anime/$1", digits),
+];
+
+/// The item's one IMDb title ID.
+fn item_imdb(item: &wikidata::Item) -> Option<String> {
+    match item.id("P345") {
+        [tt] if imdb(tt) => Some(tt.clone()),
+        _ => None,
+    }
+}
+
+/// The source: Wikidata, Letterboxd and TVmaze.
+pub struct Films;
+
+impl Films {
+    /// The one item with this ID. An answer over its read's cap is no answer: asking again
+    /// would read the same megabytes.
+    async fn item(cx: &Context, property: &str, id: &str) -> Result<Option<wikidata::Item>> {
+        Ok(match wikidata::item_with(&cx.egress, property, id).await {
+            Ok(wikidata::Found::One(item)) => Some(*item),
+            Ok(_) => None,
+            Err(error) if crate::resolver::egress::over_cap(&error) => None,
+            Err(error) => return Err(error),
+        })
+    }
+    async fn tvmaze(cx: &Context, url: &str) -> Result<Option<Show>> {
+        let options = FetchOptions::json();
+        let f = cx
+            .egress
+            .discover(url, &options, cx.egress.config().discovery_secs)
+            .await?;
+        parse_tvmaze(f.status, &f.body)
+    }
+    /// Letterboxd's film for the title; a refusal (e.g. a challenge page) is no answer, a rate
+    /// limit or server error a retry.
+    async fn letterboxd(cx: &Context, tt: &str) -> Result<Option<Link>> {
+        match cx
+            .egress
+            .discover(
+                &letterboxd_request(tt),
+                &FetchOptions::default(),
+                cx.egress.config().discovery_secs,
+            )
+            .await
+        {
+            Ok(f) if f.status >= 500 => Err(crate::resolver::RetryLater {
+                class: "upstream",
+                seconds: 60,
+            }
+            .into()),
+            Ok(f) => Ok(parse_letterboxd(f.status, &f.url)),
+            Err(e) if e.is::<crate::resolver::RetryLater>() => Err(e),
+            Err(e) => {
+                tracing::debug!(
+                    kind = crate::resolver::error_class(&e),
+                    "letterboxd gave no answer"
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Source for Films {
+    fn key_forms(&self) -> &'static [(&'static str, &'static str)] {
+        &[("imdb", "tt0077651"), ("wikidata", "Q42")]
+    }
+    fn link_type(&self, uri: &str) -> Option<Option<&'static str>> {
+        let kind = match film(uri)? {
+            Film::Tmdb { tv: false, .. } | Film::Letterboxd(_) => Some("Movie"),
+            Film::Tmdb { tv: true, .. } | Film::Tvmaze(_) => Some("TVSeries"),
+            // A Netflix title is a movie or a series: its Wikidata item may say which.
+            Film::Netflix(_) => Some("CreativeWork"),
+            // An IMDb title can be either.
+            Film::Imdb(_) => None,
+            // Another service's page is typed by its address, if at all (`media::link_type`).
+            Film::Wikidata { .. } => return None,
+        };
+        Some(kind.filter(|_| super::media::exact_page(uri)))
+    }
+    fn id(&self) -> &'static str {
+        "films"
+    }
+    fn applies(&self, subject: &Subject) -> bool {
+        title(&subject.uri).is_some()
+    }
+    async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<Found> {
+        let Some(film) = title(&subject.uri) else {
+            return Ok(Found::default());
+        };
+        let mut found = Found::default();
+        // A failing secondary service leaves what the link's own record said, and the run comes
+        // back for its part.
+        let mut deferred = Deferred::default();
+        // The title's IMDb ID, and its item.
+        let (tt, item) = match &film {
+            Film::Imdb(tt) => (
+                Some(tt.clone()),
+                deferred.take("wikidata", Self::item(cx, "P345", tt).await),
+            ),
+            Film::Tvmaze(id) => {
+                let show = Self::tvmaze(cx, &tvmaze_show(*id))
+                    .await?
+                    .filter(|s| s.id == *id);
+                match show.and_then(|s| s.imdb) {
+                    Some(tt) => {
+                        let item = deferred.take("wikidata", Self::item(cx, "P345", &tt).await);
+                        (Some(tt), item)
+                    }
+                    None => (None, None),
+                }
+            }
+            other => {
+                let (property, id) = property_of(other);
+                let item = Self::item(cx, property, &id).await?;
+                (item.as_ref().and_then(item_imdb), item)
+            }
+        };
+        if let Some(tt) = &tt {
+            found.keys.push(Key {
+                key: format!("imdb:{tt}"),
+                via: if matches!(film, Film::Imdb(_)) {
+                    "imdb"
+                } else if matches!(film, Film::Tvmaze(_)) {
+                    "tvmaze"
+                } else {
+                    "wikidata"
+                }
+                .into(),
+            });
+        }
+        if let Some(item) = &item {
+            // The Q-id is a fact: a link reaches the item one way only (the IMDb ID joins).
+            found.facts.push(Fact::new("wikidata", item.qid.as_str()));
+            found
+                .facts
+                .extend(title_type(item).map(|t| Fact::new("title_type", t)));
+            found.links = media::links(item, WIKIDATA);
+        }
+        let Some(tt) = tt else {
+            found.links.retain(|l| l.site != site(&film));
+            return deferred.finish(found);
+        };
+        // A link's own service is the card itself.
+        let own = site(&film);
+        found.links.retain(|l| l.site != own);
+        let wanted = |found: &Found, s: &str| s != own && !found.links.iter().any(|l| l.site == s);
+        if wanted(&found, "Letterboxd") {
+            found
+                .links
+                .extend(deferred.take("letterboxd", Self::letterboxd(cx, &tt).await));
+        }
+        if wanted(&found, "TVmaze") {
+            let show = deferred.take("tvmaze", Self::tvmaze(cx, &tvmaze_lookup(&tt)).await);
+            if let Some(show) = show.filter(|s| s.imdb.as_deref() == Some(tt.as_str())) {
+                found.links.push(tvmaze_link(show.id));
+            }
+        }
+        // Every link is the title's, reached through its IMDb ID: a tagged one joins by it.
+        let key = format!("imdb:{tt}");
+        found.links = found.links.into_iter().map(|l| l.keyed(&key)).collect();
+        deferred.finish(found)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::also_on::media::fixture;
+
+    /// Its links are typed by what they are, whatever their pages call themselves
+    /// (`media::link_type`); a page under an object is not typed.
+    #[test]
+    fn its_links_are_typed_by_what_they_are() {
+        for (uri, kind) in [
+            (
+                "https://www.themoviedb.org/movie/603-the-matrix",
+                Some("Movie"),
+            ),
+            ("https://www.themoviedb.org/tv/1396", Some("TVSeries")),
+            ("https://www.themoviedb.org/tv/1396/season/1", None),
+            ("https://letterboxd.com/film/the-matrix/", Some("Movie")),
+            (
+                "https://www.tvmaze.com/shows/169/breaking-bad",
+                Some("TVSeries"),
+            ),
+            ("https://www.tvmaze.com/shows/169/episodes", None),
+            ("https://www.imdb.com/title/tt0133093/", None),
+            (
+                "https://www.netflix.com/title/70143836",
+                Some("CreativeWork"),
+            ),
+            (
+                "https://www.netflix.com/gb/title/70143836",
+                Some("CreativeWork"),
+            ),
+        ] {
+            assert_eq!(super::super::media::link_type(uri), kind, "{uri}");
+        }
+    }
+
+    /// A film's or series' card is typed by its link before what the sources found; a link that
+    /// names no type (a Netflix title) takes the type the sources found, and keeps it.
+    #[test]
+    fn its_cards_are_typed_by_the_link_before_what_the_sources_found() {
+        use crate::also_on::media::{type_card, TypeHints};
+        let typed = |uri: &str, hints: TypeHints| {
+            let mut doc = crate::model::ResourceMeta::new(uri, "web", 60);
+            doc.set_type("Article");
+            type_card(uri, &hints, &mut doc);
+            doc.type_name
+        };
+        let series = TypeHints {
+            title_type: Some("TVSeries".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            typed("https://www.netflix.com/title/70143836", series.clone()),
+            "TVSeries"
+        );
+        assert_eq!(
+            typed(
+                "https://www.netflix.com/title/70143836",
+                TypeHints::default()
+            ),
+            "CreativeWork"
+        );
+        assert_eq!(
+            typed("https://www.themoviedb.org/movie/603", series),
+            "Movie",
+            "the link wins"
+        );
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.themoviedb.org/tv/1396", "web", 60);
+        doc.set_type("WebSite");
+        type_card(
+            "https://www.themoviedb.org/tv/1396",
+            &TypeHints::default(),
+            &mut doc,
+        );
+        assert_eq!(doc.type_name, "TVSeries");
+        doc.status = crate::model::Status::Missing;
+        doc.set_type("WebPage");
+        type_card(
+            "https://www.themoviedb.org/tv/1396",
+            &TypeHints::default(),
+            &mut doc,
+        );
+        assert_eq!(doc.type_name, "WebPage", "a card that did not resolve");
+        // A Netflix card its Wikidata item typed keeps that type without a hint.
+        let mut doc =
+            crate::model::ResourceMeta::new("https://www.netflix.com/title/70143836", "web", 60);
+        doc.set_type("TVSeries");
+        type_card(
+            "https://www.netflix.com/title/70143836",
+            &TypeHints::default(),
+            &mut doc,
+        );
+        assert_eq!(doc.type_name, "TVSeries");
+    }
+
+    fn read(name: &str) -> Vec<u8> {
+        fixture::read("films", name)
+    }
+
+    /// A page under a title names it but is not it: only the title's own page is looked up.
+    #[test]
+    fn only_a_titles_own_page_is_looked_up() {
+        for uri in [
+            "https://www.imdb.com/title/tt0111161/",
+            "https://www.themoviedb.org/tv/1396",
+            "https://www.themoviedb.org/movie/278-the-shawshank-redemption",
+            "https://www.tvmaze.com/shows/169/breaking-bad",
+            "https://www.netflix.com/de/title/70143836",
+            "https://letterboxd.com/film/the-shawshank-redemption/",
+        ] {
+            assert!(title(uri).is_some(), "{uri}");
+        }
+        for uri in [
+            "https://www.imdb.com/title/tt0111161/fullcredits",
+            "https://m.imdb.com/title/tt0111161/reviews",
+            "https://www.themoviedb.org/tv/1396/season/1/episode/1",
+            "https://www.tvmaze.com/shows/169/breaking-bad/episodes",
+        ] {
+            assert!(film(uri).is_some(), "{uri}");
+            assert!(title(uri).is_none(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn links_that_name_a_title() {
+        let shawshank = Some(Film::Imdb("tt0111161".into()));
+        for uri in [
+            "https://www.imdb.com/title/tt0111161/",
+            "https://m.imdb.com/title/tt0111161/reviews",
+            "http://imdb.com/title/tt0111161",
+        ] {
+            assert_eq!(film(uri), shawshank, "{uri}");
+        }
+        assert_eq!(
+            film("https://www.themoviedb.org/movie/278-the-shawshank-redemption"),
+            Some(Film::Tmdb {
+                tv: false,
+                id: "278".into()
+            })
+        );
+        assert_eq!(
+            film("https://www.themoviedb.org/tv/1396"),
+            Some(Film::Tmdb {
+                tv: true,
+                id: "1396".into()
+            })
+        );
+        assert_eq!(
+            film("https://letterboxd.com/film/the-shawshank-redemption/"),
+            Some(Film::Letterboxd("the-shawshank-redemption".into()))
+        );
+        assert_eq!(
+            film("https://www.tvmaze.com/shows/169/breaking-bad"),
+            Some(Film::Tvmaze(169))
+        );
+        assert_eq!(
+            film("https://www.netflix.com/title/70143836"),
+            Some(Film::Netflix("70143836".into()))
+        );
+        assert_eq!(
+            film("https://www.netflix.com/gb/title/70143836"),
+            Some(Film::Netflix("70143836".into()))
+        );
+        // A page of another service the item links to is looked up by the value it holds.
+        for (uri, pid, value) in [
+            (
+                "https://trakt.tv/shows/breaking-bad",
+                "P8013",
+                "shows/breaking-bad",
+            ),
+            (
+                "https://www.rottentomatoes.com/m/1009113-halloween/",
+                "P1258",
+                "m/1009113-halloween",
+            ),
+            ("https://mubi.com/films/1", "P7299", "1"),
+            ("https://anilist.co/anime/1", "P8729", "1"),
+        ] {
+            match film(uri) {
+                Some(Film::Wikidata {
+                    pid: p, value: v, ..
+                }) => {
+                    assert_eq!((p, v.as_str()), (pid, value), "{uri}")
+                }
+                other => panic!("{uri}: {other:?}"),
+            }
+        }
+        for uri in [
+            "https://www.rottentomatoes.com/m/1009113-halloween/reviews",
+            "https://www.rottentomatoes.com/celebrity/john_carpenter",
+            "https://www.netflix.com/browse",
+            "https://www.imdb.com/name/nm0000151/",
+            "https://www.imdb.com/title/tt011116/",
+            "https://www.imdb.com:8443/title/tt0111161/",
+            "https://letterboxd.com/film/the-shawshank-redemption/reviews/",
+            "https://letterboxd.com/imdb/tt0111161/",
+            "https://www.themoviedb.org/person/504",
+            "https://www.tvmaze.com/people/1",
+        ] {
+            assert_eq!(film(uri), None, "{uri}");
+        }
+    }
+
+    #[test]
+    fn letterboxd_redirects_only_for_a_film_it_has() {
+        assert_eq!(
+            letterboxd_request("tt0111161"),
+            "https://letterboxd.com/imdb/tt0111161/"
+        );
+        let ended = |u: &str| url::Url::parse(u).unwrap();
+        let link = parse_letterboxd(
+            200,
+            &ended("https://letterboxd.com/film/the-shawshank-redemption/"),
+        )
+        .unwrap();
+        assert_eq!(
+            (link.site.as_str(), link.uri.as_str(), link.via.as_str()),
+            (
+                "Letterboxd",
+                "https://letterboxd.com/film/the-shawshank-redemption/",
+                "letterboxd"
+            )
+        );
+        // An unknown ID answers its own page ("IMDb ID Not found"), not a redirect.
+        assert!(
+            String::from_utf8_lossy(&read("letterboxd-imdb-missing.html.gz"))
+                .contains("IMDb ID Not found")
+        );
+        assert_eq!(
+            parse_letterboxd(200, &ended("https://letterboxd.com/imdb/tt9999999/")),
+            None
+        );
+        assert_eq!(
+            parse_letterboxd(404, &ended("https://letterboxd.com/film/x/")),
+            None
+        );
+        assert_eq!(
+            parse_letterboxd(200, &ended("https://example.org/film/x/")),
+            None
+        );
+    }
+
+    #[test]
+    fn tvmaze_names_the_shows_imdb_id() {
+        assert_eq!(
+            tvmaze_lookup("tt0903747"),
+            "https://api.tvmaze.com/lookup/shows?imdb=tt0903747"
+        );
+        assert_eq!(
+            parse_tvmaze(200, &read("tvmaze-imdb-tt0903747-followed.json")).unwrap(),
+            Some(Show {
+                id: 169,
+                imdb: Some("tt0903747".into())
+            })
+        );
+        assert_eq!(
+            parse_tvmaze(404, &read("tvmaze-imdb-missing.json")).unwrap(),
+            None
+        );
+        assert!(parse_tvmaze(500, b"",).is_err());
+    }
+
+    #[test]
+    fn a_film_and_a_series_on_wikidata() {
+        let sites = |qid: &str| -> Vec<(String, String)> {
+            media::links(&fixture::item(qid), WIKIDATA)
+                .into_iter()
+                .map(|l| (l.site, l.uri))
+                .collect()
+        };
+        let film = sites("Q172241");
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            film,
+            [
+                s("IMDb", "https://www.imdb.com/title/tt0111161/"),
+                s("TMDB", "https://www.themoviedb.org/movie/278"),
+                s(
+                    "Letterboxd",
+                    "https://letterboxd.com/film/the-shawshank-redemption/"
+                ),
+                s(
+                    "Trakt",
+                    "https://trakt.tv/movies/the-shawshank-redemption-1994"
+                ),
+                s(
+                    "Rotten Tomatoes",
+                    "https://www.rottentomatoes.com/m/shawshank_redemption"
+                ),
+                s("TheTVDB", "https://thetvdb.com/dereferrer/movie/190"),
+                s(
+                    "Apple TV",
+                    "https://tv.apple.com/movie/umc.cmc.459n4f98t82t8ommdoa7ebnny"
+                ),
+                s("Netflix", "https://www.netflix.com/title/70005379"),
+                s("MUBI", "https://mubi.com/films/3403"),
+            ]
+        );
+        let series = sites("Q1079");
+        assert!(series.contains(&s("TMDB", "https://www.themoviedb.org/tv/1396")));
+        assert!(
+            series.contains(&s(
+                "Rotten Tomatoes",
+                "https://www.rottentomatoes.com/tv/breaking_bad"
+            )),
+            "the deprecated value is left out"
+        );
+        assert!(series.contains(&s("TheTVDB", "https://thetvdb.com/dereferrer/series/81189")));
+        assert!(series.contains(&s("TVmaze", "https://www.tvmaze.com/shows/169")));
+        let anime = sites("Q101244908");
+        assert!(anime.contains(&s("MyAnimeList", "https://myanimelist.net/anime/1")));
+        assert!(anime.contains(&s("AniList", "https://anilist.co/anime/1")));
+        assert!(trakt("shows/breaking-bad") && !trakt("people/x") && !trakt("movies/"));
+        assert!(rotten("m/shawshank_redemption") && !rotten("celebrity/x"));
+    }
+}
