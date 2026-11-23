@@ -1387,7 +1387,7 @@ one thing, only on evidence that cannot be spoofed:
   group's `/events/ical/`, read only when Meetup itself answers it over https) when both start
   within 300 s, located or not and whatever their names. A UID never joins two feeds, two
   publishers or a page and any other calendar, whatever their places, starts and names: such
-  events stay apart, linked only as [possibly the same event](#possibly-the-same-event).
+  events stay apart, linked at most as [possibly the same event](#possibly-the-same-event).
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
   `wikidata:Q…`), or a service's own record of its own object (the ISRC on a TIDAL track page;
