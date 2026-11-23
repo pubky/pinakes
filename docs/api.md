@@ -1391,8 +1391,9 @@ one thing, only on evidence that cannot be spoofed:
   two feeds, still need the cross-feed checks.
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
-  `wikidata:Q…`), or a known music service's own record of its own object (the ISRC on a TIDAL
-  track page). Any other page's claims are never such a key. A group holds at most one value of
+  `wikidata:Q…`), or a service's own record of its own object (the ISRC on a TIDAL track page;
+  a DOI a repository issued itself, or the Wikidata item a registry's or museum's record names:
+  `own_ids`). Any other page's claims are never such a key. A group holds at most one value of
   each single-object namespace: MusicBrainz recording, release, release group and artist
   (`mb:…`), Wikidata item (`wikidata`), IMDb title (`imdb`), Open Library edition and work
   (`openlibrary:…`), podcast GUID and Apple podcast ID (`podcast:guid`, `podcast:apple`), OSM
@@ -1613,7 +1614,7 @@ failed refresh keeps them, and they go when the source stops returning them. The
 seeing the keys the ones before it found: `service`, `tidal`, `spotify`,
 `musicbrainz`, `musicbrainz_entity`, `musicbrainz_containment`, `performers`, `wikidata`, `discogs`, `deezer`, `spotify_isrc`,
 `tidal_isrc`, `itunes`, `itunes_song`, `youtube_match`, `wikipedia`, `wikidata_item`, `books`,
-`films`, `podcasts`, `product_keys`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
+`films`, `podcasts`, `product_keys`, `own_ids`, `open_food_facts`, `stack_exchange`, `titles`, `federal_register`, `mempool`, `osm_wikidata`, `wikidata_osm`,
 `wikidata_places`, `btcmap`, `unpaywall`, `ncbi`, `datacite`, `huggingface`, `crates`, `npm`,
 `pypi`, `software_heritage`, `steam`, `wikidata_stores`, `app_stores`, `wayback`, `editions`;
 `[also_on.sources.<id>] enabled = false` turns one off. A MusicBrainz or Wikidata answer over

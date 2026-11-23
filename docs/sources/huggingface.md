@@ -57,6 +57,12 @@ description; a model has none.
 | `doi` | The DOIs the Hub minted for the repo (`10.57967/hf/…`) |
 | `page_url` | The repo's page on huggingface.co |
 
+## Groups
+
+A DOI the Hub minted for the repo (`10.57967/hf/…`) is also its key `doi:…` (the `own_ids`
+also-on source): the repo joins the group of the `doi:` card of that DOI (a group holds one DOI,
+so a repo with two joins neither). A `paper_doi` is a fact only and joins nothing.
+
 ## Licence
 
 Each repo's content is under the licence it names (`license`).

@@ -43,6 +43,12 @@ card has it; otherwise it is `Organization`.
 | `wikidata`, `isni`, `fundref`, `grid` | Its id in each registry, when ROR names one preferred id or only one (ISNI without spaces) |
 | `page_url` | `https://ror.org/{id}` |
 
+## Groups
+
+The organization's Wikidata id is also its key `wikidata:Q…` (the `own_ids` also-on source): the
+card joins the group of the Wikidata item's card. Its ISNI, Crossref Funder and GRID ids are
+facts only and join nothing.
+
 ## Examples
 
 - `https://ror.org/03yrm5c26` (California Digital Library, `ArchiveOrganization`)
