@@ -823,7 +823,7 @@ pub fn calendar_document(
                 doc.url = uri.into();
                 // A file of one event answered from the page's own URL origin (scheme, host and
                 // port, after redirects) names the page's date: its UID joins the page to that
-                // date in a feed (in the corroborated mode, `groups`).
+                // date in its organiser calendar (`groups`).
                 if c.occurrences.len() == 1
                     && crate::group_keys::same_url_origin(uri, f.url.as_str())
                 {

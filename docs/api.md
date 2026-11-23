@@ -1106,9 +1106,8 @@ text).
 
 **Other dates of an event page.** A page that has its own date (a Meetup date) is its own
 resource, and the calendar listing the organiser's dates is another: reading a Meetup date's page
-queues its group's calendar (`/{group}/events/ical/`) as a resource. With
-`groups.cross_container_occurrences = "corroborated"`, the page and that date in the calendar are
-one [group](#groups): from the page's card, `GET /v1/groups/{group.id}` lists the member whose
+queues its group's calendar (`/{group}/events/ical/`) as a resource. The page and that date in
+the calendar are one [group](#groups): from the page's card, `GET /v1/groups/{group.id}` lists the member whose
 `occurrence` names the calendar (`feed_id`, `feed_uri`), and
 `GET /v1/resources/{feed_id}/occurrences` lists every date. A group calendar mixes the group's
 series; its other dates are occurrences, never members of the page's group.
@@ -1381,14 +1380,14 @@ one thing, only on evidence that cannot be spoofed:
   own edition page needs no citation, and joins only an ISBN card naming it (two cards naming
   one edition page join only through the indexed page). A doi.org URL is the DOI itself, never a landing page.
 - **One ICS UID within one feed**, between dated instances that start within five minutes of
-  each other. The UID is hashed into the key, so no UID text names another feed. Across feeds only with `groups.cross_container_occurrences = "corroborated"`: both
-  located within 500 m, starting within 300 s, with a name similarity of at least 0.5. An event
+  each other. The UID is hashed into the key, so no UID text names another feed. An event
   page takes the UID of its own calendar file (one event, linked on the page's own origin and
-  answered from the page's own URL origin); in the corroborated mode it joins the occurrence
-  with that UID in the organiser calendar its platform names for it on the same origin (a Meetup
-  date's page: its group's `/events/ical/`, read only when Meetup itself answers it over https)
-  when both start within 300 s, located or not and whatever their names. Any other calendar, and
-  two feeds, still need the cross-feed checks.
+  answered from the page's own URL origin) and joins the occurrence with that UID in the
+  organiser calendar its platform names for it on the same origin (a Meetup date's page: its
+  group's `/events/ical/`, read only when Meetup itself answers it over https) when both start
+  within 300 s, located or not and whatever their names. A UID never joins two feeds, two
+  publishers or a page and any other calendar, whatever their places, starts and names: such
+  events stay apart, linked at most as [possibly the same event](#possibly-the-same-event).
 - **An exact key a source vouches for** ([Also on](#also-on)): two links a hub names as the same
   recording, release or Wikidata item, by its own identifier (`mb:recording:{mbid}`,
   `wikidata:Q…`), or a service's own record of its own object (the ISRC on a TIDAL track page;

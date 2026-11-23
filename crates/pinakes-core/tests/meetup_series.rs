@@ -1,6 +1,6 @@
 //! Meetup date pages and their group's calendar, read from trimmed recordings
-//! (`fixtures/events/meetup`): a date page queues its group's calendar, joins its own date there
-//! in the corroborated mode, and its number and token spellings are one resource.
+//! (`fixtures/events/meetup`): a date page queues its group's calendar, joins its own date there,
+//! and its number and token spellings are one resource.
 use axum::{body::Body, http::Request};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use http_body_util::BodyExt;
@@ -8,7 +8,7 @@ use pinakes_core::{
     api::{self, AppState},
     config::{Config, EventConfig, QueueConfig},
     event::adapters,
-    groups::{self, CrossContainerOccurrences},
+    groups,
     model::{Point, ResourceMeta},
     queue,
     resolver::egress::{Dns, Egress, FetchOptions, Fetched, Transport},
@@ -252,14 +252,9 @@ fn resolver_with(
     };
     (r, site)
 }
-fn queue_config(mode: CrossContainerOccurrences) -> QueueConfig {
-    QueueConfig {
-        groups: groups::GroupConfig {
-            cross_container_occurrences: mode,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+/// The queue as the daemon runs it with no setting of its own: grouping has one fixed rule.
+fn queue_config() -> QueueConfig {
+    Config::default().queue
 }
 /// One read of `uri` through the queue, as the daemon runs it; its resource ID.
 async fn read(
@@ -302,10 +297,8 @@ async fn by_uri(app: &axum::Router, uri: &str) -> Value {
     let q: String = url::form_urlencoded::byte_serialize(uri.as_bytes()).collect();
     get(app, &format!("/v1/resources/by-uri?uri={q}")).await
 }
-fn app(pool: &PgPool, mode: CrossContainerOccurrences) -> axum::Router {
-    let mut config = Config::default();
-    config.groups.cross_container_occurrences = mode;
-    api::router(AppState::new(pool.clone(), config).unwrap())
+fn app(pool: &PgPool) -> axum::Router {
+    api::router(AppState::new(pool.clone(), Config::default()).unwrap())
 }
 /// Every group: its members' resource IDs and occurrence UIDs (`""` for a page), sorted.
 async fn all_groups(pool: &PgPool) -> Vec<Vec<(String, String)>> {
@@ -331,13 +324,13 @@ async fn alias_root(pool: &PgPool, id: &str) -> Option<(String, String)> {
 
 /// A date page read by its number: its token spelling (the page's canonical) becomes its root,
 /// the root's own calendar file gives it the date's UID, and the group's calendar is queued as a
-/// resource derived from each spelling read. In the corroborated mode the page joins exactly
-/// its own date in that calendar, and a client gets from the page's card to every date in two
+/// resource derived from each spelling read. The page joins exactly its own date in that
+/// calendar, and a client gets from the page's card to every date in two
 /// reads: the group, whose occurrence member names the feed, then the feed's occurrences.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_date_page_joins_its_own_date_in_its_groups_calendar(pool: PgPool) {
     let (r, site) = resolver(&pool, site());
-    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let cfg = queue_config();
     let numeric_id = read(&pool, &r, &cfg, &numeric()).await;
     let token_id = store::ensure_resource(&pool, &token()).await.unwrap();
     assert_eq!(
@@ -400,7 +393,7 @@ async fn a_date_page_joins_its_own_date_in_its_groups_calendar(pool: PgPool) {
         }]
     );
 
-    let app = app(&pool, CrossContainerOccurrences::Corroborated);
+    let app = app(&pool);
     let card = by_uri(&app, &numeric()).await;
     assert_eq!(card["id"], token_id.as_str(), "{card}");
     assert_eq!(card["uri"], token().as_str());
@@ -437,7 +430,7 @@ async fn a_date_page_joins_its_own_date_in_its_groups_calendar(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
-    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let cfg = queue_config();
     read(&pool, &r, &cfg, &numeric()).await;
     let token_id = read(&pool, &r, &cfg, &token()).await;
     read(&pool, &r, &cfg, &feed()).await;
@@ -498,18 +491,24 @@ async fn a_failed_uid_read_keeps_the_page_and_its_group(pool: PgPool) {
     assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
 }
 
-/// Without the corroborated mode, the page and the feed's occurrence stay apart.
+/// The join needs no setting: with the default configuration, the page and its own date in the
+/// group's calendar are one group, and its card says so.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_date_page_stays_apart_from_its_calendar_when_the_mode_is_off(pool: PgPool) {
+async fn a_date_page_joins_its_calendar_with_no_grouping_setting(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let config = Config::default();
+    let cfg = config.queue.clone();
     read(&pool, &r, &cfg, &numeric()).await;
-    read(&pool, &r, &cfg, &token()).await;
+    let token_id = read(&pool, &r, &cfg, &token()).await;
     read(&pool, &r, &cfg, &feed()).await;
     common::drain_groups(&pool, &cfg.groups).await;
-    assert_eq!(all_groups(&pool).await, Vec::<Vec<(String, String)>>::new());
-    let card = by_uri(&app(&pool, CrossContainerOccurrences::Off), &numeric()).await;
-    assert!(card["group"].is_null(), "{card}");
+    let feed_id = store::ensure_resource(&pool, &feed()).await.unwrap();
+    let mut joined = vec![(feed_id, UID.to_owned()), (token_id, "".into())];
+    joined.sort();
+    assert_eq!(all_groups(&pool).await, vec![joined]);
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let card = by_uri(&app, &numeric()).await;
+    assert_eq!(card["group"]["size"], 2, "{card}");
 }
 
 /// A group's calendar mixes its series: a second series on the same evenings, under its own
@@ -537,7 +536,7 @@ async fn a_calendar_with_two_series_joins_each_page_to_its_own_date_only(pool: P
         calendar.replacen("END:VCALENDAR", &format!("{other}END:VCALENDAR"), 1),
     );
     let (r, _) = resolver(&pool, pages);
-    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let cfg = queue_config();
     for uri in [
         numeric(),
         token(),
@@ -577,13 +576,13 @@ async fn a_calendar_with_two_series_joins_each_page_to_its_own_date_only(pool: P
     assert_eq!(found, expected);
 }
 
-/// A page of another publisher whose own calendar file carries a Meetup date's UID does not
-/// join that date: across publishers the corroborated mode needs both located within 500 m,
-/// and the group's calendar gives no place.
+/// A page of another publisher whose own calendar file carries a Meetup date's UID never joins
+/// that date, at its start and under its name: a UID joins a page only to its own organiser's
+/// calendar.
 #[sqlx::test(migrations = "../../migrations")]
 async fn another_publishers_page_with_the_uid_does_not_join(pool: PgPool) {
     let (r, _) = resolver(&pool, site());
-    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let cfg = queue_config();
     read(&pool, &r, &cfg, &feed()).await;
     let start: chrono::DateTime<Utc> = sqlx::query_scalar(
         "SELECT o.start_at FROM event_occurrence o JOIN resource r ON r.id=o.resource_id WHERE r.uri=$1 AND o.uid=$2",
@@ -631,7 +630,7 @@ async fn a_dates_number_and_token_are_one_resource_and_other_groups_are_not(pool
         ),
     );
     let (r, _) = resolver(&pool, pages);
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     let token_id = read(&pool, &r, &cfg, &token()).await;
     assert_eq!(alias_root(&pool, &token_id).await, None);
     let numeric_id = read(&pool, &r, &cfg, &numeric()).await;
@@ -639,7 +638,7 @@ async fn a_dates_number_and_token_are_one_resource_and_other_groups_are_not(pool
         alias_root(&pool, &numeric_id).await,
         Some((token_id.clone(), "canonical".into()))
     );
-    let app = app(&pool, CrossContainerOccurrences::Off);
+    let app = app(&pool);
     let card = by_uri(&app, &numeric()).await;
     assert_eq!(card["id"], token_id.as_str());
     assert_eq!(by_uri(&app, &token()).await["id"], token_id.as_str());
@@ -689,7 +688,7 @@ fn path_key(uri: &str) -> String {
 /// itself again, the calendar is read.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_organiser_calendar_answered_from_another_origin_is_not_read(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let cfg = queue_config();
     let mut pages = site();
     let calendar = pages.remove(&path_key(&feed())).unwrap();
     pages.insert(
@@ -751,7 +750,7 @@ async fn an_organiser_calendar_answered_from_another_origin_is_not_read(pool: Pg
 /// origin: a redirect to another host of the same site (or another scheme or port) gives none.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_date_file_from_another_url_origin_gives_no_uid(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let cfg = queue_config();
     let mut pages = site();
     let file = path_key(&url("frxnbvyjcqbmb/ical/frxnbvyjcqbmb.ics"));
     let ics = pages.remove(&file).unwrap();
@@ -791,7 +790,7 @@ async fn a_redirect_to_another_date_is_no_alias(pool: PgPool) {
         format!("REDIRECT {}", url("frxnbvykccbjb/")),
     );
     let (r, _) = resolver(&pool, pages);
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     let id = read(&pool, &r, &cfg, &numeric()).await;
     assert_eq!(alias_root(&pool, &id).await, None);
 }
@@ -802,7 +801,7 @@ async fn a_redirect_to_another_date_is_no_alias(pool: PgPool) {
 /// so it stays in its group.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_date_page_missing_fields_reads_fine_when_its_file_fails(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Corroborated);
+    let cfg = queue_config();
     let start = shifted("2026-12-09T19:00:00+01:00", shift_days());
     let page_uri = token();
     let page = format!(
@@ -864,7 +863,7 @@ async fn a_probe_reads_no_calendar_file(pool: PgPool) {
 /// https, and the bare domain redirected to `www`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_group_calendar_is_read_by_each_of_its_spellings(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     let path = "/bitcoin-meetup-switzerland/events/ical/";
     let mut pages = site();
     pages.insert(
@@ -898,7 +897,7 @@ async fn a_group_calendar_is_read_by_each_of_its_spellings(pool: PgPool) {
 /// when answered from the page's own URL origin: a redirect elsewhere gives none.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_web_page_calendar_file_from_another_origin_gives_no_uid(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     let start = Utc::now() + Duration::days(20);
     let page_uri = "https://events.example.com/e/1";
     let page = format!(
@@ -955,7 +954,7 @@ async fn a_web_page_calendar_file_from_another_origin_gives_no_uid(pool: PgPool)
 /// is refused like on the platform route: no snapshot, so its stored dates are never cancelled.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_off_origin_calendar_on_the_web_route_keeps_its_dates(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     let (r, _) = resolver_with(&pool, site(), false);
     let id = read(&pool, &r, &cfg, &feed()).await;
     let scheduled = |pool: PgPool, id: String| async move {
@@ -993,7 +992,7 @@ async fn an_off_origin_calendar_on_the_web_route_keeps_its_dates(pool: PgPool) {
 /// starts everything over.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_off_origin_streak_never_brings_a_calendar_to_the_dead_letter(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     let mut pages = site();
     let calendar = pages.remove(&path_key(&feed())).unwrap();
     pages.insert(
@@ -1044,7 +1043,7 @@ async fn an_off_origin_streak_never_brings_a_calendar_to_the_dead_letter(pool: P
 /// its stored dates are never cancelled, nothing dead-letters, and `last_error` says why.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_off_origin_answer_of_any_status_keeps_a_calendars_dates(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     for meetup in [true, false] {
         let (r, _) = resolver_with(&pool, site(), meetup);
         let id = read(&pool, &r, &cfg, &feed()).await;
@@ -1103,7 +1102,7 @@ async fn an_off_origin_answer_of_any_status_keeps_a_calendars_dates(pool: PgPool
 /// says why; to where Meetup answers the calendar itself, it is followed and read.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_in_page_redirect_of_a_calendar_is_decided_like_an_http_one(pool: PgPool) {
-    let cfg = queue_config(CrossContainerOccurrences::Off);
+    let cfg = queue_config();
     let elsewhere = "https://calendar.example.com/meetup.ics";
     let stubs = [
         format!(

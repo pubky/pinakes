@@ -69,7 +69,7 @@ stored document becomes a line in the change journal.
 **Join.** An alias is the same object under another spelling (tracking parameters, OSM URL forms,
 ISBN-10); it reads as its root resource. A group joins resources that are one thing, only on
 evidence a page cannot fake: a DOI or ISBN card and the landing page its registry names, one ICS UID
-within a feed, an operator's curation, and exact keys from the also-on sources. The also-on worker
+within a feed, an event page and its date in its organiser's calendar, an operator's curation, and exact keys from the also-on sources. The also-on worker
 asks hubs (MusicBrainz, Wikidata) and services about their own records (TIDAL, Discogs, iTunes, Open
 Library, Podcast Index, crates.io, Steam, the Wayback Machine, …) for music, books, films, podcasts,
 places, papers, software, games and apps, and stores keys (`isrc:…`, `mb:recording:…`,
