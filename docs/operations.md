@@ -1136,7 +1136,9 @@ resumed run meets the keys in another order. A member deleted by orphan expiry l
 at once. Writer lock contention retries after one to three seconds; curation waits up to two
 seconds and answers 503 with Retry-After. `groups.cross_container_occurrences = "corroborated"`
 also joins one UID across feeds when the instances are within 500 m, 300 s and a name similarity
-of 0.5; a determined publisher can copy that, so it is off by default. In that mode an event page
+of 0.5; a determined publisher can copy that, so the code default is `off`. `pinakes.example.toml`
+sets `"corroborated"`: the Meetup join below needs that mode, and the general join still needs both
+feeds to agree on the place, the start and the name. In that mode an event page
 also joins the occurrence with its own calendar file's UID in the organiser calendar its platform
 names for it (a Meetup date's group calendar), within 300 s, without the place and name checks.
 A page's calendar file gives its UID only when answered from the page's own URL origin (scheme,

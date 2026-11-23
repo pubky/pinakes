@@ -41,7 +41,8 @@ enabled = true
 nominatim_url = "https://nominatim.openstreetmap.org"
 requests_per_second = 0.5 # The public host allows at most one request per second.
 # The ODbL dump file (osm_place.ndjson.gz), rewritten daily; it needs room for every cached place.
-dump_dir = "/var/lib/pinakes/dumps"
+# Relative to the working directory; the container image sets /var/lib/pinakes/dumps instead.
+dump_dir = "dumps"
 
 # Card resolvers; HTTP fallbacks can still use web.
 [cards.media]
