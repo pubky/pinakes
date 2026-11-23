@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# Every metric the rules and the dashboard name, and every fetch outcome a rule matches, is one
+# the daemon registers.
+export DATABASE_URL="${DATABASE_URL:-postgresql:///postgres?host=/var/run/postgresql}"
+cargo test -p pinakes-core --test changes ops_artifacts_reference_registered_metrics
+# The rules' syntax and lint (a lint finding fails), where promtool is installed.
+pinakes_promtool="${PROMTOOL:-promtool}"
+if command -v "$pinakes_promtool" >/dev/null 2>&1; then
+  "$pinakes_promtool" check rules --lint-fatal ops/alerts.yml
+else
+  printf '%s\n' 'promtool is not installed; the rules were checked against the metric registry only.'
+fi

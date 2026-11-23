@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# The public listener's document (also served at /v1/openapi.json and by /swagger-ui),
+# generated into a temporary file first, so a failed build never empties the snapshot.
+for doc in "openapi.json:--openapi"; do
+  tmp=$(mktemp "docs/.${doc%%:*}.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  cargo run -q -p pinakesd -- "${doc#*:}" > "$tmp"
+  chmod 644 "$tmp" # mktemp creates 0600; snapshots are ordinary tracked files
+  mv "$tmp" "docs/${doc%%:*}"
+  trap - EXIT
+done

@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Derive the complete class/parent table from the pinned schema.org vocabulary."""
+import json
+from pathlib import Path
+root = Path(__file__).resolve().parents[1]
+vocab = json.loads((root / 'data/schemaorg-30.1.jsonld').read_text())
+types = {}
+for node in vocab['@graph']:
+    kinds = node.get('@type', [])
+    if isinstance(kinds, str):
+        kinds = [kinds]
+    if 'rdfs:Class' not in kinds or not node['@id'].startswith('schema:'):
+        continue
+    parents = node.get('rdfs:subClassOf', [])
+    if isinstance(parents, dict):
+        parents = [parents]
+    types[node['@id'][7:]] = sorted(p['@id'][7:] for p in parents if p['@id'].startswith('schema:'))
+(root / 'data/schemaorg-types.json').write_text(json.dumps(types, indent=2, sort_keys=True) + '\n')
+print(f'{len(types)} types')

@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Derive the checked-in CLDR 47 world-default Windows timezone mapping, offline."""
+import hashlib
+import json
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+
+if len(sys.argv) != 2:
+    raise SystemExit("usage: scripts/windows-zones /path/to/windowsZones.xml")
+data = pathlib.Path(sys.argv[1]).read_bytes()
+if hashlib.sha256(data).hexdigest() != "39714d7a5a276508aeca2289a490dddb8424dea0063f3f5fbc8bd8520dcbfcba":
+    raise SystemExit("expected the pinned CLDR 47 windowsZones.xml")
+zones = {node.attrib["other"]: node.attrib["type"].split()[0]
+         for node in ET.fromstring(data).iter("mapZone")
+         if node.attrib["territory"] == "001"}
+out = pathlib.Path(__file__).resolve().parent.parent / "data/windows-zones.json"
+out.write_text(json.dumps(zones, sort_keys=True, indent=2) + "\n")

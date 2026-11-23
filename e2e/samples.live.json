@@ -1,0 +1,76 @@
+[
+  {
+    "kind": "osm",
+    "uri": "https://www.openstreetmap.org/node/341342368",
+    "type": "Place"
+  },
+  {
+    "kind": "geo",
+    "uri": "geo:47.3769,8.5417",
+    "type": "Place"
+  },
+  {
+    "kind": "event",
+    "uri": "https://luma.com/376whqyw",
+    "type": "Event"
+  },
+  {
+    "kind": "ics",
+    "uri": "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
+    "type": "DataFeed"
+  },
+  {
+    "kind": "naddr",
+    "uri": "nostr:naddr1qqjrvvp3vycxye33956nycec956x2ery94snqvfk95ergefnx9snqdeh8yekyq3qxfx8p5gzdyv0kgakc365pag8ej2p6g7l72k0hszt0g5m0k0wyymsxpqqqp7txuf3y56",
+    "type": "Event"
+  },
+  {
+    "kind": "doi",
+    "uri": "doi:10.1038/nature12373",
+    "type": "ScholarlyArticle"
+  },
+  {
+    "kind": "doi_page",
+    "uri": "https://www.nature.com/articles/nature12373",
+    "type": "CreativeWork",
+    "group_with": "doi"
+  },
+  {
+    "kind": "isbn",
+    "uri": "isbn:9780140328721",
+    "type": "Book"
+  },
+  {
+    "kind": "media",
+    "uri": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "type": "VideoObject"
+  },
+  {
+    "kind": "web",
+    "uri": "https://example.org/",
+    "type": "WebPage"
+  },
+  {
+    "kind": "pubky",
+    "uri": "pubky://{author}/pub/pinakes.e2e/objects/sample",
+    "type": "CreativeWork"
+  },
+  {
+    "kind": "apple_song",
+    "uri": "https://music.apple.com/gb/song/1440717826",
+    "type": "MusicRecording",
+    "site": "Apple Music"
+  },
+  {
+    "kind": "bandcamp_artist",
+    "uri": "https://radiohead.bandcamp.com/",
+    "type": "MusicGroup",
+    "site": "Bandcamp"
+  },
+  {
+    "kind": "soundcloud_artist",
+    "uri": "https://soundcloud.com/radiohead",
+    "type": "MusicGroup",
+    "site": "SoundCloud"
+  }
+]
