@@ -619,6 +619,16 @@ async fn a_recurring_uid_is_scoped_to_start_and_a_page_naming_no_calendar_never_
     let cfg = groups::GroupConfig::default();
     reconciled(&pool, &page, &cfg).await;
     drained(&pool, &cfg).await;
+    // The page's UID key reached the feed's occurrences: the join refused them.
+    let shared: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT x.key) FROM resource_group x JOIN resource_group y ON y.key=x.key WHERE x.key LIKE 'ics_uid:%' AND x.resource_id=$1 AND y.resource_id=$2",
+    )
+    .bind(&page)
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(shared, 1);
     assert_eq!(gid(&pool, &page).await, page);
     let grouped: i64 =
         sqlx::query_scalar("SELECT count(*) FROM group_unit WHERE group_id IS NOT NULL")
@@ -1620,7 +1630,7 @@ async fn a_stored_policy_naming_the_removed_uid_setting_requeues_once(pool: PgPo
             .await
             .unwrap();
         assert!(groups::configure(&pool, &cfg).await.unwrap(), "{mode}");
-        assert_eq!(dirty(pool.clone()).await, [a.clone()], "{mode}");
+        assert_eq!(dirty(pool.clone()).await, vec![a.clone()], "{mode}");
         sqlx::query("DELETE FROM group_dirty")
             .execute(&pool)
             .await
