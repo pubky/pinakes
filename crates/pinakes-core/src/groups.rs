@@ -1558,6 +1558,53 @@ mod tests {
         assert_eq!(joined.resume.as_deref(), Some("k5"));
     }
 
+    /// A UID key without both a page and an occurrence makes no join and spends no checks: a
+    /// long series of one feed's dates neither parks nor stops the run, and a later key still
+    /// joins.
+    #[test]
+    fn a_uid_key_of_dates_alone_spends_no_checks() {
+        let n = 40;
+        let names: Vec<String> = (0..n).map(|i| format!("u{i}")).collect();
+        let at = chrono::DateTime::from_timestamp(1_800_000_000, 0);
+        let (points, starts, calendars, overrides, singles) = (
+            vec![None; n],
+            vec![at; n],
+            vec![Some("feed".to_owned()); n],
+            vec![None; n],
+            vec![Vec::new(); n],
+        );
+        // The first 38 are one feed's dates; the last two are pages.
+        let occurrences: Vec<bool> = (0..n).map(|i| i < n - 2).collect();
+        let facts = Facts {
+            names: &names,
+            points: &points,
+            starts: &starts,
+            occurrences: &occurrences,
+            calendars: &calendars,
+            overrides: &overrides,
+            singles: &singles,
+        };
+        let epoch = chrono::DateTime::UNIX_EPOCH;
+        let bykey = BTreeMap::from([
+            (
+                "ics_uid:dates".to_owned(),
+                (0..n - 2).map(|i| (i, epoch)).collect(),
+            ),
+            (
+                "ics_uid:pages".to_owned(),
+                vec![(n - 2, epoch), (n - 1, epoch)],
+            ),
+            ("k".to_owned(), vec![(n - 2, epoch), (n - 1, epoch)]),
+        ]);
+        let cfg = GroupConfig {
+            check_budget: Some(10),
+            ..Default::default()
+        };
+        let mut joined = join(&facts, bykey, &cfg, None);
+        assert_eq!((joined.parked, joined.resume.as_deref()), (0, None));
+        assert!(same(&mut joined, n - 2, n - 1) && !same(&mut joined, 0, 1));
+    }
+
     /// A unit for the UID rule: its resource URI, whether it is an occurrence, its point.
     type UidUnit<'a> = (&'a str, bool, Option<(f64, f64)>);
     /// Units for the UID rule, all dated at one instant and named alike, joined by one
