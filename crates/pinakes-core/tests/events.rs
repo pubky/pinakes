@@ -5278,6 +5278,30 @@ fn calendar_properties_are_counted_and_need_a_name() {
     assert_eq!(container.occurrences[0].uid, "good");
     assert!(container.warnings.contains(&"invalid_vevent_line".into()));
 }
+/// A calendar body is read up to 8 MiB by default (`limits.event_feed_body_bytes`); a larger one
+/// is refused, and parses once the operator raises the limit.
+#[test]
+fn a_calendar_body_over_eight_mib_is_refused_by_default() {
+    let uri = "https://example.org/feed.ics";
+    // 64-byte calendar properties, enough of them to pass 8 MiB by a few lines.
+    let pad = format!("X-PAD:{}\n", "x".repeat(57));
+    let lines = 8 * 1024 * 1024 / pad.len() + 1;
+    let big = cal(&format!(
+        "{}{}",
+        pad.repeat(lines),
+        event("UID:big\nDTSTART:20261020T120000Z\nSUMMARY:Big")
+    ));
+    assert!(big.len() > 8 * 1024 * 1024 && big.len() < 9 * 1024 * 1024);
+    let error = calendar::parse(uri, big.as_bytes(), &EventConfig::default(), now()).unwrap_err();
+    assert!(error.to_string().contains("calendar body cap"), "{error:#}");
+    let raised = EventConfig {
+        feed_body_bytes: 9 * 1024 * 1024,
+        parse_timeout_ms: 60_000,
+        ..Default::default()
+    };
+    let read = calendar::parse(uri, big.as_bytes(), &raised, now()).unwrap();
+    assert_eq!(read.container.unwrap().occurrences.len(), 1);
+}
 /// A line folded inside a character (RFC 5545 folds at octets) unfolds whole, and a feed that is
 /// not UTF-8 keeps its events, the unreadable bytes replaced.
 #[test]
