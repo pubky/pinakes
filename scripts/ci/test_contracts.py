@@ -287,6 +287,7 @@ class Container(unittest.TestCase):
         self.assertEqual(re.findall(r'(?m)^EXPOSE (.+)$', s), ['8090'])
         self.assertIn('PINAKES__ADMIN_LISTEN=127.0.0.1:9090', s)
         self.assertIn('PINAKES__OSM__DUMP_DIR=/var/lib/pinakes/dumps', s)
+        self.assertIn('PINAKES__CATALOGUES__DIR=/var/lib/pinakes/catalogues', s)
         self.assertIn('ENTRYPOINT ["/usr/local/bin/pinakesd"]', s)
         self.assertRegex(s, r'(?m)^HEALTHCHECK [^\n]*\\\n\s*CMD \["/usr/local/bin/pinakesd", "healthcheck"\]$')
         self.assertNotIn('COPY . ', s)

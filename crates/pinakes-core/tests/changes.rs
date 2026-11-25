@@ -910,9 +910,33 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
                 .as_str()
                 .unwrap()
                 .contains("pinakes_source_token_refusals_total")));
+    // The catalogue alerts read only catalogues that are on; the lag alert only one that has
+    // finished a full import.
+    for (alert, reads) in [
+        (
+            "CatalogueImportFailed",
+            &["pinakes_catalogue_import_errors_total", "pinakes_catalogue_enabled == 1"][..],
+        ),
+        (
+            "CatalogueUpdateLag",
+            &[
+                "pinakes_catalogue_update_lag_seconds > 172800",
+                "pinakes_catalogue_enabled == 1",
+                "pinakes_catalogue_last_import_timestamp_seconds > 0",
+            ],
+        ),
+    ] {
+        let rule = rules
+            .iter()
+            .find(|r| r["alert"].as_str() == Some(alert))
+            .unwrap_or_else(|| panic!("{alert}"));
+        for read in reads {
+            assert!(rule["expr"].as_str().unwrap().contains(read), "{alert}: {read}");
+        }
+    }
     let dashboard: Value =
         serde_json::from_str(include_str!("../../../ops/grafana/pinakes.json")).unwrap();
-    assert_eq!(dashboard["panels"].as_array().unwrap().len(), 7);
+    assert_eq!(dashboard["panels"].as_array().unwrap().len(), 9);
     for panel in dashboard["panels"].as_array().unwrap() {
         for target in panel["targets"].as_array().unwrap() {
             for name in target["expr"]
