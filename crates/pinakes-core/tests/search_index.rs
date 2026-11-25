@@ -297,6 +297,7 @@ async fn an_ordinary_pass_merges_nothing(pool: PgPool) {
         .await
         .unwrap();
     common::get(&app, "/v1/search?q=bopp").await;
+    index.settle();
     assert_eq!(index.purges(), 0);
     // A post found gone: one merge.
     sqlx::query("UPDATE resource SET name=NULL, doc=jsonb_build_object('type','SocialMediaPosting','type_path',jsonb_build_array('Thing','CreativeWork','SocialMediaPosting'),'url',uri,'status','missing') WHERE id=$1")
@@ -305,7 +306,9 @@ async fn an_ordinary_pass_merges_nothing(pool: PgPool) {
         .await
         .unwrap();
     common::get(&app, "/v1/search?q=aurora").await;
+    index.settle();
     assert_eq!(index.purges(), 1);
+    index.settle();
     assert!(!index.holds_word("aurora"));
 }
 
@@ -488,6 +491,7 @@ async fn an_emptied_post_is_not_found_by_its_old_words(pool: PgPool) {
         shutdown,
     ));
     within(|| async { opened.get() == 1 && passed.get() > 0 }).await;
+    index.settle();
     assert!(index.holds_word("zyxquorum"));
     assert_eq!(
         ids_of(&common::get(&app, "/v1/search?q=zyxquorum").await),
@@ -508,6 +512,7 @@ async fn an_emptied_post_is_not_found_by_its_old_words(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    index.settle();
     assert!(index.holds_word("zyxquorum"));
     for q in ["zyxquorum", "zyxquorum%20sunset"] {
         assert!(
@@ -519,7 +524,9 @@ async fn an_emptied_post_is_not_found_by_its_old_words(pool: PgPool) {
     assert!(ids_of(&common::get(&app, "/v1/search?tags=sky").await).contains(&post));
     // The next pass removes its words from the files.
     index.sync(&pool).await.unwrap();
+    index.settle();
     assert!(!index.holds_word("zyxquorum"));
+    index.settle();
     assert!(index.holds_word("sunset"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -622,4 +629,27 @@ async fn the_daemon_drains_the_queue_batch_after_batch(pool: PgPool) {
     stop.send(true).unwrap();
     task.await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The names holding every word are counted only when the proposals may be read: a short text of
+/// letters and digits matches only where words start and never reads them, so it counts nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_text_matched_at_word_starts_counts_no_names(pool: PgPool) {
+    card(&pool, 1, "Mud flats", "A coast.", "coast", 1).await;
+    let index = SearchIndex::in_memory();
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        common::get(&app, "/v1/search?q=mud").await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(index.served() > 0);
+    assert_eq!(index.counted(), 0);
+    assert_eq!(index.proposed(), 0);
+    common::get(&app, "/v1/search?q=mud%20flats").await;
+    assert_eq!(index.counted(), 1);
 }

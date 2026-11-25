@@ -189,7 +189,7 @@
             ]
           },
           "labels": {
-            "description": "On a search row: the labels the card's catalogue source gives it, as valid tag labels.\nKept apart from people's tags, which Nexus serves for the card's `uri` and `refs`; a client\nmay offer them as suggested tags. `[]` when the card has none. Absent on other routes.",
+            "description": "On a search row, and on a card built from a catalogue card: the labels the catalogue gives\nit, as valid tag labels. Kept apart from people's tags, which Nexus serves for the card's\n`uri` and `refs`; a client may offer them as suggested tags. `[]` when the card has none.\nAbsent on other cards.",
             "items": {
               "type": "string"
             },

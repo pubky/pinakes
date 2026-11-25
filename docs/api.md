@@ -1151,8 +1151,20 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   0, `status` `ok`; `group`, `also_on` and `maybe_same` are empty. OpenStreetMap cards carry the
   ODbL `attribution`. `GET /v1/resources/{id}` answers 404 for it until someone references the
   link;
-- a card whose `uri` a listed resource has is listed once, as that resource; a card whose
-  resource the search leaves out (not referenced any more, or not yet read) is listed as the card;
+- each thing is one row:
+  - a card whose `uri` a listed resource has is listed once, as that resource; a card whose
+    resource the search leaves out (not referenced any more, or not yet read) is listed as the
+    card;
+  - a referenced card built from a catalogue card ([Catalogue cards](#catalogue-cards)) stands for
+    that catalogue card, and for every card of another catalogue sharing one of its keys: those
+    are not listed. The row is the referenced card. People's tags and the catalogue's labels both
+    match `tags` and count in `facet=tags`, its `labels` are the catalogue's, and the text index
+    finds and ranks it by its card's other names and `fame` as it would the card;
+  - cards of several catalogues sharing a key (`wikidata:Q42` on a MusicBrainz card and on the
+    Wikidata item) are one row, the card of the first catalogue in `wikidata`, `musicbrainz`,
+    `osm`, `openalex`, `podcastindex`, `tranco`, `software` order among those the search found.
+    Its relevance is the better of theirs. A card the search finds alone (its words, its label)
+    is listed as itself. Two cards of one catalogue are always two things;
 - never listed with `referenced=true`, a social filter (`author`, `reach`, `related`,
   `in_collection`), `key`, `venue`, `category`, `remote`, `ingredient`, `from` or `to`, nor with
   `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;
@@ -1215,7 +1227,8 @@ text * (1 + fame) + activity
   accents, white space collapsed), BM25 again when the name holds `q`'s words in order, and 10 for
   the start of a name word; a card found as Postgres' text search finds it scores 8 for the text
   inside its name and 0.5 per shared three-letter piece;
-- `fame`: a catalogue card's 0–1 fame from its source's own signal; 0 on a referenced link;
+- `fame`: a catalogue card's 0–1 fame from its source's own signal, also on a referenced card
+  built from a catalogue card (its card's); 0 on any other referenced link;
 - `activity`: the activity score (with `boost`'s term when given). It grows with the log of the
   taggers, so each further tag adds less than the one before, and a thousand taggers (about 7) stay
   below an exact name match: tagged cards rank higher, they don't always come first.
@@ -1267,9 +1280,11 @@ Concurrent updates show between pages; a search is not a frozen snapshot.
 ### Facets
 
 `facet` adds `facets` to the answer: counts over the whole filtered set (with `q`, over the text
-search's candidates; of catalogue cards, over the ones the search lists). The counts are the same
+search's candidates; of catalogue cards, over the ones the search lists), each row once as the
+page lists it (a card whose link a listed resource has counts as that resource). The counts are the same
 on every page, whatever `limit`, `cursor` or `sort`; `collapse` changes the rows, not the counts.
-`tags` counts people's tags and catalogue labels together.
+`tags` counts people's tags and catalogue labels together (on a card built from a catalogue card,
+its labels too, where the search may list catalogue cards).
 Each list is most frequent first, ties by value.
 
 | Facet | Entries |

@@ -2319,26 +2319,55 @@ fn push_tags(
     reach: &Option<crate::nexus::ReachSet>,
     tags: &[String],
 ) {
+    push_tags_or_labels(sql, unit, q, reach, tags, &[]);
+}
+/// [`push_tags`], where the labels a card built from a catalogue card of `labelled` shows count as
+/// its tags too (none: exactly [`push_tags`]).
+fn push_tags_or_labels(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    unit: &str,
+    q: &SearchQuery,
+    reach: &Option<crate::nexus::ReachSet>,
+    tags: &[String],
+    labelled: &[String],
+) {
     if tags.is_empty() {
         return;
     }
+    let labels = |sql: &mut QueryBuilder<'_, Postgres>, any: bool, value: Vec<String>| {
+        if labelled.is_empty() {
+            return;
+        }
+        sql.push(format!(" OR ({unit}.doc->'catalogue'->>'catalogue'=ANY("))
+            .push_bind(labelled.to_vec())
+            .push(format!(") AND {unit}.doc->'labels'"))
+            .push(if any { " ?| " } else { " ?& " })
+            .push_bind(value)
+            .push("::text[])");
+    };
+    let open = if labelled.is_empty() { "" } else { "(" };
+    let close = if labelled.is_empty() { "" } else { ")" };
     if q.match_mode.as_deref() == Some("all") {
         for tag in tags {
             sql.push(format!(
-                " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label="
+                " AND {open}EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label="
             ))
             .push_bind(tag.clone());
             scope(sql, q, reach);
             sql.push(")");
+            labels(sql, false, vec![tag.clone()]);
+            sql.push(close);
         }
     } else {
         sql.push(format!(
-            " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label=ANY("
+            " AND {open}EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label=ANY("
         ))
         .push_bind(tags.to_vec())
         .push(")");
         scope(sql, q, reach);
         sql.push(")");
+        labels(sql, true, tags.to_vec());
+        sql.push(close);
     }
 }
 /// Whether a search may list catalogue cards nobody referenced: not with `referenced=true`, a
@@ -2379,38 +2408,90 @@ fn candidate_resources(units: &[crate::search_index::Candidate]) -> Vec<String> 
     resources.dedup();
     resources
 }
-/// The cards `rows` names (ID, link, type) as units.
-fn units_of(rows: Vec<(i64, String, String)>) -> Vec<CardUnit> {
-    rows.into_iter()
-        .filter_map(|(card, uri, type_name)| {
+/// A catalogue card as [`card_units`] and [`best_known_cards`] read it: ID, link, type,
+/// catalogue and keys.
+type CardRow = (i64, String, String, String, Vec<String>);
+/// The catalogue cards a search lists, each thing once: the cards whose thing a listed resource is
+/// already left out (`NOT_REPLACED`), and cards of several catalogues sharing a key merged into one
+/// unit (`merged`: the card left out, the card that is the unit).
+#[derive(Default)]
+struct CardUnits {
+    units: Vec<CardUnit>,
+    merged: std::collections::HashMap<i64, i64>,
+}
+/// A catalogue card a referenced card built from a catalogue card (`resource.catalogue_card`)
+/// stands for: its own, or one of another catalogue sharing one of its keys (`resource_key` from
+/// the catalogue). Left out of a search: the thing is that resource, once, with people's tags and
+/// the card's labels.
+const NOT_REPLACED: &str = " AND NOT EXISTS (SELECT 1 FROM resource x WHERE x.catalogue_card=c.id AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id)) AND NOT EXISTS (SELECT 1 FROM resource_key k JOIN resource x ON x.id=k.resource_id WHERE k.source='catalogue' AND k.key=ANY(c.keys) AND x.catalogue_card IS NOT NULL AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id))";
+/// The cards `rows` names as units, in their order, each thing once: a card that shares a key
+/// naming the thing (not a `url:` key) with a card of a catalogue listed earlier in
+/// [`crate::catalogue::Catalogue::ALL`] (Wikidata first) among `rows` is merged into it. Cards of
+/// one catalogue never merge (each is its own thing there), and a merge does not chain.
+fn units_of(rows: Vec<CardRow>) -> CardUnits {
+    let rank = |catalogue: &str| {
+        crate::catalogue::Catalogue::ALL
+            .iter()
+            .position(|c| c.name() == catalogue)
+            .unwrap_or(usize::MAX)
+    };
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| rank(&rows[i].3));
+    // Each key of a card kept, with the card and its catalogue.
+    let mut held: std::collections::HashMap<&str, (i64, &str)> = std::collections::HashMap::new();
+    let mut merged = std::collections::HashMap::new();
+    for &i in &order {
+        let (id, _, _, catalogue, keys) = &rows[i];
+        let named = || keys.iter().filter(|k| !k.starts_with("url:"));
+        if let Some(&(into, _)) = named()
+            .filter_map(|k| held.get(k.as_str()))
+            .find(|(_, other)| other != catalogue)
+        {
+            merged.insert(*id, into);
+            continue;
+        }
+        for key in named() {
+            held.entry(key.as_str())
+                .or_insert((*id, catalogue.as_str()));
+        }
+    }
+    let units = rows
+        .iter()
+        .filter(|(id, ..)| !merged.contains_key(id))
+        .filter_map(|(card, uri, type_name, _, _)| {
             Some(CardUnit {
-                card,
-                unit_id: crate::search_index::card_unit(&uri)?,
-                type_path: model::type_path(&type_name).join(","),
-                host: url::Url::parse(&uri)
+                card: *card,
+                unit_id: crate::search_index::card_unit(uri)?,
+                type_path: model::type_path(type_name).join(","),
+                host: url::Url::parse(uri)
                     .ok()
                     .and_then(|u| u.host_str().map(str::to_owned)),
             })
         })
-        .collect()
+        .collect();
+    CardUnits { units, merged }
 }
 /// The catalogue cards among a text search's candidates, of a catalogue that is on.
 async fn card_units(
     pool: &PgPool,
     catalogues: &[String],
     found: &[&crate::search_index::Candidate],
-) -> Result<Vec<CardUnit>, ApiError> {
+) -> Result<CardUnits, ApiError> {
     if found.is_empty() {
-        return Ok(vec![]);
+        return Ok(CardUnits::default());
     }
     let ids: Vec<i64> = found.iter().filter_map(|c| c.card).collect();
-    let rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT c.id,c.uri,c.type FROM catalogue_card c WHERE c.id=ANY($1) AND c.catalogue=ANY($2)",
-    )
+    let mut rows: Vec<CardRow> = sqlx::query_as(&format!(
+        "SELECT c.id,c.uri,c.type,c.catalogue,c.keys FROM catalogue_card c WHERE c.id=ANY($1) AND c.catalogue=ANY($2){NOT_REPLACED}"
+    ))
     .bind(&ids)
     .bind(catalogues)
     .fetch_all(pool)
     .await?;
+    // In the candidates' order: the best of a merged unit's cards gives its relevance.
+    let at: std::collections::HashMap<i64, usize> =
+        ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    rows.sort_by_key(|row| at.get(&row.0).copied().unwrap_or(usize::MAX));
     Ok(units_of(rows))
 }
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
@@ -2424,11 +2505,13 @@ async fn best_known_cards(
     catalogues: &[String],
     sort: Option<&str>,
     cap: usize,
-) -> Result<Vec<CardUnit>, ApiError> {
+) -> Result<CardUnits, ApiError> {
     let mut sql = QueryBuilder::<Postgres>::new(
-        "SELECT c.id,c.uri,c.type FROM catalogue_card c WHERE c.catalogue=ANY(",
+        "SELECT c.id,c.uri,c.type,c.catalogue,c.keys FROM catalogue_card c WHERE c.catalogue=ANY(",
     );
-    sql.push_bind(catalogues.to_vec()).push(")");
+    sql.push_bind(catalogues.to_vec())
+        .push(")")
+        .push(NOT_REPLACED);
     if let Some(types) = &q.type_name {
         sql.push(" AND c.type=ANY(")
             .push_bind(model::subtypes(&search_types(
@@ -2499,7 +2582,7 @@ async fn best_known_cards(
         }
     }
     sql.push(" LIMIT ").push_bind(cap as i64);
-    let rows: Vec<(i64, String, String)> = sql.build_query_as().fetch_all(pool).await?;
+    let rows: Vec<CardRow> = sql.build_query_as().fetch_all(pool).await?;
     Ok(units_of(rows))
 }
 /// `card_unit`: the catalogue cards `units` as rows of `search_unit`'s columns, with their
@@ -3128,7 +3211,7 @@ pub async fn search(
     };
     // The catalogue cards among the candidates, or without text the best known of those the
     // filters let in, read as units (`CardUnit`).
-    let card_units: Vec<CardUnit> = match (&candidates, cards_allowed) {
+    let card_units: CardUnits = match (&candidates, cards_allowed) {
         (Some(found), true) => {
             let found: Vec<&crate::search_index::Candidate> =
                 found.units.iter().filter(|c| c.card.is_some()).collect();
@@ -3146,12 +3229,22 @@ pub async fn search(
             )
             .await?
         }
-        _ => vec![],
+        _ => CardUnits::default(),
     };
-    let with_cards = !card_units.is_empty();
+    // Cards built from a catalogue card are listed with the labels they show, which count as
+    // tags as a card's do: read as the referenced branch beside the cards, even with no card
+    // listed.
+    let backed = cards_allowed
+        && card_units.units.is_empty()
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM resource WHERE catalogue_card IS NOT NULL)",
+        )
+        .fetch_one(&state.pool)
+        .await?;
+    let with_cards = !card_units.units.is_empty() || backed;
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
     if with_cards {
-        push_card_units(&mut sql, &card_units, &catalogues);
+        push_card_units(&mut sql, &card_units.units, &catalogues);
     }
     if let (Some(seed), Some(since)) = (&related, since) {
         // The resource, or its whole group; of those not opted out and their aliases, the links
@@ -3314,16 +3407,23 @@ pub async fn search(
         sql.push(" FROM related rel CROSS JOIN LATERAL (SELECT * FROM resource_unit u WHERE u.id=rel.resource_id OFFSET 0) r");
     } else if with_cards {
         // The referenced units (the candidates' resources, with text) and the catalogue cards,
-        // each branch with its own filters as plain conditions: references and people's tags on
-        // the referenced units, labels (their tags) on the cards.
-        sql.push(" FROM (SELECT su.*,'{}'::text[] AS labels,NULL::real AS fame FROM search_unit su WHERE true");
+        // each branch with its own filters as plain conditions: references and people's tags (and
+        // the labels a card built from a catalogue card shows) on the referenced units, labels
+        // (their tags) on the cards.
+        let labelled: Vec<String> = crate::catalogue::join::joinable(&state.config.catalogues)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        sql.push(" FROM (SELECT su.*,CASE WHEN su.doc->'catalogue'->>'catalogue'=ANY(")
+            .push_bind(labelled.clone())
+            .push(") AND jsonb_typeof(su.doc->'labels')='array' THEN ARRAY(SELECT jsonb_array_elements_text(su.doc->'labels')) ELSE '{}'::text[] END AS labels,NULL::real AS fame FROM search_unit su WHERE true");
         if let Some(found) = &candidates {
             sql.push(" AND su.id=ANY(")
                 .push_bind(candidate_resources(&found.units))
                 .push(")");
         }
         push_referenced(&mut sql, "su", &q, &reach);
-        push_tags(&mut sql, "su", &q, &reach, &tags);
+        push_tags_or_labels(&mut sql, "su", &q, &reach, &tags, &labelled);
         sql.push(" UNION ALL SELECT * FROM card_unit cu WHERE true");
         if !tags.is_empty() {
             sql.push(if q.match_mode.as_deref() == Some("all") {
@@ -3339,21 +3439,32 @@ pub async fn search(
     }
     if let Some(found) = &candidates {
         // The candidates by unit, each with its relevance: the referenced ones, and the catalogue
-        // cards still listed, each unit once (a card whose link a resource has is that resource).
-        let listed: std::collections::HashSet<i64> = card_units.iter().map(|u| u.card).collect();
-        let mut seen = std::collections::HashSet::new();
-        let joined: Vec<&crate::search_index::Candidate> = found
+        // cards still listed, each unit once (a card whose link a resource has is that resource; a
+        // card merged into another is that card's unit, at the better relevance of the two).
+        let listed: std::collections::HashMap<i64, &str> = card_units
             .units
             .iter()
-            .filter(|c| c.card.is_none_or(|card| listed.contains(&card)))
-            .filter(|c| seen.insert(c.unit_id.clone()))
+            .map(|u| (u.card, u.unit_id.as_str()))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let joined: Vec<(&str, f64, bool)> = found
+            .units
+            .iter()
+            .filter_map(|c| match c.card {
+                None => Some((c.unit_id.as_str(), c.relevance, c.words)),
+                Some(card) => {
+                    let unit = card_units.merged.get(&card).unwrap_or(&card);
+                    listed.get(unit).map(|u| (*u, c.relevance, c.words))
+                }
+            })
+            .filter(|(unit, ..)| seen.insert(*unit))
             .collect();
         sql.push(" JOIN unnest(")
-            .push_bind(joined.iter().map(|c| c.unit_id.clone()).collect::<Vec<_>>())
+            .push_bind(joined.iter().map(|c| c.0.to_owned()).collect::<Vec<_>>())
             .push("::text[],")
-            .push_bind(joined.iter().map(|c| c.relevance).collect::<Vec<_>>())
+            .push_bind(joined.iter().map(|c| c.1).collect::<Vec<_>>())
             .push("::float8[],")
-            .push_bind(joined.iter().map(|c| c.words).collect::<Vec<_>>())
+            .push_bind(joined.iter().map(|c| c.2).collect::<Vec<_>>())
             .push("::bool[]) AS c(unit_id,relevance,words) ON c.unit_id=r.unit_id");
     }
     sql.push(" LEFT JOIN resource_score s ON s.resource_id=r.id");
@@ -3517,7 +3628,20 @@ pub async fn search(
     }
     sql.push(" ORDER BY rank DESC,unit_id DESC LIMIT ")
         .push_bind((q.limit.unwrap_or(50) + 1) as i64)
-        .push(") SELECT coalesce((SELECT jsonb_agg(");
+        .push(")");
+    // Facets count every matching link, collapsed or not: with cards, each unit once, as the page
+    // lists it (the resource of a card's link, not the card).
+    let counted = match (q.collapse.is_some(), with_cards) {
+        (true, false) => "eligible",
+        (false, false) => "filtered",
+        (collapsed, true) => {
+            sql.push(", counted AS (SELECT DISTINCT ON (unit_id) * FROM ")
+                .push(if collapsed { "eligible" } else { "filtered" })
+                .push(" ORDER BY unit_id,fame IS NOT NULL)");
+            "counted"
+        }
+    };
+    sql.push(" SELECT coalesce((SELECT jsonb_agg(");
     if related.is_some() {
         related_because(&mut sql, "to_jsonb(p)", "p.because_n", "p.because_authors");
     } else {
@@ -3536,12 +3660,6 @@ pub async fn search(
     }
     sql.push(" ORDER BY rank DESC,unit_id DESC) FROM page p),'[]') AS items, ");
     let asked = facets_asked(q.facet.as_deref())?;
-    // Facets count every matching link, collapsed or not.
-    let counted = if q.collapse.is_some() {
-        "eligible"
-    } else {
-        "filtered"
-    };
     sql.push("jsonb_build_object('type',");
     if asked.types {
         sql.push("coalesce((SELECT jsonb_agg(jsonb_build_object('type',type,'count',count) ORDER BY count DESC,type) FROM (SELECT r.type,count(DISTINCT r.unit_id) AS count FROM ")

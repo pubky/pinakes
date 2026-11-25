@@ -87,6 +87,19 @@ fn names(page: &Value) -> Vec<String> {
         .map(|i| i["name"].as_str().unwrap_or_default().to_owned())
         .collect()
 }
+/// Passes (at most three) until the index files no longer hold `word`: a merge after a removal
+/// that a merge of Tantivy's own raced is owed to a later pass.
+async fn merged_out(index: &search_index::SearchIndex, pool: &PgPool, word: &str) -> bool {
+    for _ in 0..3 {
+        index.settle();
+        if !index.holds_word(word) {
+            return true;
+        }
+        index.sync(pool).await.unwrap();
+    }
+    index.settle();
+    !index.holds_word(word)
+}
 fn unit(n: usize) -> String {
     search_index::card_unit(&format!("https://en.wikipedia.org/wiki/Item_{n}")).unwrap()
 }
@@ -232,6 +245,7 @@ async fn a_catalogue_switched_off_leaves_search_at_once(pool: PgPool) {
         names(&common::get(&on, "/v1/search?q=matterhorn").await),
         ["Matterhorn"]
     );
+    index.settle();
     assert!(index.holds_word("matterhorn"));
     let mut config = Config::default();
     config.catalogues.wikidata.enabled = false;
@@ -255,7 +269,7 @@ async fn a_catalogue_switched_off_leaves_search_at_once(pool: PgPool) {
     // The next pass of an index for this configuration removes its documents.
     index.set_catalogues(&config.catalogues.enabled_names());
     index.sync(&pool).await.unwrap();
-    assert!(!index.holds_word("matterhorn"));
+    assert!(merged_out(&index, &pool, "matterhorn").await);
     assert!(index.holds_word("cervino"));
     // Every catalogue off: none listed, and the index holds none.
     config.catalogues.enabled = false;
@@ -263,7 +277,7 @@ async fn a_catalogue_switched_off_leaves_search_at_once(pool: PgPool) {
     assert!(items(&common::get(&none, "/v1/search?q=cervino").await).is_empty());
     index.set_catalogues(&config.catalogues.enabled_names());
     index.sync(&pool).await.unwrap();
-    assert!(!index.holds_word("cervino"));
+    assert!(merged_out(&index, &pool, "cervino").await);
 }
 
 /// Fame and activity: a famous card the text names exactly comes before a link a thousand
@@ -387,6 +401,20 @@ async fn a_referenced_card_is_listed_once(pool: PgPool) {
         assert_eq!(items(&page)[0]["labels"], serde_json::json!([]), "{path}");
         assert_eq!(items(&page)[0]["name"], "Matterhorn", "{path}");
         assert_eq!(items(&page)[0]["type"], "WebPage", "{path}");
+        // The facets count the unit as the page lists it: the resource's type and tags, not the
+        // card's.
+        let sep = if path.contains('?') { '&' } else { '?' };
+        let page = common::get(&app, &format!("{path}{sep}facet=type,tags")).await;
+        assert_eq!(
+            page["facets"]["type"],
+            serde_json::json!([{"type": "WebPage", "count": 1, "type_path": ["Thing", "CreativeWork", "WebPage"]}]),
+            "{path}: {page}"
+        );
+        assert_eq!(
+            page["facets"]["tags"],
+            serde_json::json!([{"label": "climbing", "count": 1}]),
+            "{path}: {page}"
+        );
     }
 }
 
@@ -501,6 +529,19 @@ async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
         names(&common::get(&app, "/v1/search?q=summit").await),
         ["Summit One"]
     );
+    let key = |source_id: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let id: i64 = sqlx::query_scalar("SELECT id FROM catalogue_card WHERE source_id=$1")
+                .bind(source_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            format!("catalogue:{id}")
+        }
+    };
+    let (gone, added) = (key("Q6").await, key("Q7").await);
+    let kept = [key("Q1").await, key("Q2").await, key("Q5").await];
     store::finish_import(&pool, Catalogue::Wikidata, 2)
         .await
         .unwrap();
@@ -521,7 +562,12 @@ async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
     let page = names(&common::get(&app, "/v1/search?q=peak&limit=20").await);
     assert!(page.contains(&"Peak guide".to_owned()), "{page:?}");
     assert!(!page.contains(&"Peak 7".to_owned()), "{page:?}");
-    let _ = link;
+    // The index itself, not only the page: the new card has no document yet, the gone one keeps
+    // its document until the last part.
+    let held = index.documents();
+    assert!(held.contains(&link), "{held:?}");
+    assert!(!held.contains(&added) && held.contains(&gone), "{held:?}");
+    assert!(kept.iter().all(|k| held.contains(k)), "{held:?}");
     // The passes after: every part, then the gone card leaves.
     for _ in 0..4 {
         common::get(&app, "/v1/search?q=peak").await;
@@ -539,6 +585,9 @@ async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
             "Peak guide"
         ]
     );
+    let held = index.documents();
+    assert!(held.contains(&added) && !held.contains(&gone), "{held:?}");
+    assert_eq!(held.len(), 7, "six cards and the link: {held:?}");
 }
 
 /// The catalogue queue is read a batch per pass: an update run that writes faster than the index
@@ -591,15 +640,17 @@ async fn a_catalogue_switched_off_during_its_reread_leaves_the_index(pool: PgPoo
     state.search_index = index.clone();
     let app = api::router(state);
     common::get(&app, "/v1/search?q=peak").await;
+    index.settle();
     assert!(!index.holds_word("peak"));
     // Switched on: the first part of its re-read.
     index.set_catalogues(&["wikidata"]);
     common::get(&app, "/v1/search?q=peak").await;
+    index.settle();
     assert!(index.holds_word("peak"));
     // Switched off before the re-read ends.
     index.set_catalogues(&[]);
     common::get(&app, "/v1/search?q=peak").await;
-    assert!(!index.holds_word("peak"));
+    assert!(merged_out(&index, &pool, "peak").await);
 }
 
 /// A card whose link a resource has that search does not list (a link referenced but not read
@@ -682,9 +733,13 @@ async fn a_famous_card_comes_after_an_inactive_link(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 #[ignore]
 async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
-    const N: usize = 100_000;
+    // `PINAKES_BENCH_CARDS` cards (100 000 unless set), for a run at a catalogue's size.
+    let n_cards: usize = std::env::var("PINAKES_BENCH_CARDS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(100_000);
     let cards = |round: usize| -> Vec<Card> {
-        (0..N)
+        (0..n_cards)
             .map(|n| Card {
                 source_id: format!("Q{n}"),
                 uri: format!("https://en.wikipedia.org/wiki/Bench_{n}"),
@@ -780,11 +835,60 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
     println!(
         "bench: import write {write:?}, queue rows after the import {after_import}; bulk pass {bulk:?}, index {} MB ({} B per card); update write {update_write:?}, queue rows {after_update}; drain {drain:?}, left {left}; first candidate {:?}",
         size / 1_000_000,
-        size / N as u64,
+        size / n_cards as u64,
         found.units.first().map(|c| c.card)
     );
     assert_eq!(after_import, 0);
     assert_eq!(left, 0);
+    // The catalogue switched off: its documents leave, and the merge that takes their words out
+    // of the files runs outside the writer lock, so the pass returns and searches and commits go
+    // on while it runs.
+    index.set_catalogues(&[]);
+    let started = std::time::Instant::now();
+    index.sync(&pool).await.unwrap();
+    let off_pass = started.elapsed();
+    let started = std::time::Instant::now();
+    let link =
+        pinakes_core::store::ensure_resource(&pool, "https://example.org/bench-during-merge")
+            .await
+            .unwrap();
+    let mut doc = ResourceMeta::new("https://example.org/bench-during-merge", "web", 86400);
+    doc.name = Some("Bench during merge".into());
+    pinakes_core::store::save_document(&pool, &link, 0, &doc)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,'bench','tag','bench','/pub/app/tags/bench',now())")
+        .bind(&link)
+        .execute(&pool)
+        .await
+        .unwrap();
+    index.sync(&pool).await.unwrap();
+    let commit_during = started.elapsed();
+    let started = std::time::Instant::now();
+    let during = index
+        .candidates(
+            &pool,
+            search_index::TextQuery {
+                text: "bench during merge".into(),
+                at: chrono::Utc::now(),
+                ..Default::default()
+            },
+            10,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let search_during = started.elapsed();
+    let started = std::time::Instant::now();
+    index.settle();
+    let merge_left = started.elapsed();
+    println!(
+        "bench: {n_cards} cards switched off: pass {off_pass:?}; a commit meanwhile {commit_during:?}, a search {search_during:?} ({} found); merge done {merge_left:?} after; index {} MB after",
+        during.units.len(),
+        walk(&dir) / 1_000_000
+    );
+    assert_eq!(index.purges(), 1);
+    assert!(!index.holds_word("synthetic"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 fn walk(dir: &std::path::Path) -> u64 {
@@ -801,4 +905,53 @@ fn walk(dir: &std::path::Path) -> u64 {
             }
         })
         .sum()
+}
+
+/// Switching off a catalogue the index holds no document of (an import that read nothing) merges
+/// nothing, not even another catalogue's or a link's deleted documents; one with documents merges
+/// their words out.
+#[sqlx::test(migrations = "../../migrations")]
+async fn switching_off_an_empty_catalogue_merges_nothing(pool: PgPool) {
+    // Forty cards in the first segment: one deleted document there stays under the merge policy's
+    // 5% and waits for a merge after a removal.
+    let mut cards = vec![card(1, "Matterhorn", "Mountain", &[], None, 0.5)];
+    cards.extend((2..=40).map(|n| card(n, &format!("Peak {n}"), "Mountain", &[], None, 0.1)));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    import(&pool, Catalogue::Musicbrainz, &[]).await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&["wikidata", "musicbrainz"]);
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let link = referenced(&pool, "https://example.org/guide", "Alps guide", "alps", 1).await;
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=matterhorn").await),
+        ["Matterhorn"]
+    );
+    // A renamed link leaves its old document deleted in the files (no text lost: no merge).
+    sqlx::query("UPDATE resource SET name='Alps guidebook', doc=jsonb_set(doc,'{name}','\"Alps guidebook\"') WHERE id=$1")
+        .bind(&link)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=guidebook").await),
+        ["Alps guidebook"]
+    );
+    index.settle();
+    assert_eq!(index.purges(), 0);
+    assert!(
+        index.holds_word("guide"),
+        "the old document is still in the files"
+    );
+    index.set_catalogues(&["wikidata"]);
+    index.sync(&pool).await.unwrap();
+    index.settle();
+    assert_eq!(index.purges(), 0, "MusicBrainz had no document");
+    index.set_catalogues(&[]);
+    index.sync(&pool).await.unwrap();
+    // Most of the segment deleted: the merge policy may take it before the merge after the removal
+    // does; either way the words leave the files.
+    assert!(merged_out(&index, &pool, "matterhorn").await);
+    assert!(!index.holds_word("guide"));
 }

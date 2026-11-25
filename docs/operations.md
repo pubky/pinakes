@@ -1648,7 +1648,9 @@ A search with `q` (without `author`, `reach`, `related`, `in_collection`, `key`,
 `ingredient`) reads its candidates from an embedded Tantivy index in `search.index_dir`
 ([API](api.md#text-search)). The index holds every searchable unit and every card of the
 catalogues that are on: names, other names, descriptions, people's tags, source labels, type,
-host, category, venue, source, catalogue, fame, activity, start and end, and the place (H3 map
+host, category, venue, source, catalogue, fame, activity, start and end, and the place. A
+referenced card built from a catalogue card also holds its labels, its card's other names and
+its card's fame (H3 map
 cells at resolutions 4, 6 and 8, about 1,770 km², 36 km² and 0.74 km² per cell; a `near` circle is
 covered by the finest that needs at most 1,100 cells). Search loads the candidates from Postgres
 and applies every filter again, so the index decides which units are looked at and their text
@@ -1664,9 +1666,14 @@ The index is derived data, rebuilt from the database when it is missing.
   deleted, scrubbed or loses its last reference leaves every search at once (Postgres no longer
   lists it, or finds it without text) and the index within a pass. A pass that removed a card's
   text (a post found gone, emptied or opted out) merges the segments that hold the card's
-  documents, current or deleted, so its words leave the index files too; any other pass merges
-  nothing, and segments with 5% deleted documents merge on their own (as a changed or removed
-  catalogue card's old words do).
+  documents, current or deleted, so its words leave the index files too. The merge runs in the
+  background: the pass, later commits and searches don't wait for it. One merge runs at a time;
+  a removal meanwhile, or a merge that failed (a merge of Tantivy's own took a segment first,
+  tried again up to 5 times), is merged at a later pass. Any other pass merges nothing, and
+  segments with 5% deleted documents merge on their own (as a changed or removed catalogue card's
+  old words do). A card built from a catalogue card is read again when its card changes: the
+  join rebuilds it (its document holds the card's content hash), so its other names and fame
+  follow the card's.
 - **Catalogue cards.** A catalogue's full import queues only the cards whose texts it changes; the
   cards it adds or removes are not queued: once it has finished (`catalogue_state.last_import_at`),
   the daemon reads all the catalogue's cards again, 20,000 per pass (in source-ID order) after the
@@ -1678,7 +1685,8 @@ The index is derived data, rebuilt from the database when it is missing.
   that writes faster than the index reads holds back neither referenced links nor the re-read. A
   daemon restarted during a re-read starts it again from the catalogue's first card. A catalogue
   switched off leaves every search at once (searches read only the catalogues that are on) and the
-  index at the daemon's next pass, which removes its documents (also those of a re-read under way);
+  index at the daemon's next pass, which removes its documents (also those of a re-read under way)
+  and, in the background, merges their words out of the files (none when it had no documents);
   `pinakesd catalogue drop` then deletes its cards. A catalogue turned back on is read again at the
   next pass.
 - **Start.** The daemon opens the index. When the directory or its generation is missing,
