@@ -1,0 +1,1873 @@
+//! The text index: every search unit's words, tags, type, source, place and time in an embedded
+//! Tantivy index, so a search with `q` reads its best candidates there instead of ranking every
+//! match in Postgres ([`SearchIndex::candidates`]). The index is derived data: Postgres stays the
+//! source of truth, the search loads the candidates from it and checks every filter again, and a
+//! missing or unreadable index is rebuilt from it.
+//!
+//! Writers never call the index. Triggers on the tables a unit is read from queue the resource
+//! (`search_index_queue`); one pass every `limits.search_index_commit_secs` reads the units of
+//! the queued resources again and commits them ([`SearchIndex::sync`]). An index in memory (the
+//! tests' and the e2e harness', [`SearchIndex::in_memory`]) runs that pass before each search
+//! instead, so a search sees every write before it.
+//!
+//! On disk (`search.index_dir`) the directory holds one generation of the index at a time, named
+//! by its `CURRENT` file; a rebuild writes the next generation beside it and then switches
+//! `CURRENT` to it ([`reindex`]).
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use futures_util::TryStreamExt;
+use sqlx::PgPool;
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::Bound,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tantivy::{
+    collector::TopDocs,
+    query::{
+        BooleanQuery, BoostQuery, ConstScoreQuery, ExistsQuery, FuzzyTermQuery, Occur, PhraseQuery,
+        Query, RangeQuery, RegexQuery, TermQuery, TermSetQuery,
+    },
+    schema::{
+        Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
+        FAST, INDEXED, STORED, STRING,
+    },
+    tokenizer::{
+        AsciiFoldingFilter, LowerCaser, NgramTokenizer, RawTokenizer, RemoveLongFilter,
+        TextAnalyzer, Token, TokenStream, Tokenizer,
+    },
+    DocId, Index, IndexReader, IndexWriter, ReloadPolicy, Score, SegmentReader, TantivyDocument,
+    Term,
+};
+
+/// The version of the index's fields and analyzers, kept in each commit: an index written with
+/// another is rebuilt.
+const FORMAT: u32 = 2;
+/// How much a match in each field weighs (BM25 times this): the name most, then people's tags,
+/// other names and source labels, then the description.
+const NAME_BOOST: Score = 3.0;
+const TAGS_BOOST: Score = 2.0;
+const OTHER_NAMES_BOOST: Score = 1.5;
+const LABELS_BOOST: Score = 1.5;
+const DESCRIPTION_BOOST: Score = 1.0;
+/// The whole text equal to the whole name (case, accents and spacing aside), on top of its words:
+/// a fixed score, whatever the corpus' word frequencies, above the activity of a thousand taggers
+/// at [`ACTIVITY_WEIGHT`].
+const EXACT_NAME_SCORE: Score = 20.0;
+/// Every word of the text in the name, in order.
+const NAME_PHRASE_BOOST: Score = 1.0;
+/// The last word of the text as the start of a word in the name (`beatl` finds `Beatles`): a
+/// fixed score, since the text may still be typed, above what a description word scores alone.
+const PREFIX_SCORE: Score = 10.0;
+/// The text inside the name, across words (Postgres' `ILIKE '%text%'`), proposed to Postgres.
+const SUBSTRING_SCORE: Score = 8.0;
+/// Each three-letter piece a name shares with the text (Postgres' trigram similarity, `pg_trgm`),
+/// proposed to Postgres.
+const SIMILAR_PIECE_SCORE: Score = 0.5;
+/// `pg_trgm`'s similarity threshold (`%`): shared pieces over the pieces of both. A name holds at
+/// least the pieces it shares, so a name similar so shares at least 0.3 of the text's pieces: the
+/// least the index asks for.
+const SIMILARITY: f64 = 0.3;
+/// How much social activity counts against text relevance in a text search's rank:
+/// `relevance × (1 + fame) + ACTIVITY_WEIGHT × activity`. The activity score is already on a
+/// log scale (`ln(1 + taggers)` and the like, halved every 30 days), so each further tag adds
+/// less than the one before, and a thousand taggers (about 6.9) stay below one exact name match.
+pub const ACTIVITY_WEIGHT: f64 = 1.0;
+/// The activity score's half-life, as `resource_score` and the search's ranking decay it.
+const HALF_LIFE_SECS: f64 = 30.0 * 86400.0;
+/// The H3 resolutions of a unit's map cells, coarse to fine: about 1,770 km², 36 km² and
+/// 0.74 km² per cell. A `near` circle is covered by the finest of them that needs at most
+/// [`MAX_CELLS`] cells.
+pub const CELL_RESOLUTIONS: [h3o::Resolution; 3] = [
+    h3o::Resolution::Four,
+    h3o::Resolution::Six,
+    h3o::Resolution::Eight,
+];
+const MAX_CELLS: usize = 1100;
+/// Queue rows read per pass.
+const QUEUE_BATCH: i64 = 20_000;
+/// The longest word the index keeps (bytes); a longer one is left out of the words.
+const LONGEST_WORD: usize = 64;
+/// The share of deleted documents at which a segment is merged without them.
+const DELETED_SHARE_BEFORE_MERGE: f32 = 0.05;
+/// Units a rebuild hands its writer at a time.
+const ADD_BATCH: usize = 1000;
+/// Units between two progress reports of a rebuild.
+const PROGRESS_EVERY: u64 = 10_000;
+/// The memory of the writer that commits the queue, and of each of a rebuild's threads.
+const WRITER_BYTES: usize = 64_000_000;
+const REBUILD_THREADS: usize = 4;
+/// The tokenizers' names.
+const WORDS: &str = "pinakes_words";
+const EXACT: &str = "pinakes_exact";
+const GRAMS: &str = "pinakes_grams";
+const GRAMS2: &str = "pinakes_grams2";
+const GRAMS3: &str = "pinakes_grams3";
+const PIECES: &str = "pinakes_pieces";
+
+/// The index's fields.
+#[derive(Clone, Copy)]
+struct Fields {
+    unit_id: Field,
+    resource_id: Field,
+    name: Field,
+    name_exact: Field,
+    name_grams: Field,
+    name_pieces: Field,
+    other_names: Field,
+    description: Field,
+    tags_text: Field,
+    labels_text: Field,
+    tag: Field,
+    label: Field,
+    type_name: Field,
+    type_path: Field,
+    host: Field,
+    category: Field,
+    venue: Field,
+    source: Field,
+    referenced: Field,
+    cells: [Field; 3],
+    lat: Field,
+    lon: Field,
+    start_at: Field,
+    end_at: Field,
+    fame: Field,
+    activity: Field,
+    activity_at: Field,
+    newest_at: Field,
+}
+
+fn schema() -> (Schema, Fields) {
+    let mut s = Schema::builder();
+    let text = |tokenizer: &str, positions: bool| {
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(tokenizer)
+                .set_index_option(if positions {
+                    IndexRecordOption::WithFreqsAndPositions
+                } else {
+                    IndexRecordOption::WithFreqs
+                }),
+        )
+    };
+    let number = || NumericOptions::default().set_indexed().set_fast();
+    let fields = Fields {
+        unit_id: s.add_text_field("unit_id", STRING | STORED),
+        resource_id: s.add_text_field("resource_id", STRING | STORED),
+        name: s.add_text_field("name", text(WORDS, true)),
+        name_exact: s.add_text_field("name_exact", text(EXACT, false)),
+        name_grams: s.add_text_field("name_grams", text(GRAMS, false)),
+        name_pieces: s.add_text_field("name_pieces", text(PIECES, false)),
+        other_names: s.add_text_field("other_names", text(WORDS, true)),
+        description: s.add_text_field("description", text(WORDS, true)),
+        tags_text: s.add_text_field("tags_text", text(WORDS, true)),
+        labels_text: s.add_text_field("labels_text", text(WORDS, true)),
+        tag: s.add_text_field("tag", STRING),
+        label: s.add_text_field("label", STRING),
+        type_name: s.add_text_field("type", STRING | FAST),
+        type_path: s.add_text_field("type_path", STRING),
+        host: s.add_text_field("host", STRING),
+        category: s.add_text_field("category", STRING),
+        venue: s.add_text_field("venue", STRING),
+        source: s.add_text_field("source", STRING),
+        referenced: s.add_u64_field("referenced", INDEXED),
+        cells: [
+            s.add_u64_field("cell_coarse", INDEXED),
+            s.add_u64_field("cell_middle", INDEXED),
+            s.add_u64_field("cell_fine", INDEXED),
+        ],
+        lat: s.add_f64_field("lat", number()),
+        lon: s.add_f64_field("lon", number()),
+        start_at: s.add_i64_field("start_at", number()),
+        end_at: s.add_i64_field("end_at", number()),
+        fame: s.add_f64_field("fame", FAST),
+        activity: s.add_f64_field("activity", FAST),
+        activity_at: s.add_i64_field("activity_at", FAST),
+        newest_at: s.add_i64_field("newest_at", number()),
+    };
+    (s.build(), fields)
+}
+
+/// Words as search reads them (`api::word_char`): letters, digits and the marks words are
+/// written with, apart at every other character; a character of a script written without spaces
+/// (Chinese, Japanese, Thai, ...) is a word of its own, so a run of them matches as a phrase and a
+/// Latin word right after one starts there (`AI` in `我的AI助手`).
+#[derive(Clone, Default)]
+struct WordTokenizer {
+    token: Token,
+}
+struct WordStream<'a> {
+    text: &'a str,
+    chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+    token: &'a mut Token,
+}
+impl Tokenizer for WordTokenizer {
+    type TokenStream<'a> = WordStream<'a>;
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> WordStream<'a> {
+        self.token.reset();
+        WordStream {
+            text,
+            chars: text.char_indices().peekable(),
+            token: &mut self.token,
+        }
+    }
+}
+impl TokenStream for WordStream<'_> {
+    fn advance(&mut self) -> bool {
+        self.token.text.clear();
+        self.token.position = self.token.position.wrapping_add(1);
+        while let Some((from, c)) = self.chars.next() {
+            let end = if crate::api::unspaced_script(c) && c.is_alphanumeric() {
+                from + c.len_utf8()
+            } else if crate::api::word_char(c) {
+                let mut end = from + c.len_utf8();
+                while let Some(&(at, next)) = self.chars.peek() {
+                    if !crate::api::word_char(next) {
+                        break;
+                    }
+                    end = at + next.len_utf8();
+                    self.chars.next();
+                }
+                end
+            } else {
+                continue;
+            };
+            self.token.offset_from = from;
+            self.token.offset_to = end;
+            // Lowercased here, without the combining accents (`İ` lowers to `i` and a dot above;
+            // an accent written apart stays off its letter), so folding finds the plain letter.
+            for c in self.text[from..end].chars().flat_map(char::to_lowercase) {
+                if !matches!(u32::from(c), 0x0300..=0x036F) {
+                    self.token.text.push(c);
+                }
+            }
+            if self.token.text.is_empty() {
+                continue;
+            }
+            return true;
+        }
+        false
+    }
+    fn token(&self) -> &Token {
+        self.token
+    }
+    fn token_mut(&mut self) -> &mut Token {
+        self.token
+    }
+}
+/// A text's three-letter pieces as `pg_trgm` takes them: each word (letters and digits),
+/// lowercased, with two spaces before it and one after (`cat` is `  c`, ` ca`, `cat`, `at `).
+fn pieces(text: &str) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for word in text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        let padded: Vec<char> = "  "
+            .chars()
+            .chain(word.chars().flat_map(char::to_lowercase))
+            .chain(" ".chars())
+            .collect();
+        for piece in padded.windows(3) {
+            out.insert(piece.iter().collect::<String>());
+        }
+    }
+    out.into_iter().collect()
+}
+/// [`pieces`] as a tokenizer, for the name's pieces.
+#[derive(Clone, Default)]
+struct PieceTokenizer {
+    pieces: Vec<String>,
+    token: Token,
+}
+struct PieceStream<'a> {
+    pieces: std::vec::IntoIter<String>,
+    token: &'a mut Token,
+}
+impl Tokenizer for PieceTokenizer {
+    type TokenStream<'a> = PieceStream<'a>;
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> PieceStream<'a> {
+        self.token.reset();
+        self.pieces = pieces(text);
+        PieceStream {
+            pieces: std::mem::take(&mut self.pieces).into_iter(),
+            token: &mut self.token,
+        }
+    }
+}
+impl TokenStream for PieceStream<'_> {
+    fn advance(&mut self) -> bool {
+        match self.pieces.next() {
+            Some(piece) => {
+                self.token.text = piece;
+                self.token.position = self.token.position.wrapping_add(1);
+                true
+            }
+            None => false,
+        }
+    }
+    fn token(&self) -> &Token {
+        self.token
+    }
+    fn token_mut(&mut self) -> &mut Token {
+        self.token
+    }
+}
+/// Words as the index keeps them ([`WordTokenizer`]), lowercased and folded to ASCII where a
+/// letter has a plain form (`Zürich` and `İzmir` are `zurich` and `izmir`).
+fn words() -> TextAnalyzer {
+    TextAnalyzer::builder(WordTokenizer::default())
+        .filter(RemoveLongFilter::limit(LONGEST_WORD))
+        .filter(LowerCaser)
+        .filter(AsciiFoldingFilter)
+        .build()
+}
+fn folded(tokenizer: impl tantivy::tokenizer::Tokenizer) -> TextAnalyzer {
+    TextAnalyzer::builder(tokenizer)
+        .filter(LowerCaser)
+        .filter(AsciiFoldingFilter)
+        .build()
+}
+fn register(index: &Index) {
+    let tokenizers = index.tokenizers();
+    tokenizers.register(WORDS, words());
+    tokenizers.register(EXACT, folded(RawTokenizer::default()));
+    let grams = |min, max| NgramTokenizer::new(min, max, false).expect("valid n-gram sizes");
+    tokenizers.register(GRAMS, folded(grams(2, 3)));
+    tokenizers.register(GRAMS2, folded(grams(2, 2)));
+    tokenizers.register(GRAMS3, folded(grams(3, 3)));
+    tokenizers.register(
+        PIECES,
+        TextAnalyzer::builder(PieceTokenizer::default()).build(),
+    );
+}
+/// The tokens `analyzer` makes of `text`.
+fn tokens(index: &Index, analyzer: &str, text: &str) -> Vec<String> {
+    let mut analyzer = index
+        .tokenizers()
+        .get(analyzer)
+        .expect("registered tokenizer");
+    let mut stream = analyzer.token_stream(text);
+    let mut out = vec![];
+    while let Some(token) = stream.next() {
+        out.push(token.text.clone());
+    }
+    out
+}
+/// A name as one exact token: its words apart by single spaces.
+fn squashed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What the commit records: the format, and the queue position the index covers.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Payload {
+    format: u32,
+    /// Every transaction below this ID had finished when the index read the queue; the ones at
+    /// or above it may be read again.
+    boundary: u64,
+}
+
+/// One search unit as the index keeps it, read from Postgres.
+#[derive(sqlx::FromRow)]
+struct Unit {
+    unit_id: String,
+    resource_id: String,
+    name: Option<String>,
+    description: Option<String>,
+    other: Option<String>,
+    type_name: Option<String>,
+    type_path: Option<Vec<String>>,
+    host: Option<String>,
+    category: Option<String>,
+    venue_id: Option<String>,
+    resolver: Option<String>,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    start_at: Option<DateTime<Utc>>,
+    end_at: Option<DateTime<Utc>>,
+    score: Option<f64>,
+    scored_at: Option<DateTime<Utc>>,
+    newest_at: Option<DateTime<Utc>>,
+    tags: Vec<String>,
+}
+/// The units search can find by text: those with a reference that counts, and never a post whose
+/// author has not opted in to search (it is never found by its text). An OSM place's address
+/// line counts as its description, as its Postgres text does.
+const UNITS: &str = "SELECT r.unit_id, r.id AS resource_id, r.name, r.doc->>'description' AS description, p.display_name AS other, r.type AS type_name, r.type_path, r.host, r.category, r.venue_id, r.resolver, ST_Y(r.point) AS lat, ST_X(r.point) AS lon, r.start_at, r.end_at, s.score, s.updated_at AS scored_at, s.newest_at, ARRAY(SELECT DISTINCT f.label FROM effective_reference f WHERE f.resource_id=r.id AND f.label IS NOT NULL ORDER BY f.label) AS tags FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id LEFT JOIN osm_place p ON p.osm_type=r.osm_type AND p.osm_id=r.osm_id WHERE coalesce(r.doc->'attributes'->>'opted_out','')<>'true' AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id)";
+
+fn document(f: &Fields, unit: &Unit) -> TantivyDocument {
+    let mut doc = TantivyDocument::default();
+    doc.add_text(f.unit_id, &unit.unit_id);
+    doc.add_text(f.resource_id, &unit.resource_id);
+    fn present(s: &Option<String>) -> Option<&str> {
+        s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+    if let Some(name) = present(&unit.name) {
+        doc.add_text(f.name, name);
+        doc.add_text(f.name_exact, squashed(name));
+        doc.add_text(f.name_grams, name);
+        doc.add_text(f.name_pieces, name);
+    }
+    if let Some(description) = present(&unit.description) {
+        doc.add_text(f.description, description);
+    }
+    if let Some(other) = present(&unit.other) {
+        doc.add_text(f.description, other);
+    }
+    for tag in &unit.tags {
+        doc.add_text(f.tag, tag);
+        doc.add_text(f.tags_text, tag);
+    }
+    if let Some(type_name) = present(&unit.type_name) {
+        doc.add_text(f.type_name, type_name);
+    }
+    for t in unit.type_path.iter().flatten() {
+        doc.add_text(f.type_path, t);
+    }
+    for (field, value) in [
+        (f.host, &unit.host),
+        (f.category, &unit.category),
+        (f.venue, &unit.venue_id),
+        (f.source, &unit.resolver),
+    ] {
+        if let Some(value) = value {
+            doc.add_text(field, value);
+        }
+    }
+    doc.add_u64(f.referenced, 1);
+    doc.add_f64(f.fame, 0.0);
+    doc.add_f64(f.activity, unit.score.unwrap_or(0.0));
+    doc.add_i64(f.activity_at, unit.scored_at.map_or(0, |t| t.timestamp()));
+    if let Some(newest) = unit.newest_at {
+        doc.add_i64(f.newest_at, newest.timestamp());
+    }
+    if let Some(start) = unit.start_at {
+        doc.add_i64(f.start_at, start.timestamp());
+    }
+    if let Some(end) = unit.end_at {
+        doc.add_i64(f.end_at, end.timestamp());
+    }
+    if let (Some(lat), Some(lon)) = (unit.lat, unit.lon) {
+        doc.add_f64(f.lat, lat);
+        doc.add_f64(f.lon, lon);
+        if let Ok(point) = h3o::LatLng::new(lat, lon) {
+            for (field, resolution) in f.cells.iter().zip(CELL_RESOLUTIONS) {
+                doc.add_u64(*field, u64::from(point.to_cell(resolution)));
+            }
+        }
+    }
+    doc
+}
+
+/// An open index: its reader, the writer that commits the queue, and how far it read the queue.
+struct Open {
+    index: Index,
+    fields: Fields,
+    reader: IndexReader,
+    writer: std::sync::Mutex<IndexWriter>,
+    progress: std::sync::Mutex<Progress>,
+}
+#[derive(Clone, Default)]
+struct Progress {
+    boundary: u64,
+    /// Transactions at or above `boundary` whose rows were read already (all of them: a
+    /// transaction's rows become visible together).
+    applied: HashSet<u64>,
+}
+impl Open {
+    fn new(index: Index, boundary: u64) -> Result<Self> {
+        register(&index);
+        let fields = schema().1;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()?;
+        let writer: IndexWriter = index.writer_with_num_threads(1, WRITER_BYTES)?;
+        // Segments with deleted documents merge early, so a changed card's old words leave the
+        // files soon; [`Open::replace`] merges at once after a removal.
+        let mut policy = tantivy::indexer::LogMergePolicy::default();
+        policy.set_del_docs_ratio_before_merge(DELETED_SHARE_BEFORE_MERGE);
+        writer.set_merge_policy(Box::new(policy));
+        Ok(Self {
+            index,
+            fields,
+            reader,
+            writer: std::sync::Mutex::new(writer),
+            progress: std::sync::Mutex::new(Progress {
+                boundary,
+                applied: HashSet::new(),
+            }),
+        })
+    }
+}
+
+/// Where the index lives.
+enum Home {
+    /// In memory, read up before each search.
+    Memory,
+    /// In this directory, committed by the daemon's pass.
+    Disk(PathBuf),
+}
+
+/// The text index of one instance ([module docs](self)).
+pub struct SearchIndex {
+    home: Home,
+    open: std::sync::RwLock<Option<Arc<Open>>>,
+    /// One pass (or build) at a time.
+    pass: tokio::sync::Mutex<()>,
+    /// Moves with every commit, so a search page's ETag changes when the index does.
+    revision: AtomicU64,
+    /// Queue rows read at a time ([`QUEUE_BATCH`]).
+    batch: i64,
+    /// Text searches answered.
+    served: AtomicU64,
+}
+impl SearchIndex {
+    /// An index in memory, built from the database on its first search and read up before
+    /// every search after: what `AppState::new` holds until the daemon sets its own.
+    pub fn in_memory() -> Arc<Self> {
+        Arc::new(Self::with_home(Home::Memory))
+    }
+    /// The daemon's index in `dir`, opened (or built) by [`SearchIndex::run`]. Until then a
+    /// search with `q` reads Postgres alone.
+    pub fn on_disk(dir: impl Into<PathBuf>) -> Arc<Self> {
+        Arc::new(Self::with_home(Home::Disk(dir.into())))
+    }
+    /// [`SearchIndex::in_memory`] reading the queue `batch` rows at a time (tests).
+    #[doc(hidden)]
+    pub fn in_memory_with_batch(batch: i64) -> Arc<Self> {
+        Arc::new(Self {
+            batch,
+            ..Self::with_home(Home::Memory)
+        })
+    }
+    /// [`SearchIndex::on_disk`] reading the queue `batch` rows at a time (tests).
+    #[doc(hidden)]
+    pub fn on_disk_with_batch(dir: impl Into<PathBuf>, batch: i64) -> Arc<Self> {
+        Arc::new(Self {
+            batch,
+            ..Self::with_home(Home::Disk(dir.into()))
+        })
+    }
+    fn with_home(home: Home) -> Self {
+        Self {
+            batch: QUEUE_BATCH,
+            served: AtomicU64::new(0),
+            home,
+            open: std::sync::RwLock::new(None),
+            pass: tokio::sync::Mutex::new(()),
+            // Unique to this start (milliseconds, then a count), so an ETag from before a restart
+            // never matches a page of the new index.
+            revision: AtomicU64::new(
+                (chrono::Utc::now().timestamp_millis().max(0) as u64).saturating_mul(1_000_000),
+            ),
+        }
+    }
+    fn current(&self) -> Option<Arc<Open>> {
+        self.open.read().expect("index lock").clone()
+    }
+    fn set(&self, open: Open) {
+        *self.open.write().expect("index lock") = Some(Arc::new(open));
+        self.revision.fetch_add(1, Ordering::SeqCst);
+    }
+    /// Whether any segment of the index files, deleted documents included, still holds `word`
+    /// in a name or description (tests).
+    #[doc(hidden)]
+    pub fn holds_word(&self, word: &str) -> bool {
+        let Some(open) = self.current() else {
+            return false;
+        };
+        let searcher = open.reader.searcher();
+        [open.fields.name, open.fields.description]
+            .into_iter()
+            .any(|field| {
+                searcher.segment_readers().iter().any(|segment| {
+                    segment
+                        .inverted_index(field)
+                        .ok()
+                        .and_then(|inverted| inverted.terms().get(word.as_bytes()).ok().flatten())
+                        .is_some()
+                })
+            })
+    }
+    /// How many text searches the index answered (tests).
+    #[doc(hidden)]
+    pub fn served(&self) -> u64 {
+        self.served.load(Ordering::SeqCst)
+    }
+    /// Whether the index is open (on disk: opened or built by [`SearchIndex::run`]).
+    pub fn is_open(&self) -> bool {
+        self.current().is_some()
+    }
+    /// Changes with every commit and rebuild.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::SeqCst)
+    }
+    /// Open the index on disk, or build it from the database when it is missing, unreadable or
+    /// of another format (logged), then commit the queue every `period` until `shutdown`.
+    /// `passed` is set to the time of each pass that read the queue without an error, `open` to 1
+    /// once the index is open.
+    pub async fn run(
+        self: Arc<Self>,
+        pool: PgPool,
+        period: Duration,
+        passed: prometheus::IntGauge,
+        open: prometheus::IntGauge,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let Home::Disk(dir) = &self.home else {
+            return;
+        };
+        loop {
+            let opened = tokio::select! {
+                _ = shutdown.changed() => return,
+                opened = self.open_or_build(&pool, dir) => opened,
+            };
+            match opened {
+                Ok(()) => {
+                    open.set(1);
+                    break;
+                }
+                Err(error) => {
+                    tracing::error!(error = %crate::resolver::log_error(&error), dir = %dir.display(), "the text index could not be opened or built; text search reads Postgres until it is");
+                    // The next build reads every unit again, from a later snapshot: every row this
+                    // sees (those of finished transactions) is covered by it, so the queue does
+                    // not grow while closed.
+                    if let Err(error) = sqlx::query("DELETE FROM search_index_queue")
+                        .execute(&pool)
+                        .await
+                    {
+                        tracing::warn!(error = %crate::resolver::log_error(&error), "the text index queue was not trimmed");
+                    }
+                    tokio::select! {
+                        _ = shutdown.changed() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                    }
+                }
+            }
+        }
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                synced = self.sync(&pool) => match synced {
+                    Ok(()) => passed.set(chrono::Utc::now().timestamp()),
+                    Err(error) => tracing::warn!(error = %crate::resolver::log_error(&error), "the text index pass will retry"),
+                },
+            }
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                _ = tokio::time::sleep(period) => {}
+            }
+        }
+    }
+    async fn open_or_build(&self, pool: &PgPool, dir: &Path) -> Result<()> {
+        let _pass = self.pass.lock().await;
+        let xmin: String =
+            sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+                .fetch_one(pool)
+                .await?;
+        let xmin: u64 = xmin.parse().context("transaction ID")?;
+        match open_current(dir) {
+            // A boundary past the database's transactions: an index of another database (one
+            // restored from a dump starts its transaction IDs anew).
+            Ok(Some((_, payload))) if payload.boundary > xmin => {
+                tracing::warn!(dir = %dir.display(), "the text index was built from another database; rebuilding it from this one")
+            }
+            Ok(Some((index, payload))) if payload.format == FORMAT => {
+                self.set(Open::new(index, payload.boundary)?);
+                tracing::info!(dir = %dir.display(), "text index opened");
+                return Ok(());
+            }
+            Ok(Some(_)) => {
+                tracing::warn!(dir = %dir.display(), "the text index has another format; rebuilding it from the database")
+            }
+            Ok(None) => {
+                tracing::warn!(dir = %dir.display(), "no text index; building it from the database")
+            }
+            Err(error) => {
+                tracing::warn!(error = %crate::resolver::log_error(&error), dir = %dir.display(), "the text index is unreadable; rebuilding it from the database")
+            }
+        }
+        let started = std::time::Instant::now();
+        let (index, boundary, units) = build_generation(pool, dir, |n| {
+            tracing::info!(units = n, "building the text index")
+        })
+        .await?;
+        tracing::info!(
+            units,
+            secs = started.elapsed().as_secs(),
+            "text index built"
+        );
+        self.set(Open::new(index, boundary)?);
+        // The build read every transaction below its boundary.
+        sqlx::query("DELETE FROM search_index_queue WHERE xid<$1::text::xid8")
+            .bind(boundary.to_string())
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+    /// The open index; in memory, built from the database the first time.
+    async fn ready(&self, pool: &PgPool) -> Result<Option<Arc<Open>>> {
+        if let Some(open) = self.current() {
+            return Ok(Some(open));
+        }
+        if let Home::Memory = self.home {
+            let _pass = self.pass.lock().await;
+            if let Some(open) = self.current() {
+                return Ok(Some(open));
+            }
+            let index = Index::create_in_ram(schema().0);
+            register(&index);
+            let (boundary, _) = fill(pool, &index, 1, |_| {}).await?;
+            self.set(Open::new(index, boundary)?);
+        }
+        Ok(self.current())
+    }
+    /// One pass: read the units of every resource queued by a transaction that finished since the
+    /// last pass, replace their documents and commit. On disk, then delete the queue rows the
+    /// commit covers.
+    pub async fn sync(&self, pool: &PgPool) -> Result<()> {
+        let Some(open) = self.ready(pool).await? else {
+            return Ok(());
+        };
+        let _pass = self.pass.lock().await;
+        if let Home::Disk(_) = self.home {
+            return self.drain(pool, &open).await;
+        }
+        let Progress {
+            boundary,
+            mut applied,
+        } = open.progress.lock().expect("progress").clone();
+        // The first read's snapshot: every transaction below its xmin had finished, so its rows
+        // are read by the time the batches below run dry.
+        let mut first_xmin: Option<u64> = None;
+        loop {
+            let skip: Vec<String> = applied.iter().map(u64::to_string).collect();
+            let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+                "WITH s AS (SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS xmin) SELECT s.xmin, q.xid::text, q.resource_id FROM s LEFT JOIN LATERAL (SELECT xid, resource_id FROM search_index_queue WHERE xid>=$1::text::xid8 AND xid<>ALL($3::text[]::xid8[]) ORDER BY xid LIMIT $2) q ON true",
+            )
+            .bind(boundary.to_string())
+            .bind(self.batch)
+            .bind(&skip)
+            .fetch_all(pool)
+            .await?;
+            let xmin: u64 = rows
+                .first()
+                .context("no snapshot")?
+                .0
+                .parse()
+                .context("transaction ID")?;
+            let xmin = *first_xmin.get_or_insert(xmin);
+            let truncated = rows.len() as i64 >= self.batch;
+            let mut queued: BTreeMap<u64, HashSet<String>> = BTreeMap::new();
+            for (_, xid, resource) in rows {
+                if let (Some(xid), Some(resource)) = (xid, resource) {
+                    queued
+                        .entry(xid.parse().context("transaction ID")?)
+                        .or_default()
+                        .insert(resource);
+                }
+            }
+            if truncated {
+                // The last transaction read may have more rows: all of them.
+                if let Some((&last, _)) = queued.iter().next_back() {
+                    let more: Vec<String> = sqlx::query_scalar(
+                        "SELECT resource_id FROM search_index_queue WHERE xid=$1::text::xid8",
+                    )
+                    .bind(last.to_string())
+                    .fetch_all(pool)
+                    .await?;
+                    queued.entry(last).or_default().extend(more);
+                }
+            }
+            let ids = self
+                .with_roots(pool, queued.values().flatten().cloned())
+                .await?;
+            // The last batch's commit records the new boundary; one before it, the old.
+            let recorded = if truncated { boundary } else { xmin };
+            if !ids.is_empty() {
+                self.commit_units(pool, &open, ids, recorded).await?;
+            }
+            applied.extend(queued.keys().copied());
+            if !truncated {
+                break;
+            }
+        }
+        let next = first_xmin.unwrap_or(boundary);
+        {
+            let mut progress = open.progress.lock().expect("progress");
+            applied.retain(|xid| *xid >= next);
+            *progress = Progress {
+                boundary: next,
+                applied,
+            };
+        }
+        Ok(())
+    }
+    /// The daemon's pass: the queue's rows in order, a batch at a time, until it runs dry; each
+    /// batch's resources read again and committed, then its rows deleted. A row of a transaction
+    /// still running is not visible yet and stays for a later pass.
+    async fn drain(&self, pool: &PgPool, open: &Arc<Open>) -> Result<()> {
+        let boundary = committed_boundary(&open.index).unwrap_or(0);
+        loop {
+            let rows: Vec<(i64, String)> = sqlx::query_as(
+                "SELECT seq, resource_id FROM search_index_queue ORDER BY seq LIMIT $1",
+            )
+            .bind(self.batch)
+            .fetch_all(pool)
+            .await?;
+            if rows.is_empty() {
+                return Ok(());
+            }
+            let full = rows.len() as i64 >= self.batch;
+            let seqs: Vec<i64> = rows.iter().map(|(seq, _)| *seq).collect();
+            let ids = self
+                .with_roots(pool, rows.into_iter().map(|(_, id)| id))
+                .await?;
+            self.commit_units(pool, open, ids, boundary).await?;
+            sqlx::query("DELETE FROM search_index_queue WHERE seq=ANY($1)")
+                .bind(&seqs)
+                .execute(pool)
+                .await?;
+            if !full {
+                return Ok(());
+            }
+        }
+    }
+    /// `ids`, each once, with the roots of those that are aliases (an alias's references count
+    /// for its root).
+    async fn with_roots(
+        &self,
+        pool: &PgPool,
+        ids: impl Iterator<Item = String>,
+    ) -> Result<Vec<String>> {
+        let mut ids: Vec<String> = ids.collect::<HashSet<_>>().into_iter().collect();
+        if !ids.is_empty() {
+            let roots: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT root_id FROM resource_alias WHERE alias_id=ANY($1)",
+            )
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+            ids.extend(roots);
+            ids.sort();
+            ids.dedup();
+        }
+        Ok(ids)
+    }
+    /// Read the units of `ids` (a batch of [`QUEUE_BATCH`] resources at a time), replace their
+    /// documents and commit, recording `boundary`.
+    async fn commit_units(
+        &self,
+        pool: &PgPool,
+        open: &Arc<Open>,
+        ids: Vec<String>,
+        boundary: u64,
+    ) -> Result<()> {
+        for chunk in ids.chunks(self.batch.max(1) as usize) {
+            let chunk = chunk.to_vec();
+            let units: Vec<Unit> = sqlx::query_as(&format!("{UNITS} AND r.id=ANY($1)"))
+                .bind(&chunk)
+                .fetch_all(pool)
+                .await?;
+            let committing = open.clone();
+            tokio::task::spawn_blocking(move || committing.replace(&chunk, &units, boundary))
+                .await??;
+            self.revision.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+    /// The best units for a text search, at most `cap`, in the order [`TextOrder`] asks for,
+    /// with every filter the index holds applied; `None` when the daemon's index is not open
+    /// yet (the search then reads Postgres alone).
+    pub async fn candidates(
+        &self,
+        pool: &PgPool,
+        query: TextQuery,
+        cap: usize,
+    ) -> Result<Option<Candidates>> {
+        if let Home::Memory = self.home {
+            self.sync(pool).await?;
+        }
+        // Read before the search: a commit during it moves the revision past this page's.
+        let revision = self.revision();
+        let Some(open) = self.current() else {
+            return Ok(None);
+        };
+        let units = tokio::task::spawn_blocking(move || open.search(&query, cap)).await??;
+        self.served.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(Candidates { units, revision }))
+    }
+}
+/// The boundary the index's last commit recorded.
+fn committed_boundary(index: &Index) -> Option<u64> {
+    let payload: Payload =
+        serde_json::from_str(index.load_metas().ok()?.payload.as_deref()?).ok()?;
+    Some(payload.boundary)
+}
+impl Open {
+    /// Replace the documents of `resources` with `units` and commit, recording `boundary`.
+    fn replace(&self, resources: &[String], units: &[Unit], boundary: u64) -> Result<()> {
+        let mut writer = self.writer.lock().expect("writer lock");
+        let result = (|| -> Result<()> {
+            for id in resources {
+                writer.delete_term(Term::from_field_text(self.fields.resource_id, id));
+            }
+            for unit in units {
+                writer.add_document(document(&self.fields, unit))?;
+            }
+            commit(&mut writer, boundary)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            // Nothing half done stays for the next commit.
+            let _ = writer.rollback();
+        }
+        result?;
+        self.reader.reload()?;
+        // A resource that lost its text (a post found gone, emptied or opted out, a card no longer
+        // searchable): merge every segment holding deleted documents now, so its words leave the
+        // index files, not only its searches.
+        let removed = resources
+            .iter()
+            .any(|id| !units.iter().any(|u| &u.resource_id == id && has_text(u)));
+        if removed {
+            let segments: Vec<tantivy::index::SegmentId> = self
+                .reader
+                .searcher()
+                .segment_readers()
+                .iter()
+                .filter(|s| s.num_deleted_docs() > 0)
+                .map(|s| s.segment_id())
+                .collect();
+            if !segments.is_empty() {
+                writer.merge(&segments).wait()?;
+                self.reader.reload()?;
+            }
+        }
+        Ok(())
+    }
+}
+/// Whether a unit has words a text search finds it by.
+fn has_text(unit: &Unit) -> bool {
+    [&unit.name, &unit.description, &unit.other]
+        .into_iter()
+        .any(|t| t.as_deref().is_some_and(|t| !t.trim().is_empty()))
+}
+fn commit(writer: &mut IndexWriter, boundary: u64) -> Result<()> {
+    let mut prepared = writer.prepare_commit()?;
+    prepared.set_payload(&serde_json::to_string(&Payload {
+        format: FORMAT,
+        boundary,
+    })?);
+    prepared.commit()?;
+    Ok(())
+}
+
+/// The file in the index directory that names the generation in use.
+const CURRENT: &str = "CURRENT";
+/// The generation `CURRENT` names, opened, with its payload; `None` when there is none.
+fn open_current(dir: &Path) -> Result<Option<(Index, Payload)>> {
+    let name = match std::fs::read_to_string(dir.join(CURRENT)) {
+        Ok(name) => name.trim().to_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    anyhow::ensure!(generation_name(&name), "CURRENT names no generation");
+    let index = Index::open_in_dir(dir.join(&name))?;
+    register(&index);
+    anyhow::ensure!(index.schema() == schema().0, "another schema");
+    let payload = serde_json::from_str(
+        index
+            .load_metas()?
+            .payload
+            .as_deref()
+            .context("no payload")?,
+    )?;
+    // Every segment must read: a missing or damaged file fails here, not on a search.
+    let reader = index.reader()?;
+    for segment in reader.searcher().segment_readers() {
+        segment.get_store_reader(0)?;
+    }
+    Ok(Some((index, payload)))
+}
+fn generation_name(name: &str) -> bool {
+    name.strip_prefix("gen-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+/// Build a new generation in `dir` from the database, switch `CURRENT` to it and remove the
+/// other generations. Returns the index, its boundary and its units.
+async fn build_generation(
+    pool: &PgPool,
+    dir: &Path,
+    progress: impl FnMut(u64) + Send,
+) -> Result<(Index, u64, u64)> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    // A generation `CURRENT` does not name is left from a build that did not finish.
+    let current = std::fs::read_to_string(dir.join(CURRENT)).unwrap_or_default();
+    remove_generations(dir, current.trim());
+    let name = format!(
+        "gen-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+    );
+    let path = dir.join(&name);
+    std::fs::create_dir(&path).with_context(|| format!("create {}", path.display()))?;
+    let built = async {
+        let index = Index::create_in_dir(&path, schema().0)?;
+        register(&index);
+        let filled = fill(pool, &index, REBUILD_THREADS, progress).await?;
+        anyhow::Ok(filled)
+    }
+    .await;
+    let (boundary, units) = match built {
+        Ok(built) => built,
+        Err(error) => {
+            // No partial generation stays on the disk.
+            let _ = std::fs::remove_dir_all(&path);
+            return Err(error);
+        }
+    };
+    // Switch: write the new name beside CURRENT, then move it over (one rename).
+    let next = dir.join(format!("{CURRENT}.next"));
+    std::fs::write(&next, format!("{name}\n"))?;
+    std::fs::File::open(&next)?.sync_all()?;
+    std::fs::rename(&next, dir.join(CURRENT))?;
+    remove_generations(dir, &name);
+    let index = Index::open_in_dir(&path)?;
+    register(&index);
+    Ok((index, boundary, units))
+}
+/// Remove every generation in `dir` but `keep`.
+fn remove_generations(dir: &Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let other = entry.file_name().to_string_lossy().into_owned();
+        if other != keep && generation_name(&other) && entry.path().is_dir() {
+            if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+                tracing::warn!(error = %crate::resolver::log_error(&error), generation = other, "an old text index generation was not removed");
+            }
+        }
+    }
+}
+/// Every unit into the empty `index` from one snapshot, committed with the snapshot's
+/// boundary. Returns the boundary and the units written.
+async fn fill(
+    pool: &PgPool,
+    index: &Index,
+    threads: usize,
+    mut progress: impl FnMut(u64) + Send,
+) -> Result<(u64, u64)> {
+    let fields = schema().1;
+    let writer: Arc<IndexWriter> =
+        Arc::new(index.writer_with_num_threads(threads, threads * WRITER_BYTES)?);
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let boundary: String =
+        sqlx::query_scalar("SELECT pg_snapshot_xmin(pg_current_snapshot())::text")
+            .fetch_one(&mut *tx)
+            .await?;
+    let boundary: u64 = boundary.parse().context("transaction ID")?;
+    let mut units = sqlx::query_as::<_, Unit>(UNITS).fetch(&mut *tx);
+    let mut written = 0u64;
+    let mut batch = Vec::with_capacity(ADD_BATCH);
+    // Documents are added off the async threads: the writer blocks while its threads catch up.
+    let add = |batch: Vec<Unit>| {
+        let writer = writer.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            for unit in &batch {
+                writer.add_document(document(&fields, unit))?;
+            }
+            Ok(())
+        })
+    };
+    while let Some(unit) = units.try_next().await? {
+        batch.push(unit);
+        written += 1;
+        if batch.len() == ADD_BATCH {
+            add(std::mem::take(&mut batch)).await??;
+        }
+        if written.is_multiple_of(PROGRESS_EVERY) {
+            progress(written);
+        }
+    }
+    add(batch).await??;
+    drop(units);
+    tx.commit().await?;
+    let mut writer = Arc::try_unwrap(writer).map_err(|_| anyhow::anyhow!("writer still shared"))?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        commit(&mut writer, boundary)?;
+        writer.wait_merging_threads()?;
+        Ok(())
+    })
+    .await??;
+    Ok((boundary, written))
+}
+/// `pinakesd reindex`: build the index in `dir` from the database into a new generation and
+/// switch to it; `progress` hears the units written so far. Returns the units written.
+pub async fn reindex(pool: &PgPool, dir: &Path, progress: impl FnMut(u64) + Send) -> Result<u64> {
+    let (_, _, units) = build_generation(pool, dir, progress).await?;
+    Ok(units)
+}
+
+/// How a text search's candidates are ordered, so that the best ones for the page's own order
+/// are the ones kept.
+#[derive(Clone, Copy, Debug)]
+pub enum TextOrder {
+    /// Text relevance times (1 + fame), plus [`ACTIVITY_WEIGHT`] times the activity score.
+    Relevance,
+    /// The activity score.
+    Activity,
+    /// The newest reference first.
+    Recent,
+    /// The earliest start first.
+    Start,
+    /// The nearest to this point first (latitude, longitude).
+    Distance(f64, f64),
+}
+/// A text search: its text, its order, the instant activity decays to, and its filters.
+#[derive(Clone, Debug, Default)]
+pub struct TextQuery {
+    pub text: String,
+    pub order: Option<TextOrder>,
+    pub at: DateTime<Utc>,
+    /// Any of these types, each with its subtypes.
+    pub types: Vec<String>,
+    /// None of these types, nor their subtypes; a unit with no type is left out too.
+    pub exclude_types: Vec<String>,
+    /// People's tags: any of them, or every one with `all_tags`.
+    pub tags: Vec<String>,
+    pub all_tags: bool,
+    pub hosts: Vec<String>,
+    pub category: Option<String>,
+    pub venue: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    /// Units with a start only.
+    pub started: bool,
+    /// A circle: latitude, longitude, radius in metres (the exact distance is Postgres').
+    pub near: Option<(f64, f64, f64)>,
+    /// Boxes (west, south, east, north), any of them.
+    pub boxes: Vec<[f64; 4]>,
+    /// Units with a reference newer than this.
+    pub referenced_since: Option<DateTime<Utc>>,
+    /// Referenced units only.
+    pub referenced: bool,
+    /// Leave out job postings that ended by this instant (whole seconds before it, so the index
+    /// never leaves out one Postgres keeps).
+    pub open_jobs_at: Option<DateTime<Utc>>,
+    /// Whether the text may match inside a name's words or a similar name, as Postgres' `ILIKE`
+    /// and `%`: not for a short text of letters and digits, which matches only where words start.
+    pub inside_words: bool,
+}
+/// A text search's candidates, and the index revision they were read at (for the page's ETag).
+#[derive(Clone, Debug)]
+pub struct Candidates {
+    pub units: Vec<Candidate>,
+    pub revision: u64,
+}
+/// One candidate: its unit, its resource, and its text relevance times (1 + fame).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Candidate {
+    pub unit_id: String,
+    pub resource_id: String,
+    pub relevance: f64,
+    /// Found by its words (as the index reads them); `false`: proposed by the text inside its
+    /// name or its name's pieces, for Postgres to check as it matches text.
+    pub words: bool,
+}
+
+/// One item of the text: words to find (one word, or several as a phrase), with its sign.
+#[derive(Debug, PartialEq)]
+enum Item {
+    /// Words, and whether the word was written with letters and digits alone (`c++` is not), so
+    /// it may be the start of a longer one.
+    Words(Vec<String>, bool),
+    Not(Vec<String>),
+    /// `or` between the items around it.
+    Or,
+}
+/// The text's items as Postgres' `websearch_to_tsquery` reads them: words, `"quoted phrases"`,
+/// `-word` to leave out, and `or` between two items. Each word is split and folded as the index
+/// splits the fields; a word that is several tokens (`pinakes-test`) is a phrase.
+fn items(index: &Index, text: &str) -> Vec<Item> {
+    let mut out = vec![];
+    let mut rest = text;
+    while let Some(start) = rest.find(|c: char| !c.is_whitespace()) {
+        rest = &rest[start..];
+        let negated = rest.starts_with('-');
+        if negated {
+            rest = &rest[1..];
+        }
+        let (raw, quoted) = if let Some(inner) = rest.strip_prefix('"') {
+            let end = inner.find('"').unwrap_or(inner.len());
+            let raw = &inner[..end];
+            rest = inner.get(end + 1..).unwrap_or("");
+            (raw, true)
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let raw = &rest[..end];
+            rest = &rest[end..];
+            (raw, false)
+        };
+        if !quoted && !negated && raw.eq_ignore_ascii_case("or") {
+            if !matches!(out.last(), None | Some(Item::Or)) {
+                out.push(Item::Or);
+            }
+            continue;
+        }
+        let words = tokens(index, WORDS, raw);
+        if !words.is_empty() {
+            let whole = !quoted
+                && raw.chars().all(|c| {
+                    crate::api::word_char(c)
+                        || (crate::api::unspaced_script(c) && c.is_alphanumeric())
+                });
+            out.push(if negated {
+                Item::Not(words)
+            } else {
+                Item::Words(words, whole)
+            });
+        }
+    }
+    while matches!(out.last(), Some(Item::Or)) {
+        out.pop();
+    }
+    out
+}
+
+impl Open {
+    fn search(&self, q: &TextQuery, cap: usize) -> Result<Vec<Candidate>> {
+        let searcher = self.reader.searcher();
+        let order = q.order.unwrap_or(TextOrder::Relevance);
+        let now = q.at.timestamp() as f64;
+        let items = items(&self.index, &q.text);
+        let filters = self.filters(q);
+        let words = self.words_query(&q.text, &items, &filters);
+        let found = |query: &dyn Query, words: bool| -> Result<Vec<Candidate>> {
+            searcher
+                .search(query, &ranked(cap, order, now))?
+                .into_iter()
+                .map(|((_, relevance), address)| {
+                    let doc: TantivyDocument = searcher.doc(address)?;
+                    let text = |field| {
+                        doc.get_first(field)
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .context("stored ID")
+                    };
+                    Ok(Candidate {
+                        unit_id: text(self.fields.unit_id)?,
+                        resource_id: text(self.fields.resource_id)?,
+                        relevance,
+                        words,
+                    })
+                })
+                .collect()
+        };
+        let mut out = match &words {
+            Some(query) => found(query.as_ref(), true)?,
+            None => vec![],
+        };
+        // The text inside a name and similar names, as Postgres finds them, for a text that is
+        // not short: proposed, and checked there.
+        if q.inside_words || words.is_none() {
+            if let Some(query) = self.proposals(&q.text, &filters) {
+                let seen: HashSet<String> = out.iter().map(|c| c.unit_id.clone()).collect();
+                out.extend(
+                    found(query.as_ref(), false)?
+                        .into_iter()
+                        .filter(|c| !seen.contains(&c.unit_id)),
+                );
+            }
+        }
+        Ok(out)
+    }
+}
+/// The best `cap` units in `order`, each with its key and its relevance times (1 + fame).
+fn ranked(
+    cap: usize,
+    order: TextOrder,
+    now: f64,
+) -> impl tantivy::collector::Collector<Fruit = Vec<((f64, f64), tantivy::DocAddress)>> {
+    TopDocs::with_limit(cap.max(1)).tweak_score(move |segment: &SegmentReader| {
+        let fast = segment.fast_fields();
+        let f64s = |name: &str| fast.f64(name).ok();
+        let i64s = |name: &str| fast.i64(name).ok();
+        let (fame, activity, activity_at, newest, start, lat, lon) = (
+            f64s("fame"),
+            f64s("activity"),
+            i64s("activity_at"),
+            i64s("newest_at"),
+            i64s("start_at"),
+            f64s("lat"),
+            f64s("lon"),
+        );
+        move |doc: DocId, score: Score| -> (f64, f64) {
+            let f =
+                |c: &Option<tantivy::columnar::Column<f64>>| c.as_ref().and_then(|c| c.first(doc));
+            let i =
+                |c: &Option<tantivy::columnar::Column<i64>>| c.as_ref().and_then(|c| c.first(doc));
+            let relevance = f64::from(score) * (1.0 + f(&fame).unwrap_or(0.0));
+            let active = || {
+                let age = (now - i(&activity_at).unwrap_or(0) as f64).max(0.0);
+                f(&activity).unwrap_or(0.0) * (-std::f64::consts::LN_2 * age / HALF_LIFE_SECS).exp()
+            };
+            let key = match order {
+                TextOrder::Relevance => relevance + ACTIVITY_WEIGHT * active(),
+                TextOrder::Activity => active(),
+                TextOrder::Recent => i(&newest).unwrap_or(0) as f64,
+                TextOrder::Start => -(i(&start).unwrap_or(i64::MAX) as f64),
+                TextOrder::Distance(lat0, lon0) => match (f(&lat), f(&lon)) {
+                    (Some(lat), Some(lon)) => -haversine_m(lat0, lon0, lat, lon),
+                    _ => f64::NEG_INFINITY,
+                },
+            };
+            (
+                if key.is_nan() { f64::NEG_INFINITY } else { key },
+                relevance,
+            )
+        }
+    })
+}
+
+/// The great-circle distance between two points, in metres (the order of a distance search's
+/// candidates; Postgres measures the page's own distances).
+fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let (dp, dl) = ((lat2 - lat1).to_radians(), (lon2 - lon1).to_radians());
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * 6_371_008.8 * a.sqrt().min(1.0).asin()
+}
+/// The cells of one of [`CELL_RESOLUTIONS`] (its position) that cover a circle: the finest
+/// resolution whose disk of cells around the centre reaches past the radius in at most
+/// [`MAX_CELLS`] cells. A ring of hexagons lies at least 1.5 edges further out than the one
+/// before; the edge taken is 60% of the resolution's average, below its smallest.
+pub fn cover(lat: f64, lon: f64, radius_m: f64) -> Option<(usize, Vec<u64>)> {
+    let centre = h3o::LatLng::new(lat, lon).ok()?;
+    for (position, resolution) in CELL_RESOLUTIONS.iter().enumerate().rev() {
+        let edge = resolution.edge_length_m() * 0.6;
+        let k = (radius_m / (1.5 * edge)).ceil() as u64 + 1;
+        let cells = 3 * k * (k + 1) + 1;
+        if cells as usize <= MAX_CELLS {
+            let disk: Vec<u64> = centre
+                .to_cell(*resolution)
+                .grid_disk_safe(k as u32)
+                .map(u64::from)
+                .collect();
+            return Some((position, disk));
+        }
+    }
+    None
+}
+
+impl Open {
+    /// The filters the index holds, each a clause every candidate must match without scoring.
+    fn filters(&self, q: &TextQuery) -> Vec<(Occur, Box<dyn Query>)> {
+        let f = &self.fields;
+        let mut out: Vec<(Occur, Box<dyn Query>)> = vec![];
+        let must = |query: Box<dyn Query>| -> (Occur, Box<dyn Query>) {
+            (Occur::Must, Box::new(ConstScoreQuery::new(query, 0.0)))
+        };
+        let set = |field: Field, values: &[String]| -> Box<dyn Query> {
+            Box::new(TermSetQuery::new(
+                values.iter().map(|v| Term::from_field_text(field, v)),
+            ))
+        };
+        let term = |field: Field, value: &str| -> Box<dyn Query> {
+            Box::new(TermQuery::new(
+                Term::from_field_text(field, value),
+                IndexRecordOption::Basic,
+            ))
+        };
+        if q.referenced {
+            out.push(must(Box::new(TermQuery::new(
+                Term::from_field_u64(f.referenced, 1),
+                IndexRecordOption::Basic,
+            ))));
+        }
+        if !q.types.is_empty() {
+            out.push(must(set(f.type_path, &q.types)));
+        }
+        if !q.exclude_types.is_empty() {
+            out.push(must(Box::new(ExistsQuery::new("type".into(), false))));
+            out.push((Occur::MustNot, set(f.type_path, &q.exclude_types)));
+        }
+        // A tag matches people's tags and source labels alike.
+        let either = |tags: &[String]| -> Box<dyn Query> {
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Should, set(f.tag, tags)),
+                (Occur::Should, set(f.label, tags)),
+            ]))
+        };
+        if q.all_tags {
+            for tag in &q.tags {
+                out.push(must(either(std::slice::from_ref(tag))));
+            }
+        } else if !q.tags.is_empty() {
+            out.push(must(either(&q.tags)));
+        }
+        if !q.hosts.is_empty() {
+            out.push(must(set(f.host, &q.hosts)));
+        }
+        if let Some(category) = &q.category {
+            out.push(must(term(f.category, category)));
+        }
+        if let Some(venue) = &q.venue {
+            out.push(must(term(f.venue, venue)));
+        }
+        let i64_range = |field: Field, from: Option<i64>, to: Option<i64>| -> Box<dyn Query> {
+            Box::new(RangeQuery::new(
+                Bound::Included(Term::from_field_i64(field, from.unwrap_or(i64::MIN))),
+                Bound::Included(Term::from_field_i64(field, to.unwrap_or(i64::MAX))),
+            ))
+        };
+        if q.started || q.from.is_some() || q.to.is_some() {
+            // Whole seconds that hold the bounds: Postgres compares the exact instants.
+            out.push(must(i64_range(
+                f.start_at,
+                q.from.map(|t| t.timestamp() - 1),
+                q.to.map(|t| t.timestamp() + 1),
+            )));
+        }
+        if let Some(at) = q.open_jobs_at {
+            out.push((
+                Occur::MustNot,
+                Box::new(BooleanQuery::new(vec![
+                    (Occur::Must, term(f.type_path, "JobPosting")),
+                    (
+                        Occur::Must,
+                        i64_range(f.end_at, None, Some(at.timestamp() - 1)),
+                    ),
+                ])),
+            ));
+        }
+        if let Some(since) = q.referenced_since {
+            out.push(must(i64_range(
+                f.newest_at,
+                Some(since.timestamp() - 1),
+                None,
+            )));
+        }
+        if let Some((lat, lon, radius)) = q.near {
+            match cover(lat, lon, radius) {
+                Some((position, cells)) => {
+                    let field = f.cells[position];
+                    out.push(must(Box::new(TermSetQuery::new(
+                        cells.into_iter().map(|c| Term::from_field_u64(field, c)),
+                    ))));
+                }
+                None => out.push(must(Box::new(ExistsQuery::new("lat".into(), false)))),
+            }
+        }
+        if !q.boxes.is_empty() {
+            let f64_range = |field: Field, low: f64, high: f64| -> Box<dyn Query> {
+                Box::new(RangeQuery::new(
+                    Bound::Included(Term::from_field_f64(field, low)),
+                    Bound::Included(Term::from_field_f64(field, high)),
+                ))
+            };
+            let boxes = q
+                .boxes
+                .iter()
+                .map(|[west, south, east, north]| -> (Occur, Box<dyn Query>) {
+                    (
+                        Occur::Should,
+                        Box::new(BooleanQuery::new(vec![
+                            (Occur::Must, f64_range(f.lat, *south, *north)),
+                            (Occur::Must, f64_range(f.lon, *west, *east)),
+                        ])),
+                    )
+                })
+                .collect();
+            out.push(must(Box::new(BooleanQuery::new(boxes))));
+        }
+        out
+    }
+    /// The words of one item in one field, as a word or a phrase.
+    fn words_in(&self, field: Field, words: &[String]) -> Box<dyn Query> {
+        let terms: Vec<Term> = words
+            .iter()
+            .map(|w| Term::from_field_text(field, w))
+            .collect();
+        if terms.len() == 1 {
+            Box::new(TermQuery::new(
+                terms.into_iter().next().expect("one term"),
+                IndexRecordOption::WithFreqs,
+            ))
+        } else {
+            Box::new(PhraseQuery::new(terms))
+        }
+    }
+    /// One item where it may match: the name, other names or the description; as the last item,
+    /// also the start of a word in the name. People's tags and source labels holding it add to
+    /// its score but never match alone.
+    fn item_query(&self, words: &[String], last: bool) -> Box<dyn Query> {
+        let f = &self.fields;
+        let boosted = |field: Field, boost: Score| -> (Occur, Box<dyn Query>) {
+            (
+                Occur::Should,
+                Box::new(BoostQuery::new(self.words_in(field, words), boost)),
+            )
+        };
+        let mut matches: Vec<(Occur, Box<dyn Query>)> = vec![
+            boosted(f.name, NAME_BOOST),
+            boosted(f.other_names, OTHER_NAMES_BOOST),
+            boosted(f.description, DESCRIPTION_BOOST),
+        ];
+        if let ([word], true) = (words, last) {
+            for field in [f.name, f.other_names] {
+                let prefix =
+                    FuzzyTermQuery::new_prefix(Term::from_field_text(field, word), 0, false);
+                matches.push((
+                    Occur::Should,
+                    Box::new(ConstScoreQuery::new(Box::new(prefix), PREFIX_SCORE)),
+                ));
+            }
+        }
+        Box::new(BooleanQuery::new(vec![
+            (Occur::Must, Box::new(BooleanQuery::new(matches))),
+            boosted(f.tags_text, TAGS_BOOST),
+            boosted(f.labels_text, LABELS_BOOST),
+        ]))
+    }
+    /// The whole text inside the name (`ILIKE '%text%'`): every three characters of it (two for
+    /// a text of two), across words; one character is any name holding it.
+    fn substring(&self, text: &str) -> Option<Box<dyn Query>> {
+        let f = &self.fields;
+        let length = text.chars().count();
+        let query: Box<dyn Query> = match length {
+            0 => return None,
+            1 => {
+                let folded = tokens(&self.index, EXACT, text).pop()?;
+                let pattern = format!(".*{}.*", regex_escape(&folded));
+                Box::new(RegexQuery::from_pattern(&pattern, f.name_grams).ok()?)
+            }
+            _ => {
+                let grams = tokens(&self.index, if length == 2 { GRAMS2 } else { GRAMS3 }, text);
+                if grams.is_empty() {
+                    return None;
+                }
+                Box::new(BooleanQuery::new(
+                    grams
+                        .into_iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .map(|g| -> (Occur, Box<dyn Query>) {
+                            (
+                                Occur::Must,
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(f.name_grams, &g),
+                                    IndexRecordOption::Basic,
+                                )),
+                            )
+                        })
+                        .collect(),
+                ))
+            }
+        };
+        Some(Box::new(ConstScoreQuery::new(query, SUBSTRING_SCORE)))
+    }
+    /// The text as a query of its words: every item (an `or` joins the items around it), none of
+    /// the items to leave out, the filters; scored by the items' fields, more when the name is the
+    /// whole text or holds its words in order. `None` for a text without words.
+    fn words_query(
+        &self,
+        text: &str,
+        items: &[Item],
+        filters: &[(Occur, Box<dyn Query>)],
+    ) -> Option<Box<dyn Query>> {
+        let f = &self.fields;
+        let last_words = items.iter().rposition(|i| matches!(i, Item::Words(..)))?;
+        // Items joined by `or` form one group; every group must match.
+        let mut groups: Vec<Vec<Box<dyn Query>>> = vec![];
+        let mut joined = false;
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![];
+        for (position, item) in items.iter().enumerate() {
+            match item {
+                Item::Or => joined = true,
+                Item::Words(words, whole) => {
+                    let query = self.item_query(words, position == last_words && *whole);
+                    match (joined, groups.last_mut()) {
+                        (true, Some(group)) => group.push(query),
+                        _ => groups.push(vec![query]),
+                    }
+                    joined = false;
+                }
+                Item::Not(words) => {
+                    clauses.push((Occur::MustNot, self.item_query(words, false)));
+                    joined = false;
+                }
+            }
+        }
+        for group in groups {
+            let query: Box<dyn Query> = if group.len() == 1 {
+                group.into_iter().next().expect("one")
+            } else {
+                Box::new(BooleanQuery::new(
+                    group.into_iter().map(|q| (Occur::Should, q)).collect(),
+                ))
+            };
+            clauses.push((Occur::Must, query));
+        }
+        // The name is the whole text, or holds its words in order.
+        if let Some(exact) = tokens(&self.index, EXACT, &squashed(text)).pop() {
+            clauses.push((
+                Occur::Should,
+                Box::new(ConstScoreQuery::new(
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(f.name_exact, &exact),
+                        IndexRecordOption::Basic,
+                    )),
+                    EXACT_NAME_SCORE,
+                )),
+            ));
+        }
+        let plain: Vec<&String> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Words(w, _) => Some(w),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if plain.len() > 1 && !items.iter().any(|i| matches!(i, Item::Or)) {
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    Box::new(PhraseQuery::new(
+                        plain
+                            .iter()
+                            .map(|w| Term::from_field_text(f.name, w))
+                            .collect(),
+                    )),
+                    NAME_PHRASE_BOOST,
+                )),
+            ));
+        }
+        clauses.extend(filters.iter().map(|(o, q)| (*o, q.box_clone())));
+        Some(Box::new(BooleanQuery::new(clauses)))
+    }
+    /// Names Postgres may find the text in otherwise: the text inside the name, or a name that
+    /// shares at least 0.3 of the text's three-letter pieces (every name `pg_trgm` takes
+    /// for similar, and some it does not), with the filters. Postgres checks each.
+    fn proposals(&self, text: &str, filters: &[(Occur, Box<dyn Query>)]) -> Option<Box<dyn Query>> {
+        let f = &self.fields;
+        let mut either: Vec<(Occur, Box<dyn Query>)> = vec![];
+        if let Some(substring) = self.substring(text.trim()) {
+            either.push((Occur::Should, substring));
+        }
+        let pieces = pieces(text);
+        if !pieces.is_empty() {
+            let least = ((pieces.len() as f64 * SIMILARITY).ceil() as usize).max(1);
+            let similar = BooleanQuery::with_minimum_required_clauses(
+                pieces
+                    .iter()
+                    .map(|p| -> (Occur, Box<dyn Query>) {
+                        (
+                            Occur::Should,
+                            Box::new(ConstScoreQuery::new(
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(f.name_pieces, p),
+                                    IndexRecordOption::Basic,
+                                )),
+                                SIMILAR_PIECE_SCORE,
+                            )),
+                        )
+                    })
+                    .collect(),
+                least,
+            );
+            either.push((Occur::Should, Box::new(similar)));
+        }
+        if either.is_empty() {
+            return None;
+        }
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> =
+            vec![(Occur::Must, Box::new(BooleanQuery::new(either)))];
+        clauses.extend(filters.iter().map(|(o, q)| (*o, q.box_clone())));
+        Some(Box::new(BooleanQuery::new(clauses)))
+    }
+}
+/// `text` as a literal in a regular expression.
+fn regex_escape(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if !c.is_alphanumeric() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index() -> Index {
+        let index = Index::create_in_ram(schema().0);
+        register(&index);
+        index
+    }
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn the_text_reads_as_websearch_does() {
+        let index = index();
+        assert_eq!(
+            items(
+                &index,
+                r#"Zürich "daft punk" -live or acoustic pinakes-test"#
+            ),
+            vec![
+                Item::Words(words(&["zurich"]), true),
+                Item::Words(words(&["daft", "punk"]), false),
+                Item::Not(words(&["live"])),
+                Item::Or,
+                Item::Words(words(&["acoustic"]), true),
+                Item::Words(words(&["pinakes", "test"]), false),
+            ]
+        );
+        assert_eq!(
+            items(&index, "or OR c++ or"),
+            vec![Item::Words(words(&["c"]), false)]
+        );
+        assert!(items(&index, "!!! --").is_empty());
+        assert_eq!(
+            items(&index, "İzmir"),
+            vec![Item::Words(words(&["izmir"]), true)]
+        );
+        // A script written without spaces: one word per character, a Latin word apart.
+        assert_eq!(
+            items(&index, "我的AI助手 x²zqy"),
+            vec![
+                Item::Words(words(&["我", "的", "ai", "助", "手"]), true),
+                Item::Words(words(&["x2zqy"]), true),
+            ]
+        );
+    }
+
+    /// Random text of every kind of character the parser treats apart (quotes, `-`, signs,
+    /// letters with and without accents, combining marks, scripts without spaces, emoji): the
+    /// parser never panics, and the word tokenizer splits exactly as `api::word_char` says, each
+    /// character of a script without spaces a word of its own.
+    #[test]
+    fn the_parser_and_the_tokenizer_take_any_text() {
+        let palette: Vec<char> = "aZ09 \"-_+.,/:\u{301}éİßØ东京タ我AIภาษาעבריתالعربية😀™・\t\n²"
+            .chars()
+            .collect();
+        let index = index();
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..5000 {
+            let length = (next() % 24) as usize;
+            let text: String = (0..length)
+                .map(|_| palette[(next() % palette.len() as u64) as usize])
+                .collect();
+            let _ = items(&index, &text);
+            let _ = pieces(&text);
+            // The reference split.
+            let mut expected = vec![];
+            let mut word = String::new();
+            for c in text.chars() {
+                if crate::api::unspaced_script(c) && c.is_alphanumeric() {
+                    if !word.is_empty() {
+                        expected.push(std::mem::take(&mut word));
+                    }
+                    expected.push(c.to_string());
+                } else if crate::api::word_char(c) {
+                    word.push(c);
+                } else if !word.is_empty() {
+                    expected.push(std::mem::take(&mut word));
+                }
+            }
+            if !word.is_empty() {
+                expected.push(word);
+            }
+            let expected: Vec<String> = expected
+                .iter()
+                .map(|w| {
+                    w.chars()
+                        .flat_map(char::to_lowercase)
+                        .filter(|c| !matches!(u32::from(*c), 0x0300..=0x036F))
+                        .collect::<String>()
+                })
+                .filter(|w| !w.is_empty())
+                .collect();
+            let mut tokenizer = WordTokenizer::default();
+            let mut stream = tokenizer.token_stream(&text);
+            let mut got = vec![];
+            while stream.advance() {
+                got.push(stream.token().text.clone());
+            }
+            assert_eq!(got, expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn pieces_are_pg_trgm_s() {
+        assert_eq!(pieces("Cat"), ["  c", " ca", "at ", "cat"]);
+        assert_eq!(pieces("a-b"), ["  a", "  b", " a ", " b "]);
+        assert!(pieces("!!!").is_empty());
+    }
+
+    #[test]
+    fn a_circle_is_covered_by_cells_that_hold_it() {
+        for (lat, lon, radius) in [
+            (47.3769, 8.5417, 500.0),
+            (47.3769, 8.5417, 20_000.0),
+            (-33.86, 151.2, 200_000.0),
+            (64.1, -21.9, 3_000.0),
+            (0.0, 179.99, 50_000.0),
+        ] {
+            let (position, cells) = cover(lat, lon, radius).unwrap();
+            assert!(cells.len() <= MAX_CELLS);
+            let resolution = CELL_RESOLUTIONS[position];
+            let cells: HashSet<u64> = cells.into_iter().collect();
+            // Points on the circle's edge, in every direction, lie in a covering cell.
+            for step in 0..72 {
+                let bearing = (step as f64 * 5.0).to_radians();
+                let d = radius / 6_371_008.8;
+                let (p, l) = (lat.to_radians(), lon.to_radians());
+                let p2 = (p.sin() * d.cos() + p.cos() * d.sin() * bearing.cos()).asin();
+                let l2 =
+                    l + (bearing.sin() * d.sin() * p.cos()).atan2(d.cos() - p.sin() * p2.sin());
+                let mut lon2 = l2.to_degrees();
+                if lon2 > 180.0 {
+                    lon2 -= 360.0;
+                }
+                let point = h3o::LatLng::new(p2.to_degrees(), lon2).unwrap();
+                assert!(
+                    cells.contains(&u64::from(point.to_cell(resolution))),
+                    "{lat},{lon} r={radius}: bearing {step}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distances_are_great_circle_metres() {
+        let d = haversine_m(47.3769, 8.5417, 46.9480, 7.4474);
+        assert!((d - 95_500.0).abs() < 1_500.0, "{d}");
+        assert_eq!(haversine_m(1.0, 2.0, 1.0, 2.0), 0.0);
+    }
+}

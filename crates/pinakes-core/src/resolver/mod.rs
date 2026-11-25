@@ -661,6 +661,7 @@ mod tests {
             "/queue.rs",
             "/same_event.rs",
             "/same_recording.rs",
+            "/search_index.rs",
             "/resolver/mod.rs",
             "pinakesd/src/main.rs",
         ];

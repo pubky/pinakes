@@ -188,6 +188,16 @@
               "null"
             ]
           },
+          "labels": {
+            "description": "On a search row: the labels the card's catalogue source gives it, as valid tag labels.\nKept apart from people's tags, which Nexus serves for the card's `uri` and `refs`; a client\nmay offer them as suggested tags. `[]` when the card has none. Absent on other routes.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "maybe_same": {
             "description": "On an event card: other events that are possibly the same one, best first (the rule:\n\"Possibly the same event\" in docs/api.md); on an app's store card, other store cards that\nare possibly the same app (\"Possibly the same app\"); on a MusicRecording card, other\nrecordings that are possibly the same one (\"Possibly the same recording\"). Up to three on\na search, lookup or group card and up to ten on a resource read. A hint only: never a\ngroup, never counted, and never a member of this card's own group. Absent on other cards,\nand on a kind's cards when its hint is off (`[event] same_event_hint` for events and apps,\n`[groups] same_recording_hint`).",
             "items": {
@@ -4090,6 +4100,18 @@
                 {
                   "$ref": "#/components/schemas/CollapseMode"
                 }
+              ]
+            }
+          },
+          {
+            "description": "`true`: only things someone referenced on Pubky. Every card this instance lists today is\none, so the answer is the same with or without it.",
+            "in": "query",
+            "name": "referenced",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
               ]
             }
           }

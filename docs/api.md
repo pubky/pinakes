@@ -3039,7 +3039,7 @@ listener's layers, with the caller's address:
 
 | Tool | Request | Answer |
 | --- | --- | --- |
-| `search` | `GET /v1/search` with `q`, `type` (array), `exclude_type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `host` (array), `category`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | `url`, compact cards in `items`, `cursor`, and `reach_truncated` and `facets` when present |
+| `search` | `GET /v1/search` with `q`, `type` (array), `exclude_type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `host` (array), `category`, `sort`, `window`, `collapse`, `referenced`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | `url`, compact cards in `items`, `cursor`, and `reach_truncated` and `facets` when present |
 | `card` | `GET /v1/resources/by-uri` with `uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | `url` and one compact `card` with `category`, `address`, `facts`, `keys`, `tz`, `event_status`, `venue` and `organizer` when present, `related` and `related_total` when it has them, `aliases` (at most 10), and, when public collections hold it, `in_collections` (the first 5) and `collections_url` |
 | `lookup` | `GET /v1/search?key=` with `key` and optional `limit` | As `search` |
 | `group` | `GET /v1/groups/{id}` | `url`, `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |

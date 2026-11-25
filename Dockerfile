@@ -17,12 +17,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 pinakes \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin pinakes \
-    && install -d -o 10001 -g 10001 /var/lib/pinakes/dumps /var/lib/pinakes/catalogues
+    && install -d -o 10001 -g 10001 /var/lib/pinakes/dumps /var/lib/pinakes/catalogues /var/lib/pinakes/search-index
 COPY --from=build /build/target/release/pinakesd /usr/local/bin/pinakesd
 ENV PINAKES__LISTEN=0.0.0.0:8090 \
     PINAKES__ADMIN_LISTEN=127.0.0.1:9090 \
     PINAKES__OSM__DUMP_DIR=/var/lib/pinakes/dumps \
-    PINAKES__CATALOGUES__DIR=/var/lib/pinakes/catalogues
+    PINAKES__CATALOGUES__DIR=/var/lib/pinakes/catalogues \
+    PINAKES__SEARCH__INDEX_DIR=/var/lib/pinakes/search-index
 WORKDIR /var/lib/pinakes
 USER 10001:10001
 EXPOSE 8090

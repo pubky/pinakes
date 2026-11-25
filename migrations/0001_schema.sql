@@ -514,6 +514,89 @@ CREATE TRIGGER osm_revision_insert BEFORE INSERT OR DELETE ON osm_place FOR EACH
 CREATE TRIGGER osm_revision_update BEFORE UPDATE OF doc, status, name, type, type_path, category, point, bbox ON osm_place FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 
 
+-- ── The text index's queue ───────────────────────────────────────────────────────────────────
+
+-- The resources whose search units the text index (`search_index`) must read again: one row per
+-- write, with the writing transaction's ID. The index reads the rows of every transaction that
+-- has finished since its last pass (`pg_snapshot_xmin`), so a write that commits late is never
+-- skipped, and deletes the rows its last commit covers.
+CREATE TABLE search_index_queue (
+    seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    resource_id text NOT NULL
+);
+CREATE INDEX search_index_queue_xid_idx ON search_index_queue USING btree (xid);
+
+-- A row's resource, or the resource of a row that names one (`resource_id`), on any change.
+CREATE FUNCTION queue_search_index() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    -- Each branch is planned only when it runs: `resource` has `id`, the others `resource_id`.
+    IF TG_TABLE_NAME = 'resource' THEN
+        INSERT INTO search_index_queue(resource_id) VALUES (CASE WHEN TG_OP = 'DELETE' THEN OLD.id ELSE NEW.id END);
+    ELSE
+        IF TG_OP <> 'INSERT' THEN INSERT INTO search_index_queue(resource_id) VALUES (OLD.resource_id); END IF;
+        IF TG_OP <> 'DELETE' AND (TG_OP = 'INSERT' OR NEW.resource_id IS DISTINCT FROM OLD.resource_id) THEN
+            INSERT INTO search_index_queue(resource_id) VALUES (NEW.resource_id);
+        END IF;
+    END IF;
+    RETURN NULL;
+END $$;
+
+-- An alias and its root: the alias leaves search, and its references count for the root.
+CREATE FUNCTION queue_search_index_alias() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        INSERT INTO search_index_queue(resource_id) VALUES (OLD.alias_id), (OLD.root_id);
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        INSERT INTO search_index_queue(resource_id) VALUES (NEW.alias_id), (NEW.root_id);
+    END IF;
+    RETURN NULL;
+END $$;
+
+-- Every resource, when a table a unit's tags or score come from is emptied (a feed reset).
+CREATE FUNCTION queue_search_index_all() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    INSERT INTO search_index_queue(resource_id) SELECT id FROM resource;
+    RETURN NULL;
+END $$;
+
+-- An OSM place's resources, and the events and occurrences held at it as their venue.
+CREATE FUNCTION queue_search_index_osm() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    place record;
+BEGIN
+    IF TG_OP = 'DELETE' THEN place := OLD; ELSE place := NEW; END IF;
+    INSERT INTO search_index_queue(resource_id)
+        SELECT id FROM resource WHERE osm_type = place.osm_type AND osm_id = place.osm_id
+        UNION SELECT id FROM resource WHERE doc #>> '{venue,osm_id}' = place.osm_type || '/' || place.osm_id
+        UNION SELECT resource_id FROM occurrence WHERE doc #>> '{venue,osm_id}' = place.osm_type || '/' || place.osm_id;
+    RETURN NULL;
+END $$;
+
+CREATE TRIGGER resource_search_index_insert AFTER INSERT OR DELETE ON resource FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER resource_search_index_update AFTER UPDATE OF uri, host, resolver, doc, status, name, type, type_path, category, point, start_at, end_at, venue_id, osm_type, osm_id, osm_version ON resource FOR EACH ROW
+    WHEN ((OLD.uri, OLD.host, OLD.resolver, OLD.doc, OLD.status, OLD.name, OLD.type, OLD.type_path, OLD.category, OLD.point, OLD.start_at, OLD.end_at, OLD.venue_id, OLD.osm_type, OLD.osm_id, OLD.osm_version)
+        IS DISTINCT FROM (NEW.uri, NEW.host, NEW.resolver, NEW.doc, NEW.status, NEW.name, NEW.type, NEW.type_path, NEW.category, NEW.point, NEW.start_at, NEW.end_at, NEW.venue_id, NEW.osm_type, NEW.osm_id, NEW.osm_version))
+    EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER reference_search_index AFTER INSERT OR DELETE OR UPDATE ON reference FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER score_search_index AFTER INSERT OR DELETE OR UPDATE ON resource_score FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER occurrence_search_index AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER alias_search_index AFTER INSERT OR DELETE OR UPDATE ON resource_alias FOR EACH ROW EXECUTE FUNCTION queue_search_index_alias();
+CREATE TRIGGER osm_search_index_insert AFTER INSERT OR DELETE ON osm_place FOR EACH ROW EXECUTE FUNCTION queue_search_index_osm();
+CREATE TRIGGER osm_search_index_update AFTER UPDATE OF doc, status, name, display_name, type, type_path, category, point, versions ON osm_place FOR EACH ROW
+    WHEN ((OLD.doc, OLD.status, OLD.name, OLD.display_name, OLD.type, OLD.type_path, OLD.category, OLD.point, OLD.versions)
+        IS DISTINCT FROM (NEW.doc, NEW.status, NEW.name, NEW.display_name, NEW.type, NEW.type_path, NEW.category, NEW.point, NEW.versions))
+    EXECUTE FUNCTION queue_search_index_osm();
+CREATE TRIGGER reference_search_index_truncate AFTER TRUNCATE ON reference FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_all();
+CREATE TRIGGER score_search_index_truncate AFTER TRUNCATE ON resource_score FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_all();
+
+
 -- ── Groups ───────────────────────────────────────────────────────────────────────────────────
 
 -- A group: units that are the same thing (see docs/design.md). `curated` groups are kept when

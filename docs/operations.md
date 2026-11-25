@@ -253,6 +253,8 @@ resolver limits apply to pubky and to each card route.
 | `related_seed_links` | `32` | 1–1000 | Seed links a related page samples: of the resource, its group's members and their aliases, the ones with the newest tags, at most this many. |
 | `collapse_refs_per_member` | `10000` | 1–1000000 | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | 1–200000 | Largest `near` radius (metres). |
+| `search_text_candidates` | `500` | 50–10000 | The best units a search with `q` reads from the text index ([Text index](#text-index)). |
+| `search_index_commit_secs` | `2` | 1–60 | Seconds between two passes that commit queued changes to the text index. |
 | `api_cache_capacity` | `10000` | 100–100000 | Entries the rate limiter's table holds when an API request adds a client address. Past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
 | `preview_cache_capacity` | `10000` | 100–100000 | The same table's size when a preview adds its client address and link. Keep it equal to `api_cache_capacity`. |
 | `preview_requests_per_minute` | `30` | 1 or more | Preview requests per minute per client. |

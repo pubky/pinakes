@@ -48,6 +48,11 @@ pub struct Metrics {
     pub group_budget: IntGaugeVec,
     /// Resources whose last grouping run refused a join for conflicting single-object keys.
     pub group_key_conflicts: IntGauge,
+    /// When the text index last committed the queue or found nothing to commit, in Unix seconds;
+    /// 0 until it is open (`search_index`).
+    pub search_index_pass: IntGauge,
+    /// 1 once the daemon's text index is open, 0 before (and while it is built).
+    pub search_index_open: IntGauge,
     /// API handler panics (either listener) answered 500 by the backstop layer.
     pub api_panics: IntCounter,
     /// Requests answered, by listener (`public`, `admin`), route (its path template, `unmatched`
@@ -120,6 +125,16 @@ impl Metrics {
             "Resources whose last grouping run refused a join that would put two MBIDs, Q-ids or Discogs IDs of one kind in a group",
         )?;
         registry.register(Box::new(group_key_conflicts.clone()))?;
+        let search_index_pass = IntGauge::new(
+            "pinakes_search_index_last_pass_timestamp_seconds",
+            "Last pass of the text index that read its queue without an error",
+        )?;
+        registry.register(Box::new(search_index_pass.clone()))?;
+        let search_index_open = IntGauge::new(
+            "pinakes_search_index_open",
+            "1 once the text index is open, 0 while it is being built or cannot be",
+        )?;
+        registry.register(Box::new(search_index_open.clone()))?;
         let ingest_resets = IntCounter::new(
             "pinakes_ingest_epoch_resets_total",
             "Nexus projection resets",
@@ -328,6 +343,8 @@ impl Metrics {
                 "Whether each catalogue's full import waits for another large catalogue's (1) or not (0)",
                 &["catalogue"]
             ),
+            search_index_pass,
+            search_index_open,
             registry,
             refresh_lock: Arc::default(),
             refreshed_once: Arc::default(),

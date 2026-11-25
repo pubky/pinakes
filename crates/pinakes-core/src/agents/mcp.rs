@@ -617,7 +617,7 @@ pub fn tools() -> Vec<Tool> {
             "search",
             "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, refs, type, name, description, site, point, start, end, group, also_on). For group tags, batch each exact non-derived also_on member's uri and optional refs (at most 5) with the card's own links; no extra group read is needed for those members. Returns a cursor for the next page and, with facet, counts over every match.",
             json!({"type":"object","additionalProperties":false,"properties":{
-                "q":{"type":"string","description":"Words in the name or description, at most 256 bytes. Up to three characters of letters and digits (spaces counted; not Hebrew, Arabic or a script written without spaces) match a name only where a word starts."},
+                "q":{"type":"string","description":"Words in the name or description, at most 256 bytes; accents and case do not matter, the last word may be the start of one, and a name similar to the text (a typo) or holding it inside a word matches too. Up to three characters of letters and digits (spaces counted; not Hebrew, Arabic or a script written without spaces) match a name only where a word starts."},
                 "type":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Schema.org types, any of them, each with its subtypes: e.g. [\"Place\"], [\"Event\"], [\"MusicRecording\", \"MusicAlbum\", \"MusicGroup\"]. A single type as a string is accepted too."},
                 "exclude_type":{"type":"array","items":{"type":"string"},"maxItems":50,"description":"Schema.org types to leave out, each with its subtypes: every card of another type, e.g. [\"WebPage\", \"Article\"]. Links with no type yet are left out too. Combines with type. A single type as a string is accepted too."},
                 "tags":{"type":"array","items":{"type":"string"},"maxItems":5,"description":"Labels people tagged the links with; any of them unless match is all."},
@@ -634,12 +634,13 @@ pub fn tools() -> Vec<Tool> {
                 "host":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Only links on any of these hosts, each exactly as their URLs name it (www.youtube.com), as facet host lists it. A single host as a string is accepted too."},
                 "category":{"type":"string","description":"Only links of this category: a place's OpenStreetMap key/value (amenity/cafe), or a page's schema.org category, as facet category lists it."},
                 "facet":{"type":"array","items":{"type":"string","enum":["type","tags","host","category"]},"maxItems":4,"description":"Counts over every match, not just this page, in facets: type (card types), tags (labels), host (services, with their site name) and category (categories such as amenity/cafe), most frequent first. A comma-separated string is accepted too."},
-                "sort":{"type":"string","enum":["relevance","activity","recent","distance","start","trending"],"description":"relevance (default with q: name match, then tag labels, then description; activity breaks ties; needs q), activity (default without q), recent, distance (needs near), start (earliest first), trending (with window)."},
+                "sort":{"type":"string","enum":["relevance","activity","recent","distance","start","trending"],"description":"relevance (default with q: how well the name, then tag labels, then the description match, plus activity on a log scale; needs q), activity (default without q), recent, distance (needs near), start (earliest first), trending (with window)."},
                 "window":{"type":"string","description":"With sort trending: how far back, 1h to 90d, default 7d."},
                 "collapse":{"type":"string","enum":["group"],"description":"group: one row per group of links that are the same thing."},
                 "reach":{"type":"string","enum":["following","friends","wot_2"],"description":"Only links that the viewer's follows (or friends, or two steps of follows) referenced. Needs viewer. wot_2 only where the instance has it."},
                 "boost":{"type":"string","enum":["following","friends","wot_2"],"description":"Rank first the links the viewer's follows (or friends, or two steps of follows) referenced, leaving nothing out. Needs viewer; with the default sort, relevance or trending. wot_2 only where the instance has it."},
                 "viewer":{"type":"string","description":"With reach or boost: a 52-character pubky public key."},
+                "referenced":{"type":"boolean","description":"true: only things someone referenced on Pubky (every card here is one today)."},
                 "limit":{"type":"integer","minimum":1,"maximum":500,"description":"Cards per page, default 50."},
                 "cursor":{"type":"string","description":"The cursor of the previous page, with the same filters."}
             }}),
@@ -769,7 +770,7 @@ fn search_query(args: &JsonObject) -> Result<String, Failure> {
             Some(_) => return Err(Failure::bad(format!("`{key}` is an array of strings"))),
         }
     }
-    for flag in ["remote", "closed"] {
+    for flag in ["remote", "closed", "referenced"] {
         match args.get(flag) {
             None | Some(Value::Null) => {}
             Some(Value::Bool(b)) => pairs.push((flag, b.to_string())),
@@ -1346,7 +1347,7 @@ mod tests {
     /// The `search` rows of the guide and of docs/api.md name every argument the schema takes.
     #[test]
     fn the_search_rows_name_every_argument() {
-        assert_eq!(SEARCH_ARGUMENTS.len(), 25);
+        assert_eq!(SEARCH_ARGUMENTS.len(), 26);
         let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api.md");
         let docs = std::fs::read_to_string(docs).unwrap();
         for (page, text) in [

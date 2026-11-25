@@ -44,6 +44,12 @@ requests_per_second = 0.5 # The public host allows at most one request per secon
 # Relative to the working directory; the container image sets /var/lib/pinakes/dumps instead.
 dump_dir = "dumps"
 
+# The text index a search with q reads (docs/operations.md, Text index): derived data, rebuilt from
+# the database when missing. Relative to the working directory; the container image sets
+# /var/lib/pinakes/search-index instead.
+[search]
+index_dir = "search-index"
+
 # Card resolvers; HTTP fallbacks can still use web.
 [cards.media]
 enabled = true

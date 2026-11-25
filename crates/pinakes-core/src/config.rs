@@ -79,7 +79,6 @@ pub struct Config {
     /// forwards (`api::client_address`).
     #[serde(skip)]
     pub preview_new_per_client_per_hour: usize,
-    #[serde(skip)]
     pub search: SearchConfig,
     #[serde(skip)]
     pub queue: QueueConfig,
@@ -838,31 +837,53 @@ impl Default for OsmConfig {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SearchConfig {
+    /// The text index's directory (`search_index`): derived data, rebuilt from the database
+    /// when it is missing or unreadable.
+    pub index_dir: String,
+    /// The best units a text search reads from the index before Postgres loads and filters them.
+    #[serde(skip)]
+    pub text_candidates: usize,
+    /// Seconds between two passes that commit queued changes to the text index.
+    #[serde(skip)]
+    pub index_commit_secs: u64,
+    #[serde(skip)]
     pub reach_timeout_secs: u64,
     /// The taggers a related page samples: the authors of a resource's most recent tags, at most
     /// this many.
+    #[serde(skip)]
     pub related_taggers: usize,
     /// The days a related page looks back, for those taggers and their tags.
+    #[serde(skip)]
     pub related_window_days: u32,
     /// The references a related page reads per sampled tagger (their most recent).
+    #[serde(skip)]
     pub related_refs_per_tagger: usize,
     /// The shared taggers a related row needs (its group's, when collapsed).
+    #[serde(skip)]
     pub related_min_shared: usize,
     /// The tags a related page reads per seed link (its most recent), from which the taggers
     /// are sampled.
+    #[serde(skip)]
     pub related_tag_sample: usize,
     /// The seed links a related page samples: of the resource, its group's members and their
     /// aliases, the ones with the newest tags, at most this many.
+    #[serde(skip)]
     pub related_seed_links: usize,
     /// The references counted per group member when `collapse=group` picks a group's row.
+    #[serde(skip)]
     pub collapse_refs_per_member: usize,
+    #[serde(skip)]
     pub max_radius_m: f64,
 }
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
+            index_dir: "search-index".into(),
+            text_candidates: 500,
+            index_commit_secs: 2,
             reach_timeout_secs: 5,
             related_taggers: 200,
             related_window_days: 365,
@@ -1384,6 +1405,7 @@ impl Config {
             || self.osm.ttl_secs == 0
             || self.osm.ttl_secs > 31536000
             || self.osm.dump_dir.trim().is_empty()
+            || self.search.index_dir.trim().is_empty()
             || !(1..=168).contains(&self.osm.dump_every_hours)
             || !(1..=1000).contains(&self.osm.dump_downloads_per_hour)
             || !(1..=10000).contains(&self.api.requests_per_minute)
@@ -1402,6 +1424,8 @@ impl Config {
             || !(1..=1_000_000).contains(&self.search.collapse_refs_per_member)
             || !self.search.max_radius_m.is_finite()
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
+            || !(50..=10_000).contains(&self.search.text_candidates)
+            || !(1..=60).contains(&self.search.index_commit_secs)
         {
             bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
         }
@@ -2907,6 +2931,10 @@ limits! {
     collapse_refs_per_member: usize = |c| c.search.collapse_refs_per_member => [|c, v| c.search.collapse_refs_per_member = v],
     /// Largest `near` radius (metres).
     max_radius_m: f64 = |c| c.search.max_radius_m => [|c, v| c.search.max_radius_m = v],
+    /// The best units a text search reads from the text index (50–10000).
+    search_text_candidates: usize = |c| c.search.text_candidates => [|c, v| c.search.text_candidates = v],
+    /// Seconds between two passes that commit queued changes to the text index (1–60).
+    search_index_commit_secs: u64 = |c| c.search.index_commit_secs => [|c, v| c.search.index_commit_secs = v],
     /// Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget. Also the client addresses the dump download limiter remembers per hour.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
     /// Seconds a request may take on either listener before it is answered 504 (8–600).
