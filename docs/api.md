@@ -1667,9 +1667,10 @@ Pinakes answers for it:
   never removed, except a source's own when the source is removed from the build.
   `pinakesd reextract` moves the stored aliases.
 - The vectors hold with every source on, and `spelling_rules` is the same whichever sources an
-  instance switches off. A source switched off folds no new link, so its `source/{name}` vectors
-  do not hold there (links it folded before stay folded; Discogs links still fold to the same
-  root by the music rule). A build without the source has no vectors of it.
+  instance switches off. A source switched off, or one that needs a token the instance lacks
+  (CourtListener), folds no new link, so its `source/{name}` vectors do not hold there (links it
+  folded before stay folded; Discogs links still fold to the same root by the music rule). A build
+  without the source has no vectors of it.
 - Not in the file, because they need a fetch and cannot be reproduced offline: a page's own
   canonical or permanent redirect, a Meetup date's number and token, an official API's answer,
   and a podcast feed naming its episode's page (alias bases `canonical` and `source`).
