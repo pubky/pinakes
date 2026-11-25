@@ -94,3 +94,17 @@ groups:
         expr: increase(pinakes_source_token_refusals_total[6h]) > 0
         labels: {severity: warning}
         annotations: {summary: "{{ $labels.source }} refused the configured key: check or rotate the {{ $labels.source }} key (a new key needs a Pinakes restart)"}
+      - alert: CatalogueImportFailed
+        expr: (increase(pinakes_catalogue_import_errors_total[1h]) > 0) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0)
+        labels: {severity: warning}
+        annotations: {summary: "A {{ $labels.catalogue }} catalogue import or update failed in the last hour; pinakesd catalogue status shows the error, and the run resumes from its cursor"}
+      - alert: CatalogueTurnBlocked
+        expr: (pinakes_catalogue_waiting_for_turn == 1) and on (instance, job) (sum by (instance, job) (increase(pinakes_catalogue_import_errors_total{catalogue=~"wikidata|musicbrainz|osm|openalex"}[1h])) > 0)
+        for: 6h
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue has waited six hours for the large-import turn while a large catalogue's import keeps failing: pinakesd catalogue status shows which; fix it, switch it off or drop it"}
+      - alert: CatalogueUpdateLag
+        expr: (pinakes_catalogue_update_lag_seconds > on (instance, job, catalogue) pinakes_catalogue_max_update_lag_seconds) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0)
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's cards are further behind upstream than its source's publication rhythm allows (pinakes_catalogue_max_update_lag_seconds): no import or update has brought newer data"}

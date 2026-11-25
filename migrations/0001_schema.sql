@@ -2,8 +2,8 @@
 -- and local and test databases are recreated (docs/operations.md, "Schema").
 --
 -- In order: extensions; resources and their references; events and OpenStreetMap places; the
--- read views; the search revision; groups; also-on; the same-event hint; the rows the code
--- updates in place.
+-- read views; the search revision; groups; also-on; the same-event hint; catalogues; the rows the
+-- code updates in place.
 
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -1168,6 +1168,78 @@ CREATE FUNCTION maybe_same_hint(unit text, type_path text[], n integer, events b
  SELECT CASE WHEN events AND coalesce(type_path @> ARRAY['Event'],false) THEN same_event_hint(unit,type_path,n)
              WHEN recordings AND coalesce(type_path @> ARRAY['MusicRecording'],false) THEN same_recording_hint(unit,n) END
 $$;
+
+
+-- ── Catalogues ───────────────────────────────────────────────────────────────────────────────
+
+-- One item a catalogue import holds (`catalogue`): Wikidata, MusicBrainz, OpenStreetMap, OpenAlex,
+-- Podcast Index, Tranco or software packages. The catalogue's importer is its only writer; the
+-- fetch queue, the refresh times and the change journal never touch these rows. `source` is the
+-- sub-source (`crates.io`, `f-droid`, `flathub` for software; the catalogue's name otherwise).
+-- `uri` is the item's canonical link, normalized as a referenced link is (`model::identity`);
+-- `keys` are join keys in the forms resources carry (`wikidata:Q42`, `mb:recording:<mbid>`,
+-- `isrc:…`, `osm:node/1`, `doi:…`) and `url:<resource id>` for each link people share for the
+-- same item; `related_uris` are links that belong to the item's group without being the item
+-- (an official website). `labels` are valid Pubky tag labels. `fame` is 0–1. A full import
+-- stamps every row it reads with its generation (`seen_generation`) and then removes the rows it
+-- did not read; a row changes only when its `content_hash` does.
+CREATE TABLE catalogue_card (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    catalogue text NOT NULL CONSTRAINT catalogue_card_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
+    source text NOT NULL CONSTRAINT catalogue_card_source_check CHECK (source ~ '^[a-z0-9][a-z0-9._-]{0,31}$'),
+    source_id text NOT NULL CONSTRAINT catalogue_card_source_id_check CHECK (octet_length(source_id) BETWEEN 1 AND 512),
+    uri text NOT NULL CONSTRAINT catalogue_card_uri_check CHECK (octet_length(uri) BETWEEN 1 AND 2048),
+    type text NOT NULL,
+    name text NOT NULL,
+    other_names text[] NOT NULL DEFAULT '{}',
+    description text,
+    labels text[] NOT NULL DEFAULT '{}',
+    keys text[] NOT NULL DEFAULT '{}',
+    related_uris text[] NOT NULL DEFAULT '{}',
+    point geometry(Point,4326),
+    fame real NOT NULL DEFAULT 0 CONSTRAINT catalogue_card_fame_check CHECK (fame >= 0 AND fame <= 1),
+    details jsonb NOT NULL DEFAULT '{}' CONSTRAINT catalogue_card_details_check CHECK (jsonb_typeof(details) = 'object' AND octet_length(details::text) <= 8192),
+    content_hash bytea NOT NULL CONSTRAINT catalogue_card_content_hash_check CHECK (octet_length(content_hash) = 32),
+    seen_generation bigint NOT NULL,
+    updated_at timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT catalogue_card_source_id_key UNIQUE (catalogue, source_id)
+);
+CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (fame DESC);
+CREATE INDEX catalogue_card_keys_idx ON catalogue_card USING gin (keys);
+CREATE INDEX catalogue_card_labels_idx ON catalogue_card USING gin (labels);
+CREATE INDEX catalogue_card_point_idx ON catalogue_card USING gist (point);
+CREATE INDEX catalogue_card_related_uris_idx ON catalogue_card USING gin (related_uris);
+CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (type, fame DESC);
+CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
+
+-- Each catalogue's import: what it does now (`phase`: idle, import (a full import, the first or
+-- a re-import), update, failed, disabled), the run its `cursor` belongs to (`run`; NULL when none
+-- is under way), so a restart resumes it, the generation of the last full import begun, where
+-- the next update starts (`position`: a replication sequence, a time; kept from run to run), the
+-- cards it holds, the upstream version read (a dump's date), when the last full import and the
+-- last update finished, how current the cards are (`current_as_of`: the upstream time of the data
+-- the last finished run left, which the update lag counts from), why an update asked for a full
+-- import (`import_requested`, until that import begins as a new one), why it waits (`waiting`:
+-- free disk, another large import) and its errors.
+-- `pinakesd catalogue drop` deletes the row with the cards.
+CREATE TABLE catalogue_state (
+    catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
+    phase text NOT NULL DEFAULT 'idle' CONSTRAINT catalogue_state_phase_check CHECK (phase IN ('idle', 'import', 'update', 'failed', 'disabled')),
+    run text CONSTRAINT catalogue_state_run_check CHECK (run IN ('import', 'update')),
+    generation bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_generation_check CHECK (generation >= 0),
+    cursor jsonb,
+    position jsonb,
+    cards bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_cards_check CHECK (cards >= 0),
+    upstream_version text CONSTRAINT catalogue_state_upstream_version_check CHECK (octet_length(upstream_version) <= 256),
+    last_import_at timestamp with time zone,
+    last_update_at timestamp with time zone,
+    current_as_of timestamp with time zone,
+    import_requested text,
+    waiting text,
+    last_error text,
+    error_count bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_error_count_check CHECK (error_count >= 0),
+    updated_at timestamp with time zone NOT NULL DEFAULT now()
+);
 
 
 -- ── Rows the code updates in place ───────────────────────────────────────────────────────────

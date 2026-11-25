@@ -279,6 +279,33 @@ enabled = true
 # client_id = ""
 # client_secret = ""
 
+# Catalogues: open catalogues imported in bulk, one card per item (docs/operations.md,
+# Catalogues). Each is on by default; enabled = false here switches all of them off. A catalogue
+# switched off starts no importer; its rows stay until `pinakesd catalogue drop <name>`.
+[catalogues]
+enabled = true
+# Downloads and temporary files. Relative to the working directory; the container image sets
+# /var/lib/pinakes/catalogues instead.
+dir = "catalogues"
+[catalogues.wikidata]
+enabled = true
+# limit = 100000 # Import at most this many items (a small instance); unset imports all.
+[catalogues.musicbrainz]
+enabled = true
+# limit = 100000
+[catalogues.osm]
+enabled = true
+region = "planet" # Or a region of Geofabrik's extracts, e.g. "europe/switzerland".
+[catalogues.openalex]
+enabled = true
+min_citations = 50 # Works cited more than this many times.
+[catalogues.podcastindex]
+enabled = true
+[catalogues.tranco]
+enabled = true
+[catalogues.software]
+enabled = true # crates.io, F-Droid and Flathub.
+
 [api]
 # Applied to every public route (/v1, the agents' guide and /mcp) per client address.
 requests_per_minute = 120

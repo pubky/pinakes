@@ -18,6 +18,8 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH]` | Runs the daemon. Creates the schema on an empty database. Without `--config`, only the defaults and the environment apply. |
 | `pinakesd [--config PATH] --migrate` | Creates the schema on an empty database and exits. |
 | `pinakesd [--config PATH] reextract ROUTE…\|all\|also-on` | Reads stored links again after a parser, routing or source change. Run it with the daemon stopped ([re-extraction](#re-extraction)). |
+| `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
+| `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
 | `pinakesd --openapi` | Prints the OpenAPI document. |
 | `pinakesd --help` | Prints the usage line. |
@@ -152,6 +154,20 @@ Concurrency, rates and lifetimes are not keys of these sections; they are [limit
 | `api.swagger_ui` | `true` | Swagger UI at `/swagger-ui`. |
 | `api.mcp` | `true` | The MCP endpoint, `POST /mcp`. |
 | `canary.enabled` | `true` | Periodic [canaries](#canaries). |
+
+### Catalogue sections
+
+A catalogue is on when both `catalogues.enabled` and its own `enabled` are true
+([catalogues](#catalogues)).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `catalogues.enabled` | `true` | All catalogues. Off, Pinakes indexes only referenced links. |
+| `catalogues.dir` | `"catalogues"` | Downloads and temporary files of imports, one directory per catalogue (`catalogues/wikidata`), relative to the working directory. The container image sets `/var/lib/pinakes/catalogues`. |
+| `catalogues.<name>.enabled` | `true` | One catalogue: `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` or `software`. |
+| `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. |
+| `catalogues.osm.region` | `"planet"` | `planet`, or a region of Geofabrik's OpenStreetMap extracts by its path (`europe/switzerland`). |
+| `catalogues.openalex.min_citations` | `50` | Import works cited more than this many times, 0–1000000. |
 
 ### Limits
 
@@ -328,8 +344,8 @@ which PostgreSQL refuses to a role without `CREATE` on the schema even when the 
 
 ### Schema
 
-`migrations/0001_schema.sql` is the whole schema. `pinakesd --migrate`, the daemon's start and
-`reextract` each create it on an empty database and leave a database that already has it as it is.
+`migrations/0001_schema.sql` is the whole schema. `pinakesd --migrate`, the daemon's start,
+`reextract` and the `catalogue` commands each create it on an empty database and leave a database that already has it as it is.
 A database built from another version of the file is refused and left unchanged.
 
 Schema changes edit that file; there is no incremental migration runner and no general in-place
@@ -1571,12 +1587,114 @@ host, the same registrable domain. The publisher must match when:
 A link with too few path segments (and no such query parameter) is a publisher of its own. A subdomain of a
 listed host takes the host's rule; the longest matching host wins.
 
+## Catalogues
+
+A catalogue card is one item of an open catalogue, stored in `catalogue_card`. The catalogues are
+`wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` and `software` (crates.io,
+F-Droid and Flathub). An importer is the only writer of a catalogue's cards; they don't go
+through the fetch queue, the refresh tiers or the change journal. This version has no importer: no
+catalogue is read, and the catalogue tables stay empty.
+
+### What a card holds
+
+| Field | Holds |
+| --- | --- |
+| `catalogue`, `source`, `source_id` | The catalogue, its sub-source (the registry for `software`, else the catalogue) and the item's ID there, unique per catalogue |
+| `uri` | The item's canonical link, normalized as a referenced link is |
+| `type` | The schema.org type, by its bare name (`Person`) |
+| `name`, `other_names`, `description` | Texts, without control characters |
+| `labels` | The source's labels as valid Pubky tag labels: lower case, at most 20 characters, no spaces, commas or colons. A label that can't be made one is left out. |
+| `keys` | Join keys in the forms resources carry (`wikidata:Q42`, `mb:recording:<mbid>`, `doi:` in lower case, `isbn:` as ISBN-13), and `url:<resource id>` for each link people share for the item |
+| `related_uris` | Links in the item's group that are not the item, such as an official website |
+| `point`, `fame`, `details` | A point, a 0–1 fame from the source's own signal, and the catalogue's own extras |
+
+`catalogue_state` holds one row per catalogue: its phase (`idle`, `import`, `update`, `failed`,
+`disabled`), the run under way and where it resumes, where the next update starts, its cards, the
+upstream version, when the last full import and update finished, how current its cards are
+(`current_as_of`: the upstream time of the data the last finished run left), why it waits, and its
+errors.
+
+### Turn a catalogue off
+
+Set `[catalogues.<name>] enabled = false`, or `[catalogues] enabled = false` for all of them
+([keys](#catalogue-sections)), and restart the daemon. A catalogue that is off:
+
+- starts no importer;
+- keeps its rows, so turning it back on doesn't import it again from the start. Its state row's
+  phase is `disabled` while the daemon runs with it off, and a run it had under way resumes from
+  its cursor when it is on again.
+
+### Status and drop
+
+```sh
+pinakesd --config <path> catalogue status
+pinakesd --config <path> catalogue drop <name>
+```
+
+`catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, when its
+last full import and update finished, how current its cards are, a full import an update asked
+for (with its reason) and why it waits, and its last error.
+The last error stays after a later success; the metrics count every failure.
+
+`catalogue drop <name>` deletes the catalogue's cards, 10,000 per transaction, and its state row,
+so it starts over with a full import when it is turned on again. Then it deletes the catalogue's
+directory (`catalogues.dir/<name>`, relative to the command's working directory, as the daemon's
+is) and prints the directory it removed, or that there was none. It refuses:
+
+- a catalogue that is on in the configuration it is given: switch it off in the daemon's file,
+  restart the daemon, then drop;
+- while a daemon runs the catalogue's importer, which holds the catalogue's advisory lock for as
+  long as it runs. The drop takes the same lock, so it can run beside the daemon.
+
+`scripts/lock-waits` names these locks `catalogue <name>` and `large catalogue import`.
+
+### Importer rules
+
+No importer is registered in this version, so `pinakesd` starts no importer task. Once a
+catalogue has one, its importer runs as a background task of `pinakesd`, started only for a
+catalogue that is on, and follows these rules:
+
+| Rule | What the task does |
+| --- | --- |
+| One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
+| What runs | A full import when none has finished, then an update a day after the last finished full import or update. An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
+| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. Each catalogue may lag as far as its source's publication rhythm allows (below). |
+| One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
+| Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
+| Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |
+| Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is one whose importer panicked. A run whose catalogue lock's database session has ended stops, is logged and resumes once the task holds the lock again; nothing about it is written to the state row, which another daemon may hold by then. Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
+| Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
+| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. |
+
+### Allowed update lag
+
+`CatalogueUpdateLag` fires when a catalogue's cards are further behind upstream than its source's
+publication rhythm allows (`pinakes_catalogue_max_update_lag_seconds`, fixed per catalogue):
+
+| Catalogue | Upstream publishes | Allowed lag |
+| --- | --- | --- |
+| `wikidata` | A change stream | 2 days |
+| `osm` | Daily change files | 2 days |
+| `tranco` | A daily list | 2 days |
+| `software` | Daily registry files | 2 days |
+| `musicbrainz` | Dumps twice a week | 5 days |
+| `podcastindex` | A weekly database | 9 days |
+| `openalex` | A quarterly snapshot | 100 days |
+
+### A large import that keeps failing
+
+A large catalogue's full import that fails is resumed every ten minutes, and keeps the
+large-import turn meanwhile: the other large catalogues' full imports wait for it
+(`pinakes_catalogue_waiting_for_turn`, alert `CatalogueTurnBlocked`). `catalogue status` names it
+in the others' `waiting` and shows its `last_error`. Fix the cause, or switch it off and restart
+(its cut-off import then no longer holds the turn; it resumes when it is on again), or drop it.
+
 ## Monitoring
 
 Scrape `GET /metrics` on the admin listener. [ops/README.md](../ops/README.md) has every series, the scrape
 setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafana/pinakes.json`).
 `scripts/check-ops` checks every metric they name against the registry, and runs `promtool check rules
---lint-fatal` when it is installed.
+--lint-fatal` and the rule tests (`ops/alerts.test.yml`) when it is installed.
 
 ### Alerts
 
@@ -1595,6 +1713,8 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CursorReset` | info | A feed resync or [feed reset](#feed-resets). |
 | `PreviewCapacityReached` | warning | [New previews](#new-previews). |
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
+| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
+| `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
 
 A new key needs a restart.
 

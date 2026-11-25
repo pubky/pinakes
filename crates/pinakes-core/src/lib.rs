@@ -8,6 +8,7 @@ pub mod app_ids;
 pub mod barcode;
 pub mod canary;
 pub mod capability;
+pub mod catalogue;
 pub mod change_api;
 pub mod changes;
 pub mod collections;
