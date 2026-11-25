@@ -1,94 +1,166 @@
 # Discogs
 
-Artists, masters and releases in the Discogs music database, read from its API
-(`api.discogs.com`): Discogs answers requests for its web pages with a bot wall. No key; 25
-requests a minute, the pace Pinakes keeps by default. Discogs' images need authentication, by
-either credential Discogs takes:
-- a personal access token (`[also_on.sources.discogs] token`, or
-  `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`), sent as `Authorization: Discogs token=…`;
-- an app's consumer key and secret (`[also_on.sources.discogs] key` and `secret`, or
-  `PINAKES_DISCOGS_CONSUMER_KEY` and `PINAKES_DISCOGS_CONSUMER_SECRET`, which fill them when the
-  file leaves them unset), sent as `Authorization: Discogs key=…, secret=…`.
+Pinakes reads artists, masters and releases in the Discogs music database from the Discogs API
+(`api.discogs.com`), because Discogs' web pages answer automated requests with a bot wall. No
+credential is needed. With one, the cards also show Discogs' images.
 
-The token wins when both are set. With either, the cards show images and Discogs allows 60
-requests a minute; an operator's `limits.host_rates` entry sets the pace outright
-(`"api.discogs.com" = 1.0` under `[limits.host_rates]`). The credential is sent only to
-`api.discogs.com` and never appears in logs, errors or the operator info. A request Discogs
-answers 401 or 403 with the credential is asked again without it. When that answer is the record
-(or its 404), the credential is what Discogs refused (expired, revoked or mistyped): it is dropped
-for an hour, one warning is logged, the cards are read without it meanwhile (no images), and
-`pinakes_source_token_refusals_total{source="discogs"}` counts each refusal. A 401 or 403 the
-request gets without the credential too is no refusal of it. Release data is CC0.
+| | |
+| --- | --- |
+| Source | `discogs`, official source with an also-on half |
+| Links | `discogs.com/artist/{id}`, `discogs.com/master/{id}`, `discogs.com/release/{id}` |
+| Fetches | `GET https://api.discogs.com/artists/{id}`, `/masters/{id}` or `/releases/{id}` |
+| Credentials | Optional `[also_on.sources.discogs] token`, or `key` and `secret`: images on cards |
+| Rate | 25 requests a minute on `api.discogs.com` |
+| Refresh | Daily, as every official card ([refresh](../design.md#refresh)) |
+| Card types | `MusicGroup`, `Person`, `MusicAlbum` |
+| Keys | `discogs:artist:…`, `discogs:master:…`, `discogs:release:…`, `upc:…` (from the [also-on half](#also-on)) |
+| Credit | None |
+| Switch | `[sources.discogs] enabled` (cards) and `[also_on.sources.discogs] enabled` (keys), both on by default |
 
 ## Links
 
+Pinakes reads three kinds of Discogs object:
+
 - an **artist**: `https://www.discogs.com/artist/{id}`;
 - a **master**, an album across all its editions: `https://www.discogs.com/master/{id}`;
-- a **release**, one edition (a pressing, a format, a country): `https://www.discogs.com/release/{id}`.
+- a **release**, one edition (a pressing, a format, a country):
+  `https://www.discogs.com/release/{id}`.
 
-The name after the ID (`/master/21491-Radiohead-OK-Computer`), a language path (`/de/…`) and
-`discogs.com` without `www` are aliases of that address. Labels and marketplace pages are not
-read.
+These are the roots. The name after the ID (`/master/21491-Radiohead-OK-Computer`), a language
+path (`/de/…`, `/pt_BR/…`), `discogs.com` without `www`, `http` and a trailing slash are
+[aliases](../api.md#aliases) of the root. An ID is up to 12 digits without a leading zero.
 
-## What it reads
+Not read here: labels, marketplace pages (`/sell/…`), image pages, links to `api.discogs.com`
+and links with a port, user name or password.
 
-`GET https://api.discogs.com/{artists,masters,releases}/{id}` (2 to 50 KB). An ID Discogs does not
-have is `missing`; a record whose `id` is not the one asked for is an error, and no card. The
-answer is shared for an hour with the also-on lookup of the same link.
+## What it fetches
+
+One request per read: `GET https://api.discogs.com/{artists|masters|releases}/{id}`. The answer
+is shared for an hour with the also-on half's request for the same release, so they ask once.
+
+- An ID Discogs doesn't have (404) is `missing`.
+- A record whose `id` isn't the one asked for is an error, and gives no card.
+- A 408, 429 or 5xx answer is retried later. Any other status is an error.
+
+### Credentials
+
+Discogs' images need a credential. Set either one in `[also_on.sources.discogs]`, which the card
+route reads too (`[sources.discogs]` takes none):
+
+| Credential | Config | Environment | Sent as |
+| --- | --- | --- | --- |
+| A personal access token | `token` | `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN` | `Authorization: Discogs token=…` |
+| An app's consumer key and secret | `key` and `secret` | `PINAKES_DISCOGS_CONSUMER_KEY` and `PINAKES_DISCOGS_CONSUMER_SECRET` (used when the file leaves them unset) | `Authorization: Discogs key=…, secret=…` |
+
+The token wins when both are set. The credential is sent only to `api.discogs.com` and never
+appears in logs, errors or the operator info.
+
+With a credential, Discogs allows 60 requests a minute, but Pinakes keeps its pace of 25 a
+minute. To use the higher limit, set the pace yourself under `[limits.host_rates]`, for example
+`"api.discogs.com" = 1.0`.
+
+### A refused credential
+
+When Discogs answers 401 or 403 to a request with the credential, Pinakes asks again without it.
+If that second answer is the record (or a 404), the credential is what Discogs refused (expired,
+revoked or mistyped):
+
+- Pinakes stops sending it for an hour and logs one warning;
+- cards are read without it meanwhile, so they have no images;
+- `pinakes_source_token_refusals_total{source="discogs"}` counts each refusal.
+
+A 401 or 403 that the request gets without the credential too is not a refusal of it.
 
 ## Card
 
-An artist is a `MusicGroup` named without Discogs' number for namesakes (`Radiohead (2)` →
-`Radiohead`); a `Person` when MusicBrainz says the artist is one. A master or release is a
-`MusicAlbum` named by its title. A master is described by its artist credit and year
-(`Radiohead · 1997`), a release also by its format and country
-(`Radiohead · CD, Album, Stereo · Europe · 1997`). The image is Discogs' primary image, only with
-a token.
+- An artist is a `MusicGroup`, named without Discogs' number for namesakes (`Radiohead (2)` →
+  `Radiohead`). It is a `Person` when MusicBrainz says the artist is one (the `artist_type` fact
+  of `musicbrainz`).
+- A master or a release is a `MusicAlbum` named by its title.
+- `site` is "Discogs".
+- `description`: for a master, the artist credit and year (`Radiohead · 1997`); for a release,
+  also its format and country (`Radiohead · CD, Album, Stereo · Europe · 1997`).
+- `image` is Discogs' primary image (else its first), only when the record was read with a
+  credential.
 
 | Fact | Meaning |
 | --- | --- |
-| `artist` | A master's or release's artist credit |
+| `artist` | A master's or release's artist credit, each name as credited with its join word |
 | `year` | The year it was released |
-| `format`, `country` | A release's format and its descriptions; where it was released |
-| `upc` | A release's barcodes, as 13 digits with a verified check digit |
-| `master` | A release's master |
+| `format` | A release's first format and its descriptions (`CD, Album, Stereo`) |
+| `country` | Where a release was released, as Discogs names it (`Europe`) |
+| `upc` | A release's barcodes, as GTIN-13 with a verified check digit, joined with `; ` |
+| `master` | A release's master, as its link `https://www.discogs.com/master/{id}` |
+
+## Keys and groups
+
+The card route sets no key. A Discogs link's keys come from the [also-on half](#also-on) below,
+and from the music hubs that name Discogs pages:
+
+- `musicbrainz` relates each Discogs page at its own level: an artist to an
+  artist, a master to a release group, a release to one release. A release never takes its
+  release group's key, because an edition is not the album.
+- `wikidata` finds the item that carries the Discogs ID: an artist (`P1953`), an
+  album (`P1954`, a master), or an edition (`P2206`, a release). A release ID names an item only
+  when the item is not an album's.
+
+Pages of other services list the Discogs artist, master or release that MusicBrainz or Wikidata
+names for them at their level. A master's card lists the album's pages on other services:
+MusicBrainz names none for a release group (its editions have them), so they come from the one
+Wikidata item MusicBrainz relates the release group to, when that item names the release group
+back.
 
 ## Also on
 
-A Discogs link joins other services' pages exactly, never by title or catalogue number:
+The `discogs` also-on source records a Discogs link's own ID and a release's barcodes. It never
+matches by title or catalogue number.
 
-- MusicBrainz names Discogs pages in its URL relations, at one level each: an artist's
-  artist, a release group's master, a release's release. A master joins its release group, a
-  release its one release (never the release group: an edition is not the album), an artist the
-  artist.
-- Wikidata's Discogs artist ID (P1953) and master ID (P1954) name the item of an artist or
-  album; a release ID (P2206) names an item only when it is not an album's (it has no master and
-  no MusicBrainz release group).
-- A release's own barcode is a `upc:` key when it lists one; a box set lists each disc's, so
-  several stay facts.
+| | |
+| --- | --- |
+| Runs on | Discogs artist, master and release links |
+| Asks | A release's record, `GET https://api.discogs.com/releases/{id}` (the card's request, shared); nothing for an artist or master |
+| Rows live | 30 days; rows expire after 60 |
+| Keys | `discogs:artist:{id}`, `discogs:master:{id}`, `discogs:release:{id}`, `upc:…` |
+| Facts | `upc` |
+| Switch | `[also_on.sources.discogs] enabled`, on by default |
 
-**Trust.** Discogs is edited by its users, so a release's barcode is what its editors entered.
-Pinakes keys it on Discogs' word alone, as it keys MusicBrainz's barcodes (also edited by its
-users). A wrong barcode joins this edition to another one's pages, and the join is a hint on the
-card, not a claim. If wrong barcodes show up, the rule changes to keying a Discogs barcode only
-when a second source names the same one, and keeping it as a fact otherwise.
+- Every Discogs link gets the key `discogs:{kind}:{id}`. Each of these namespaces names one
+  object, so a [group](../api.md#groups) holds at most one value of each. A search with
+  `key=discogs:{kind}:{id}` finds the links that carry it.
+- A release lists its barcodes as `upc` facts (at most four). A release that lists exactly one
+  barcode also gets it as the key `upc:…`, which `deezer` and `itunes`
+  then look albums up by. A box set lists each disc's barcode, so several barcodes stay facts and
+  join nothing.
 
-Pages of other services list the Discogs artist, master or release that MusicBrainz or Wikidata
-names for them at their level. A master's card lists the album's pages on other services: MusicBrainz
-names none for a release group (its editions have them), so they come from the one Wikidata item
-MusicBrainz relates the release group to, when that item names the release group back.
+Discogs is edited by its users, so a release's barcode is what its editors entered. Pinakes keys
+it on Discogs' word alone, as it keys MusicBrainz's barcodes. A wrong barcode joins this edition
+to another one's pages, and the join shows as a link on the card.
 
-The `discogs` also-on source: a Discogs artist, master or release gets `discogs:{kind}:{id}` as key, and a release
-up to four of its barcodes as facts, from the record its card reads (shared); a release that
-lists one barcode also gets it as a `upc:` key (a box set lists each disc's), which
-`deezer` and `itunes` then look up. Never by title or catalogue number.
+When Discogs' record fails, the source records the link's own key and comes back after a failed
+run's backoff ([operations](../operations.md#also-on)).
 
-Each Discogs release costs one Discogs request (the one its card makes), and a Discogs master one
-Wikidata request (the item MusicBrainz relates its release group to). When Discogs' record fails,
-the link's own key is recorded and the run comes back after a failed run's backoff
-([operations](../operations.md#also-on)).
+## Credit
 
-Keys: `discogs:{artist|master|release}:{id}`: each names one object, so a [group](../api.md#groups) holds at most one value of each, and [`key=`](../api.md#search) finds the links that carry it.
+The card credits nothing beyond its `site`, "Discogs". Discogs states its release data as CC0.
+
+## Turn it off
+
+To stop reading Discogs cards:
+
+```toml
+[sources.discogs]
+enabled = false
+```
+
+Discogs links then get ordinary web cards. To stop recording Discogs keys and barcodes:
+
+```toml
+[also_on.sources.discogs]
+enabled = false
+```
+
+Its stored keys and facts stop showing at once, and Discogs links join groups only through the
+music hubs' keys.
 
 ## Examples
 

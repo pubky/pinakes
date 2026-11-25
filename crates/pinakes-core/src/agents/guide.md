@@ -53,8 +53,10 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 - **Only referenced links.** Search lists links someone tagged, replied to or embedded on Pubky.
   Pinakes holds no posts, users or tags of its own: those are Nexus's (below).
 - **Groups.** Links that are the same thing on several services (a song on Spotify and on
-  Apple Music, a book's editions, an event on two platforms) form a group: `group.id` on each
-  card, `also_on` lists the others. Every link keeps its own card.
+  Apple Music, a DOI and its landing page, an event page and the same date in its organiser's
+  calendar) form a group: `group.id` on each card, `also_on` lists the others. Every link keeps
+  its own card. Only exact identifiers join a group; a match by title or time is a hint
+  (`kind: "maybe"` in `also_on`, or `maybe_same` on events and recordings).
 - **Podcasts.** A show's card (`PodcastSeries`) carries `episodes`: its latest 5 episodes with
   public audio or video, newest first, each with `uri`, `name`, `published` and a `stream` (`url`, `type`,
   `duration_s`) to play. `GET {{BASE}}/v1/resources/{id}/episodes` pages through its latest 1000,
@@ -247,8 +249,8 @@ Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
 ## Limits
 
 - **Per-IP budget**: 120 requests a minute over every public route by default
-  (`limits.requests_per_minute` in `GET {{BASE}}/v1/info`). A `reach` search costs 6, a `related`
-  search 6. Over budget is a 429 with `Retry-After: 60`. An MCP message costs one, and a tool
+  (`limits.requests_per_minute` in `GET {{BASE}}/v1/info`). A `reach` or `boost` search costs 6, a
+  `related` search 6. Over budget is a 429 with `Retry-After: 60`. An MCP message costs one, and a tool
   call costs what its REST call costs on top.
 - **Pages**: `limit` 1–500, default 50. Follow `cursor`; a full page does not mean there is no
   more.

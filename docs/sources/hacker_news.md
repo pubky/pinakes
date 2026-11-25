@@ -1,50 +1,120 @@
 # Hacker News
 
-Hacker News stories, comments, jobs and polls, read from the official Firebase API by item id.
-No key; the API publishes no limit (one request per second). Items are social content: the card
-quotes at most 200 characters, refreshes within the hour and is removed once the item is gone.
+Pinakes reads Hacker News stories, comments, jobs and polls from the official Firebase API, by
+item ID. No key is needed. Items are social content.
+
+| | |
+| --- | --- |
+| Source | `hacker_news`, official source |
+| Links | `news.ycombinator.com/item?id={id}`, `hacker-news.firebaseio.com/v0/item/{id}.json` |
+| Fetches | `GET https://hacker-news.firebaseio.com/v0/item/{id}.json`; for a comment, its parent the same way |
+| Credentials | None |
+| Rate | Shared per-host default (`limits.host_requests_per_second`) |
+| Refresh | Within the hour (social content) |
+| Card types | `DiscussionForumPosting`, `Comment`, `JobPosting` |
+| Keys | None (facts only) |
+| Social content | Yes: 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |
+| Credit | None |
+| Switch | `[sources.hacker_news] enabled`, on by default |
 
 ## Links
 
-`https://news.ycombinator.com/item?id={id}` is the root; the same item's other pages
-(`&p=2`) and the API's `https://hacker-news.firebaseio.com/v0/item/{id}.json` are aliases of it.
-Another site's page that names an item by its id (such as `https://hnsignals.com/signal/{id}`)
-is not read: it gets a web card of its own.
+Every address of one item is one resource. The root is
+`https://news.ycombinator.com/item?id={id}`, and these links are [aliases](../api.md#aliases) of
+it:
 
-## What it reads
+- the same item page with other query parameters, such as `&p=2`;
+- `https://hacker-news.firebaseio.com/v0/item/{id}.json`, the API's address.
 
-`GET https://hacker-news.firebaseio.com/v0/item/{id}.json` (well under 1 KB), and for a comment
-its parent the same way, to see whether it answers a hiring thread (a failed read leaves it a
-comment). An item that does not exist or was deleted is `missing`.
+An item ID is a positive decimal number of at most 12 digits.
+
+Not read here: user pages (`news.ycombinator.com/user?id=…`), the front page, an `item` link
+whose `id` is not a number, and other sites' pages that name an item by its ID (such as
+`https://hnsignals.com/signal/{id}`). Those get web cards of their own.
+
+## What it fetches
+
+Each read makes one request: `GET https://hacker-news.firebaseio.com/v0/item/{id}.json`. An item
+the API answers with `null`, or one marked deleted, is `missing`. Any other status than 200, or an
+answer for another item ID, is an error, and the read is retried.
+
+For a comment, Pinakes then reads its parent the same way, to see whether the comment is a
+top-level answer in a hiring thread (see [Job postings](#job-postings)). If that second read fails,
+the card stays a comment.
 
 ## Card
 
-A story or poll is a `DiscussionForumPosting` named by its title; a comment is a `Comment`
-named after its author ("Comment by …"). The description is an excerpt of its text.
+The type follows the item's type:
 
-Two kinds of item are `JobPosting`s ([Jobs](../api.md#jobs)), posted at their time (`start`):
+- A story, poll or other non-comment item is a `DiscussionForumPosting`, named by its title.
+- A comment is a `Comment`, named after its author ("Comment by norvig").
+- A job item, and a hiring comment, is a `JobPosting`.
 
-- a job item ("9 Mothers (YC P26) Is Hiring in Austin, TX"), named by its title; its employer is
-  the name before " (YC …", and its `link` is where to apply;
-- a top-level comment of a monthly "Ask HN: Who is hiring?" thread (a story by `whoishiring`)
-  whose first line is a header in the thread's convention, parts separated by `|`, `—` or `–`
-  (an ASCII `-` is not a separator: it is part of words such as "Full-time")
-  ("FUTO | https://futo.tech/ | Austin, TX | REMOTE(Worldwide) or ONSITE | Full Time"). It is
-  named by that line; its employer is the first part (without its parentheses); a part saying
-  REMOTE makes it remote, with the regions in its parentheses ("REMOTE (US)"); a part naming
-  full time, part time, contract or intern gives its employment type; one applies through the
-  comment's page. The free-text place is not placed on the map.
+`description` is an excerpt of the item's text: plain text, at most 200 characters.
+
+### Job postings
+
+Two kinds of item are `JobPosting`s ([jobs](../api.md#jobs)). Both are posted at the item's time,
+which the card holds as `start`.
+
+A job item, such as "9 Mothers (YC P26) Is Hiring in Austin, TX", is named by its title. Its
+employer is the part of the title before " (YC ". Its `apply_url` is the item's link.
+
+A hiring comment is a top-level comment of a monthly "Ask HN: Who is hiring?" thread (a story by
+`whoishiring` whose title starts with that text). It is a job posting only when its first line is a
+header in the thread's convention, for example:
+
+```text
+FUTO | https://futo.tech/ | Austin, TX | REMOTE(Worldwide) or ONSITE | Full Time
+```
+
+The header has at least two parts, separated by `|`, `—` or `–`, and at most 300 characters. An
+ASCII `-` is not a separator, because it is part of words such as "Full-time". From the header:
+
+- The card is named by the header line (at most 200 characters).
+- The employer is the first part, without its parenthesized asides.
+- A part saying REMOTE makes the posting remote, with the regions in its parentheses, such as
+  "REMOTE (US)".
+- A part naming full time, part time, contract, intern or temporary gives the employment type.
+- `apply_url` is the comment's page.
+
+A free-text place in the header is not placed on the map. A comment without such a header stays a
+`Comment`.
 
 | Fact | Meaning |
 | --- | --- |
 | `author` | The author's user name |
-| `item_type` | `story`, `comment`, `job`, `poll` or `pollopt` |
-| `published` | RFC 3339 |
-| `score`, `comment_count` | For a story |
-| `link` | The link a story discusses (another object, not this one) |
-| `parent` | For a comment, the item it answers |
-| `page_url` | Its page on Hacker News |
-| `hiring_organization`, `employment_type`, `remote`, `remote_regions`, `date_posted`, `apply_url` | A job posting's ([Jobs](../api.md#jobs)) |
+| `item_type` | The API's item type: `story`, `comment`, `job`, `poll` or `pollopt` |
+| `published` | When the item was posted, RFC 3339 |
+| `score` | A story's points |
+| `comment_count` | A story's number of comments |
+| `link` | The link a story points at (another object, not this one) |
+| `parent` | For a comment, the page of the item it answers |
+| `page_url` | The item's page on Hacker News |
+| `hiring_organization` | A job posting's employer |
+| `employment_type` | A job posting's employment type, such as `FULL_TIME` |
+| `remote` | `true` for a remote job posting |
+| `remote_regions` | The regions a remote job posting names |
+| `date_posted` | When a job posting was posted |
+| `apply_url` | Where to apply: a job item's link, or a hiring comment's page |
+
+## Keys and groups
+
+Hacker News items have no keys and join no [groups](../api.md#groups). A story's `link` is a fact
+only: it names another resource, which gets a card of its own.
+
+## Credit
+
+The card credits nothing.
+
+## Turn it off
+
+```toml
+[sources.hacker_news]
+enabled = false
+```
+
+Hacker News links then get ordinary web cards.
 
 ## Examples
 

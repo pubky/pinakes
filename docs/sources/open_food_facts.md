@@ -1,55 +1,126 @@
 # Open Food Facts
 
-Products on the Open Food Facts databases (Open Food Facts, Open Beauty Facts, Open Products
-Facts, Open Pet Food Facts), read from their API by barcode: their product pages carry only the
-site's own structured data. No key; the databases publish a limit of 100 product reads a minute,
-so each database's host is paced at 1.66 requests a second.
+Pinakes reads products on the Open Food Facts databases from their API, by barcode. The databases are
+Open Food Facts, Open Beauty Facts, Open Products Facts and Open Pet Food Facts. Their product pages
+carry only the site's own structured data. No key is needed.
+
+An also-on source of the same name finds the database's product for any other product card that
+states a barcode ([below](#also-on)).
+
+| | |
+| --- | --- |
+| Source | `open_food_facts`, official source with an also-on half |
+| Links | `{country or world}.{database}/product/{barcode}[/{slug}]`, and `/produit/` |
+| Fetches | `GET https://world.{database}/api/v2/product/{GTIN-13}.json?fields=…`, once or twice |
+| Credentials | None |
+| Rate | At most 1.66 requests per second on each database's `world.` host (the databases publish 100 product reads a minute). A source's rate only lowers the default, so with the default `limits.host_requests_per_second` (1) each host gets 1 |
+| Refresh | Daily, as every official card ([refresh](../design.md#refresh)) |
+| Card types | `Product` |
+| Keys | `gtin:{GTIN-13}`, recorded by the `product_keys` also-on source |
+| Credit | `© Open Food Facts contributors, ODbL 1.0` (or the other database's name), in `attribution` |
+| Switch | `[sources.open_food_facts] enabled`, on by default; the also-on half `[also_on.sources.open_food_facts] enabled`, on by default |
 
 ## Links
 
-`https://world.{database}/product/{barcode}` is the root; a country's subdomain
-(`ch.openfoodfacts.org`), a slug after the barcode and the French `/produit/` are aliases of it.
-The databases are openfoodfacts.org, openbeautyfacts.org, openproductsfacts.org and
-openpetfoodfacts.org.
+The databases are on these hosts:
+
+| Database | Host | Product type |
+| --- | --- | --- |
+| Open Food Facts | `openfoodfacts.org` | `food` |
+| Open Beauty Facts | `openbeautyfacts.org` | `beauty` |
+| Open Products Facts | `openproductsfacts.org` | `product` |
+| Open Pet Food Facts | `openpetfoodfacts.org` | `petfood` |
+
+Every address of one product is one resource, under the root
+`https://world.{database}/product/{barcode}`. These links are [aliases](../api.md#aliases) of it:
+
+- the page on a country's subdomain (`ch.openfoodfacts.org`) or on the bare host;
+- the page with a slug after the barcode;
+- the French `/produit/` in place of `/product/`.
 
 Once the product is read, its root is its page on the database that holds it, with the barcode as
-that database's record spells it. A link that spells the barcode with more or fewer leading zeros
-(`…/product/0000080466468` for `…/product/80466468`) is an alias of that root, and so is a product
-page on a database that holds the barcode as another type of product
-(`https://world.openfoodfacts.org/product/80466468` for the product on openbeautyfacts.org).
+that database's record spells it. These links are then aliases of that root too:
 
-## What it reads
+- a link that spells the barcode with more or fewer leading zeros (`…/product/0000080466468` for
+  `…/product/80466468`);
+- a product page on a database that holds the barcode as another type of product
+  (`https://world.openfoodfacts.org/product/80466468` for the product on openbeautyfacts.org).
 
-`GET https://world.{database}/api/v2/product/{GTIN-13}.json?fields=…`. A database that holds the
-barcode as another type of product names that type ("product found with a different product type:
-beauty"), and that database is asked once. A barcode no database holds is `missing`.
+A barcode is 8, 12, 13 or 14 digits with a valid check digit. A 14-digit one starts with `0`. Not
+read here: an address with any other barcode, a category or list, and a host with a deeper subdomain.
+
+## What it fetches
+
+The first request goes to the database in the link:
+`GET https://world.{database}/api/v2/product/{GTIN-13}.json?fields=code,product_name,brands,quantity,product_type,nutriscore_grade,image_front_small_url`.
+
+A database that holds the barcode as another type of product answers 404 and names that type
+("product found with a different product type: beauty"). The database for that type is then asked
+once, and no other.
+
+A barcode that the asked databases do not hold is `missing`, and so is a record of another barcode.
+Any other answer is an error and the read is retried.
 
 ## Card
 
-A `Product` named by its product name, with its front image and the credit
-`© Open Food Facts contributors, ODbL 1.0` (or the other database's) as `attribution`, which a
-client shows with the card. Its barcode is its product key `gtin:`, as any product card's is
-([also on](README.md#also-on)).
+The type is `Product`.
+
+- `site` is the database's name.
+- `name` is the product name, else its brands.
+- `image` is the address of the small front image.
+- `attribution` is the database's credit. A client shows it with the card.
 
 | Fact | Meaning |
 | --- | --- |
-| `gtin` | Its barcode as GTIN-13 (the database may spell it shorter: `80466468`) |
-| `brand` | Its brands, as the database lists them |
-| `quantity` | E.g. `400 g` |
+| `gtin` | The barcode as GTIN-13 (the database may spell it shorter: `80466468`) |
+| `brand` | The brands, as the database lists them |
+| `quantity` | The quantity as the database writes it, for example `400 g` |
 | `nutriscore` | `a` to `e`, for food |
+
+## Keys and groups
+
+The card's barcode is its key `gtin:{GTIN-13}`, recorded by the `product_keys` also-on source with
+`open_food_facts` in `via`. `key=gtin:{barcode}` finds the card by the barcode in any of its lengths.
+A [group](../api.md#groups) holds at most one `gtin:` value.
 
 ## Also on
 
-`open_food_facts`: a product card on any other site that states its barcode (a shop's page) is
-looked up the same way, Open Food Facts first. The database's record must be of that barcode. It
-gives a derived link to the product there, keyed by the barcode (`gtin:`), and the facts
-`product_name`, `brands`, `quantity`, `nutriscore` and `attribution` (the database's credit:
-show it with them). Answers are cached for a day.
+The `open_food_facts` also-on source runs on a product card on any other site (a shop's page) that
+states a barcode in its `gtin` fact. It asks the databases as above, with Open Food Facts first. The
+database's record must be of that barcode.
 
-## Licence
+What it records:
 
-The databases' data is under the Open Database License (ODbL 1.0), © their contributors; the
-images under CC BY-SA. Pinakes keeps the image's address only.
+- a derived link to the product's page on the database, keyed by the barcode (`gtin:`);
+- the facts `product_name`, `brands`, `quantity` and `nutriscore`, where the record has them;
+- the fact `attribution`, the database's credit. Show it with these facts.
+
+The link carries the key, and the card it was found for does not. A referenced resource that is that
+database page takes the key.
+
+An answer is kept for a day, and a failed request for at most five minutes. A 429 or a server error is
+retried after its `Retry-After`, from one minute to an hour. The source's rows live 30 days and
+expire after twice that.
+
+## Credit
+
+Each card, and the facts the also-on half records, carry
+`© {database} contributors, ODbL 1.0`. The databases' data is under the Open Database License
+(ODbL 1.0).
+
+## Turn it off
+
+```toml
+[sources.open_food_facts]
+enabled = false
+
+[also_on.sources.open_food_facts]
+enabled = false
+```
+
+The two switches are independent. With the first off, links to the databases get ordinary web cards.
+With the second off, the also-on half asks nothing, and after the restart its stored links and facts
+stop showing.
 
 ## Examples
 

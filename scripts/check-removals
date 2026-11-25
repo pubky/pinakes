@@ -90,7 +90,7 @@ SHARED = [
     # the official huggingface source (model and dataset pages); the family's index entry names
     # its own, so it stays when the official source goes.
     {
-        "pattern": re.compile(r"^- \[`papers`\]\(papers\.md\):.*`huggingface`"),
+        "pattern": re.compile(r"^(?:- |\| )\[`papers`\]\(papers\.md\)(?::| \|).*`huggingface`"),
         "files": {"docs/sources/README.md"},
         "names": {"huggingface"},
         "why": "the papers family's own source of that id",
@@ -138,8 +138,12 @@ def own_lines(kind, name, title):
     banner = "|".join(re.escape(t) for t in (name, title) if t)
     own = {
         CORE + REGISTRY[kind]: [r"^pub mod %s;\n" % name, r"^\s*(&%s::\w+,|Arc::new\(%s::\w+\),)\n" % (name, name)],
-        # Its index entries (the page's, and `name.md#also-on` for an official source's half).
-        "docs/sources/README.md": [r"^- \[`%s`\]\(%s\.md(?:#[^)]*)?\):[^\n]*\n(  [^\n]*\n)*" % (name, name)],
+        # Its index entries (the page's, and `name.md#also-on` for an official source's half): a
+        # table row, or a list item with its continuation lines.
+        "docs/sources/README.md": [
+            r"^\| \[`%s`\]\(%s\.md(?:#[^)]*)?\) \|[^\n]*\n" % (name, name),
+            r"^- \[`%s`\]\(%s\.md(?:#[^)]*)?\):[^\n]*\n(  [^\n]*\n)*" % (name, name),
+        ],
         "pinakes.example.toml": [
             # Its `[sources.<name>]` block (the header may carry a comment), to the next section or
             # blank line.

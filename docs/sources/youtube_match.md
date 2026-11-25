@@ -1,66 +1,96 @@
 # `youtube_match`: a label's YouTube upload on Deezer and TIDAL, by artist, title and length
 
-One of the music sources of [also on](../api.md#also-on). Unlike the exact lookups, its links are
-matches by artist, title and length: maybes (`kind` `maybe`), never keys.
+This source finds a label's YouTube upload on Deezer and TIDAL. It is not an exact lookup: it compares
+the artist, the title and the length. Its links are `maybe` links, never keys.
 
-`youtube_match` (on by default; `[also_on.sources.youtube_match] enabled = false` turns it off):
-for a YouTube or YouTube Music video that is a label's upload, the same recording on Deezer and on
-TIDAL. A video is a label's upload when its stored card shows one: its channel (the oEmbed
-`author`) is an artist's Topic channel, `<Artist> - Topic`, or its description starts "Provided to
-YouTube by". The source reads the video's watch page (`https://www.youtube.com/watch?v={id}`) for
-its title, channel, length and description (`ytInitialPlayerResponse.videoDetails`:
-`title`, `author`, `lengthSeconds`, `shortDescription`; the page's `<meta itemprop="duration">`
-when the length is missing), as the stored card has no length. The artist is the Topic channel's
-name, else the first artist of the description's "Title · Artist" line (the same rule types the
-video's card a `MusicRecording` with that `artist`). The length read is the card's `duration` fact
-(seconds), whatever the searches find.
+| | |
+| --- | --- |
+| Source | `youtube_match`, also-on source |
+| Runs on | YouTube and YouTube Music videos that are a label's upload, as their stored card shows |
+| Asks | YouTube's watch page `https://www.youtube.com/watch?v={id}`; Deezer `GET https://api.deezer.com/search?q={artist} {title}` while `deezer` runs; TIDAL `GET https://openapi.tidal.com/v2/searchResults?countryCode={country}&filter[query]={artist} {title}&include=tracks.artists` while `tidal_isrc` runs |
+| Credentials | None of its own; the TIDAL search needs the operator's TIDAL credentials |
+| Rate | `www.youtube.com` at the shared per-host default (`limits.host_requests_per_second`), and Deezer's and TIDAL's paces |
+| Rows live | 30 days; rows expire after 60 |
+| Keys | None |
+| Links | `https://www.deezer.com/track/{id}` and `https://tidal.com/track/{id}`, a `maybe` each |
+| Facts | `duration`, in seconds |
+| Switch | `[also_on.sources.youtube_match] enabled`, on by default |
 
-It then searches, for the artist and title as `same_recording` compares them (lower case, the tags
-that keep a recording's identity such as a remaster dropped, the first credited artist):
-- Deezer (`https://api.deezer.com/search?q={artist} {title}`, the plain form, which finds
-  tracks the advanced `artist:"…" track:"…"` form misses), while `deezer` runs;
-- TIDAL (`GET /v2/searchResults?countryCode={[tidal] country}&filter[query]={artist} {title}&include=tracks.artists`,
-  with the operator's TIDAL credentials), while `tidal_isrc` runs.
+## What it does
 
-Of each service's tracks, exactly one must have the same artist (its first) and title (with its
-version, `Bohemian Rhapsody (Live Aid)`) and a length within 2 s of the video's; none or several
-give nothing for that service. Only the first page of each search is read (25 Deezer tracks, 20
-TIDAL tracks), so a second such track further down goes unseen; the link is a maybe, never a
-join. Queen's Topic upload of Bohemian Rhapsody (354 s) matches Deezer's one such track (354 s);
-TIDAL has two (355 s and 356 s), so it gives no TIDAL link. The links are
-`https://www.deezer.com/track/{id}` and `https://tidal.com/track/{id}`, `via` `youtube_match`,
-`kind` `maybe`.
+### Which videos
 
-## Why it is a maybe
+A video is a label's upload when its stored card shows one of these:
 
-Nothing YouTube publishes ties a video to an ISRC or another service's ID: the artist, title and
-length are a metadata match. Its links are derived but unkeyed and marked `maybe`: they never
-join a group, never become a key of the video, and a candidate's ISRC is never recorded as the
-video's.
+- its channel (the oEmbed `author`) is an artist's Topic channel, `<Artist> - Topic`;
+- its description starts "Provided to YouTube by".
 
-YouTube sometimes answers a watch page with a sign-in request
-(`playabilityStatus.status` `LOGIN_REQUIRED`, "confirm you're not a bot") and no video details,
-which the egress takes for a wall (as any other wall YouTube puts up), or a 403. That is no answer:
-the lookup is retried six hours later (`youtube_login`), keeping what an earlier run found.
+The source runs only while `deezer` or `tidal_isrc` runs.
 
-## From other services to YouTube
+### What it reads
 
-The exact paths from another service's track to its YouTube video are MusicBrainz URL relations
-(`musicbrainz`) and Wikidata's YouTube video ID (P1651, `wikidata`), which already give YouTube
-links. Odesli (song.link) is not used: its public API answers 401 `PUBLIC_API_ACCESS_DEPRECATED`
-(version v1-alpha.1 retired on 31 July 2026, no new keys), and it matches by metadata too. No
-other exact source of a track's YouTube video is known.
+The stored card has no length, so the source reads the watch page: the title, channel, length and
+description in `ytInitialPlayerResponse.videoDetails` (`title`, `author`, `lengthSeconds`,
+`shortDescription`). When the length is missing there, it takes the page's
+`<meta itemprop="duration">`. The artist is the Topic channel's name, else the first artist of the
+description's "Title · Artist" line.
 
-## Operations
+The length becomes the card's `duration` fact, whatever the searches find.
 
-Per label upload, while Deezer or `tidal_isrc` runs: one watch page (about 1.4 MB, refused above
-`limits.also_on_watch_page_bytes`, 3 MiB by default) at the host's default pace
-(`limits.host_requests_per_second`, one request at a time), then one Deezer search and one TIDAL
-search; each answer is shared for `limits.discovery_cache_secs` (an hour by default). A rate limit
-or an outage of YouTube or Deezer (`youtube_busy`, Deezer's quota) is retried, keeping the links an
-earlier run found. A watch page over `limits.also_on_watch_page_bytes` gives nothing and is not
-retried. TIDAL failing (a rate limit, an unexpected
-answer) fails the run, which keeps every link an earlier run found, unless the run has a Deezer
-match: that is recorded beside the links an earlier run found (a TIDAL one too), and
-the run comes back after the wait TIDAL named, else after five minutes. TIDAL refusing the credentials brings no run back early: a Deezer match is recorded, the links an earlier run found stay (a TIDAL one too), and the video is read again at its usual time. After an upgrade that adds
-it, `pinakesd reextract also-on` asks for every stored video at once.
+### What counts as a match
+
+The source searches each service for the artist and title as `same_recording` compares them: lower
+case, without the tags that keep a recording's identity (such as a remaster), and with the first
+credited artist only. Only the first page of each search is read, so a second such track further
+down goes unseen.
+
+For each service, exactly one track must have all of these:
+
+- the same artist (the track's first);
+- the same title, with its version, such as `Bohemian Rhapsody (Live Aid)`;
+- a length within 2 seconds of the video's.
+
+None or several give nothing for that service. Queen's Topic upload of "Bohemian Rhapsody" (354
+seconds) matches Deezer's one such track. TIDAL has two (355 and 356 seconds), so TIDAL gives none.
+
+### From other services to YouTube
+
+This source goes from a YouTube video to other services only. The exact links from another service's
+track to its YouTube video come from MusicBrainz URL relations (`musicbrainz`) and
+Wikidata's YouTube video ID, P1651 (`wikidata`).
+
+## Keys, links and facts
+
+The links are `maybe` links (`kind: "maybe"`, `via` `youtube_match`). Nothing YouTube publishes ties a
+video to an ISRC or another service's ID, so the artist, title and length are a metadata match. The
+links never join a group and never become a key of the video. When an exact source finds the same
+link, its exact link takes the `maybe`'s place. A candidate's ISRC is never recorded as the video's.
+
+## Cost
+
+For each label upload: one watch page (about 1.4 MB, refused above
+`limits.also_on_watch_page_bytes`, 3 MiB by default), then one Deezer search and one TIDAL search.
+Each answer is shared for `limits.discovery_cache_secs` (an hour by default).
+
+### Failures
+
+| What happens | What the source does |
+| --- | --- |
+| YouTube serves a sign-in page without video details (`playabilityStatus.status` `LOGIN_REQUIRED`), another wall, or a 403 | Retries six hours later (`youtube_login`), keeping what an earlier run found |
+| YouTube answers 429 or a 5xx | Retries after the wait YouTube named (`youtube_busy`), keeping what an earlier run found |
+| The watch page is over the cap, or has no video details | Finds nothing, drops what an earlier run found, and does not retry |
+| Deezer's search fails (busy, down, or an unexpected answer) | Retries, keeping what an earlier run found |
+| TIDAL fails in a run with a Deezer match | Records the Deezer match beside the links an earlier run found. The run comes back after the wait TIDAL named, else after `limits.also_on_refusal_hold_secs` (300 seconds by default) |
+| TIDAL fails in a run without a Deezer match | Fails the run, which keeps every link an earlier run found |
+| TIDAL refuses the credentials | Records a Deezer match if there is one, and keeps every link an earlier run found. No run comes back early: the video is read again at its usual time |
+
+`pinakesd reextract also-on` asks for every stored video at once.
+
+## Turn it off
+
+```toml
+[also_on.sources.youtube_match]
+enabled = false
+```
+
+Its links and the `duration` fact stop showing at the next start, and expire as usual.

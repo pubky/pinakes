@@ -1,28 +1,62 @@
 # `product_keys`: a product's barcode as its key
 
-An [also on](../api.md#also-on) source.
+This also-on source runs on [product](../api.md#products) cards that an
+[official source](README.md) read from a service's own record. It makes the barcode in that record
+the card's join key.
 
-`product_keys` reads a [product](../api.md#products) card whose barcode (`gtin`) a service's own
-record states (a product database's record, read by an [official source](README.md)) and makes
-it the key `gtin:{GTIN-13}`: two shops' pages of one product join one group, a hint like every
-group. `via` names that source. A barcode only the page's own JSON-LD states, or a record the
-page's own host serves (a shop's product record, read by a page hook), is the card's fact `gtin`
-and makes no key: what a page says about itself never joins it to another resource. A page that names several products of its own (in its
-head, or naming the page; one product described twice is one), a product it only lists (named by
-a fragment of a page whose head declares it a collection or about another entity), or a barcode
-with a wrong check digit, states none. It asks no service.
+| | |
+| --- | --- |
+| Source | `product_keys`, also-on source |
+| Runs on | `Product` cards (and subtypes) from an official source that is not a page hook, with a valid barcode in the `gtin` fact |
+| Asks | No service |
+| Credentials | None |
+| Rate | None needed: it sends no request |
+| Rows live | 30 days; rows expire after twice that |
+| Keys | `gtin:{GTIN-13}` |
+| Links | None |
+| Facts | None |
+| Switch | `[also_on.sources.product_keys] enabled`, on by default |
 
-`key=gtin:{barcode}` searches every link with the barcode, in any of its lengths (UPC-A, EAN-8,
-EAN-13, GTIN-14).
+## What it does
 
-A product's price and availability are facts of its own card with the time they were read
-(`price_at`), never keys. A music release's barcode is the music sources' `upc:` key and stays
-apart from `gtin:`.
+1. The card must be a product, and an official source that is not a page hook must have read it.
+2. The card's `gtin` fact must be a barcode of 8, 12, 13 or 14 digits with a valid check digit. A
+   14-digit one starts with `0`.
+3. The barcode, as GTIN-13, becomes the card's key `gtin:{GTIN-13}`. `via` names the official
+   source.
 
-## Examples
+Examples:
 
-- A product database's record naming barcode `3017620422003`: key `gtin:3017620422003`, via
-  the source that read it.
-- A shop's product page whose JSON-LD alone names `gtin13` `0840440422266`: `facts.gtin`, no key.
-- A Shopify shop's product whose own product record (on the shop's own host) names barcode
-  `0840440422266`: `facts.gtin`, no key.
+- A product database's record names barcode `3017620422003`: the card has the key
+  `gtin:3017620422003`, via the source that read it.
+- A shop's product page names `gtin13` `0840440422266` in its JSON-LD alone: the card has the fact
+  `gtin` and no key.
+- A Shopify shop's own product record, on the shop's own host, names barcode `0840440422266`: the
+  card has the fact `gtin` and no key.
+
+## Keys, links and facts
+
+The key is exact: the service's own record states it. Cards that share a `gtin:` value join one
+[group](../api.md#groups), which is a hint and merges nothing. A group holds at most one `gtin:`
+value.
+
+A barcode that only the page itself states is a fact and joins nothing. That holds for the page's
+JSON-LD and for a record the page's own host serves, which a page hook reads.
+
+`key=gtin:{barcode}` finds every link with that key, by the barcode in any of its lengths (UPC-A,
+EAN-8, EAN-13, GTIN-14). A music release's barcode is the key `upc:`, which is separate from
+`gtin:`.
+
+## Cost
+
+None. The source reads only the stored card.
+
+## Turn it off
+
+```toml
+[also_on.sources.product_keys]
+enabled = false
+```
+
+After the restart its stored keys stop showing: cards, search and groups leave them out. They are
+kept until they expire, and show again when the source is on. The `gtin` fact stays on the card.
