@@ -70,10 +70,11 @@ and every 7 days while one refusal follows another
 A sign-in redirect whose address carries `is_from_rle` (Instagram's rate-limit enforcement) refuses
 every page to the address Pinakes asks from, not only this one. It counts as a refusal at once,
 without asking for the sign-in page, and no request goes to Instagram (`www.instagram.com`,
-`instagram.com`) for a day, then for 2, 4 and 7 days after each such refusal in a row; any other
-answer from Instagram ends the streak. Links due meanwhile wait, and a new link is read once the
-pause is over. The pause is kept in memory: a restart forgets it, while each link's own wait is
-stored.
+`instagram.com`) for a day, then for 2, 4 and 7 days after each such refusal in a row; a request
+already waiting for its turn sends nothing either. Any other final answer from Instagram ends the
+streak (a redirect from `instagram.com` to `www.instagram.com` is no answer yet). Links due
+meanwhile wait, and a new link is read once the pause is over. The pause is kept in memory: a
+restart forgets it, while each link's own wait is stored.
 
 ## Card
 

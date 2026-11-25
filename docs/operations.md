@@ -1146,11 +1146,13 @@ title never becomes a card's name. `pinakes_fetch_total` counts it as outcome `b
 A sign-in redirect whose query says the site refuses the whole address for a while, not the page
 (Instagram's `is_from_rle`), is a wall at once: the sign-in page is not asked for, and no request
 goes to any host of that site (its registrable domain: `instagram.com` and `www.instagram.com`
-alike) for a day, then for 2, 4 and 7 days after each such refusal in a row. Any other answer from
-the site ends the streak. Every link of the site waits meanwhile (`rate_limited`, charged nothing,
-asked again each hour without a request), and those due count in `pinakes_refresh_overdue` until the
-pause ends. The pause and its streak are kept in memory and a restart forgets them; each link's own
-wait is stored.
+alike) for a day, then for 2, 4 and 7 days after each such refusal in a row. A request already
+waiting for its host's turn when the refusal comes sends nothing, and a refusal to a request sent
+before the pause began adds no step. Any other final answer from the site, or a redirect away from
+it, ends the streak; a redirect within the site does not. Every link of the site waits meanwhile
+(`rate_limited`, charged nothing, asked again each hour without a request), and those due count in
+`pinakes_refresh_overdue` until the pause ends. The pause and its streak are kept in memory and a
+restart forgets them; each link's own wait is stored.
 
 A wall hook may answer in its place, also for plain 401 and 403 answers, within six seconds. The site's
 own feed lists the exact link (`feed`), or a source's record names it (an IMDb title by its Wikidata item,
