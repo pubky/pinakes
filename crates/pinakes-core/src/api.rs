@@ -90,9 +90,13 @@ pub struct AppState {
     /// Set by the daemon once a background task or worker has ended or the daemon is stopping:
     /// `GET /healthz` then answers 503.
     pub stopping: Arc<std::sync::atomic::AtomicBool>,
+    /// The text index a search with `q` reads its candidates from: one in memory, read up before
+    /// each search, until the daemon sets its own on disk (`search_index`).
+    pub search_index: Arc<crate::search_index::SearchIndex>,
 }
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
+        let config_catalogues = config.catalogues.enabled_names();
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
@@ -114,6 +118,11 @@ impl AppState {
                 .context("initialize cursor MAC")?,
             clock: None,
             stopping: Arc::default(),
+            search_index: {
+                let index = crate::search_index::SearchIndex::in_memory();
+                index.set_catalogues(&config_catalogues);
+                index
+            },
         })
     }
     /// Now, for relative times and search cursors.
@@ -868,6 +877,8 @@ pub struct SearchQuery {
     /// own card; links in no group stay rows of their own.
     #[param(value_type = Option<CollapseMode>)]
     pub collapse: Option<String>,
+    /// `true`: only things someone referenced on Pubky: no catalogue card nobody referenced.
+    pub referenced: Option<bool>,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -1015,6 +1026,11 @@ pub struct Card {
     /// On a `related` search row only: why it is listed, from what its rank counted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub because: Option<Because>,
+    /// On a search row: the labels the card's catalogue source gives it, as valid tag labels.
+    /// Kept apart from people's tags, which Nexus serves for the card's `uri` and `refs`; a client
+    /// may offer them as suggested tags. `[]` when the card has none. Absent on other routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
 }
 /// Why a `related` row is listed: the resource's taggers who also referenced it.
 #[derive(Clone, Serialize, ToSchema)]
@@ -1483,6 +1499,7 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         occurrence,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
         because: because(row),
+        labels: None,
     })
 }
 /// A card's `embed` (docs/api.md, Embed): the player its link names (`embed::link`), else a
@@ -2182,6 +2199,304 @@ fn validate_search(q: &SearchQuery) -> Result<Vec<String>, ApiError> {
     }
     Ok(tags)
 }
+/// A text search as the text index reads it: its text, the order its candidates are kept in
+/// (the page's own ranking), and the filters the index holds. Postgres applies every filter again
+/// and those the index does not hold (`key`, `remote`, `closed`, `ingredient`, exact distances).
+fn text_query(
+    q: &SearchQuery,
+    text: &str,
+    tags: &[String],
+    spatial: &crate::spatial::Filters,
+    at: DateTime<Utc>,
+    sort: Option<&str>,
+) -> Result<crate::search_index::TextQuery, ApiError> {
+    use crate::search_index::TextOrder;
+    let list = |types: &Option<String>, name: &str, max: usize| -> Result<Vec<String>, ApiError> {
+        types
+            .as_deref()
+            .map(|t| search_types(name, t, max))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
+    let trending = sort == Some("trending");
+    Ok(crate::search_index::TextQuery {
+        text: text.to_owned(),
+        order: match sort {
+            Some("activity") => Some(TextOrder::Activity),
+            Some("recent") | Some("trending") => Some(TextOrder::Recent),
+            Some("start") => Some(TextOrder::Start),
+            Some("distance") => spatial
+                .near
+                .map(|(lat, lon, _)| TextOrder::Distance(lat, lon)),
+            _ => Some(TextOrder::Relevance),
+        },
+        at,
+        types: list(&q.type_name, "type", SEARCH_TYPES_MAX)?,
+        exclude_types: list(&q.exclude_type, "exclude_type", SEARCH_EXCLUDED_TYPES_MAX)?,
+        tags: tags.to_vec(),
+        all_tags: q.match_mode.as_deref() == Some("all"),
+        hosts: q
+            .host
+            .as_deref()
+            .map(search_hosts)
+            .transpose()?
+            .unwrap_or_default(),
+        category: q.category.clone(),
+        venue: q.venue.clone(),
+        from: spatial.from,
+        to: spatial.to,
+        started: sort == Some("start"),
+        near: spatial.near,
+        boxes: spatial.bbox.as_ref().map(|b| b.split()).unwrap_or_default(),
+        // A trending row has a reference inside the window.
+        referenced_since: if trending {
+            Some(at - trend_window(q.window.as_deref())?)
+        } else {
+            None
+        },
+        referenced: q.referenced == Some(true),
+        // As Postgres' `ILIKE` match: a short text of letters and digits only at word starts.
+        inside_words: word_start(text).is_none(),
+        open_jobs_at: (q.closed != Some(true)).then_some(at),
+        catalogues: vec![],
+    })
+}
+/// `{unit}` has a reference that counts, in the author and reach scope.
+fn push_referenced(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    unit: &str,
+    q: &SearchQuery,
+    reach: &Option<crate::nexus::ReachSet>,
+) {
+    sql.push(format!(
+        " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id"
+    ));
+    scope(sql, q, reach);
+    sql.push(")");
+}
+/// `{unit}` carries the tags (any, or all with `match=all`), in the author and reach scope.
+fn push_tags(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    unit: &str,
+    q: &SearchQuery,
+    reach: &Option<crate::nexus::ReachSet>,
+    tags: &[String],
+) {
+    if tags.is_empty() {
+        return;
+    }
+    if q.match_mode.as_deref() == Some("all") {
+        for tag in tags {
+            sql.push(format!(
+                " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label="
+            ))
+            .push_bind(tag.clone());
+            scope(sql, q, reach);
+            sql.push(")");
+        }
+    } else {
+        sql.push(format!(
+            " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label=ANY("
+        ))
+        .push_bind(tags.to_vec())
+        .push(")");
+        scope(sql, q, reach);
+        sql.push(")");
+    }
+}
+/// Whether a search may list catalogue cards nobody referenced: not with `referenced=true`, a
+/// social filter, an identifier, a venue, a category, a time, a job posting's or a recipe's facts,
+/// nor ranked by references or a start (`recent`, `trending`, `start`), which such a card has
+/// none of.
+fn catalogue_cards_allowed(q: &SearchQuery, sort: Option<&str>) -> bool {
+    q.referenced != Some(true)
+        && q.reach.is_none()
+        && q.author.is_none()
+        && q.related.is_none()
+        && q.in_collection.is_none()
+        && q.key.is_none()
+        && q.venue.is_none()
+        && q.category.is_none()
+        && q.remote.is_none()
+        && q.ingredient.is_none()
+        && q.from.is_none()
+        && q.to.is_none()
+        && !matches!(sort, Some("recent" | "trending" | "start"))
+}
+/// A catalogue card as a search unit: its card, its unit ID (the resource ID of its link), its
+/// type path, its host, and (from the text index) its relevance and whether its words matched.
+struct CardUnit {
+    card: i64,
+    unit_id: String,
+    type_path: String,
+    host: Option<String>,
+}
+/// The resources of the referenced candidates.
+fn candidate_resources(units: &[crate::search_index::Candidate]) -> Vec<String> {
+    let mut resources: Vec<String> = units
+        .iter()
+        .filter(|c| c.card.is_none())
+        .map(|c| c.resource_id.clone())
+        .collect();
+    resources.sort();
+    resources.dedup();
+    resources
+}
+/// The cards `rows` names (ID, link, type) as units.
+fn units_of(rows: Vec<(i64, String, String)>) -> Vec<CardUnit> {
+    rows.into_iter()
+        .filter_map(|(card, uri, type_name)| {
+            Some(CardUnit {
+                card,
+                unit_id: crate::search_index::card_unit(&uri)?,
+                type_path: model::type_path(&type_name).join(","),
+                host: url::Url::parse(&uri)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned)),
+            })
+        })
+        .collect()
+}
+/// The catalogue cards among a text search's candidates, of a catalogue that is on.
+async fn card_units(
+    pool: &PgPool,
+    catalogues: &[String],
+    found: &[&crate::search_index::Candidate],
+) -> Result<Vec<CardUnit>, ApiError> {
+    if found.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids: Vec<i64> = found.iter().filter_map(|c| c.card).collect();
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT c.id,c.uri,c.type FROM catalogue_card c WHERE c.id=ANY($1) AND c.catalogue=ANY($2)",
+    )
+    .bind(&ids)
+    .bind(catalogues)
+    .fetch_all(pool)
+    .await?;
+    Ok(units_of(rows))
+}
+/// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
+/// the filters let in, at most `cap`, through the `(type, fame)`, `fame`, `labels` and `point`
+/// indexes.
+async fn best_known_cards(
+    pool: &PgPool,
+    q: &SearchQuery,
+    tags: &[String],
+    spatial: &crate::spatial::Filters,
+    catalogues: &[String],
+    sort: Option<&str>,
+    cap: usize,
+) -> Result<Vec<CardUnit>, ApiError> {
+    let mut sql = QueryBuilder::<Postgres>::new(
+        "SELECT c.id,c.uri,c.type FROM catalogue_card c WHERE c.catalogue=ANY(",
+    );
+    sql.push_bind(catalogues.to_vec()).push(")");
+    if let Some(types) = &q.type_name {
+        sql.push(" AND c.type=ANY(")
+            .push_bind(model::subtypes(&search_types(
+                "type",
+                types,
+                SEARCH_TYPES_MAX,
+            )?))
+            .push(")");
+    }
+    if let Some(types) = &q.exclude_type {
+        sql.push(" AND NOT c.type=ANY(")
+            .push_bind(model::subtypes(&search_types(
+                "exclude_type",
+                types,
+                SEARCH_EXCLUDED_TYPES_MAX,
+            )?))
+            .push(")");
+    }
+    if !tags.is_empty() {
+        sql.push(if q.match_mode.as_deref() == Some("all") {
+            " AND c.labels@>"
+        } else {
+            " AND c.labels&&"
+        })
+        .push_bind(tags.to_vec());
+    }
+    if let Some(hosts) = &q.host {
+        sql.push(" AND substring(c.uri FROM '^[a-z][a-z0-9+.-]*://([^/?#:]+)')=ANY(")
+            .push_bind(search_hosts(hosts)?)
+            .push(")");
+    }
+    if let Some(bbox) = &spatial.bbox {
+        sql.push(" AND (");
+        for (i, b) in bbox.split().iter().enumerate() {
+            if i > 0 {
+                sql.push(" OR ");
+            }
+            sql.push("c.point && ST_MakeEnvelope(");
+            for (j, n) in b.iter().enumerate() {
+                if j > 0 {
+                    sql.push(",");
+                }
+                sql.push_bind(*n);
+            }
+            sql.push(",4326)");
+        }
+        sql.push(")");
+    }
+    if let Some((lat, lon, radius)) = spatial.near {
+        sql.push(" AND ST_DWithin(c.point::geography,ST_SetSRID(ST_MakePoint(")
+            .push_bind(lon)
+            .push(",")
+            .push_bind(lat)
+            .push("),4326)::geography,")
+            .push_bind(radius)
+            .push(")");
+    }
+    match (sort, spatial.near) {
+        (Some("distance"), Some((lat, lon, _))) => {
+            sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
+                .push_bind(lon)
+                .push(",")
+                .push_bind(lat)
+                .push("),4326)::geography,c.id");
+        }
+        _ => {
+            sql.push(" ORDER BY c.fame DESC,c.id");
+        }
+    }
+    sql.push(" LIMIT ").push_bind(cap as i64);
+    let rows: Vec<(i64, String, String)> = sql.build_query_as().fetch_all(pool).await?;
+    Ok(units_of(rows))
+}
+/// `card_unit`: the catalogue cards `units` as rows of `search_unit`'s columns, with their
+/// `labels` and `fame` (a referenced unit has `'{}'` and NULL), of a catalogue that is on. Its
+/// document is what a card reads: type, name, description, link, place, its source and, for
+/// OpenStreetMap, the ODbL attribution.
+fn push_card_units(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    units: &[CardUnit],
+    catalogues: &[String],
+) {
+    let template = serde_json::to_value(ResourceMeta {
+        status: model::Status::Ok,
+        ..Default::default()
+    })
+    .expect("a document");
+    sql.push("card_unit AS (SELECT x.unit_id AS id,c.uri,x.host,c.type,string_to_array(x.path,',') AS type_path,c.name,NULL::text AS category,c.point,NULL::timestamptz AS start_at,NULL::timestamptz AS end_at,NULL::text AS venue_id,")
+        .push_bind(template)
+        .push("::jsonb||jsonb_build_object('type',c.type,'type_path',to_jsonb(string_to_array(x.path,',')),'name',c.name,'description',c.description,'url',c.uri,'source',c.source,'status','ok')||CASE WHEN c.point IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('location',jsonb_build_object('lat',ST_Y(c.point),'lon',ST_X(c.point))) END||CASE WHEN c.catalogue='osm' THEN jsonb_build_object('attribution','© OpenStreetMap contributors (ODbL)') ELSE '{}'::jsonb END AS doc,to_tsvector('simple',c.name||' '||coalesce(c.description,'')) AS search_text,NULL::text AS resolver,c.updated_at AS resolved_at,NULL::timestamptz AS refresh_at,'ok'::text AS status,NULL::text AS osm_type,NULL::bigint AS osm_id,x.unit_id,NULL::jsonb AS occurrence,c.labels,c.fame FROM unnest(")
+        .push_bind(units.iter().map(|u| u.card).collect::<Vec<_>>())
+        .push("::bigint[],")
+        .push_bind(units.iter().map(|u| u.unit_id.clone()).collect::<Vec<_>>())
+        .push("::text[],")
+        .push_bind(units.iter().map(|u| u.type_path.clone()).collect::<Vec<_>>())
+        .push("::text[],")
+        .push_bind(units.iter().map(|u| u.host.clone()).collect::<Vec<_>>())
+        .push("::text[]) AS x(card,unit_id,path,host) JOIN catalogue_card c ON c.id=x.card WHERE c.catalogue=ANY(")
+        .push_bind(catalogues.to_vec())
+        .push(")), ");
+}
+/// How many times `limits.search_text_candidates` a trending text search reads from the index.
+pub const TRENDING_CANDIDATES: usize = 20;
+/// The most candidates a trending text search reads, whatever the limit.
+pub const TRENDING_MOST: usize = 10_000;
 /// The text of `q`, when there is one to match (an empty `q` filters nothing).
 fn query_text(q: &SearchQuery) -> Option<&str> {
     q.q.as_deref().filter(|s| !s.is_empty())
@@ -2276,7 +2591,7 @@ fn word_start_regex() -> &'static str {
 /// vowel signs as letters), or a combining mark or joiner a word is written with (combining
 /// diacritics, so an accent written apart, Hebrew points, Arabic vowel marks, the viramas and
 /// other marks of the Indic scripts, ZWNJ and ZWJ).
-fn word_char(c: char) -> bool {
+pub(crate) fn word_char(c: char) -> bool {
     // A script written without spaces has no word starts of its own: a Latin word right after
     // one starts there (`AI` in `我的AI助手`).
     !unspaced_script(c)
@@ -2315,6 +2630,24 @@ fn word_start(text: &str) -> Option<WordStart> {
         words: words.join("\\s+"),
     })
 }
+/// `r` matches `text` (Postgres' text search): its words in the name or description
+/// (`websearch_to_tsquery`), or for a short text a name word that starts so ([`word_start`]),
+/// else the text inside the name (`ILIKE`) or a name similar to it (`pg_trgm`'s `%`).
+fn push_text_match(sql: &mut QueryBuilder<'_, Postgres>, text: &str) {
+    sql.push("(r.search_text @@ websearch_to_tsquery('simple',")
+        .push_bind(text.to_owned())
+        .push(") OR ");
+    match word_start(text) {
+        Some(starts) => push_word_start(sql, starts),
+        None => {
+            sql.push("r.name ILIKE ")
+                .push_bind(like_anywhere(text))
+                .push(" OR r.name % ")
+                .push_bind(text.to_owned());
+        }
+    }
+    sql.push(")");
+}
 /// `r.name` matches the short text ([`WordStart`]).
 fn push_word_start(sql: &mut QueryBuilder<'_, Postgres>, starts: WordStart) {
     sql.push("(");
@@ -2338,7 +2671,7 @@ fn prefixing_script(c: char) -> bool {
     )
 }
 /// A letter of a script written without spaces between words.
-fn unspaced_script(c: char) -> bool {
+pub(crate) fn unspaced_script(c: char) -> bool {
     matches!(
         u32::from(c),
         0x0E00..=0x0EFF // Thai, Lao
@@ -2577,7 +2910,7 @@ fn related_because(sql: &mut QueryBuilder<'_, Postgres>, item: &str, n: &str, au
 /// The version of a search page's shape, in its ETag: a page cached under another version is
 /// never answered 304. Move it when a search row gains or loses a field, a field reads otherwise
 /// for stored rows, or the same query finds other rows or the same rows in another order.
-pub const SEARCH_SHAPE: u32 = 11;
+pub const SEARCH_SHAPE: u32 = 12;
 /// The most taggers a related row's `because` names.
 pub const BECAUSE_TAGGERS: usize = 3;
 
@@ -2708,7 +3041,81 @@ pub async fn search(
         ),
         None => None,
     };
+    // A text search without a social filter, an exact identifier or a filter on a job posting's
+    // or recipe's own facts (`remote`, `ingredient`) reads its best candidates
+    // from the text index (`search_index`); the rest, and every search while the daemon's index
+    // is not open yet, read Postgres alone.
+    let text_route = query_text(&q).filter(|_| {
+        q.reach.is_none()
+            && q.author.is_none()
+            && related.is_none()
+            && q.in_collection.is_none()
+            && key.is_none()
+            && q.remote.is_none()
+            && q.ingredient.is_none()
+    });
+    // Catalogue cards nobody referenced, of the catalogues that are on: listed unless the search
+    // asks for what only referenced links have (a social filter, an identifier, a venue, a
+    // category, a time, a job posting's or a recipe's facts, references in time).
+    let catalogues: Vec<String> = state
+        .config
+        .catalogues
+        .enabled_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let cards_allowed = !catalogues.is_empty() && catalogue_cards_allowed(&q, sort);
+    let candidates = match text_route {
+        Some(text) => {
+            let mut query = text_query(&q, text, &tags, &spatial, at, sort)?;
+            if cards_allowed {
+                query.catalogues = catalogues.clone();
+            }
+            // A trending page ranks by the references inside its window, which only Postgres
+            // counts: it is given more candidates (those referenced last inside the window) and
+            // ranks them.
+            let cap = if trending {
+                (state.config.search.text_candidates * TRENDING_CANDIDATES).min(TRENDING_MOST)
+            } else {
+                state.config.search.text_candidates
+            };
+            match state.search_index.candidates(&state.pool, query, cap).await {
+                Ok(found) => found,
+                Err(error) => {
+                    tracing::warn!(error=%crate::resolver::log_error(&error),"text index unavailable; this search reads Postgres");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    // The catalogue cards among the candidates, or without text the best known of those the
+    // filters let in, read as units (`CardUnit`).
+    let card_units: Vec<CardUnit> = match (&candidates, cards_allowed) {
+        (Some(found), true) => {
+            let found: Vec<&crate::search_index::Candidate> =
+                found.units.iter().filter(|c| c.card.is_some()).collect();
+            card_units(&state.pool, &catalogues, &found).await?
+        }
+        (None, true) if query_text(&q).is_none() && related.is_none() => {
+            best_known_cards(
+                &state.pool,
+                &q,
+                &tags,
+                &spatial,
+                &catalogues,
+                sort,
+                state.config.search.text_candidates,
+            )
+            .await?
+        }
+        _ => vec![],
+    };
+    let with_cards = !card_units.is_empty();
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
+    if with_cards {
+        push_card_units(&mut sql, &card_units, &catalogues);
+    }
     if let (Some(seed), Some(since)) = (&related, since) {
         // The resource, or its whole group; of those not opted out and their aliases, the links
         // with the newest tags in the window (one probe each), and on each a sample of its most
@@ -2810,7 +3217,21 @@ pub async fn search(
         sql.push("coalesce(extract(epoch FROM s.newest_at),0)::double precision");
     } else {
         let text = query_text(&q).filter(|_| sort == Some("relevance"));
-        if let Some(text) = text {
+        let indexed = text.is_some() && candidates.is_some();
+        // By activity, a catalogue card nobody referenced comes after every referenced unit (whose
+        // score is 0 or more), the best known first (`fame - 2`, below -1).
+        let by_fame = with_cards && !indexed;
+        if by_fame {
+            sql.push("CASE WHEN r.fame IS NOT NULL THEN r.fame::double precision-2.0 ELSE ");
+        }
+        if indexed {
+            // The text index's relevance times (1 + fame), plus the activity score (with any
+            // boost) at its weight (`search_index::ACTIVITY_WEIGHT`).
+            sql.push(format!(
+                "c.relevance+{:?}*(",
+                crate::search_index::ACTIVITY_WEIGHT
+            ));
+        } else if let Some(text) = text {
             // The match's whole points, plus the activity score (with any boost) mapped into
             // [0, 1) by a/(1+a), which keeps its order: it only breaks ties between matches
             // that are equally good.
@@ -2834,8 +3255,13 @@ pub async fn search(
                 .push("::timestamptz-b.at)))/2592000.0) END,0)");
         }
         sql.push(")::double precision");
-        if text.is_some() {
+        if indexed {
+            sql.push(")");
+        } else if text.is_some() {
             sql.push("))");
+        }
+        if by_fame {
+            sql.push(" END");
         }
     }
     if !related_groups {
@@ -2849,8 +3275,49 @@ pub async fn search(
         // Each related resource once, as its own card (never once per occurrence), looked up one
         // by one: the set is bounded, and a join would read every card.
         sql.push(" FROM related rel CROSS JOIN LATERAL (SELECT * FROM resource_unit u WHERE u.id=rel.resource_id OFFSET 0) r");
+    } else if with_cards {
+        // The referenced units (the candidates' resources, with text) and the catalogue cards,
+        // each branch with its own filters as plain conditions: references and people's tags on
+        // the referenced units, labels (their tags) on the cards.
+        sql.push(" FROM (SELECT su.*,'{}'::text[] AS labels,NULL::real AS fame FROM search_unit su WHERE true");
+        if let Some(found) = &candidates {
+            sql.push(" AND su.id=ANY(")
+                .push_bind(candidate_resources(&found.units))
+                .push(")");
+        }
+        push_referenced(&mut sql, "su", &q, &reach);
+        push_tags(&mut sql, "su", &q, &reach, &tags);
+        sql.push(" UNION ALL SELECT * FROM card_unit cu WHERE true");
+        if !tags.is_empty() {
+            sql.push(if q.match_mode.as_deref() == Some("all") {
+                " AND cu.labels@>"
+            } else {
+                " AND cu.labels&&"
+            })
+            .push_bind(tags.clone());
+        }
+        sql.push(") r");
     } else {
         sql.push(" FROM search_unit r");
+    }
+    if let Some(found) = &candidates {
+        // The candidates by unit, each with its relevance: the referenced ones, and the catalogue
+        // cards still listed, each unit once (a card whose link a resource has is that resource).
+        let listed: std::collections::HashSet<i64> = card_units.iter().map(|u| u.card).collect();
+        let mut seen = std::collections::HashSet::new();
+        let joined: Vec<&crate::search_index::Candidate> = found
+            .units
+            .iter()
+            .filter(|c| c.card.is_none_or(|card| listed.contains(&card)))
+            .filter(|c| seen.insert(c.unit_id.clone()))
+            .collect();
+        sql.push(" JOIN unnest(")
+            .push_bind(joined.iter().map(|c| c.unit_id.clone()).collect::<Vec<_>>())
+            .push("::text[],")
+            .push_bind(joined.iter().map(|c| c.relevance).collect::<Vec<_>>())
+            .push("::float8[],")
+            .push_bind(joined.iter().map(|c| c.words).collect::<Vec<_>>())
+            .push("::bool[]) AS c(unit_id,relevance,words) ON c.unit_id=r.unit_id");
     }
     sql.push(" LEFT JOIN resource_score s ON s.resource_id=r.id");
     if boost.is_some() && !trending {
@@ -2863,6 +3330,12 @@ pub async fn search(
         sql.push(" JOIN trend t ON t.resource_id=r.id");
     }
     sql.push(" WHERE true");
+    if let (Some(found), false) = (&candidates, with_cards) {
+        // By resource first: an occurrence's unit ID is computed, its resource's is a key.
+        sql.push(" AND r.id=ANY(")
+            .push_bind(candidate_resources(&found.units))
+            .push(")");
+    }
     if related.is_some() {
         // A post whose author has not opted in to search is never suggested, as it is never found by
         // its text, nor counts toward its group (`eligible` reads the rows that pass).
@@ -2942,47 +3415,24 @@ pub async fn search(
         }
         sql.push(")");
     }
-    if let Some(text) = q.q.as_ref().filter(|s| !s.is_empty()) {
-        sql.push(" AND (r.search_text @@ websearch_to_tsquery('simple',")
-            .push_bind(text.clone())
-            .push(") OR ");
-        match word_start(text) {
-            Some(starts) => push_word_start(&mut sql, starts),
-            None => {
-                sql.push("r.name ILIKE ")
-                    .push_bind(like_anywhere(text))
-                    .push(" OR r.name % ")
-                    .push_bind(text.clone());
-            }
+    if let Some(text) = query_text(&q) {
+        sql.push(" AND (");
+        if candidates.is_some() {
+            // A unit the index found by its words still has text (a post found gone or emptied
+            // since the index's last pass keeps its tags, not its words); any other candidate
+            // matches as without the index.
+            sql.push("c.words AND (coalesce(r.name,'')<>'' OR r.search_text<>''::tsvector) OR ");
         }
+        push_text_match(&mut sql, text);
         // A post whose author has not opted in to search is never found by its text.
         sql.push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
-    if related.is_none() {
+    if related.is_none() && !with_cards {
         // (A related row is referenced by a sampled tagger, who is in scope.)
-        sql.push(" AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id");
-        scope(&mut sql, &q, &reach);
-        sql.push(")");
+        push_referenced(&mut sql, "r", &q, &reach);
     }
-    if !tags.is_empty() {
-        if q.match_mode.as_deref() == Some("all") {
-            for tag in &tags {
-                sql.push(
-                    " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=",
-                )
-                .push_bind(tag.clone());
-                scope(&mut sql, &q, &reach);
-                sql.push(")");
-            }
-        } else {
-            sql.push(
-                " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=ANY(",
-            )
-            .push_bind(tags)
-            .push(")");
-            scope(&mut sql, &q, &reach);
-            sql.push(")");
-        }
+    if !with_cards {
+        push_tags(&mut sql, "r", &q, &reach, &tags);
     }
     if let (true, Some(since)) = (related_groups, since) {
         // Each row's group (or the row alone) over the rows that pass: its members' taggers
@@ -3006,9 +3456,21 @@ pub async fn search(
             .push_bind(cap)
             .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base AND f.kind<>'post' LIMIT ")
             .push_bind(cap)
-            .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
+            .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,");
+        if with_cards {
+            // A card and the listed resource of its link share the ID, the group and the
+            // references: the resource is the row.
+            sql.push("e.fame IS NOT NULL,");
+        }
+        sql.push("e.id,e.unit_id");
     }
-    sql.push("), page AS (SELECT * FROM filtered");
+    if with_cards {
+        // A catalogue card whose link a listed resource has is that resource: one row per unit,
+        // the resource's.
+        sql.push("), page AS (SELECT * FROM (SELECT DISTINCT ON (unit_id) * FROM filtered ORDER BY unit_id,fame IS NOT NULL) d");
+    } else {
+        sql.push("), page AS (SELECT * FROM filtered");
+    }
     if let Some(c) = &cursor {
         sql.push(" WHERE (rank,unit_id)<(")
             .push_bind(c.score)
@@ -3052,7 +3514,18 @@ pub async fn search(
         sql.push("NULL");
     }
     sql.push(",'tags',");
-    if asked.tags {
+    if asked.tags && with_cards {
+        // People's tags and catalogue cards' labels together.
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT l.label,count(DISTINCT l.unit_id) AS count FROM (SELECT r.unit_id,f.label FROM ")
+            .push(counted)
+            .push(" r JOIN effective_reference f ON r.id=f.resource_id WHERE f.label IS NOT NULL");
+        scope(&mut sql, &q, &reach);
+        sql.push(" UNION ALL SELECT r.unit_id,x.label FROM ")
+            .push(counted)
+            .push(" r CROSS JOIN unnest(r.labels) x(label)) l GROUP BY l.label ORDER BY count DESC,l.label LIMIT ")
+            .push_bind(FACET_LIST_CAP)
+            .push(") t),'[]')");
+    } else if asked.tags {
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM ")
             .push(counted)
             .push(" r JOIN effective_reference f ON r.id=f.resource_id WHERE f.label IS NOT NULL");
@@ -3185,7 +3658,11 @@ pub async fn search(
             spatial.from,
             spatial.to,
             (trending || related.is_some()).then(|| at.timestamp().div_euclid(60)),
-            SEARCH_SHAPE
+            SEARCH_SHAPE,
+            // The text index lags the database by a pass: its own revision.
+            candidates.as_ref().map(|c| c.revision),
+            // The catalogues that are on: switching one off changes what is listed.
+            with_cards.then_some(&catalogues),
         ))?)
         .to_hex()
     );
@@ -3200,6 +3677,17 @@ pub async fn search(
     } else {
         let mut cards = items.iter().map(card).collect::<Result<Vec<_>, _>>()?;
         with_refs(&state.pool, cards.iter_mut()).await?;
+        for (card, item) in cards.iter_mut().zip(&items) {
+            // A catalogue card's source labels; `[]` on every other row.
+            card.labels = Some(
+                item["labels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|l| l.as_str().map(str::to_owned))
+                    .collect(),
+            );
+        }
         Json(SearchResponse {
             items: cards,
             cursor: next,

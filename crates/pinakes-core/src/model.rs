@@ -856,9 +856,10 @@ pub fn truncate(s: &mut String, max: usize) {
         s.truncate(n);
     }
 }
-pub fn type_path(name: &str) -> Vec<String> {
+/// Every type name Pinakes knows (schema.org's and its own), with its parents.
+fn vocabulary() -> &'static BTreeMap<String, Vec<String>> {
     static TYPES: OnceLock<BTreeMap<String, Vec<String>>> = OnceLock::new();
-    let types = TYPES.get_or_init(|| {
+    TYPES.get_or_init(|| {
         let mut types: BTreeMap<String, Vec<String>> =
             serde_json::from_str(include_str!("../../../data/schemaorg-types.json"))
                 .expect("pinned vocabulary");
@@ -873,7 +874,19 @@ pub fn type_path(name: &str) -> Vec<String> {
             );
         }
         types
-    });
+    })
+}
+/// The type names whose path holds one of `names` (each with its subtypes), for a filter on a
+/// table that keeps only a bare type name (`catalogue_card.type`).
+pub fn subtypes(names: &[String]) -> Vec<String> {
+    vocabulary()
+        .keys()
+        .filter(|t| type_path(t).iter().any(|p| names.contains(p)))
+        .cloned()
+        .collect()
+}
+pub fn type_path(name: &str) -> Vec<String> {
+    let types = vocabulary();
     let name = name
         .strip_prefix("https://schema.org/")
         .or_else(|| name.strip_prefix("http://schema.org/"))

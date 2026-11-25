@@ -514,6 +514,98 @@ CREATE TRIGGER osm_revision_insert BEFORE INSERT OR DELETE ON osm_place FOR EACH
 CREATE TRIGGER osm_revision_update BEFORE UPDATE OF doc, status, name, type, type_path, category, point, bbox ON osm_place FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 
 
+-- ── The text index's queue ───────────────────────────────────────────────────────────────────
+
+-- The resources whose search units the text index (`search_index`) must read again: one row per
+-- write, with the writing transaction's ID. The index reads the rows of every transaction that
+-- has finished since its last pass (`pg_snapshot_xmin`), so a write that commits late is never
+-- skipped, and deletes the rows its last commit covers.
+CREATE TABLE search_index_queue (
+    seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    resource_id text NOT NULL
+);
+CREATE INDEX search_index_queue_xid_idx ON search_index_queue USING btree (xid);
+
+-- This database, to the text index: a token made with the database, which the index records and
+-- checks with the database's own ID (`pg_database.oid`), so an index built from another database
+-- is never opened as this one's.
+CREATE TABLE search_index_database (
+    id integer PRIMARY KEY CONSTRAINT search_index_database_id_check CHECK (id = 1),
+    token uuid NOT NULL DEFAULT gen_random_uuid()
+);
+INSERT INTO search_index_database(id) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM search_index_database);
+
+-- A row's resource, or the resource of a row that names one (`resource_id`), on any change.
+CREATE FUNCTION queue_search_index() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    -- Each branch is planned only when it runs: `resource` has `id`, the others `resource_id`.
+    IF TG_TABLE_NAME = 'resource' THEN
+        INSERT INTO search_index_queue(resource_id) VALUES (CASE WHEN TG_OP = 'DELETE' THEN OLD.id ELSE NEW.id END);
+    ELSE
+        IF TG_OP <> 'INSERT' THEN INSERT INTO search_index_queue(resource_id) VALUES (OLD.resource_id); END IF;
+        IF TG_OP <> 'DELETE' AND (TG_OP = 'INSERT' OR NEW.resource_id IS DISTINCT FROM OLD.resource_id) THEN
+            INSERT INTO search_index_queue(resource_id) VALUES (NEW.resource_id);
+        END IF;
+    END IF;
+    RETURN NULL;
+END $$;
+
+-- An alias and its root: the alias leaves search, and its references count for the root.
+CREATE FUNCTION queue_search_index_alias() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        INSERT INTO search_index_queue(resource_id) VALUES (OLD.alias_id), (OLD.root_id);
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        INSERT INTO search_index_queue(resource_id) VALUES (NEW.alias_id), (NEW.root_id);
+    END IF;
+    RETURN NULL;
+END $$;
+
+-- Every resource, when a table a unit's tags or score come from is emptied (a feed reset).
+CREATE FUNCTION queue_search_index_all() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    INSERT INTO search_index_queue(resource_id) SELECT id FROM resource;
+    RETURN NULL;
+END $$;
+
+-- An OSM place's resources, and the events and occurrences held at it as their venue.
+CREATE FUNCTION queue_search_index_osm() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    place record;
+BEGIN
+    IF TG_OP = 'DELETE' THEN place := OLD; ELSE place := NEW; END IF;
+    INSERT INTO search_index_queue(resource_id)
+        SELECT id FROM resource WHERE osm_type = place.osm_type AND osm_id = place.osm_id
+        UNION SELECT id FROM resource WHERE doc #>> '{venue,osm_id}' = place.osm_type || '/' || place.osm_id
+        UNION SELECT resource_id FROM occurrence WHERE doc #>> '{venue,osm_id}' = place.osm_type || '/' || place.osm_id;
+    RETURN NULL;
+END $$;
+
+CREATE TRIGGER resource_search_index_insert AFTER INSERT OR DELETE ON resource FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER resource_search_index_update AFTER UPDATE OF uri, host, resolver, doc, status, name, type, type_path, category, point, start_at, end_at, venue_id, osm_type, osm_id, osm_version ON resource FOR EACH ROW
+    WHEN ((OLD.uri, OLD.host, OLD.resolver, OLD.doc, OLD.status, OLD.name, OLD.type, OLD.type_path, OLD.category, OLD.point, OLD.start_at, OLD.end_at, OLD.venue_id, OLD.osm_type, OLD.osm_id, OLD.osm_version)
+        IS DISTINCT FROM (NEW.uri, NEW.host, NEW.resolver, NEW.doc, NEW.status, NEW.name, NEW.type, NEW.type_path, NEW.category, NEW.point, NEW.start_at, NEW.end_at, NEW.venue_id, NEW.osm_type, NEW.osm_id, NEW.osm_version))
+    EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER reference_search_index AFTER INSERT OR DELETE OR UPDATE ON reference FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER score_search_index AFTER INSERT OR DELETE OR UPDATE ON resource_score FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER occurrence_search_index AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+CREATE TRIGGER alias_search_index AFTER INSERT OR DELETE OR UPDATE ON resource_alias FOR EACH ROW EXECUTE FUNCTION queue_search_index_alias();
+CREATE TRIGGER osm_search_index_insert AFTER INSERT OR DELETE ON osm_place FOR EACH ROW EXECUTE FUNCTION queue_search_index_osm();
+CREATE TRIGGER osm_search_index_update AFTER UPDATE OF doc, status, name, display_name, type, type_path, category, point, versions ON osm_place FOR EACH ROW
+    WHEN ((OLD.doc, OLD.status, OLD.name, OLD.display_name, OLD.type, OLD.type_path, OLD.category, OLD.point, OLD.versions)
+        IS DISTINCT FROM (NEW.doc, NEW.status, NEW.name, NEW.display_name, NEW.type, NEW.type_path, NEW.category, NEW.point, NEW.versions))
+    EXECUTE FUNCTION queue_search_index_osm();
+CREATE TRIGGER reference_search_index_truncate AFTER TRUNCATE ON reference FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_all();
+CREATE TRIGGER score_search_index_truncate AFTER TRUNCATE ON resource_score FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_all();
+
+
 -- ── Groups ───────────────────────────────────────────────────────────────────────────────────
 
 -- A group: units that are the same thing (see docs/design.md). `curated` groups are kept when
@@ -1241,6 +1333,44 @@ CREATE TABLE catalogue_state (
     updated_at timestamp with time zone NOT NULL DEFAULT now()
 );
 
+
+-- The catalogue cards an update run changed or removed, and the cards a full import changed in
+-- place, for the text index (`search_index`). A full import's new and removed cards are not
+-- queued: the index reads the catalogue's cards again once the import has finished
+-- (`catalogue_state.last_import_at`), so a first import of millions of cards never passes
+-- through this table.
+CREATE TABLE search_index_catalogue_queue (
+    seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    card_id bigint NOT NULL
+);
+
+-- The changed cards of a statement: in an update run every change, in a full import the cards
+-- whose content changed in place.
+CREATE FUNCTION queue_search_index_catalogue() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO search_index_catalogue_queue(card_id)
+            SELECT n.id FROM changed_new n JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run = 'update';
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO search_index_catalogue_queue(card_id)
+            SELECT n.id FROM changed_new n JOIN changed_old o ON o.id = n.id JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run IN ('update', 'import')
+            WHERE n.content_hash IS DISTINCT FROM o.content_hash OR n.catalogue IS DISTINCT FROM o.catalogue;
+    ELSE
+        INSERT INTO search_index_catalogue_queue(card_id)
+            SELECT o.id FROM changed_old o JOIN catalogue_state s ON s.catalogue = o.catalogue AND s.run = 'update';
+    END IF;
+    RETURN NULL;
+END $$;
+
+-- Searches without text read the cards near a point and on a host through these.
+CREATE INDEX catalogue_card_geography_idx ON catalogue_card USING gist ((point::geography));
+CREATE INDEX catalogue_card_host_idx ON catalogue_card USING btree ((substring(uri FROM '^[a-z][a-z0-9+.-]*://([^/?#:]+)')), fame DESC);
+CREATE TRIGGER catalogue_card_search_index_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
+CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card REFERENCING OLD TABLE AS changed_old NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
+CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
+-- Search pages without text read the cards: their ETag moves with them.
+CREATE TRIGGER catalogue_card_revision BEFORE INSERT OR DELETE OR UPDATE OF catalogue, uri, type, name, other_names, description, labels, point, fame OR TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 
 -- ── Rows the code updates in place ───────────────────────────────────────────────────────────
 

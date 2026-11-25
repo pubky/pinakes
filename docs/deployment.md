@@ -21,7 +21,7 @@ for the platform being built, then copies it into a `debian:bookworm-slim` runti
 | Health check | `pinakesd healthcheck` every 30 seconds (timeout 10 s, start period 60 s, 3 retries) |
 | Configuration and credentials | None; you mount them |
 
-The image sets four settings as environment variables:
+The image sets five settings as environment variables:
 
 | Variable | Value |
 | --- | --- |
@@ -29,9 +29,10 @@ The image sets four settings as environment variables:
 | `PINAKES__ADMIN_LISTEN` | `127.0.0.1:9090` |
 | `PINAKES__OSM__DUMP_DIR` | `/var/lib/pinakes/dumps` |
 | `PINAKES__CATALOGUES__DIR` | `/var/lib/pinakes/catalogues` |
+| `PINAKES__SEARCH__INDEX_DIR` | `/var/lib/pinakes/search-index` |
 
-The environment wins over the TOML file, so `listen`, `admin_listen`, `osm.dump_dir` and
-`catalogues.dir` in a mounted TOML file have no effect. To change one, pass the variable, such as
+The environment wins over the TOML file, so `listen`, `admin_listen`, `osm.dump_dir`,
+`catalogues.dir` and `search.index_dir` in a mounted TOML file have no effect. To change one, pass the variable, such as
 `--env PINAKES__LISTEN=…`.
 
 ### Build the image
@@ -107,6 +108,7 @@ To run a command, put it after the image name, with the same mounts and environm
 
 - `--config /etc/pinakes/pinakes.toml --migrate`
 - `--config /etc/pinakes/pinakes.toml reextract all`, with the daemon stopped
+- `--config /etc/pinakes/pinakes.toml reindex`, with the daemon stopped
 - `--config /etc/pinakes/pinakes.toml catalogue status`, beside the daemon
 
 ## CI and image publishing
@@ -218,6 +220,7 @@ docker buildx imagetools inspect "registry-1.docker.io/synonymsoft/pinakes:$VERS
 | Nexus | The reference feed and social and reach reads (`nexus_url`) | A Nexus that serves the `/v1` routes Pinakes reads ([README](../README.md)). It is a fixed, trusted upstream; optional authorization comes from the environment. |
 | Dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | Persistent and writable, with room for two copies of the file ([ODbL dump](operations.md#odbl-dump)). A CDN can cache the file by its `ETag`. |
 | Catalogue directory | `catalogues.dir`: downloads and temporary files of catalogue imports, one directory per catalogue | Writable by UID 10001, with room for the largest large catalogue's full import ([catalogues](#catalogues)). It need not be backed up. |
+| Text index directory | `search.index_dir`: the index text searches read ([text index](operations.md#text-index)) | Local disk, writable by UID 10001, with room for two copies during `reindex` (about 0.7 KB per searchable unit on the development data, and 170 B per catalogue card measured on 100,000 synthetic cards). Derived data: a missing index is rebuilt from the database at start, so a volume only saves that rebuild. |
 | Prometheus and Alertmanager | Scraping the admin `/metrics` and evaluating the supplied alerts | A private scrape path. [ops/README.md](../ops/README.md) has the rules and a Grafana dashboard. |
 | MusicBrainz mirror (optional) | Music lookups, at `[also_on.sources.musicbrainz] base_url` | Optional. The mirror's host gets the shared per-host pace, and a mirror on a private address is refused ([operations](operations.md#also-on)). See the [MusicBrainz Server documentation](https://musicbrainz.org/doc/MusicBrainz_Server). |
 

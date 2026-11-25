@@ -18,6 +18,7 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH]` | Runs the daemon. Creates the schema on an empty database. Without `--config`, only the defaults and the environment apply. |
 | `pinakesd [--config PATH] --migrate` | Creates the schema on an empty database and exits. |
 | `pinakesd [--config PATH] reextract ROUTE…\|all\|also-on` | Reads stored links again after a parser, routing or source change. Run it with the daemon stopped ([re-extraction](#re-extraction)). |
+| `pinakesd [--config PATH] reindex` | Builds the text index from the database into a new generation and switches to it. Run it with the daemon stopped ([text index](#text-index)). |
 | `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
@@ -154,6 +155,7 @@ Concurrency, rates and lifetimes are not keys of these sections; they are [limit
 | `api.swagger_ui` | `true` | Swagger UI at `/swagger-ui`. |
 | `api.mcp` | `true` | The MCP endpoint, `POST /mcp`. |
 | `canary.enabled` | `true` | Periodic [canaries](#canaries). |
+| `search.index_dir` | `"search-index"` | The text index's directory, relative to the working directory ([text index](#text-index)). The container image sets `/var/lib/pinakes/search-index`. |
 
 ### Catalogue sections
 
@@ -253,6 +255,8 @@ resolver limits apply to pubky and to each card route.
 | `related_seed_links` | `32` | 1–1000 | Seed links a related page samples: of the resource, its group's members and their aliases, the ones with the newest tags, at most this many. |
 | `collapse_refs_per_member` | `10000` | 1–1000000 | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | 1–200000 | Largest `near` radius (metres). |
+| `search_text_candidates` | `500` | 50–10000 | The best units a search with `q` reads from the text index ([Text index](#text-index)). |
+| `search_index_commit_secs` | `2` | 1–60 | Seconds between two passes that commit queued changes to the text index. |
 | `api_cache_capacity` | `10000` | 100–100000 | Entries the rate limiter's table holds when an API request adds a client address. Past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
 | `preview_cache_capacity` | `10000` | 100–100000 | The same table's size when a preview adds its client address and link. Keep it equal to `api_cache_capacity`. |
 | `preview_requests_per_minute` | `30` | 1 or more | Preview requests per minute per client. |
@@ -1606,6 +1610,65 @@ host, the same registrable domain. The publisher must match when:
 A link with too few path segments (and no such query parameter) is a publisher of its own. A subdomain of a
 listed host takes the host's rule; the longest matching host wins.
 
+## Text index
+
+A search with `q` (without `author`, `reach`, `related`, `in_collection`, `key`, `remote` or
+`ingredient`) reads its candidates from an embedded Tantivy index in `search.index_dir`
+([API](api.md#text-search)). The index holds every searchable unit and every card of the
+catalogues that are on: names, other names, descriptions, people's tags, source labels, type,
+host, category, venue, source, catalogue, fame, activity, start and end, and the place (H3 map
+cells at resolutions 4, 6 and 8, about 1,770 km², 36 km² and 0.74 km² per cell; a `near` circle is
+covered by the finest that needs at most 1,100 cells). Search loads the candidates from Postgres
+and applies every filter again, so the index decides which units are looked at and their text
+relevance, never what is shown.
+
+The index is derived data, rebuilt from the database when it is missing.
+
+- **Referenced links.** Triggers on the resource, reference, score, occurrence, alias and OSM
+  place tables queue each changed resource (`search_index_queue`). Every
+  `limits.search_index_commit_secs` (2 s) the daemon reads the queue in order, 20,000 rows at a
+  time, reads those resources' units again, replaces their documents, commits, and deletes the
+  rows it read; a row of a transaction still running is read by a later pass. A card that is
+  deleted, scrubbed or loses its last reference leaves every search at once (Postgres no longer
+  lists it, or finds it without text) and the index within a pass. A pass that removed a card's
+  text (a post found gone, emptied or opted out) merges the segments that hold the card's
+  documents, current or deleted, so its words leave the index files too; any other pass merges
+  nothing, and segments with 5% deleted documents merge on their own (as a changed or removed
+  catalogue card's old words do).
+- **Catalogue cards.** A catalogue's full import queues only the cards whose texts it changes; the
+  cards it adds or removes are not queued: once it has finished (`catalogue_state.last_import_at`),
+  the daemon reads all the catalogue's cards again, 20,000 per pass (in source-ID order) after the
+  pass's queues, and when it has read the last one removes the documents of earlier imports, so
+  millions of imported cards never pass through a queue and referenced links keep their 2 s
+  meanwhile. Until then a removed card stays in the index, and Postgres, which checks every
+  candidate, leaves it out. An update run queues the cards it adds, changes or removes
+  (`search_index_catalogue_queue`, by triggers on `catalogue_card`), 20,000 rows per pass, so a run
+  that writes faster than the index reads holds back neither referenced links nor the re-read. A
+  daemon restarted during a re-read starts it again from the catalogue's first card. A catalogue
+  switched off leaves every search at once (searches read only the catalogues that are on) and the
+  index at the daemon's next pass, which removes its documents (also those of a re-read under way);
+  `pinakesd catalogue drop` then deletes its cards. A catalogue turned back on is read again at the
+  next pass.
+- **Start.** The daemon opens the index. When the directory or its generation is missing,
+  unreadable, of another format, or built from another database (each database has its own
+  identity: a token in `search_index_database` and the database's Postgres ID, so a restored copy
+  or a second database on the cluster is another one), it logs a warning and builds the
+  index from the database in the background (about a second per 2,000 units on the development
+  data; catalogue cards at Tantivy's bulk rate); until then text searches read Postgres alone. A
+  build that fails is retried every minute; meanwhile the rows of finished transactions in both
+  queues are deleted (the next build reads everything), and a failed build leaves no partial
+  generation.
+- **Rebuild.** `pinakesd --config <path> reindex`, with the daemon stopped (it takes the instance
+  lock), builds the index from the database into a new generation, prints its progress, switches
+  to it and removes the old one. Use it after restoring a database from a backup, or to compact the
+  index. Queue rows written meanwhile are applied by the daemon's next pass.
+
+The directory holds one generation (`gen-<milliseconds>`) and a `CURRENT` file naming it; a
+rebuild needs room for two generations, and a generation `CURRENT` doesn't name is removed before
+a build. `pinakes_search_index_open` is 1 once the index is open, and
+`pinakes_search_index_last_pass_timestamp_seconds` is the last pass that read its queues without
+an error ([alerts](#alerts)).
+
 ## Catalogues
 
 A catalogue card is one item of an open catalogue, stored in `catalogue_card`. The catalogues are
@@ -1639,6 +1702,8 @@ Set `[catalogues.<name>] enabled = false`, or `[catalogues] enabled = false` for
 ([keys](#catalogue-sections)), and restart the daemon. A catalogue that is off:
 
 - starts no importer;
+- leaves search at once: no search lists its cards, and the text index removes their documents
+  at its next pass ([text index](#text-index));
 - keeps its rows, so turning it back on doesn't import it again from the start. Its state row's
   phase is `disabled` while the daemon runs with it off, and a run it had under way resumes from
   its cursor when it is on again.
@@ -1734,6 +1799,7 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
 | `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
+| `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10; the log says why. Text searches read Postgres alone, or miss newer changes. |
 
 A new key needs a restart.
 

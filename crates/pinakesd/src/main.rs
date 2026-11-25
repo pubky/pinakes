@@ -40,6 +40,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         Command::Migrate => (true, None, None),
         Command::Reextract(routes) => (false, Some(routes), None),
         Command::Catalogue(command) => (false, None, Some(command)),
+        Command::Reindex => return reindex(config).await,
         Command::Print(text) => {
             println!("{text}");
             return Ok(());
@@ -288,7 +289,10 @@ async fn start(
     pinakes_core::also_on::configure(&pool, &config).await?;
     pinakes_core::catalogue::store::sync_switches(&pool, &config.catalogues).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
-    let state = AppState::new(api_pool, config.clone())?;
+    let mut state = AppState::new(api_pool, config.clone())?;
+    let search_index = pinakes_core::search_index::SearchIndex::on_disk(&config.search.index_dir);
+    search_index.set_catalogues(&config.catalogues.enabled_names());
+    state.search_index = search_index.clone();
     // Both listeners are bound before any task or worker starts: from here on nothing waits,
     // so a signal during startup never cuts off a worker that has claimed a job.
     let admin = tokio::net::TcpListener::bind(&config.admin_listen).await?;
@@ -394,6 +398,16 @@ async fn start(
             tokio::select! {_=group_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
         }
     });
+    tasks.spawn(
+        "text index",
+        search_index.run(
+            pool.clone(),
+            Duration::from_secs(config.search.index_commit_secs),
+            state.metrics.search_index_pass.clone(),
+            state.metrics.search_index_open.clone(),
+            shutdown_rx.clone(),
+        ),
+    );
     tasks.spawn_optional(
         "same-event hints",
         pinakes_core::same_event::run(pool.clone(), config.clone(), shutdown_rx.clone()),
@@ -547,6 +561,39 @@ async fn drop_held(
     }
     Ok(())
 }
+/// `pinakesd reindex`: with the daemon stopped (it takes the instance lock), build the text index
+/// in `search.index_dir` from the database into a new generation, switch to it and remove the
+/// old one, printing the progress.
+async fn reindex(config: Option<PathBuf>) -> Result<()> {
+    let config = Config::load(config.as_deref())?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&config.database_url)
+        .await?;
+    migrate(&pool).await?;
+    let _lock = pinakes_core::locks::own_database(&pool)
+        .await
+        .context("reindex runs while the daemon is stopped")?;
+    let dir = PathBuf::from(&config.search.index_dir);
+    println!("building the text index in {}", dir.display());
+    let started = std::time::Instant::now();
+    let catalogues: Vec<String> = config
+        .catalogues
+        .enabled_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let units = pinakes_core::search_index::reindex(&pool, &dir, &catalogues, |n| {
+        println!("{n} units and cards")
+    })
+    .await?;
+    println!(
+        "text index built: {units} units in {} s",
+        started.elapsed().as_secs()
+    );
+    Ok(())
+}
+
 /// A `nexus_authorization` sent to an `http://` Nexus on another machine crosses the network in
 /// clear.
 fn warn_plain_nexus(config: &Config) {
@@ -602,6 +649,8 @@ enum Command {
     Reextract(Vec<String>),
     /// `catalogue status` or `catalogue drop NAME`.
     Catalogue(CatalogueCommand),
+    /// `reindex`: build the text index from the database and switch to it.
+    Reindex,
     Print(String),
     /// `parse-worker <cpu seconds>`: the HTML parse worker the daemon runs itself in.
     ParseWorker(u64),
@@ -695,6 +744,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((config, Command::ParseWorker(secs)));
             }
             "reextract" => routes = Some(vec![]),
+            "reindex" if routes.is_none() => command = Command::Reindex,
             "healthcheck" if routes.is_none() => command = Command::Healthcheck,
             "--openapi" => {
                 return Ok((
@@ -706,7 +756,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | parse-worker SECS]"
                             .into(),
                     ),
                 ))

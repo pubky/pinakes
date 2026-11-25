@@ -41,6 +41,7 @@ pub mod resolver;
 pub mod same_event;
 pub mod same_recording;
 pub mod scheduler;
+pub mod search_index;
 pub mod source;
 pub mod sources;
 pub mod spatial;

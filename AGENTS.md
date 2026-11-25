@@ -61,7 +61,7 @@ thread clock (`CLOCK_THREAD_CPUTIME_ID`).
   - `groups.rs`, `group_keys.rs`, `same_event.rs`, `same_recording.rs`, `hints.rs`,
     `matching.rs`: groups, the same-event and same-recording hints and what they share.
   - `api.rs`, `change_api.rs`, `spatial.rs`, `recipes.rs`: the HTTP API, its OpenAPI document
-    and examples. `agents/`: the agents' guide (`/llms.txt`, `/skill.md`) and the MCP endpoint.
+    and examples. `search_index.rs`: the text index a search with `q` reads its candidates from. `agents/`: the agents' guide (`/llms.txt`, `/skill.md`) and the MCP endpoint.
   - `config.rs`: configuration and every limit with its default.
   - `telemetry.rs`, `canary.rs`, `maintenance.rs`, `osm_dump.rs`, `locks.rs`, `adapter.rs`
     (each route's manifest: mode, cadence, expected fields, canary), `source.rs` (each source's

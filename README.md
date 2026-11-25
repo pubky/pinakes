@@ -57,6 +57,8 @@ card        typed document and its change journal                  store.rs, cha
   ├── also on     keys, facts and links from hubs and services     also_on.rs, also_on/, lookups/
   └── same event  events that are possibly the same one            same_event.rs
   ▼
+text index  words, tags, labels, type, place per unit and card     search_index.rs
+  ▼
 /v1 API     search, cards, lookup, resolve, occurrences, changes   api.rs, change_api.rs
 ```
 
@@ -75,7 +77,10 @@ line, creates the schema, and starts the listeners and the background tasks.
    identifiers only. Their answers give keys (`isrc:…`, `mb:recording:…`, `wikidata:Q…`, `doi:…`),
    facts and derived links. Resources that share a key form a group. A group is a hint on each
    card, never a merge.
-4. **Serve.** The public listener (port 8090 by default) serves `/v1`. The admin listener (port
+4. **Serve.** A search with text reads its candidates from an embedded Tantivy index of every
+   searchable unit and every catalogue card, which triggers keep current; Postgres checks each
+   candidate and builds the page ([text index](docs/operations.md#text-index)). The public
+   listener (port 8090 by default) serves `/v1`. The admin listener (port
    9090) serves `/metrics`, operator info, stored documents and group curation.
 
 Pinakes stores its data in PostgreSQL with PostGIS and `pg_trgm`. The index is derived data that a

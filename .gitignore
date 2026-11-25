@@ -5,6 +5,8 @@
 /dumps/
 # A local daemon's catalogue downloads and temporary files (catalogues.dir).
 /catalogues/
+# The text index a local daemon writes (search.index_dir).
+search-index/
 .env
 *.bundle
 

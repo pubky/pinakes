@@ -197,6 +197,7 @@ collapsed. Its `name` is the start of the text on one line.
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}` ([Occurrence](#occurrence)) |
 | `maybe_same` | Other cards that are possibly the same thing, best first, each `{id, uri, site, start, score}`: for events ([Possibly the same event](#possibly-the-same-event)), app store cards ([Possibly the same app](#possibly-the-same-app)) and `MusicRecording` cards ([Possibly the same recording](#possibly-the-same-recording)). Up to 3 on a search, lookup or group card and up to 10 on a resource read; `[]` when there are none. Absent on other cards, and on a kind's cards when its hint is off. |
 | `because` | [Related](#related) search rows only: why the row is listed, `{shared, taggers}`. Absent on every other card. |
+| `labels` | Search rows only: the labels the card's catalogue gives it, as valid tag labels, kept apart from people's tags (which Nexus serves for `uri` and `refs`); a client may offer them as suggested tags. `[]` on every other search row ([Catalogue cards](#catalogue-cards-in-search)). Absent on other routes. |
 
 #### refs
 
@@ -1006,9 +1007,10 @@ POST /v1/changes/lookup {"resource_ids":["81cefcae5a6a468cfc27ff1c1b420fce","5bc
 
 ## Search
 
-`GET /v1/search` lists the links people referenced on Pubky, filtered and ranked. Every
-parameter is optional, and the filters combine. Search lists only resources with at least one
-public reference.
+`GET /v1/search` lists the links people referenced on Pubky and the cards of the catalogues that
+are on, filtered and ranked. Every parameter is optional, and the filters combine. A resource is
+listed only with at least one public reference ([Catalogue cards](#catalogue-cards-in-search) for
+the cards nobody referenced).
 
 The answer is `{items, cursor, reach_truncated, facets?}`:
 
@@ -1023,14 +1025,14 @@ The answer is `{items, cursor, reach_truncated, facets?}`:
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `q` | None | Text in the name or description, at most 256 bytes ([Text search](#text-search)) |
+| `q` | None | Text in the name, other names or description, at most 256 bytes ([Text search](#text-search)) |
 | `type` | Any type | A schema.org type with its subtypes (`Event` matches `MusicEvent`; `Place` matches cafés and other `LocalBusiness` types), or up to 10 comma-separated: any of them (`type=MusicRecording,MusicAlbum,MusicGroup`) |
 | `exclude_type` | None | Leaves out a schema.org type with its subtypes (`exclude_type=Event` leaves out `MusicEvent` too), or up to 50 comma-separated, spelled as for `type`. A link with no type yet (not read, or unreachable) is left out as well. Combines with `type`: `type=CreativeWork&exclude_type=Article`. |
 | `category` | None | One category exactly, at most 256 bytes: a place's OSM `key/value` (`amenity/cafe`), or the `category` a page's schema.org data gives |
 | `host` | None | A host exactly as the links' URLs name it (`www.youtube.com` and `youtube.com` are two hosts), or up to 10 comma-separated: links on any of them (`host=open.spotify.com,www.deezer.com`). Spaces around a host are ignored; each host is at most 256 bytes. |
 | `key` | None | Links carrying one exact identifier, on any service and in any spelling ([Search by key](#search-by-key)) |
 | `related` | None | A resource ID: what the people who tagged it also referenced ([Related](#related)). Not with `sort` or `boost`. |
-| `tags` | None | Comma-separated labels: at most 5, each 1–128 bytes |
+| `tags` | None | Comma-separated labels: at most 5, each 1–128 bytes. They match people's tags and catalogue cards' labels. |
 | `match` | `any` | With `tags`: `any`, or `all` (at most 3 tags) |
 | `author` | None | Resources referenced by this public key (52 characters, z-base-32) |
 | `reach` | None | `following`, `friends` or `wot_2` of `viewer`: only their references and tags count (a filter; [Reach and boost](#reach-and-boost)) |
@@ -1051,6 +1053,7 @@ The answer is `{items, cursor, reach_truncated, facets?}`:
 | `radius` | None | With `near`: positive metres, at most `limits.max_radius_m` (200 km by default) |
 | `from`, `to` | None | Inclusive bounds on the start time: RFC 3339, Unix milliseconds, or relative (`now`, `now+30d`, `now-12h`; at most 100 years), within UTC years 0001–9999 |
 | `collapse` | None | `group`: one row per group ([Collapsing groups](#collapsing-groups)) |
+| `referenced` | None | `true`: only things someone referenced on Pubky, no catalogue card nobody referenced |
 
 The answer is 400 for an unknown parameter, invalid coordinates or dates, an out-of-range
 radius, an unknown type and incompatible options. A date outside years 0001–9999 gives the
@@ -1066,22 +1069,73 @@ letters and digits; anything else, such as a URL, gets a general message. Other 
 
 ### Text search
 
-`q` searches the name and description, with a trigram and partial-name fallback. A post whose
-author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's
-`indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`).
+A search with `q` and none of `author`, `reach`, `related`, `in_collection`, `key`, `remote` and
+`ingredient` reads its candidates from the text index ([operations](operations.md#text-index)):
+the best `limits.search_text_candidates` (500) units for the page's order that match `q` by its
+words, and the best 500 that Postgres' own text search may find otherwise, each with the filters
+the index holds (`type`, `exclude_type`, `tags` and `match`, `host`, `category`, `venue`, `from`,
+`to`, `near`, `bbox`, closed job postings, the catalogues that are on). The page, its facets and
+`collapse` are built from those candidates, with every filter applied again and the exact
+distance. `q` matches like this:
 
-A short `q` matches differently. Short means letters and digits only, at most three characters,
-counting one space between words (`ai`, `lol`, `btc`):
+- Words: every word in the name, the description (an OpenStreetMap place's address line) or
+  other names, as `"quoted phrases"` in order; `-word` leaves out the cards that hold it, and `or`
+  between two words takes either. Letters match without their accents and case (`zurich` finds
+  `Zürich`), and the last word also matches the start of a word in the name (`beatl` finds
+  `Beatles`). A word is letters, digits and the marks they are written with; signs split words
+  (`c++` is `c`, `node.js` is `node js`). In a script written without spaces (Chinese, Japanese,
+  Thai) each character is a word, so `東京` matches `東京タワー`.
+- As Postgres' text search, for a text that is not short: the text inside the name (`ILIKE`:
+  `over` finds `Sovereign`) and a name similar to the text (`pg_trgm`'s `%`, similarity 0.3 or
+  more: `kraftwerg` finds `Kraftwerk`, `daft punk` finds `Daft`). The index proposes the names
+  that hold the text's three-letter pieces (at least 30% of them) and Postgres keeps those it
+  matches, so a typo finds only near names. It proposes them only while fewer cards than its
+  candidates (`limits.search_text_candidates`, 500) hold every word of the text in their name
+  (with that many, the candidates are those cards), and leaves
+  out a piece more than 10,000 names and 5% of the index hold, asking one piece fewer for each
+  (one at least): a typo made of common pieces alone finds nothing this way.
+- A short `q` (letters and digits only, at most three characters, counting one space between
+  words: `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a
+  sign such as `/` or `™` starts a word too) and the description by whole words. Several short
+  words match in order, each at a word start (`a s` finds `A slow song`, not `As lop`).
 
-- It matches a name only at the start of a word (`Airbnb`, not `Rain`). A sign such as `/` or
-  `™` starts a word too.
-- It matches the description by whole words.
-- Several short words match in order, separated only by white space, each at a word start
-  (`a s` finds `A slow song`, not `As lop`).
+People's tags and catalogue labels add to a card's relevance but never match `q` alone. A post
+whose author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's
+`indexable: false` or `noindex`, Bluesky's `!no-unauthenticated`). A card found by its words that
+has no text any more (a post found gone or emptied since the index's last pass) is left out.
 
-Text with other signs (`c++`), text in a script written without spaces (Chinese, Japanese,
-Thai), and text in Hebrew or Arabic (which write prefixes onto words) still match inside the
-name.
+The index follows writes within `limits.search_index_commit_secs` (2 s): a new tag is found by
+text a few seconds after Pinakes reads it, while a deleted or emptied card leaves every search at
+once. With `q`, facets count the candidates, not every match, and a text search lists at most its
+candidates over all its pages. Relevance uses the whole index's word statistics, so a commit
+between two pages can move a card across the cursor: a later page may then repeat or miss a card,
+as when its activity changes.
+
+With `author`, `reach`, `related`, `in_collection`, `key`, `remote` or `ingredient`, and while the
+daemon builds its text index after a start without one, `q` is matched in Postgres alone: its
+words (`websearch_to_tsquery`, in the `simple` configuration, without accent folding), the text
+inside the name and similar names, a short `q` as above.
+
+### Catalogue cards in search
+
+A catalogue card nobody referenced is a search row like any other, of a catalogue that is on
+([catalogues](operations.md#catalogues)):
+
+- found by text through the index, by `type` (with its subtypes), `exclude_type`, `tags` (its
+  labels), `host`, `near` and `bbox`;
+- `id` is the resource ID its `uri` would have, the same once someone references the link; `uri`
+  is the card's canonical link; `labels` are its source's labels; `refs` is `[]`, `collections`
+  0, `status` `ok`; `group`, `also_on` and `maybe_same` are empty. OpenStreetMap cards carry the
+  ODbL `attribution`. `GET /v1/resources/{id}` answers 404 for it until someone references the
+  link;
+- a card whose `uri` a listed resource has is listed once, as that resource; a card whose
+  resource the search leaves out (not referenced any more, or not yet read) is listed as the card;
+- never listed with `referenced=true`, a social filter (`author`, `reach`, `related`,
+  `in_collection`), `key`, `venue`, `category`, `remote`, `ingredient`, `from` or `to`, nor with
+  `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;
+- without text, the best known first (by its source's fame) after every referenced unit, at most
+  `limits.search_text_candidates` per search (by distance with `sort=distance`);
+- a catalogue switched off leaves every search at once.
 
 ### Search by key
 
@@ -1127,8 +1181,32 @@ Scores are internal and never returned.
   * 2^(-age_of_newest_reference_in_days / 30)
 ```
 
-**Relevance** ranks by how well `q` matches: the name first, then the tags, then the
-description, and only then by activity:
+**Relevance** ranks by how well `q` matches. From the text index:
+
+```text
+text * (1 + fame) + activity
+```
+
+- `text`: the match's BM25 score over the fields (the name weighing 3, people's tags 2, other
+  names and source labels 1.5, the description 1), plus 20 when the name equals `q` (any case or
+  accents, white space collapsed), BM25 again when the name holds `q`'s words in order, and 10 for
+  the start of a name word; a card found as Postgres' text search finds it scores 8 for the text
+  inside its name and 0.5 per shared three-letter piece;
+- `fame`: a catalogue card's 0–1 fame from its source's own signal; 0 on a referenced link;
+- `activity`: the activity score (with `boost`'s term when given). It grows with the log of the
+  taggers, so each further tag adds less than the one before, and a thousand taggers (about 7) stay
+  below an exact name match: tagged cards rank higher, they don't always come first.
+
+With `q` and another `sort`, the index keeps the 500 matches that rank first in that order (the
+most active, the newest reference, the earliest start, the nearest), and the page ranks them as
+without `q`. With `sort=trending` it keeps the 10,000 matches (20 times
+`limits.search_text_candidates`, at most 10,000) referenced last among those referenced inside `window`, and
+Postgres ranks them by their references inside the window: a match whose last reference in the
+window is older than those 10,000 is not listed. By activity, a catalogue card comes after every
+referenced unit, the best known first.
+
+In Postgres alone (with a social filter, `key`, `remote` or `ingredient`), relevance ranks the
+name first, then the tags, then the description, and only then by activity:
 
 ```text
 9 * name + 3 * tag + description + a / (1 + a)
@@ -1147,7 +1225,7 @@ description, and only then by activity:
 - `a`: the activity score (with `boost`'s term when given), mapped into [0, 1) so it only breaks
   ties.
 
-Words are whole words (`music` does not match `musical` there), in the `simple` text
+Words are whole words there (`music` does not match `musical`), in the `simple` text
 configuration, with no stemming. `q` alone decides what matches (name and description); tags
 only rank.
 
@@ -1165,8 +1243,10 @@ Concurrent updates show between pages; a search is not a frozen snapshot.
 
 ### Facets
 
-`facet` adds `facets` to the answer: counts over the whole filtered set. The counts are the same
+`facet` adds `facets` to the answer: counts over the whole filtered set (with `q`, over the text
+search's candidates; of catalogue cards, over the ones the search lists). The counts are the same
 on every page, whatever `limit`, `cursor` or `sort`; `collapse` changes the rows, not the counts.
+`tags` counts people's tags and catalogue labels together.
 Each list is most frequent first, ties by value.
 
 | Facet | Entries |
@@ -3039,7 +3119,7 @@ listener's layers, with the caller's address:
 
 | Tool | Request | Answer |
 | --- | --- | --- |
-| `search` | `GET /v1/search` with `q`, `type` (array), `exclude_type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `host` (array), `category`, `sort`, `window`, `collapse`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | `url`, compact cards in `items`, `cursor`, and `reach_truncated` and `facets` when present |
+| `search` | `GET /v1/search` with `q`, `type` (array), `exclude_type` (array), `tags` (array), `match`, `near` (`{lat, lon, radius}`), `bbox` (`[west, south, east, north]`), `from`, `to`, `key`, `remote`, `closed`, `ingredient`, `in_collection`, `host` (array), `category`, `sort`, `window`, `collapse`, `referenced`, `reach`, `boost`, `viewer`, `limit`, `cursor`, `facet` (array of `type`, `tags`, `host`, `category`) | `url`, compact cards in `items`, `cursor`, and `reach_truncated` and `facets` when present |
 | `card` | `GET /v1/resources/by-uri` with `uri`; with `resolve: true` and an unknown link, `POST /v1/resolve` | `url` and one compact `card` with `category`, `address`, `facts`, `keys`, `tz`, `event_status`, `venue` and `organizer` when present, `related` and `related_total` when it has them, `aliases` (at most 10), and, when public collections hold it, `in_collections` (the first 5) and `collections_url` |
 | `lookup` | `GET /v1/search?key=` with `key` and optional `limit` | As `search` |
 | `group` | `GET /v1/groups/{id}` | `url`, `id`, `type`, `keys`, every member's compact card, and `best`: the most complete readable member of the group's type |
