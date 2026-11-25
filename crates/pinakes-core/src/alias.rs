@@ -33,38 +33,67 @@ pub struct Alias {
 pub fn root(uri: &str) -> Option<Alias> {
     rooted(uri).map(|(alias, _)| alias)
 }
-/// [`root`] with the rule that named it: `cursor`, `osm`, `isbn`, `doi`, `source/{name}` (an
-/// official source's spellings), `music/{service}` (`music::Service::token`), `wikipedia`,
-/// `wikidata`, `musicbrainz` or `tracking`. `data/spellings.json` lists examples of each.
+/// A rule of [`rooted`] that is neither a music service's (`music/{service}`) nor an official
+/// source's (`source/{name}`). A new rule gets a variant here, which `tests/spellings.rs` makes
+/// list and give vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    Cursor,
+    Osm,
+    Isbn,
+    Doi,
+    Wikipedia,
+    Wikidata,
+    MusicBrainz,
+    Tracking,
+}
+impl Rule {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cursor => "cursor",
+            Self::Osm => "osm",
+            Self::Isbn => "isbn",
+            Self::Doi => "doi",
+            Self::Wikipedia => "wikipedia",
+            Self::Wikidata => "wikidata",
+            Self::MusicBrainz => "musicbrainz",
+            Self::Tracking => "tracking",
+        }
+    }
+}
+/// [`root`] with the rule that named it: a [`Rule`], `source/{name}` (an official source's
+/// spellings) or `music/{service}` (`music::Service::token`). `data/spellings.json` lists
+/// examples of each.
 pub fn rooted(uri: &str) -> Option<(Alias, String)> {
     let (_, uri, _) = crate::model::identity(uri).ok()?;
+    let core = |rule: Rule| rule.name().to_owned();
     let found = if let Some(root) = crate::event::adapters::cursor::canonical_root(&uri) {
-        Some((root, "cursor", "cursor".to_owned()))
+        Some((root, "cursor", core(Rule::Cursor)))
     } else if let Some(osm) = crate::resolver::osm::parse_id(&uri) {
-        Some((osm.uri(), "osm", "osm".to_owned()))
+        Some((osm.uri(), "osm", core(Rule::Osm)))
     } else if let Some(isbn) = crate::resolver::cards::isbn(&uri) {
         Some((
             format!("isbn:{}", crate::resolver::cards::isbn13(&isbn)),
             "identifier",
-            "isbn".to_owned(),
+            core(Rule::Isbn),
         ))
     } else if let Some(doi) = crate::resolver::cards::doi(&uri) {
-        Some((format!("doi:{doi}"), "identifier", "doi".to_owned()))
+        Some((format!("doi:{doi}"), "identifier", core(Rule::Doi)))
     } else if let Some((source, root)) = crate::sources::alias_root_by(&uri) {
         Some((root, "identifier", format!("source/{source}")))
     } else if let Some(music) = crate::music::parse(&uri) {
         let rule = format!("music/{}", music.service.token());
         Some((music.canonical, "service", rule))
     } else if let Some(article) = crate::wikipedia::parse(&uri) {
-        Some((article.canonical, "service", "wikipedia".to_owned()))
+        Some((article.canonical, "service", core(Rule::Wikipedia)))
     } else if let Some((_, item)) = crate::hubs::wikidata::item_link(&uri) {
-        Some((item, "service", "wikidata".to_owned()))
+        Some((item, "service", core(Rule::Wikidata)))
     } else if let Some((_, _, page)) = crate::hubs::musicbrainz::entity_link(&uri) {
-        Some((page, "service", "musicbrainz".to_owned()))
+        Some((page, "service", core(Rule::MusicBrainz)))
     } else if let Some((_, page)) = crate::hubs::musicbrainz::isrc_link(&uri) {
-        Some((page, "service", "musicbrainz".to_owned()))
+        Some((page, "service", core(Rule::MusicBrainz)))
     } else {
-        untracked(&uri).map(|root| (root, "tracking", "tracking".to_owned()))
+        untracked(&uri).map(|root| (root, "tracking", core(Rule::Tracking)))
     }?;
     let (_, root, _) = crate::model::identity(&found.0).ok()?;
     (root != uri).then_some((

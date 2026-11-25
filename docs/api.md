@@ -1657,15 +1657,18 @@ Pinakes answers for it:
   does: a rule change that changes an answer fails it until the file says the same. Every rule
   has vectors, and every root is its own root with a vector of its own.
 - `GET /v1/info` `spelling_rules` is the version: the first 16 hex characters of the BLAKE3 hash
-  of the file. It changes with every change to the file. A copy whose hash matches is the rule
-  set that instance runs.
+  of the file. It changes with every change to the file, and every change to a rule comes with
+  vectors of the spellings it adds or moves. A copy whose hash matches holds the vectors that
+  instance answers exactly; a spelling no vector shows may still fold there.
 - The rules are read-side only. Pinakes folds a link when it reads it and never rewrites anyone's
   tags: a tag stays on the link its author wrote, and its references count for the root.
-- A root once listed stays a spelling of its card. A rule change that gives links another root
-  also folds the old root into the new one (its vector names the new root), and
-  `pinakesd reextract` moves the stored aliases.
-- The vectors hold with every source on. A source switched off folds none of its links, so its
-  `source/{name}` vectors do not hold on that instance; a build without the source has none.
+- A root once listed stays a spelling of its card: a rule change that gives links another root
+  also folds the old root into the new one, and its vector then names the new root. Vectors are
+  never removed but with their source. `pinakesd reextract` moves the stored aliases.
+- The vectors hold with every source on, and `spelling_rules` is the same whichever sources an
+  instance switches off. A source switched off folds no new link, so its `source/{name}` vectors
+  do not hold there (links it folded before stay folded; Discogs links still fold to the same
+  root by the music rule). A build without the source has no vectors of it.
 - Not in the file, because they need a fetch and cannot be reproduced offline: a page's own
   canonical or permanent redirect, a Meetup date's number and token, an official API's answer,
   and a podcast feed naming its episode's page (alias bases `canonical` and `source`).

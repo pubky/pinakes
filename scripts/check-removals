@@ -11,7 +11,8 @@ tests (`cargo test --workspace`, as scripts/test does, every target even after o
 DATABASE_URL and RUST_TEST_THREADS as for it), which a source's removal can break where the build
 does not: a test of another source that relied on it, a recording it took along. A source whose
 removal needs any other edit fails, with its first errors or failed tests. `--list` names the
-sources and stops; `--self-test` checks the deletion and the leftover check on a synthetic tree
+sources and stops; `--spellings-layout FILE` checks that FILE is in the layout this script writes
+`data/spellings.json` in, and stops; `--self-test` checks the deletion and the leftover check on a synthetic tree
 of their own, independent of the repository and of which sources it has, and stops.
 
 The leftover check (`verify`) does not reuse the deletion's patterns: it looks for the source
@@ -65,6 +66,12 @@ FIXTURE_INDEXES = [CORE + "tests/fixtures/%s/README.md" % d for d in ("sources",
 PROSE = ["README.md", "AGENTS.md", "e2e/README.md"]
 # The URI-only spelling rules' vectors: one per line, in the layout `tests/spellings.rs` holds.
 SPELLINGS = "data/spellings.json"
+# Sources whose links shared code roots the same way once they are gone: their vectors stay, under
+# the shared code's rule. Every other source's vectors go with it.
+SPELLINGS_HANDOVER = {
+    # music.rs reads Discogs links too (`music::discogs::root`, the root the source names).
+    "discogs": "music/discogs",
+}
 # Lines that may name a source after its removal and stay, each with the files it applies to, the
 # removed sources it applies to (any, when None) and its reason: what the line belongs to is in
 # the build without the source. A line is shared in those files alone: the same words in a
@@ -243,12 +250,23 @@ def remove(wt, kind, name):
     for rel, patterns in lines.items():
         for pattern in patterns:
             edit(rel, pattern)
-    # Its spelling vectors: the build without it folds none of its links.
+    # Its spelling vectors: the build without it folds none of its links (but those shared code
+    # roots the same way, `SPELLINGS_HANDOVER`), so they go, and the vectors of their roots that
+    # no vector left names.
     if own_vectors(wt, name):
         p = os.path.join(wt, SPELLINGS)
         with open(p, encoding="utf-8") as f:
             doc = json.load(f)
-        doc["vectors"] = [v for v in doc["vectors"] if v.get("rule") != "source/%s" % name]
+        own = "source/%s" % name
+        if name in SPELLINGS_HANDOVER:
+            for v in doc["vectors"]:
+                if v.get("rule") == own:
+                    v["rule"] = SPELLINGS_HANDOVER[name]
+        else:
+            gone = {v["root"] for v in doc["vectors"] if v.get("rule") == own}
+            kept = [v for v in doc["vectors"] if v.get("rule") != own]
+            named = {v["root"] for v in kept if v["root"] != v["link"]}
+            doc["vectors"] = [v for v in kept if not (v["link"] in gone and v.get("rule") == "none" and v["link"] not in named)]
         with open(p, "w", encoding="utf-8") as f:
             f.write(spellings_text(doc))
 
@@ -581,11 +599,13 @@ PINAKES_DELTA_KEY=
     "e2e/samples/alpha_beta.json": '[{"kind": "alpha_beta_seed", "uri": "https://alpha-beta.example/1"}]\n',
     "e2e/samples/delta.json": '[{"kind": "delta_join", "uri": "https://delta.example/1", "group_with": "alpha_beta_seed", "needs": "alpha_beta"}]\n',
     "e2e/samples.live.json": '[{"kind": "web", "uri": "https://example.org/"}, {"kind": "web_twin", "uri": "https://example.org/2", "maybe_same_with": "web"}]\n',
-    # The spelling vectors: one of the official source's rule, one of the other's, one core rule.
+    # The spelling vectors: one of the official source's rule with its root's own, one of the
+    # other's, one core rule.
     SPELLINGS: """{
   "about": "Test vectors.",
   "vectors": [
     {"link":"https://alpha-beta.example/d/1","root":"ab:1","basis":"identifier","rule":"source/alpha_beta"},
+    {"link":"ab:1","root":"ab:1","basis":null,"rule":"none"},
     {"link":"https://gamma.example/x/2","root":"gamma:2","basis":"identifier","rule":"source/gamma"},
     {"link":"https://example.org/a?utm_source=x","root":"https://example.org/a","basis":"tracking","rule":"tracking"}
   ]
@@ -634,7 +654,7 @@ def self_test():
                 assert "PINAKES__PODCAST_INDEX__KEY=" in env and "ALPHA_BETA" not in env, env
                 assert any("docs/api.md:1" in m for m in mentions), mentions
                 spellings = open(os.path.join(wt, SPELLINGS), encoding="utf-8").read()
-                assert "alpha_beta" not in spellings and "source/gamma" in spellings, spellings
+                assert "alpha_beta" not in spellings and '"ab:1"' not in spellings and "source/gamma" in spellings, spellings
                 assert spellings == spellings_text(json.loads(spellings)), spellings
                 assert len(json.loads(spellings)["vectors"]) == 2, spellings
         wt, name, title = os.path.join(base, "alpha_beta"), "alpha_beta", "Alpha Beta"
@@ -705,6 +725,13 @@ def main(argv):
     # The self-test reads nothing of the repository: before its registries are read.
     if argv == ["--self-test"]:
         return self_test()
+    # `tests/spellings.rs`: the layout `remove` writes is the file's own.
+    if len(argv) == 2 and argv[0] == "--spellings-layout":
+        with open(argv[1], encoding="utf-8") as f:
+            text = f.read()
+        same = spellings_text(json.loads(text)) == text
+        print("spellings layout: " + ("same" if same else "DIFFERENT"))
+        return 0 if same else 1
     all_sources = registered()
     if "shared" in {n for _, n in all_sources}:
         raise SystemExit("no source may be named `shared`: that is the fixtures' shared directory")

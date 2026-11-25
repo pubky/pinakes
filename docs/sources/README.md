@@ -309,8 +309,9 @@ registry lines, nothing else. `scripts/test` and `scripts/e2e --mock` then pass 
   `shared/` there, never in a directory named after a source), and its own test file
   (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
 - its live end-to-end samples, `e2e/samples/<name>.json`;
-- its spelling vectors, the lines of `data/spellings.json` whose `rule` is `source/<name>`
-  ([Spelling vectors](../api.md#spelling-vectors)).
+- its spelling vectors, the lines of `data/spellings.json` whose `rule` is `source/<name>`, and
+  the lines of their roots that nothing else names ([Spelling vectors](../api.md#spelling-vectors));
+  Discogs's stay as `music/discogs`, since `music.rs` roots those links the same way.
 
 An instance that runs a build without the source may keep a `[sources.<name>]` block (or
 `PINAKES__SOURCES__<NAME>__ENABLED`) that only sets `enabled`: the daemon logs a warning and

@@ -90,6 +90,12 @@ resolver, a routing rule or an alias rule, say in the PR which `pinakesd reextra
 operator runs. Also-on results refresh with `reextract also-on`; `reextract all` does both.
 When a change adds something operators must do, document it in `docs/operations.md`.
 
+**Spelling vectors.** A change to an alias rule that needs only the URI adds vectors to
+`data/spellings.json` for the spellings it adds or moves (`cargo test -p pinakes-core --test
+spellings` writes this build's answers to copy over the file). A root listed there stays a
+spelling of its card: a rule that gives links another root folds the old root into the new one
+too. Never remove a vector but with its source ([docs/api.md](docs/api.md#spelling-vectors)).
+
 **Keys and facts.** Only a hub (MusicBrainz, Wikidata) or a service's own record of its own ID
 makes a join key. What a page says about itself (`sameAs`, a canonical link to another page, an
 ISRC in its markup) is a fact at most and never joins two resources, and so is another service's
@@ -127,7 +133,7 @@ full list):
 - its block in `pinakes.example.toml` (and its variables in `.env.example`);
 - its fixture directories (those named after it) and its own test file, if any;
 - `e2e/samples/<name>.json`;
-- its lines in `data/spellings.json` (rule `source/<name>`).
+- its lines in `data/spellings.json` (rule `source/<name>`; Discogs's become `music/discogs`).
 
 Shared code stays. A test that needs a source returns early without it, so no test changes. A
 removed source's keys stay in the database until they expire, and keep their grouping rule

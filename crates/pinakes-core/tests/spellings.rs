@@ -1,7 +1,12 @@
 //! `data/spellings.json`, the URI-only spelling rules' test vectors (docs/api.md, Spelling
 //! vectors): every vector is what this build answers for its link, the file keeps its one
 //! layout (one vector per line), every root is its own root, and every rule has vectors.
-use pinakes_core::{alias, model, music::Service, sources};
+use pinakes_core::{
+    alias::{self, Rule},
+    model,
+    music::Service,
+    sources,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -126,6 +131,27 @@ fn every_root_is_its_own_root() {
     }
 }
 
+/// Every rule of `alias::Rule` (a new one fails to compile here until listed).
+fn core_rules() -> Vec<Rule> {
+    use Rule::*;
+    let all = [
+        Cursor,
+        Osm,
+        Isbn,
+        Doi,
+        Wikipedia,
+        Wikidata,
+        MusicBrainz,
+        Tracking,
+    ];
+    for r in all {
+        match r {
+            Cursor | Osm | Isbn | Doi | Wikipedia | Wikidata | MusicBrainz | Tracking => {}
+        }
+    }
+    all.to_vec()
+}
+
 /// Every music service `music::parse` reads (a new one fails to compile here until listed).
 fn services() -> Vec<Service> {
     use Service::*;
@@ -150,7 +176,7 @@ fn services() -> Vec<Service> {
     all.to_vec()
 }
 
-/// Every rule `alias::rooted` names has a vector that it roots: each core rule, each music
+/// Every rule `alias::rooted` names has a vector that it roots: each `alias::Rule`, each music
 /// service, and each registered source whose module spells its objects (`fn alias_root`); and
 /// `identity` and `none` have theirs.
 #[test]
@@ -159,27 +185,20 @@ fn every_rule_has_vectors() {
     for v in file().vectors {
         *count.entry(v.rule).or_default() += 1;
     }
-    let mut rules: Vec<String> = [
-        "cursor",
-        "osm",
-        "isbn",
-        "doi",
-        "wikipedia",
-        "wikidata",
-        "musicbrainz",
-        "tracking",
-        "identity",
-        "none",
-    ]
-    .map(String::from)
-    .to_vec();
-    // Discogs links are the discogs source's (`source/discogs`) while it is in the build, and
-    // music.rs's without it, with the same root (`music::discogs::root`) either way.
+    let mut rules: Vec<String> = core_rules()
+        .into_iter()
+        .map(|r| r.name().to_owned())
+        .collect();
+    rules.extend(["identity", "none"].map(String::from));
+    // A music service whose links an official source of its name spells first (Discogs) has that
+    // source's vectors while the source is in the build; without it, music.rs roots the same
+    // links to the same root, and a source's removal hands its vectors over (check-removals).
     rules.extend(
         services()
             .into_iter()
-            .filter(|s| *s != Service::Discogs)
-            .map(|s| format!("music/{}", s.token())),
+            .map(|s| s.token())
+            .filter(|t| sources::by_name(t).is_none())
+            .map(|t| format!("music/{t}")),
     );
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sources");
     for entry in std::fs::read_dir(&dir).unwrap() {
@@ -200,4 +219,24 @@ fn every_rule_has_vectors() {
     }
     let missing: Vec<&String> = rules.iter().filter(|r| !count.contains_key(*r)).collect();
     assert!(missing.is_empty(), "rules without a vector: {missing:?}");
+}
+
+/// `scripts/check-removals` rewrites the file when it removes a source: it writes this file's
+/// layout byte for byte.
+#[test]
+fn check_removals_writes_this_layout() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new("python3")
+        .arg("-I")
+        .arg(root.join("scripts/check-removals"))
+        .arg("--spellings-layout")
+        .arg(root.join("data/spellings.json"))
+        .output()
+        .expect("python3 runs scripts/check-removals");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
