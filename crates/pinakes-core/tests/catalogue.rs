@@ -801,6 +801,15 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
             .get(),
         3
     );
+    // Each catalogue's allowed lag, from the one place it is set.
+    for c in Catalogue::ALL {
+        assert_eq!(
+            get(&metrics2.catalogue_max_lag, c.name()),
+            c.max_update_lag().as_secs() as i64,
+            "{c}"
+        );
+    }
+    assert_eq!(get(&metrics2.catalogue_max_lag, "openalex"), 100 * 86400);
     // Before its first full import a catalogue has no lag.
     assert_eq!(get(&metrics2.catalogue_lag, "osm"), 0);
 }
@@ -1014,7 +1023,7 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
         Some(at("2026-11-22T00:00:00Z"))
     );
     // An update that can't apply the changes asks for a full import: nothing marked current,
-    // the update not counted as finished, a new generation begun.
+    // the update not counted as finished, no run under way and no generation begun yet.
     let before = state(&pool, Catalogue::Wikidata).await;
     *fixture.current.lock().unwrap() = Some(at("2026-11-25T00:00:00Z"));
     *fixture.update_end.lock().unwrap() =
@@ -1022,18 +1031,20 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
     *fixture.next.lock().unwrap() = Some(Run::Update);
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
     let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.run.as_deref(), s.phase.as_str()), (None, "idle"));
     assert_eq!(
-        (s.run.as_deref(), s.phase.as_str()),
-        (Some("import"), "import")
+        s.import_requested.as_deref(),
+        Some("the change stream is more than five days behind")
     );
-    assert_eq!(s.generation, before.generation + 1);
+    assert_eq!(s.generation, before.generation);
     assert_eq!(
         (s.current_as_of, s.last_update_at),
         (before.current_as_of, before.last_update_at)
     );
-    // The next step runs that import from the start, unasked.
+    // The next step runs that import from the start as a new one, without asking the importer.
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
     let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(s.import_requested, None);
     assert_eq!(fixture.started_from.lock().unwrap().last(), Some(&None));
     assert_eq!((s.run, s.generation, s.cards), (None, 2, 5));
     assert_eq!(s.current_as_of, Some(at("2026-11-25T00:00:00Z")));
@@ -1048,8 +1059,9 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
     assert!((chrono::Utc::now() - current).num_seconds() < 60);
 }
 
-/// A run whose catalogue lock's session ends (an administrator, a database restart) is cut off
-/// as a failure (`lock_lost`), and the task takes the lock again and resumes from the cursor.
+/// A run whose catalogue lock's session ends (an administrator, a database restart) is cut off;
+/// the task logs it, writes nothing to the state row (another daemon may hold the lock by
+/// then), takes the lock again and resumes from the cursor.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
     let (ctx, _dir) = context(&pool, plenty());
@@ -1064,20 +1076,21 @@ async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
         .unwrap();
     // End the session that holds the catalogue's lock.
     let ended: bool = sqlx::query_scalar(
-        "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid",
+        "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
     )
     .bind(Catalogue::Wikidata.lock_key())
     .fetch_one(&pool)
     .await
     .unwrap();
     assert!(ended);
-    until("the lost lock recorded", || async {
-        state(&pool, Catalogue::Wikidata).await.error_count == 1
+    // The task takes the lock again and resumes from the cursor.
+    until("the resumed run", || async {
+        fixture.started_from.lock().unwrap().len() == 2
     })
     .await;
+    // Nothing was written to the state row about the lost lock: it may be another daemon's.
     let s = state(&pool, Catalogue::Wikidata).await;
-    assert_eq!(s.last_error.as_deref(), Some("lock_lost"));
-    assert_eq!(s.cursor, Some(json!({"next": 10})));
+    assert_eq!((s.error_count, s.last_error), (0, None));
     // Let the resumed run past its first batch.
     gate.notify_one();
     until("the resumed import", || async {
@@ -1094,7 +1107,7 @@ async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
         [None, Some(json!({"next": 10}))]
     );
     let s = state(&pool, Catalogue::Wikidata).await;
-    assert_eq!((s.cards, s.error_count, s.phase.as_str()), (25, 1, "idle"));
+    assert_eq!((s.cards, s.error_count, s.phase.as_str()), (25, 0, "idle"));
 }
 
 /// An importer that panics fails its run (`panic`), recorded like any failure: the task goes on
@@ -1161,4 +1174,126 @@ async fn a_failure_is_stored_by_its_class(pool: PgPool) {
     let s = state(&pool, Catalogue::Tranco).await;
     // The fixture's error text ("the fixture dump broke off") stands for an upstream's.
     assert_eq!(s.last_error.as_deref(), Some("unclassified"));
+}
+
+/// An update's hand-over to a full import waits for the large-import turn as a new import does:
+/// while another large catalogue's cut-off import holds the turn, the requested import does not
+/// start (no pile-up of temporary files) and holds no turn itself, so the cut-off import resumes
+/// and finishes (no deadlock); then the requested import runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_hand_over_to_a_full_import_waits_for_the_large_import_turn(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let place = |c: Card| Card {
+        uri: format!("https://www.openstreetmap.org/node/{}", &c.source_id[1..]),
+        r#type: "Place".into(),
+        ..c
+    };
+    // Wikidata imported once; OpenStreetMap's import cut off after a batch.
+    let wikidata = Fixture::new(Catalogue::Wikidata, cards(5));
+    assert_eq!(run::step(&wikidata, &ctx).await.unwrap(), Next::Again);
+    let osm = Fixture::new(Catalogue::Osm, cards(25).into_iter().map(place).collect());
+    *osm.fail_after.lock().unwrap() = Some(1);
+    assert!(run::step(&osm, &ctx).await.is_err());
+    assert_eq!(
+        state(&pool, Catalogue::Osm).await.run.as_deref(),
+        Some("import")
+    );
+    // Wikidata's update hands over to a full import.
+    *wikidata.update_end.lock().unwrap() = UpdateEnd::NeedsImport("the change stream is gone");
+    *wikidata.next.lock().unwrap() = Some(Run::Update);
+    assert_eq!(run::step(&wikidata, &ctx).await.unwrap(), Next::Again);
+    let generation = state(&pool, Catalogue::Wikidata).await.generation;
+    // It waits for OpenStreetMap's cut-off import, though Wikidata comes first in the order.
+    assert_eq!(
+        run::step(&wikidata, &ctx).await.unwrap(),
+        Next::Wait(ctx.pace.turn)
+    );
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert!(s.waiting.unwrap().starts_with("osm's full import"));
+    assert_eq!((s.run, s.generation), (None, generation));
+    assert_eq!(wikidata.started_from.lock().unwrap().len(), 2);
+    // OpenStreetMap resumes and finishes: the waiting hand-over holds no turn.
+    assert_eq!(run::step(&osm, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(state(&pool, Catalogue::Osm).await.cards, 25);
+    // Then Wikidata's requested import runs, in a new generation.
+    assert_eq!(run::step(&wikidata, &ctx).await.unwrap(), Next::Again);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(
+        (s.generation, s.import_requested, s.run),
+        (generation + 1, None, None)
+    );
+    assert_eq!(wikidata.started_from.lock().unwrap().len(), 3);
+}
+
+/// Property: `jsonb_text_len` is exactly the length of PostgreSQL's own text of the value, on
+/// random values (nested objects and arrays, strings with escapes, non-ASCII and control
+/// characters, integers, floats with and without exponents, negative zero), so the details cap
+/// is the table's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn jsonb_text_len_is_postgresql_s_length(pool: PgPool) {
+    struct Gen(u64);
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn text(&mut self) -> String {
+            const CHARS: &[char] = &[
+                'a', 'Z', '0', ' ', '"', '\\', '/', '\n', '\t', '\u{1}', '\u{1f}', 'é', '東', '😀',
+                '\u{2028}',
+            ];
+            (0..self.below(8))
+                .map(|_| CHARS[self.below(CHARS.len() as u64) as usize])
+                .collect()
+        }
+        fn number(&mut self) -> serde_json::Value {
+            let f = [
+                2.0, -0.0, 0.0, 0.5, -12.25, 1e30, 1.5e-7, 1e-3, 123456.789, 1e16, -7e21, 3.0e300,
+            ][self.below(12) as usize];
+            match self.below(3) {
+                0 => json!(self.next() as i64 >> self.below(60)),
+                1 => json!(self.next()),
+                _ => json!(f),
+            }
+        }
+        fn value(&mut self, depth: u32) -> serde_json::Value {
+            match if depth == 0 {
+                self.below(4)
+            } else {
+                self.below(6)
+            } {
+                0 => serde_json::Value::Null,
+                1 => json!(self.below(2) == 0),
+                2 => self.number(),
+                3 => json!(self.text()),
+                4 => serde_json::Value::Array(
+                    (0..self.below(4)).map(|_| self.value(depth - 1)).collect(),
+                ),
+                _ => serde_json::Value::Object(
+                    (0..self.below(4))
+                        .map(|_| (self.text(), self.value(depth - 1)))
+                        .collect(),
+                ),
+            }
+        }
+    }
+    let mut gen = Gen(0x1234_5678_9abc_def1);
+    for _ in 0..500 {
+        let value = gen.value(3);
+        let printed: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
+            .bind(&value)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            pinakes_core::catalogue::jsonb_text_len(&value),
+            printed as usize,
+            "{value}"
+        );
+    }
 }

@@ -5,7 +5,7 @@
 //! class alone, never by its text, with two exceptions the runner itself vouches for:
 //!
 //! - a [`Failure`] an importer or the runner raises: a fixed class (`download`, `parse`, `disk`,
-//!   `panic`, `lock_lost`, …) and, optionally, where (`at`): the host of a fixed bulk file or a
+//!   `panic`, `turn_lost` (the large-import lock lost while this daemon still holds the catalogue lock), …) and, optionally, where (`at`): the host of a fixed bulk file or a
 //!   local path, never anything read from a page;
 //! - an error of this process's own database (a `sqlx::Error`), shown by its own text through
 //!   `resolver::log_error`, as the daemon's other database errors are.

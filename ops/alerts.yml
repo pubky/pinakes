@@ -104,7 +104,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue has waited six hours for the large-import turn while a large catalogue's import keeps failing: pinakesd catalogue status shows which; fix it, switch it off or drop it"}
       - alert: CatalogueUpdateLag
-        expr: (pinakes_catalogue_update_lag_seconds > 172800) and on (catalogue) (pinakes_catalogue_enabled == 1) and on (catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0)
+        expr: (pinakes_catalogue_update_lag_seconds > on (catalogue) pinakes_catalogue_max_update_lag_seconds) and on (catalogue) (pinakes_catalogue_enabled == 1) and on (catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0)
         for: 15m
         labels: {severity: warning}
-        annotations: {summary: "The {{ $labels.catalogue }} catalogue's cards are more than two days behind upstream: no import or update has brought newer data"}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's cards are further behind upstream than its source's publication rhythm allows (pinakes_catalogue_max_update_lag_seconds): no import or update has brought newer data"}

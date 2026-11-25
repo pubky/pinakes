@@ -66,8 +66,10 @@ pub enum UpdateEnd {
     /// before, when it says nothing).
     Done,
     /// The changes can't be applied (a Wikidata change stream more than five days behind, a
-    /// replication sequence that is gone): a full import starts instead, and the cards are not
-    /// marked current. The reason is the importer's own fixed text.
+    /// replication sequence that is gone): the update ends without marking the cards current,
+    /// and a full import is asked for (`import_requested`). It begins as any new full import:
+    /// it waits for the large-import turn and the disk, and holds no turn while it waits. The
+    /// reason is the importer's own fixed text.
     NeedsImport(&'static str),
 }
 /// What an importer does next.
@@ -428,7 +430,7 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             let stepped = std::panic::AssertUnwindSafe(step(&*importer, &ctx)).catch_unwind();
             tokio::select! {
                 stepped = stepped => stepped.unwrap_or_else(|_| Err(Failure::new("panic").into())),
-                _ = held.lost(ctx.pace.lock_check) => Err(Failure::new("lock_lost").into()),
+                _ = held.lost(ctx.pace.lock_check) => Err(CatalogueLockLost.into()),
             }
         };
         let next = tokio::select! {
@@ -438,6 +440,16 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
         let wait = match next {
             Ok(Next::Again) => continue,
             Ok(Next::Wait(wait)) => wait,
+            // The state row may already be another daemon's, which took the lock: only the log
+            // says so. The run resumes from its cursor once this task holds the lock again.
+            Err(failed) if failed.is::<CatalogueLockLost>() => {
+                tracing::warn!(
+                    catalogue = catalogue.name(),
+                    "catalogue lock lost; the run resumes from its cursor once the lock is taken again"
+                );
+                lock = None;
+                ctx.pace.turn
+            }
             Err(failed) => {
                 let shown = failure::shown(&failed);
                 tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue import failed; it resumes from its cursor");
@@ -486,8 +498,11 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     let pool = &ctx.pool;
     let state = store::ensure_state(pool, catalogue).await?;
     let resumed = state.run.as_deref().and_then(Run::parse);
+    // A full import an update asked for starts as any new full import does (the large-import
+    // turn, the disk), not as a resumed one; meanwhile nothing else is planned.
     let run = match resumed {
         Some(run) => run,
+        None if state.import_requested.is_some() => Run::Import,
         None => match importer.plan(&state).await? {
             Plan::Run(run) => run,
             Plan::Wait(wait) => {
@@ -544,7 +559,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         .await?;
         (state.generation, state.cursor.clone())
     } else {
-        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(catalogue.name())
             .bind(run.name())
             .fetch_one(pool)
@@ -588,15 +603,16 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     };
     let ended = tokio::select! {
         ran = ran => ran?,
-        _ = watched => return Err(Failure::new("lock_lost").into()),
+        _ = watched => return Err(Failure::new("turn_lost").into()),
     };
     let mut report = job.report;
     let position = job.position.take();
     if let UpdateEnd::NeedsImport(reason) = ended {
-        // A full import starts in place of the update, in a new generation, with the turn and
-        // disk rules of any full import; nothing is marked current.
-        sqlx::query("UPDATE catalogue_state SET run='import',phase='import',cursor=NULL,waiting=NULL,generation=generation+1,updated_at=now() WHERE catalogue=$1")
+        // The update ends without marking anything current, and a full import is asked for: the
+        // next step starts it as a new import, through the large-import turn and the disk check.
+        sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,phase='idle',waiting=NULL,import_requested=$2,updated_at=now() WHERE catalogue=$1")
             .bind(catalogue.name())
+            .bind(reason)
             .execute(pool)
             .await?;
         tracing::info!(
@@ -637,6 +653,15 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     );
     Ok(Next::Again)
 }
+/// The catalogue's lock was lost while a run went on (its session ended).
+#[derive(Debug)]
+struct CatalogueLockLost;
+impl std::fmt::Display for CatalogueLockLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("lock_lost")
+    }
+}
+impl std::error::Error for CatalogueLockLost {}
 /// The words every wait for the large-import turn ends with;
 /// `pinakes_catalogue_waiting_for_turn` counts the state rows whose `waiting` holds them.
 pub const TURN: &str = "one large import runs at a time";

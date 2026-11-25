@@ -73,6 +73,23 @@ impl Catalogue {
             Catalogue::Wikidata | Catalogue::Musicbrainz | Catalogue::Osm | Catalogue::Openalex
         )
     }
+    /// How far behind upstream its cards may fall (`current_as_of`) before the update lag
+    /// alert fires: the source's own publication rhythm and a margin. Wikidata's change stream,
+    /// OpenStreetMap's daily diffs, Tranco's daily list and the package registries: two days.
+    /// MusicBrainz's dumps, twice a week: five days. Podcast Index's weekly database: nine days.
+    /// OpenAlex's quarterly snapshot: 100 days. The one place these live; `/metrics` exports them
+    /// as `pinakes_catalogue_max_update_lag_seconds`.
+    pub fn max_update_lag(self) -> std::time::Duration {
+        const DAY: u64 = 86400;
+        std::time::Duration::from_secs(match self {
+            Catalogue::Wikidata | Catalogue::Osm | Catalogue::Tranco | Catalogue::Software => {
+                2 * DAY
+            }
+            Catalogue::Musicbrainz => 5 * DAY,
+            Catalogue::Podcastindex => 9 * DAY,
+            Catalogue::Openalex => 100 * DAY,
+        })
+    }
     /// The advisory lock its importer holds (`locks::CATALOGUE`).
     pub fn lock_key(self) -> i64 {
         crate::locks::CATALOGUE[self as usize]
@@ -186,7 +203,7 @@ impl Default for OsmCatalogue {
         }
     }
 }
-/// OpenAlex: works cited at least `min_citations` times.
+/// OpenAlex: works cited more than `min_citations` times ([`CataloguesConfig::cited_enough`]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpenAlexCatalogue {
@@ -253,6 +270,10 @@ impl CataloguesConfig {
     /// `pinakesd catalogue drop` deletes it with the catalogue.
     pub fn work_dir(&self, catalogue: Catalogue) -> std::path::PathBuf {
         std::path::Path::new(&self.dir).join(catalogue.name())
+    }
+    /// Whether an OpenAlex work cited this many times is imported: more than `min_citations`.
+    pub fn cited_enough(&self, citations: u64) -> bool {
+        citations > u64::from(self.openalex.min_citations)
     }
     /// `limit` of Wikidata or MusicBrainz; none for the others.
     pub fn limit(&self, catalogue: Catalogue) -> Option<u64> {
@@ -417,7 +438,10 @@ pub fn jsonb_text_len(value: &serde_json::Value) -> usize {
         // with an exponent out in full (`1e30`, `1.5e-7`), as Rust prints a float.
         Value::Number(n) => {
             let written = n.to_string();
-            if written.contains(['e', 'E']) {
+            if n.as_f64() == Some(0.0) {
+                // Numeric has no negative zero: `-0.0` prints as `0.0`.
+                written.trim_start_matches('-').len()
+            } else if written.contains(['e', 'E']) {
                 n.as_f64().map_or(usize::MAX / 4, |f| f.to_string().len())
             } else {
                 written.len()
@@ -894,6 +918,114 @@ mod tests {
         assert!(config.enabled_set().is_empty());
         assert!(Catalogue::ALL.iter().all(|c| !config.enabled(*c)));
     }
+    /// Every catalogue has its own allowed lag, at least two days (more than the daily update),
+    /// and the slow publishers more; OpenAlex takes works cited more than `min_citations` times.
+    #[test]
+    fn lag_limits_and_citations() {
+        let day = std::time::Duration::from_secs(86400);
+        for c in Catalogue::ALL {
+            assert!(c.max_update_lag() >= 2 * day, "{c}");
+        }
+        assert_eq!(Catalogue::Musicbrainz.max_update_lag(), 5 * day);
+        assert_eq!(Catalogue::Podcastindex.max_update_lag(), 9 * day);
+        assert_eq!(Catalogue::Openalex.max_update_lag(), 100 * day);
+        let config = CataloguesConfig::default();
+        assert!(!config.cited_enough(50) && config.cited_enough(51));
+    }
+
+    /// A small deterministic generator (xorshift), so the property tests below are the same on
+    /// every run.
+    struct Gen(u64);
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn pick<'a, T>(&mut self, from: &'a [T]) -> &'a T {
+            &from[self.below(from.len())]
+        }
+        /// A text of up to `max` characters drawn from letters (with upper case, accents, Greek,
+        /// CJK), digits, every character a tag label refuses, hyphens, underscores, punctuation
+        /// and control characters.
+        fn text(&mut self, max: usize) -> String {
+            const CHARS: &[char] = &[
+                'a', 'b', 'z', 'A', 'Q', 'Z', 'é', 'É', 'ß', 'Σ', 'ς', 'σ', 'İ', '東', '京', '0',
+                '7', ' ', '\t', '\n', '\r', ',', ':', '_', '-', ';', '&', '/', '.', '\u{0}',
+                '\u{7}', '\u{85}', '\u{a0}', '\u{2028}',
+            ];
+            let len = self.below(max + 1);
+            (0..len).map(|_| *self.pick(CHARS)).collect()
+        }
+    }
+
+    /// Property: whatever a source gives, `label` returns a valid Pubky tag label (1–20
+    /// characters, lower case, none of the refused characters, no whitespace or control
+    /// character) or nothing, and a label it made is its own label again.
+    #[test]
+    fn label_always_gives_a_valid_tag_and_is_idempotent() {
+        let mut gen = Gen(0x9e37_79b9_7f4a_7c15);
+        let mut made = 0;
+        for _ in 0..20_000 {
+            let raw = gen.text(30);
+            let Some(l) = label(&raw) else { continue };
+            made += 1;
+            let n = l.chars().count();
+            assert!((1..=LABEL_MAX_CHARS).contains(&n), "{raw:?} -> {l:?}");
+            assert!(
+                !l.contains(LABEL_INVALID)
+                    && !l.chars().any(|c| c.is_whitespace() || c.is_control()),
+                "{raw:?} -> {l:?}"
+            );
+            assert_eq!(l.to_lowercase(), l, "{raw:?}");
+            assert_eq!(label(&l).as_deref(), Some(l.as_str()), "{raw:?}");
+        }
+        assert!(made > 5_000, "{made}");
+    }
+
+    /// Property: a key `stored_key` returns is its own stored form, and is valid.
+    #[test]
+    fn stored_key_is_idempotent() {
+        let mut gen = Gen(0x2545_f491_4f6c_dd1d);
+        let kinds = [
+            "doi", "isbn", "isrc", "wikidata", "url", "mb", "osm", "Doi", "x_1", "",
+        ];
+        let values = [
+            "10.1038/Nature12373",
+            "0-14-032872-6",
+            "978-0-14-032872-1",
+            "gbum71029604",
+            "q42",
+            "0123456789abcdef0123456789abcdef",
+            "recording:b1392450-e666-3926-a536-22c65f834433",
+            "node/1",
+        ];
+        let mut kept = 0;
+        for _ in 0..20_000 {
+            let mut value = gen.pick(&values).to_string();
+            if gen.below(3) == 0 {
+                value.push_str(&gen.text(4));
+            }
+            let raw = format!("{}:{value}", gen.pick(&kinds));
+            let raw = if gen.below(4) == 0 {
+                format!(" {raw} ")
+            } else {
+                raw
+            };
+            let Some(key) = stored_key(&raw) else {
+                continue;
+            };
+            kept += 1;
+            assert!(valid_key(&key), "{raw:?} -> {key:?}");
+            assert_eq!(stored_key(&key).as_deref(), Some(key.as_str()), "{raw:?}");
+        }
+        assert!(kept > 5_000, "{kept}");
+    }
+
     #[test]
     fn names_locks_and_sizes() {
         for c in Catalogue::ALL {

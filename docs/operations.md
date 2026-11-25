@@ -167,7 +167,7 @@ A catalogue is on when both `catalogues.enabled` and its own `enabled` are true
 | `catalogues.<name>.enabled` | `true` | One catalogue: `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` or `software`. |
 | `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. |
 | `catalogues.osm.region` | `"planet"` | `planet`, or a region of Geofabrik's OpenStreetMap extracts by its path (`europe/switzerland`). |
-| `catalogues.openalex.min_citations` | `50` | Import works cited at least this many times, 0–1000000. |
+| `catalogues.openalex.min_citations` | `50` | Import works cited more than this many times, 0–1000000. |
 
 ### Limits
 
@@ -1656,14 +1656,29 @@ catalogue that is on, and follows these rules:
 | Rule | What the task does |
 | --- | --- |
 | One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
-| What runs | A full import when none has finished, then an update a day after the last finished full import or update. An update that can't apply the changes (a change stream too far behind) hands over to a full import. |
-| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. |
+| What runs | A full import when none has finished, then an update a day after the last finished full import or update. An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
+| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. Each catalogue may lag as far as its source's publication rhythm allows (below). |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
 | Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
 | Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |
-| Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is a run whose lock's database session has ended, and one whose importer panicked. Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
-| Failures | Stored and logged by class (`download`, `parse`, `disk`, `lock_lost`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
+| Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is one whose importer panicked. A run whose catalogue lock's database session has ended stops, is logged and resumes once the task holds the lock again; nothing about it is written to the state row, which another daemon may hold by then. Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
+| Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
 | Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. |
+
+### Allowed update lag
+
+`CatalogueUpdateLag` fires when a catalogue's cards are further behind upstream than its source's
+publication rhythm allows (`pinakes_catalogue_max_update_lag_seconds`, fixed per catalogue):
+
+| Catalogue | Upstream publishes | Allowed lag |
+| --- | --- | --- |
+| `wikidata` | A change stream | 2 days |
+| `osm` | Daily change files | 2 days |
+| `tranco` | A daily list | 2 days |
+| `software` | Daily registry files | 2 days |
+| `musicbrainz` | Dumps twice a week | 5 days |
+| `podcastindex` | A weekly database | 9 days |
+| `openalex` | A quarterly snapshot | 100 days |
 
 ### A large import that keeps failing
 
@@ -1697,7 +1712,7 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CursorReset` | info | A feed resync or [feed reset](#feed-resets). |
 | `PreviewCapacityReached` | warning | [New previews](#new-previews). |
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
-| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
+| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
 
 A new key needs a restart.

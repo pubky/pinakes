@@ -1218,8 +1218,9 @@ CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 -- the next update starts (`position`: a replication sequence, a time; kept from run to run), the
 -- cards it holds, the upstream version read (a dump's date), when the last full import and the
 -- last update finished, how current the cards are (`current_as_of`: the upstream time of the data
--- the last finished run left, which the update lag counts from), why it waits (`waiting`: free
--- disk, another large import) and its errors.
+-- the last finished run left, which the update lag counts from), why an update asked for a full
+-- import (`import_requested`, until that import begins as a new one), why it waits (`waiting`:
+-- free disk, another large import) and its errors.
 -- `pinakesd catalogue drop` deletes the row with the cards.
 CREATE TABLE catalogue_state (
     catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
@@ -1233,6 +1234,7 @@ CREATE TABLE catalogue_state (
     last_import_at timestamp with time zone,
     last_update_at timestamp with time zone,
     current_as_of timestamp with time zone,
+    import_requested text,
     waiting text,
     last_error text,
     error_count bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_error_count_check CHECK (error_count >= 0),

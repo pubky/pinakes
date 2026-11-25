@@ -281,8 +281,7 @@ enabled = true
 
 # Catalogues: open catalogues imported in bulk, one card per item (docs/operations.md,
 # Catalogues). Each is on by default; enabled = false here switches all of them off. A catalogue
-# switched off leaves search and lookups at once; its cards stay until
-# `pinakesd catalogue drop <name>`.
+# switched off starts no importer; its rows stay until `pinakesd catalogue drop <name>`.
 [catalogues]
 enabled = true
 # Downloads and temporary files. Relative to the working directory; the container image sets
@@ -299,7 +298,7 @@ enabled = true
 region = "planet" # Or a region of Geofabrik's extracts, e.g. "europe/switzerland".
 [catalogues.openalex]
 enabled = true
-min_citations = 50 # Works cited at least this many times.
+min_citations = 50 # Works cited more than this many times.
 [catalogues.podcastindex]
 enabled = true
 [catalogues.tranco]

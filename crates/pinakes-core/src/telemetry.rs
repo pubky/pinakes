@@ -86,6 +86,9 @@ pub struct Metrics {
     pub catalogue_lag: IntGaugeVec,
     pub catalogue_errors: IntCounterVec,
     pub catalogue_turn: IntGaugeVec,
+    /// How far behind upstream each catalogue may fall before the lag alert fires
+    /// (`Catalogue::max_update_lag`), fixed per catalogue.
+    pub catalogue_max_lag: IntGaugeVec,
 }
 impl Metrics {
     pub fn new() -> Result<Self> {
@@ -313,6 +316,12 @@ impl Metrics {
                 "Failed catalogue import and update runs, by catalogue",
                 &["catalogue"]
             ),
+            catalogue_max_lag: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_max_update_lag_seconds",
+                "How far behind upstream each catalogue's cards may fall before CatalogueUpdateLag fires: the source's own publication rhythm",
+                &["catalogue"]
+            ),
             catalogue_turn: metric!(
                 IntGaugeVec,
                 "pinakes_catalogue_waiting_for_turn",
@@ -351,6 +360,9 @@ impl Metrics {
             out.catalogue_lag.with_label_values(&name);
             out.catalogue_errors.with_label_values(&name);
             out.catalogue_turn.with_label_values(&name);
+            out.catalogue_max_lag
+                .with_label_values(&name)
+                .set(catalogue.max_update_lag().as_secs() as i64);
         }
         Ok(out)
     }

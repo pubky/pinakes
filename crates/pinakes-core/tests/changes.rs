@@ -930,7 +930,7 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
         (
             "CatalogueUpdateLag",
             &[
-                "pinakes_catalogue_update_lag_seconds > 172800",
+                "pinakes_catalogue_update_lag_seconds > on (catalogue) pinakes_catalogue_max_update_lag_seconds",
                 "pinakes_catalogue_enabled == 1",
                 "pinakes_catalogue_last_import_timestamp_seconds > 0",
             ],

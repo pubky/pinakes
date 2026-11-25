@@ -63,6 +63,9 @@ pub struct State {
     pub upstream_version: Option<String>,
     pub last_import_at: Option<DateTime<Utc>>,
     pub last_update_at: Option<DateTime<Utc>>,
+    /// Why an update asked for a full import (its importer's fixed words), until that import
+    /// begins; none when none is asked for.
+    pub import_requested: Option<String>,
     /// How current the cards are: the upstream time of the data the last finished run left (a
     /// dump's date, the time of the last change applied). The update lag counts from it.
     pub current_as_of: Option<DateTime<Utc>>,
@@ -471,6 +474,7 @@ mod tests {
             last_import_at: Some("2026-11-24T10:00:00Z".parse().unwrap()),
             last_update_at: None,
             current_as_of: Some("2026-11-23T00:00:00Z".parse().unwrap()),
+            import_requested: None,
             waiting: None,
             last_error: Some("timed\nout".into()),
             error_count: 1,
