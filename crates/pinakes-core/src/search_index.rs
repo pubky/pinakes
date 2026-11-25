@@ -637,6 +637,15 @@ struct Open {
     /// tests.
     counted: AtomicU64,
 }
+/// Sets [`Purges::running`] back to false when dropped.
+struct Running<'a>(&'a std::sync::Mutex<Purges>);
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut purging) = self.0.lock() {
+            purging.running = false;
+        }
+    }
+}
 /// How many times a merge after a removal is started before it is owed to the next pass.
 const PURGE_ATTEMPTS: u32 = 5;
 /// Removals whose words must still leave the index files ([`Open::purge`]): the resources whose
@@ -1200,10 +1209,7 @@ impl SearchIndex {
                 .map(|c| c.name().to_owned())
                 .filter(|c| !enabled.contains(c))
                 .filter(|c| {
-                    recorded.contains_key(c)
-                        || searcher
-                            .doc_freq(&Term::from_field_text(open.fields.catalogue, c))
-                            .is_ok_and(|n| n > 0)
+                    recorded.contains_key(c) || open.has_documents(&searcher, c).unwrap_or(true)
                 })
                 .collect()
         };
@@ -1449,11 +1455,8 @@ impl Open {
         let boundary = committed_boundary(&self.index).unwrap_or(0);
         let had_documents = {
             let searcher = self.reader.searcher();
-            off.iter().any(|c| {
-                searcher
-                    .doc_freq(&Term::from_field_text(self.fields.catalogue, c))
-                    .map_or(true, |n| n > 0)
-            })
+            off.iter()
+                .any(|c| self.has_documents(&searcher, c).unwrap_or(true))
         };
         let before = self.catalogues.lock().expect("markers").clone();
         for catalogue in off {
@@ -1613,9 +1616,25 @@ impl Open {
             }
         };
         let open = self.clone();
-        let waiting = std::thread::Builder::new()
+        let (owed, owed_catalogues) = (resources.clone(), catalogues);
+        let spawned = std::thread::Builder::new()
             .name("text-index-purge".into())
-            .spawn(move || open.wait_merge(merged, resources, catalogues))?;
+            .spawn(move || {
+                // `running` goes back to false however the wait ends (a panic included), so a later
+                // pass can merge again.
+                let _running = Running(&open.purging);
+                open.wait_merge(merged, resources, catalogues)
+            });
+        let waiting = match spawned {
+            Ok(waiting) => waiting,
+            Err(error) => {
+                let mut purging = self.purging.lock().expect("purges");
+                purging.running = false;
+                purging.resources.extend(owed);
+                purging.catalogues |= owed_catalogues;
+                return Err(error.into());
+            }
+        };
         if let Some(earlier) = self.merging.lock().expect("merging").replace(waiting) {
             // Done: only one merge runs at a time.
             let _ = earlier.join();
@@ -1687,6 +1706,16 @@ impl Open {
             }
         }
     }
+    /// Whether the index holds a live document of `catalogue` (deleted ones, still in the files until
+    /// a merge, do not count: a catalogue switched off whose merge runs in the background is not
+    /// removed again).
+    fn has_documents(&self, searcher: &tantivy::Searcher, catalogue: &str) -> Result<bool> {
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.catalogue, catalogue),
+            IndexRecordOption::Basic,
+        );
+        Ok(searcher.search(&query, &tantivy::collector::Count)? > 0)
+    }
     /// Whether a merge is owed and none runs: the pass then starts it ([`Open::purge`]).
     fn purge_owed(&self) -> bool {
         let purging = self.purging.lock().expect("purges");
@@ -1699,6 +1728,9 @@ impl Open {
         resources: &[String],
         catalogues: bool,
     ) -> Result<Vec<tantivy::index::SegmentId>> {
+        // Read the segments as they are now: one a merge of Tantivy's own replaced since the last
+        // read still holds a deleted document's words, under its new ID.
+        self.reader.reload()?;
         let committed: HashSet<tantivy::index::SegmentId> =
             self.index.searchable_segment_ids()?.into_iter().collect();
         let mut wanted: Vec<tantivy::index::SegmentId> = if catalogues {
@@ -2655,6 +2687,89 @@ mod tests {
     }
     fn words(list: &[&str]) -> Vec<String> {
         list.iter().map(|w| w.to_string()).collect()
+    }
+
+    fn docs(open: &Open, docs: &[(&str, &str, &str)]) {
+        let f = open.fields;
+        let mut writer = open.writer.lock().unwrap();
+        for (id, name, catalogue) in docs {
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.resource_id, *id);
+            doc.add_text(f.name, *name);
+            if !catalogue.is_empty() {
+                doc.add_text(f.catalogue, *catalogue);
+            }
+            doc.add_u64(f.has_text, 1);
+            writer.add_document(doc).unwrap();
+        }
+        commit(&mut writer, &open.stamp(0)).unwrap();
+    }
+    fn holds(open: &Open, word: &str) -> bool {
+        let searcher = open.reader.searcher();
+        searcher.segment_readers().iter().any(|segment| {
+            segment
+                .inverted_index(open.fields.name)
+                .unwrap()
+                .terms()
+                .get(word.as_bytes())
+                .unwrap()
+                .is_some()
+        })
+    }
+
+    /// A merge of Tantivy's own that replaced the segment since the reader last read it: the merge
+    /// after a removal finds the document's words in the new segment, not nothing.
+    #[test]
+    fn a_merge_after_a_removal_reads_the_segments_as_they_are_now() {
+        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
+        docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
+        open.reader.reload().unwrap();
+        {
+            // Merged behind the reader's back, then the removal committed: the reader still knows
+            // only the two old segments.
+            let mut writer = open.writer.lock().unwrap();
+            let segments = open.index.searchable_segment_ids().unwrap();
+            writer.merge(&segments).wait().unwrap();
+            writer.delete_term(Term::from_field_text(open.fields.resource_id, "a"));
+            commit(&mut writer, &open.stamp(0)).unwrap();
+            open.purge(&mut writer, vec!["a".into()], false).unwrap();
+        }
+        if let Some(waiting) = open.merging.lock().unwrap().take() {
+            waiting.join().unwrap();
+        }
+        open.reader.reload().unwrap();
+        assert!(
+            !holds(&open, "aurora"),
+            "the deleted document's words left the files"
+        );
+        assert!(holds(&open, "cosmos"));
+        assert!(!open.purge_owed());
+    }
+
+    /// A catalogue's deleted documents, still in the files until a merge, are no documents of it:
+    /// a switch-off whose merge runs is not removed again at the next pass.
+    #[test]
+    fn deleted_documents_of_a_catalogue_are_not_documents() {
+        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        docs(
+            &open,
+            &[("catalogue:1", "peak", "wikidata"), ("r", "page", "")],
+        );
+        open.reader.reload().unwrap();
+        assert!(open
+            .has_documents(&open.reader.searcher(), "wikidata")
+            .unwrap());
+        {
+            let mut writer = open.writer.lock().unwrap();
+            writer.delete_term(Term::from_field_text(open.fields.catalogue, "wikidata"));
+            commit(&mut writer, &open.stamp(0)).unwrap();
+        }
+        open.reader.reload().unwrap();
+        let searcher = open.reader.searcher();
+        let term = Term::from_field_text(open.fields.catalogue, "wikidata");
+        assert!(searcher.doc_freq(&term).unwrap() > 0, "still in the files");
+        assert!(!open.has_documents(&searcher, "wikidata").unwrap());
     }
 
     /// A merge after a removal while another runs is owed, not lost: the next pass starts it, and

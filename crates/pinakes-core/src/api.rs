@@ -2421,9 +2421,14 @@ struct CardUnits {
 }
 /// A catalogue card a referenced card built from a catalogue card (`resource.catalogue_card`)
 /// stands for: its own, or one of another catalogue sharing one of its keys (`resource_key` from
-/// the catalogue). Left out of a search: the thing is that resource, once, with people's tags and
-/// the card's labels.
-const NOT_REPLACED: &str = " AND NOT EXISTS (SELECT 1 FROM resource x WHERE x.catalogue_card=c.id AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id)) AND NOT EXISTS (SELECT 1 FROM resource_key k JOIN resource x ON x.id=k.resource_id WHERE k.source='catalogue' AND k.key=ANY(c.keys) AND x.catalogue_card IS NOT NULL AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id))";
+/// the catalogue; a card of the same catalogue is another thing there). Left out of a search: the
+/// thing is that resource, once, with people's tags and the card's labels. Only a resource that is
+/// a unit of its own (not an alias, with a reference that counts) stands for a card.
+const NOT_REPLACED: &str = " AND NOT EXISTS (SELECT 1 FROM resource x WHERE x.catalogue_card=c.id AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id) AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=x.id)) AND NOT EXISTS (SELECT 1 FROM resource_key k JOIN resource x ON x.id=k.resource_id JOIN catalogue_card y ON y.id=x.catalogue_card WHERE k.source='catalogue' AND k.key=ANY(c.keys) AND y.catalogue<>c.catalogue AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id) AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=x.id))";
+/// How many times `cap` cards [`best_known_cards`] reads before it leaves out the replaced ones
+/// (`NOT_REPLACED`), so the read keeps the plan its order's index gives and the replaced ones are
+/// checked for those cards only.
+const BEST_KNOWN_OVERREAD: usize = 3;
 /// The cards `rows` names as units, in their order, each thing once: a card that shares a key
 /// naming the thing (not a `url:` key) with a card of a catalogue listed earlier in
 /// [`crate::catalogue::Catalogue::ALL`] (Wikidata first) among `rows` is merged into it. Cards of
@@ -2509,9 +2514,7 @@ async fn best_known_cards(
     let mut sql = QueryBuilder::<Postgres>::new(
         "SELECT c.id,c.uri,c.type,c.catalogue,c.keys FROM catalogue_card c WHERE c.catalogue=ANY(",
     );
-    sql.push_bind(catalogues.to_vec())
-        .push(")")
-        .push(NOT_REPLACED);
+    sql.push_bind(catalogues.to_vec()).push(")");
     if let Some(types) = &q.type_name {
         sql.push(" AND c.type=ANY(")
             .push_bind(model::subtypes(&search_types(
@@ -2581,8 +2584,20 @@ async fn best_known_cards(
             sql.push(" ORDER BY c.fame DESC,c.id");
         }
     }
-    sql.push(" LIMIT ").push_bind(cap as i64);
-    let rows: Vec<CardRow> = sql.build_query_as().fetch_all(pool).await?;
+    sql.push(" LIMIT ")
+        .push_bind((cap * BEST_KNOWN_OVERREAD) as i64);
+    let mut rows: Vec<CardRow> = sql.build_query_as().fetch_all(pool).await?;
+    let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    let kept: std::collections::HashSet<i64> = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT c.id FROM catalogue_card c WHERE c.id=ANY($1){NOT_REPLACED}"
+    ))
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
+    rows.retain(|r| kept.contains(&r.0));
+    rows.truncate(cap);
     Ok(units_of(rows))
 }
 /// `card_unit`: the catalogue cards `units` as rows of `search_unit`'s columns, with their
@@ -3446,19 +3461,25 @@ pub async fn search(
             .iter()
             .map(|u| (u.card, u.unit_id.as_str()))
             .collect();
-        let mut seen = std::collections::HashSet::new();
-        let joined: Vec<(&str, f64, bool)> = found
-            .units
-            .iter()
-            .filter_map(|c| match c.card {
-                None => Some((c.unit_id.as_str(), c.relevance, c.words)),
-                Some(card) => {
-                    let unit = card_units.merged.get(&card).unwrap_or(&card);
-                    listed.get(unit).map(|u| (*u, c.relevance, c.words))
+        // Each unit at its first (best) candidate's relevance; found by its words when any of its
+        // candidates was (a merged unit's cards each matched in their own way).
+        let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut joined: Vec<(&str, f64, bool)> = vec![];
+        for (unit, relevance, words) in found.units.iter().filter_map(|c| match c.card {
+            None => Some((c.unit_id.as_str(), c.relevance, c.words)),
+            Some(card) => {
+                let unit = card_units.merged.get(&card).unwrap_or(&card);
+                listed.get(unit).map(|u| (*u, c.relevance, c.words))
+            }
+        }) {
+            match at.get(unit) {
+                Some(&i) => joined[i].2 |= words,
+                None => {
+                    at.insert(unit, joined.len());
+                    joined.push((unit, relevance, words));
                 }
-            })
-            .filter(|(unit, ..)| seen.insert(*unit))
-            .collect();
+            }
+        }
         sql.push(" JOIN unnest(")
             .push_bind(joined.iter().map(|c| c.0.to_owned()).collect::<Vec<_>>())
             .push("::text[],")

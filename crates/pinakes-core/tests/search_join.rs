@@ -331,3 +331,29 @@ async fn a_card_with_only_a_shared_link_leaves_for_the_link_built_from_it(pool: 
         assert_eq!(urls(&common::get(&app, path).await), [SHARED], "{path}");
     }
 }
+
+/// A link built from a card stands for that card and for other catalogues' cards of its thing,
+/// never for another item of its own catalogue that shares a key (each is its own thing there).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_link_built_from_a_card_leaves_other_items_of_its_catalogue_listed(pool: PgPool) {
+    let mut other = adams();
+    other.source_id = "Q4242".into();
+    other.uri = "https://en.wikipedia.org/wiki/Douglas_Adams_(other)".into();
+    other.keys = vec![MB_KEY.into()];
+    other.labels = vec![];
+    other.fame = 0.1;
+    import(&pool, Catalogue::Wikidata, 1, &[adams(), other.clone()]).await;
+    let id = tagged(&pool, SPOTIFY, "books", 1).await;
+    assert_eq!(
+        join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await,
+        1
+    );
+    let (app, _) = app(&pool);
+    for path in ["/v1/search?type=Person", "/v1/search?q=adams"] {
+        let mut found = urls(&common::get(&app, path).await);
+        found.sort();
+        let mut want = vec![SPOTIFY.to_owned(), other.uri.clone()];
+        want.sort();
+        assert_eq!(found, want, "{path}");
+    }
+}
