@@ -122,9 +122,10 @@ pub fn rooted(uri: &str) -> Option<(Alias, Named)> {
 /// The web page Pinakes links for an identifier, built from the identifier alone, with the rule
 /// that builds it: a join key's page (`wikidata:{Q-id}`, `mb:{kind}:{mbid}`, `isrc:{ISRC}`,
 /// `osm:{type}/{id}`), or the page of a card whose root is no web link (`doi:…`, a source's own
-/// scheme such as `artic:…` or `btc:…`), in any spelling of that root. `data/spellings.json`
-/// (`pages`) lists examples of each. `None` for a web link (its own page) and for an identifier
-/// with no single page of its own (an MBID without its entity, an ISBN, a barcode, …).
+/// scheme such as `artic:…` or `btc:…`), in any spelling of that root, whichever sources are on.
+/// `data/spellings.json` (`pages`) lists examples of each. `None` for a web link (its own page)
+/// and for an identifier with no single page of its own (an MBID without its entity, an ISBN, a
+/// barcode, …).
 pub fn web_page(identifier: &str) -> Option<(String, Named)> {
     use Named::Core;
     let identifier = identifier.trim();

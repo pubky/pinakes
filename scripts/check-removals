@@ -621,6 +621,7 @@ PINAKES_DELTA_KEY=
   ],
   "pages": [
     {"id":"ab:1","page":"https://alpha-beta.example/d/1","rule":"source/alpha_beta"},
+    {"id":"gamma:2","page":"https://gamma.example/x/2","rule":"source/gamma"},
     {"id":"wikidata:Q1","page":"https://www.wikidata.org/wiki/Q1","rule":"wikidata"}
   ]
 }
@@ -673,12 +674,24 @@ def self_test():
                 assert "alpha_beta" not in spellings and '"ab:1"' not in spellings and "source/gamma" in spellings, spellings
                 assert spellings == spellings_text(json.loads(spellings)), spellings
                 assert len(json.loads(spellings)["vectors"]) == 2, spellings
-                assert json.loads(spellings)["pages"] == [{"id": "wikidata:Q1", "page": "https://www.wikidata.org/wiki/Q1", "rule": "wikidata"}], spellings
+                assert [p["id"] for p in json.loads(spellings)["pages"]] == ["gamma:2", "wikidata:Q1"], spellings
             if name == "gamma":
                 spellings = open(os.path.join(wt, SPELLINGS), encoding="utf-8").read()
                 vectors = json.loads(spellings)["vectors"]
                 assert len(vectors) == 4 and spellings == spellings_text(json.loads(spellings)), spellings
                 assert {"link": "https://gamma.example/x/2", "root": "gamma:2", "basis": "service", "rule": "music/gamma"} in vectors, spellings
+                # Its pages go: the shared rule that takes its vectors builds no page.
+                assert [p["id"] for p in json.loads(spellings)["pages"]] == ["ab:1", "wikidata:Q1"], spellings
+        # A source with pages and no vectors: its pages go all the same.
+        wt = os.path.join(base, "pages-only")
+        shutil.copytree(tree, wt)
+        p = os.path.join(wt, SPELLINGS)
+        doc = json.load(open(p, encoding="utf-8"))
+        doc["vectors"] = [v for v in doc["vectors"] if v["rule"] != "source/alpha_beta" and v["link"] != "ab:1"]
+        open(p, "w", encoding="utf-8").write(spellings_text(doc))
+        remove(wt, "sources", "alpha_beta")
+        doc = json.load(open(p, encoding="utf-8"))
+        assert [p["id"] for p in doc["pages"]] == ["gamma:2", "wikidata:Q1"] and open(p, encoding="utf-8").read() == spellings_text(doc), doc
         wt, name, title = os.path.join(base, "alpha_beta"), "alpha_beta", "Alpha Beta"
         kept = shared_lines(tree, name)
         cases = [
