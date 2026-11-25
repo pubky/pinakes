@@ -228,8 +228,16 @@ pub mod musicbrainz {
             _ => return None,
         };
         let mbid = mbid(id)?;
-        let page = format!("https://musicbrainz.org/{}/{mbid}", kind.as_str());
+        let page = entity_page(kind, &mbid);
         Some((kind, mbid, page))
+    }
+    /// An entity's page, `https://musicbrainz.org/{kind}/{mbid}`, for a canonical MBID.
+    pub fn entity_page(kind: MbKind, mbid: &str) -> String {
+        format!("https://musicbrainz.org/{}/{mbid}", kind.as_str())
+    }
+    /// An ISRC's page, `https://musicbrainz.org/isrc/{ISRC}`, for an ISRC as keys store it.
+    pub fn isrc_page(isrc: &str) -> String {
+        format!("https://musicbrainz.org/isrc/{isrc}")
     }
     /// A link to an ISRC's page (`/isrc/{ISRC}`): the ISRC as keys store it and its page.
     pub fn isrc_link(uri: &str) -> Option<(String, String)> {
@@ -238,7 +246,7 @@ pub mod musicbrainz {
             return None;
         };
         let isrc = crate::music::isrc(code)?;
-        let page = format!("https://musicbrainz.org/isrc/{isrc}");
+        let page = isrc_page(&isrc);
         Some((isrc, page))
     }
 
@@ -1180,8 +1188,12 @@ pub mod wikidata {
             .or_else(|| url.path().strip_prefix("/wiki/"))
             .or_else(|| url.path().strip_prefix("/entity/"))?;
         let qid = qid(id)?;
-        let canonical = format!("https://www.wikidata.org/wiki/{qid}");
+        let canonical = item_page(&qid);
         Some((qid, canonical))
+    }
+    /// An item's page, `https://www.wikidata.org/wiki/{Q-id}`: the root of every link to it.
+    pub fn item_page(qid: &str) -> String {
+        format!("https://www.wikidata.org/wiki/{qid}")
     }
     /// `list=search` hits as item IDs.
     pub fn parse_search(v: &Value) -> Vec<String> {

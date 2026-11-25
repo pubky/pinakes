@@ -330,6 +330,12 @@ impl Source for Uniprot {
         let root = identifier(&target(uri)?)?;
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        match from_root(root)? {
+            Target::Accession(a) => Some(page(&a)),
+            Target::Name(_) => None,
+        }
+    }
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("uniprot:") && from_root(uri).is_none()
     }

@@ -1573,6 +1573,11 @@ impl Source for Mempool {
         let root = identifier(&target(uri)?)?;
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        from_root(root)
+            .filter(|t| identifier(t).as_deref() == Some(root))
+            .map(|t| page(&t))
+    }
     fn invalid(&self, uri: &str) -> bool {
         ROOTS.iter().any(|r| uri.starts_with(r)) && from_root(uri).is_none()
     }

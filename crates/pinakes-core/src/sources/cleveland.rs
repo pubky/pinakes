@@ -208,6 +208,12 @@ impl Source for Cleveland {
         let root = identifier(&target(uri)?)?;
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        match from_root(root)? {
+            Artwork::Accession(a) => Some(page(&a)),
+            Artwork::Id(_) => None,
+        }
+    }
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("cleveland:") && from_root(uri).is_none()
     }

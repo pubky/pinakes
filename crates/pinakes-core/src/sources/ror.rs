@@ -236,6 +236,9 @@ impl Source for Ror {
         let root = identifier(&target(uri)?);
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        from_root(root).map(|id| page(&id))
+    }
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("ror:") && from_root(uri).is_none()
     }

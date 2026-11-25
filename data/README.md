@@ -19,7 +19,7 @@ the repository.
 | `api-recipes.json` | The named API examples | `recipes.rs`, `tests/recipes.rs`, `scripts/e2e --live-recipes` | By hand |
 | `event-adapters.json` | One entry per event platform | `event/adapters/mod.rs` (and a test in `config.rs`) | By hand |
 | `interstitial-markers.json` | Markers of a bot wall or challenge page | `resolver/interstitial.rs` | By hand |
-| `spellings.json` | Test vectors of the URI-only spelling rules ([docs/api.md](../docs/api.md#spelling-vectors)); its hash is `/v1/info` `spelling_rules` | `alias.rs` (`spelling_rules`), `tests/spellings.rs` | Add a link by hand, then copy over it the file `cargo test -p pinakes-core --test spellings` writes with this build's answers |
+| `spellings.json` | Test vectors of the URI-only spelling rules and the identifier pages ([docs/api.md](../docs/api.md#spelling-vectors)); its hash is `/v1/info` `spelling_rules` | `alias.rs` (`spelling_rules`, `web_page`), `tests/spellings.rs` | Add a link by hand, then copy over it the file `cargo test -p pinakes-core --test spellings` writes with this build's answers |
 
 The licence files next to them (`LICENSE.schemaorg.txt`, `LICENSE.cldr.txt`, `LICENSE.rails.txt`,
 `LICENSE.tzf-rel.md`, `oembed-LICENSE`) hold the upstream licence texts. Each upstream data set

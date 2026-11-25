@@ -194,22 +194,28 @@ def own_paths(kind, name):
 
 def spellings_text(doc):
     """`data/spellings.json` in its one layout (`render` in tests/spellings.rs): one vector per
-    line."""
-    lines = ["    " + json.dumps(v, ensure_ascii=False, separators=(",", ":")) for v in doc["vectors"]]
-    return '{\n  "about": %s,\n  "vectors": [\n%s  ]\n}\n' % (
+    line, then one identifier page per line."""
+
+    def lines(all):
+        lines = ["    " + json.dumps(v, ensure_ascii=False, separators=(",", ":")) for v in all]
+        return "".join(l + (",\n" if i + 1 < len(lines) else "\n") for i, l in enumerate(lines))
+
+    return '{\n  "about": %s,\n  "vectors": [\n%s  ],\n  "pages": [\n%s  ]\n}\n' % (
         json.dumps(doc["about"], ensure_ascii=False),
-        "".join(l + (",\n" if i + 1 < len(lines) else "\n") for i, l in enumerate(lines)),
+        lines(doc["vectors"]),
+        lines(doc["pages"]),
     )
 
 
-def own_vectors(wt, name):
-    """The vectors of `data/spellings.json` whose rule is the source's: (index, vector)."""
+def own_vectors(wt, name, part="vectors"):
+    """The vectors (or the identifier `pages`) of `data/spellings.json` whose rule is the
+    source's: (index, entry)."""
     p = os.path.join(wt, SPELLINGS)
     if not os.path.exists(p):
         return []
     with open(p, encoding="utf-8") as f:
         doc = json.load(f)
-    return [(i, v) for i, v in enumerate(doc["vectors"]) if v.get("rule") == "source/%s" % name]
+    return [(i, v) for i, v in enumerate(doc[part]) if v.get("rule") == "source/%s" % name]
 
 
 def remove(wt, kind, name):
@@ -253,7 +259,8 @@ def remove(wt, kind, name):
     # Its spelling vectors: the build without it folds none of its links (but those shared code
     # roots the same way, `SPELLINGS_HANDOVER`), so they go, and the vectors of their roots that
     # no vector left names.
-    if own_vectors(wt, name):
+    # Its identifier pages: the build without it builds none.
+    if own_vectors(wt, name) or own_vectors(wt, name, "pages"):
         p = os.path.join(wt, SPELLINGS)
         with open(p, encoding="utf-8") as f:
             doc = json.load(f)
@@ -267,6 +274,7 @@ def remove(wt, kind, name):
             kept = [v for v in doc["vectors"] if v.get("rule") != own]
             named = {v["root"] for v in kept if v["root"] != v["link"]}
             doc["vectors"] = [v for v in kept if not (v["link"] in gone and v.get("rule") == "none" and v["link"] not in named)]
+        doc["pages"] = [v for v in doc["pages"] if v.get("rule") != own]
         with open(p, "w", encoding="utf-8") as f:
             f.write(spellings_text(doc))
 
@@ -418,6 +426,8 @@ def verify(wt, kind, name, title, kept=()):
     # The spelling vectors: none is of its rule.
     for i, v in own_vectors(wt, name):
         left.append(f"{SPELLINGS}: vector {i + 1} {v.get('link')!r} of rule {v.get('rule')!r}")
+    for i, v in own_vectors(wt, name, "pages"):
+        left.append(f"{SPELLINGS}: page {i + 1} {v.get('id')!r} of rule {v.get('rule')!r}")
     # The e2e samples that stay: none is of its kind, and none that runs without the source joins
     # a sample that does not. A sample that `needs` the source is left out of a run without it,
     # by the mock and the live stack alike (e2e_stack's `by_needs`): it does not run, its joins do
@@ -600,7 +610,7 @@ PINAKES_DELTA_KEY=
     "e2e/samples/delta.json": '[{"kind": "delta_join", "uri": "https://delta.example/1", "group_with": "alpha_beta_seed", "needs": "alpha_beta"}]\n',
     "e2e/samples.live.json": '[{"kind": "web", "uri": "https://example.org/"}, {"kind": "web_twin", "uri": "https://example.org/2", "maybe_same_with": "web"}]\n',
     # The spelling vectors: one of the official source's rule with its root's own, one of the
-    # other's, one core rule.
+    # other's, one core rule; the identifier pages: the official source's and a core rule's.
     SPELLINGS: """{
   "about": "Test vectors.",
   "vectors": [
@@ -608,6 +618,10 @@ PINAKES_DELTA_KEY=
     {"link":"ab:1","root":"ab:1","basis":null,"rule":"none"},
     {"link":"https://gamma.example/x/2","root":"gamma:2","basis":"identifier","rule":"source/gamma"},
     {"link":"https://example.org/a?utm_source=x","root":"https://example.org/a","basis":"tracking","rule":"tracking"}
+  ],
+  "pages": [
+    {"id":"ab:1","page":"https://alpha-beta.example/d/1","rule":"source/alpha_beta"},
+    {"id":"wikidata:Q1","page":"https://www.wikidata.org/wiki/Q1","rule":"wikidata"}
   ]
 }
 """,
@@ -659,6 +673,7 @@ def self_test():
                 assert "alpha_beta" not in spellings and '"ab:1"' not in spellings and "source/gamma" in spellings, spellings
                 assert spellings == spellings_text(json.loads(spellings)), spellings
                 assert len(json.loads(spellings)["vectors"]) == 2, spellings
+                assert json.loads(spellings)["pages"] == [{"id": "wikidata:Q1", "page": "https://www.wikidata.org/wiki/Q1", "rule": "wikidata"}], spellings
             if name == "gamma":
                 spellings = open(os.path.join(wt, SPELLINGS), encoding="utf-8").read()
                 vectors = json.loads(spellings)["vectors"]
@@ -690,11 +705,15 @@ def self_test():
             ("e2e/samples.live.json", "maybe_same", "'web_twin' maybe_same_with 'alpha_beta_seed', which is gone"),
             ("e2e/samples/delta.json", "joins the left out", "'delta_child' group_with 'delta_join', which is gone"),
             (SPELLINGS, None, "vector 1 'https://alpha-beta.example/d/1' of rule 'source/alpha_beta'"),
+            (SPELLINGS, "page", "page 1 'ab:1' of rule 'source/alpha_beta'"),
         ]
         edits = {
             (".env.example", None): lambda t: t.replace("PINAKES__PODCAST_INDEX__KEY=\n", ""),
             (SPELLINGS, None): lambda t: t.replace(
                 '"vectors": [\n', '"vectors": [\n    {"link":"https://alpha-beta.example/d/1","root":"ab:1","basis":"identifier","rule":"source/alpha_beta"},\n'
+            ),
+            (SPELLINGS, "page"): lambda t: t.replace(
+                '"pages": [\n', '"pages": [\n    {"id":"ab:1","page":"https://alpha-beta.example/d/1","rule":"source/alpha_beta"},\n'
             ),
             ("e2e/samples.live.json", None): lambda t: t.replace('{"kind": "web",', '{"kind": "alpha_beta",'),
             ("e2e/samples/delta.json", None): lambda t: t.replace(', "needs": "alpha_beta"', ""),

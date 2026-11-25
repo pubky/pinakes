@@ -204,6 +204,9 @@ impl Source for ClinicalTrials {
         let root = identifier(&target(uri)?);
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        from_root(root).map(|n| page(&n))
+    }
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("nct:") && from_root(uri).is_none()
     }

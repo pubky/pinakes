@@ -1091,7 +1091,7 @@
             "type": "array"
           },
           "spelling_rules": {
-            "description": "The version of the URI-only spelling rules (docs/api.md, Spelling vectors): the first 16\nhex characters of the BLAKE3 hash of `data/spellings.json`, the vectors this build answers\nexactly. It changes with every change to that file.",
+            "description": "The version of the URI-only spelling rules and identifier pages (docs/api.md, Spelling\nvectors, Identifier pages): the first 16 hex characters of the BLAKE3 hash of\n`data/spellings.json`, the vectors and pages this build answers exactly. It changes with\nevery change to that file.",
             "example": "3f9a0c1d2e4b5a69",
             "type": "string"
           },

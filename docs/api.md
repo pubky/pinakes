@@ -149,7 +149,7 @@ skipped. Sending both lists, or neither, is a 400.
 | `api_shape` | `2`: one flat object per card |
 | `user_agent` | The User-Agent this instance's requests to other services carry: its version and the operator's contact (`http.contact`), when set |
 | `resolves` | The kinds of links this instance resolves: `web`, `pubky`, `geo`, `osm`, `event`, `calendar` and the card kinds `media`, `isbn`, `doi`, `nostr`, `activitypub` and `official`, those that are on |
-| `spelling_rules` | The version of the URI-only spelling rules: the first 16 hex characters of the BLAKE3 hash of `data/spellings.json` ([Spelling vectors](#spelling-vectors)) |
+| `spelling_rules` | The version of the URI-only spelling rules and identifier pages: the first 16 hex characters of the BLAKE3 hash of `data/spellings.json` ([Spelling vectors](#spelling-vectors), [Identifier pages](#identifier-pages)) |
 | `limits` | The sizes and budgets a client must respect: `lookup`, `change_lookup` and `occurrence_lookup` (500 each), `search_page` (500), the `related_*` limits ([Related](#related)), `collapse_refs_per_member`, `requests_per_minute`, `previews_per_minute` and `previews_per_uri_per_minute` |
 | `osm_licence` | `{licence, attribution, url, dump, updated_at}`: the ODbL licence of OSM-derived values, the dump's path, and when the dump was last written (`null` before the first) |
 | `attributions` | What a client must show while it shows values from a service, `[{provider, notice, logo, url}]` ([Credits](#credits)). Absent when there are none. |
@@ -234,7 +234,8 @@ An occurrence's `refs` are its feed's. A gone social post's `refs` name its own 
   as Loopky for a deck.
 - A card whose link is not a web page (`btc:`, `ln:`, `uniprot:`, `fr:`, …): the web page its
   source reads it from, named by its site, such as
-  `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`.
+  `[{"client": "mempool.space", "url": "https://mempool.space/block/…"}]`. The page of such a
+  root from the root alone is in [Identifier pages](#identifier-pages).
 - `[]` on a web link's card, on a card gone upstream and on a card whose source names no page.
 
 #### How links are typed
@@ -1674,6 +1675,46 @@ Pinakes answers for it:
 - Not in the file, because they need a fetch and cannot be reproduced offline: a page's own
   canonical or permanent redirect, a Meetup date's number and token, an official API's answer,
   and a podcast feed naming its episode's page (alias bases `canonical` and `source`).
+
+### Identifier pages
+
+`data/spellings.json` also lists, under `pages`, the web page Pinakes links for an identifier,
+built from the identifier alone. A client that tags an item without a link the user had (a
+catalogue card found in search, a card whose `uri` is no web link) can write that page, and the
+tag counts for the same card. Any client or indexer can read the file without asking a Pinakes.
+Each entry is one identifier and what Pinakes answers for it:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | The identifier as written |
+| `page` | The web page, `null` when Pinakes has no single page for it |
+| `rule` | What builds the page: `wikidata`, `musicbrainz`, `osm` or `doi`, or `source/{name}` for an official source's own scheme; `none` when there is no page |
+
+| Identifier | Page |
+| --- | --- |
+| `wikidata:{Q-id}` | `https://www.wikidata.org/wiki/{Q-id}` |
+| `mb:{recording\|release\|release-group\|artist}:{mbid}` | `https://musicbrainz.org/{kind}/{mbid}` |
+| `isrc:{ISRC}` | MusicBrainz's ISRC page, `https://musicbrainz.org/isrc/{ISRC}` |
+| `osm:{node\|way\|relation}/{id}` | `https://www.openstreetmap.org/{type}/{id}` |
+| `doi:{DOI}` | `https://doi.org/{DOI}` |
+| A source's own scheme (`artic:`, `btc:`, `ln:`, `uniprot:`, `fr:`, …) | The object's page on the service, as the source builds it from the root |
+
+- A join key's page (Wikidata, MusicBrainz, OSM) is a card's `uri` itself. A `doi:` card's page
+  and a source's page are aliases of the card's root ([Aliases](#aliases)). The source's page may
+  differ from the page the card's `open_in` names after a read (the Federal Register's dated page
+  with its title, a Figshare portal's page); both are aliases of the same root.
+- No single page (`null`): an MBID without its entity (`mbid:`), an ISBN (an `isbn:` card has no
+  web page of its own), an IMDb ID, a barcode (`upc:`, `gtin:`), the podcast keys, and an LEI
+  (`lei:`): GLEIF's record page names the LEI in its fragment, which every link drops, so a tag
+  on it would not count for the card. The keys
+  of the also-on lookups (`crate:`, `arxiv:`, `steam:`, …) have none here either: their pages
+  are the links those lookups list in [Also on](#also-on). A web link is its own page.
+- A test runs every entry through the code that builds the pages and checks that each page is an
+  address of its card. Every source with roots of its own scheme has entries, and every such root
+  among the spelling vectors has its page. `spelling_rules` covers the pages as it covers the
+  vectors: a changed page changes it.
+- The pages are the same whichever sources an instance switches off. A source removed from the
+  build takes its entries along.
 
 ## Changes
 

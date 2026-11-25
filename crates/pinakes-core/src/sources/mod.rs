@@ -185,6 +185,12 @@ pub trait Source: Send + Sync {
     fn alias_root(&self, _uri: &str) -> Option<String> {
         None
     }
+    /// The web page of a root in this source's own identifier scheme (`artic:…`, `btc:…`), from
+    /// the root alone: an address of the object that [`alias_root`](Source::alias_root) folds
+    /// back to the root. `None` for a root that is a web page itself, and for any other link.
+    fn root_page(&self, _root: &str) -> Option<String> {
+        None
+    }
     /// A link in this source's own identifier scheme that can never name an object (a final
     /// `missing`, never fetched again).
     fn invalid(&self, _uri: &str) -> bool {
@@ -932,6 +938,14 @@ pub fn alias_root(uri: &str) -> Option<String> {
 pub fn alias_root_by(uri: &str) -> Option<(&'static str, String)> {
     let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
     alias_root_by_with(uri, switches.as_ref())
+}
+/// The web page of a source's root in its own identifier scheme, with the source's name
+/// ([`Source::root_page`]), whichever sources are on.
+pub fn root_page_by(root: &str) -> Option<(&'static str, String)> {
+    REGISTRY.iter().find_map(|s| {
+        let page = s.root_page(root)?;
+        s.alias_root(root).is_none().then_some((s.name(), page))
+    })
 }
 #[cfg(test)]
 fn alias_root_with(uri: &str, switches: Option<&SourcesConfig>) -> Option<String> {

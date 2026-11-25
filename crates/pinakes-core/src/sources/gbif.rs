@@ -313,6 +313,9 @@ impl Source for Gbif {
         let root = identifier(target(uri)?);
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        from_root(root).map(page)
+    }
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("gbif:") && from_root(uri).is_none()
     }
