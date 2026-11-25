@@ -137,8 +137,9 @@ impl InstanceLock {
         watch_checks(check, LOCK_CHECK).await
     }
 }
-/// [`InstanceLock::watch`] over any check, one every `every`.
-async fn watch_checks<F, Fut>(mut check: F, every: std::time::Duration)
+/// [`InstanceLock::watch`] over any check, one every `every`: also the watch of a catalogue
+/// importer's locks (`catalogue::run::SessionLock::lost`).
+pub(crate) async fn watch_checks<F, Fut>(mut check: F, every: std::time::Duration)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Check>,

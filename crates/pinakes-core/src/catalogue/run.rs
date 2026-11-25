@@ -307,7 +307,8 @@ pub fn free_bytes(path: &Path) -> std::io::Result<u64> {
 /// [`SessionLock::release`] or until it is dropped, which closes the connection and so ends the
 /// session and its lock.
 pub struct SessionLock {
-    connection: PgConnection,
+    /// Shared with the checks of [`SessionLock::lost`], one at a time.
+    connection: Arc<tokio::sync::Mutex<PgConnection>>,
     key: i64,
 }
 impl SessionLock {
@@ -319,7 +320,10 @@ impl SessionLock {
             .fetch_one(&mut connection)
             .await?;
         if taken {
-            Ok(Some(Self { connection, key }))
+            Ok(Some(Self {
+                connection: Arc::new(tokio::sync::Mutex::new(connection)),
+                key,
+            }))
         } else {
             let _ = connection.close().await;
             Ok(None)
@@ -329,38 +333,41 @@ impl SessionLock {
     /// its session has ended, and after two checks in a row with no answer within `every`; one
     /// slow check alone loses nothing. A check every `every`. Never ends otherwise.
     pub async fn lost(&mut self, every: Duration) {
-        use crate::locks::Check;
-        let mut slow = false;
-        loop {
-            // The check after a slow one is made at once: the session has had its time.
-            if !slow {
-                tokio::time::sleep(every).await;
-            }
-            match self.check(every).await {
-                Check::Held => slow = false,
-                Check::Slow if !slow => slow = true,
-                Check::Slow | Check::Gone => return,
-            }
-        }
+        let connection = self.connection.clone();
+        let check = move || {
+            let connection = connection.clone();
+            async move { check_session(&mut *connection.lock().await, every).await }
+        };
+        crate::locks::watch_checks(check, every).await
     }
     /// One check of the lock's session, given `wait` to answer: held, slow (no answer in time,
     /// or an error that leaves the session open) or gone (the session has ended, and the lock
     /// with it), as `locks::failed_check` tells them apart.
     pub async fn check(&mut self, wait: Duration) -> crate::locks::Check {
-        use crate::locks::Check;
-        let answer = sqlx::query("SELECT 1").execute(&mut self.connection);
-        match tokio::time::timeout(wait, answer).await {
-            Ok(Ok(_)) => Check::Held,
-            Ok(Err(error)) => crate::locks::failed_check(&error),
-            Err(_) => Check::Slow,
-        }
+        check_session(&mut *self.connection.lock().await, wait).await
     }
-    pub async fn release(mut self) {
+    pub async fn release(self) {
+        let mut connection = self.connection.lock().await;
         let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(self.key)
-            .execute(&mut self.connection)
+            .execute(&mut *connection)
             .await;
-        let _ = self.connection.close().await;
+        drop(connection);
+        // The last holder closes the connection; a check still holding a clone drops it later,
+        // which closes it too.
+        if let Ok(connection) = Arc::try_unwrap(self.connection) {
+            let _ = connection.into_inner().close().await;
+        }
+    }
+}
+/// One check of a lock's session ([`SessionLock::check`]).
+async fn check_session(connection: &mut PgConnection, wait: Duration) -> crate::locks::Check {
+    use crate::locks::Check;
+    let answer = sqlx::query("SELECT 1").execute(connection);
+    match tokio::time::timeout(wait, answer).await {
+        Ok(Ok(_)) => Check::Held,
+        Ok(Err(error)) => crate::locks::failed_check(&error),
+        Err(_) => Check::Slow,
     }
 }
 
