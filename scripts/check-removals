@@ -5,8 +5,7 @@ For every official source, also-on source and lookup family (every registered on
 given), removes it on a scratch worktree of HEAD as AGENTS.md says (its module, its registry
 lines, its docs page and index lines, its example-configuration blocks and variables, its fixture
 directories, its own test file, its e2e samples and its spelling vectors), checks nothing of its
-own is left, and
-builds every test target with warnings as errors. With `--tests`, it then runs the workspace's
+own is left, and builds every test target with warnings as errors. With `--tests`, it then runs the workspace's
 tests (`cargo test --workspace`, as scripts/test does, every target even after one fails: set
 DATABASE_URL and RUST_TEST_THREADS as for it), which a source's removal can break where the build
 does not: a test of another source that relied on it, a recording it took along. A source whose
@@ -67,10 +66,10 @@ PROSE = ["README.md", "AGENTS.md", "e2e/README.md"]
 # The URI-only spelling rules' vectors: one per line, in the layout `tests/spellings.rs` holds.
 SPELLINGS = "data/spellings.json"
 # Sources whose links shared code roots the same way once they are gone: their vectors stay, under
-# the shared code's rule. Every other source's vectors go with it.
+# the shared code's rule and basis. Every other source's vectors go with it.
 SPELLINGS_HANDOVER = {
     # music.rs reads Discogs links too (`music::discogs::root`, the root the source names).
-    "discogs": "music/discogs",
+    "discogs": ("music/discogs", "service"),
 }
 # Lines that may name a source after its removal and stay, each with the files it applies to, the
 # removed sources it applies to (any, when None) and its reason: what the line belongs to is in
@@ -261,7 +260,7 @@ def remove(wt, kind, name):
         if name in SPELLINGS_HANDOVER:
             for v in doc["vectors"]:
                 if v.get("rule") == own:
-                    v["rule"] = SPELLINGS_HANDOVER[name]
+                    v["rule"], v["basis"] = SPELLINGS_HANDOVER[name]
         else:
             gone = {v["root"] for v in doc["vectors"] if v.get("rule") == own}
             kept = [v for v in doc["vectors"] if v.get("rule") != own]
@@ -641,6 +640,8 @@ def self_test():
         sources = registered(tree)
         expected = [("sources", "alpha_beta"), ("sources", "gamma"), ("also_on", "delta"), ("lookups", "epsilon")]
         assert sources == expected, sources
+        # gamma's vectors are handed over to a shared rule, as Discogs's are.
+        SPELLINGS_HANDOVER["gamma"] = ("music/gamma", "service")
         for kind, name in sources:
             wt = os.path.join(base, name)
             shutil.copytree(tree, wt)
@@ -657,6 +658,11 @@ def self_test():
                 assert "alpha_beta" not in spellings and '"ab:1"' not in spellings and "source/gamma" in spellings, spellings
                 assert spellings == spellings_text(json.loads(spellings)), spellings
                 assert len(json.loads(spellings)["vectors"]) == 2, spellings
+            if name == "gamma":
+                spellings = open(os.path.join(wt, SPELLINGS), encoding="utf-8").read()
+                vectors = json.loads(spellings)["vectors"]
+                assert len(vectors) == 4 and spellings == spellings_text(json.loads(spellings)), spellings
+                assert {"link": "https://gamma.example/x/2", "root": "gamma:2", "basis": "service", "rule": "music/gamma"} in vectors, spellings
         wt, name, title = os.path.join(base, "alpha_beta"), "alpha_beta", "Alpha Beta"
         kept = shared_lines(tree, name)
         cases = [
@@ -715,6 +721,7 @@ def self_test():
                     f.write(before)
         left, _ = verify(wt, "sources", name, title, kept)
         assert not left, f"after the cases: {left}"
+        SPELLINGS_HANDOVER.pop("gamma")
         print("self-test ok (%d removals, %d leftovers named)" % (len(sources), len(cases)))
         return 0
     finally:

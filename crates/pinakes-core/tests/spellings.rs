@@ -39,7 +39,7 @@ fn answer(link: &str) -> Vector {
             link: link.to_owned(),
             root: alias.root,
             basis: Some(alias.basis.to_owned()),
-            rule,
+            rule: rule.name(),
         };
     }
     let (_, normalized, _) =

@@ -1664,7 +1664,8 @@ Pinakes answers for it:
   tags: a tag stays on the link its author wrote, and its references count for the root.
 - A root once listed stays a spelling of its card: a rule change that gives links another root
   also folds the old root into the new one, and its vector then names the new root. Vectors are
-  never removed but with their source. `pinakesd reextract` moves the stored aliases.
+  never removed, except a source's own when the source is removed from the build.
+  `pinakesd reextract` moves the stored aliases.
 - The vectors hold with every source on, and `spelling_rules` is the same whichever sources an
   instance switches off. A source switched off folds no new link, so its `source/{name}` vectors
   do not hold there (links it folded before stay folded; Discogs links still fold to the same
