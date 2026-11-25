@@ -821,6 +821,30 @@ impl SearchIndex {
         self.current()
             .map_or(0, |open| open.counted.load(Ordering::SeqCst))
     }
+    /// Merge every segment into one and wait for it (benchmarks: the largest segment a merge after a
+    /// removal may have to rewrite).
+    #[doc(hidden)]
+    pub fn merge_all(&self) -> Result<()> {
+        let Some(open) = self.current() else {
+            return Ok(());
+        };
+        let segments = open.index.searchable_segment_ids()?;
+        if segments.len() > 1 {
+            open.writer
+                .lock()
+                .expect("writer lock")
+                .merge(&segments)
+                .wait()?;
+        }
+        open.reader.reload()?;
+        Ok(())
+    }
+    /// The number of segments the index reads (benchmarks).
+    #[doc(hidden)]
+    pub fn segments(&self) -> usize {
+        self.current()
+            .map_or(0, |open| open.reader.searcher().segment_readers().len())
+    }
     /// Wait for the merge after a removal under way, if any ([`Open::purge`]; tests).
     #[doc(hidden)]
     pub fn settle(&self) {

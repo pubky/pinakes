@@ -796,9 +796,14 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    // The re-read goes a part (20,000 cards) per pass: as many passes as it takes, and one more.
     let started = std::time::Instant::now();
-    index.sync(&pool).await.unwrap();
+    let parts = n_cards.div_ceil(20_000) + 1;
+    for _ in 0..parts {
+        index.sync(&pool).await.unwrap();
+    }
     let bulk = started.elapsed();
+    assert_eq!(index.documents().len(), n_cards, "every card read");
     let size: u64 = walk(&dir);
     // An update run that changes every card.
     sqlx::query(
@@ -813,8 +818,13 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
         .unwrap();
     let update_write = started.elapsed();
     let after_update = queued().await;
+    // One batch (20,000 rows) of the catalogue queue per pass.
     let started = std::time::Instant::now();
-    index.sync(&pool).await.unwrap();
+    let mut passes = 0;
+    while queued().await > 0 {
+        index.sync(&pool).await.unwrap();
+        passes += 1;
+    }
     let drain = started.elapsed();
     let left = queued().await;
     let found = index
@@ -833,27 +843,21 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
         .unwrap()
         .unwrap();
     println!(
-        "bench: import write {write:?}, queue rows after the import {after_import}; bulk pass {bulk:?}, index {} MB ({} B per card); update write {update_write:?}, queue rows {after_update}; drain {drain:?}, left {left}; first candidate {:?}",
+        "bench: import write {write:?}, queue rows after the import {after_import}; bulk re-read {bulk:?} ({parts} passes), index {} MB ({} B per card); update write {update_write:?}, queue rows {after_update}; drain {drain:?} ({passes} passes), left {left}; first candidate {:?}",
         size / 1_000_000,
         size / n_cards as u64,
         found.units.first().map(|c| c.card)
     );
     assert_eq!(after_import, 0);
     assert_eq!(left, 0);
-    // The catalogue switched off: its documents leave, and the merge that takes their words out
-    // of the files runs outside the writer lock, so the pass returns and searches and commits go
-    // on while it runs.
-    index.set_catalogues(&[]);
-    let started = std::time::Instant::now();
-    index.sync(&pool).await.unwrap();
-    let off_pass = started.elapsed();
-    let started = std::time::Instant::now();
-    let link =
-        pinakes_core::store::ensure_resource(&pool, "https://example.org/bench-during-merge")
-            .await
-            .unwrap();
-    let mut doc = ResourceMeta::new("https://example.org/bench-during-merge", "web", 86400);
-    doc.name = Some("Bench during merge".into());
+    // A link that loses its text while its document sits in one segment with every card (the
+    // largest segment a merge after a removal may have to rewrite): the pass returns at once, a
+    // commit and a search go on while the merge rewrites the segment in the background.
+    let link = pinakes_core::store::ensure_resource(&pool, "https://example.org/bench-vanishing")
+        .await
+        .unwrap();
+    let mut doc = ResourceMeta::new("https://example.org/bench-vanishing", "web", 86400);
+    doc.name = Some("Bench vanishing zyzzyva".into());
     pinakes_core::store::save_document(&pool, &link, 0, &doc)
         .await
         .unwrap();
@@ -862,6 +866,35 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    index.sync(&pool).await.unwrap();
+    let started = std::time::Instant::now();
+    index.merge_all().unwrap();
+    let one_segment = started.elapsed();
+    let segments = index.segments();
+    assert!(index.holds_word("zyzzyva"));
+    sqlx::query("UPDATE resource SET name=NULL, doc=doc-'name'-'description' WHERE id=$1")
+        .bind(&link)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    index.sync(&pool).await.unwrap();
+    let lost_pass = started.elapsed();
+    let other =
+        pinakes_core::store::ensure_resource(&pool, "https://example.org/bench-during-merge")
+            .await
+            .unwrap();
+    let mut doc = ResourceMeta::new("https://example.org/bench-during-merge", "web", 86400);
+    doc.name = Some("Bench during merge".into());
+    pinakes_core::store::save_document(&pool, &other, 0, &doc)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,'bench2','tag','bench','/pub/app/tags/bench2',now())")
+        .bind(&other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
     index.sync(&pool).await.unwrap();
     let commit_during = started.elapsed();
     let started = std::time::Instant::now();
@@ -882,13 +915,26 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
     let started = std::time::Instant::now();
     index.settle();
     let merge_left = started.elapsed();
+    let purged = index.purges();
     println!(
-        "bench: {n_cards} cards switched off: pass {off_pass:?}; a commit meanwhile {commit_during:?}, a search {search_during:?} ({} found); merge done {merge_left:?} after; index {} MB after",
-        during.units.len(),
+        "bench: {n_cards} cards in {segments} segment(s) (merged in {one_segment:?}); a link losing its text: pass {lost_pass:?}; a commit meanwhile {commit_during:?}, a search {search_during:?} ({} found); merge done {merge_left:?} after; merges after a removal {purged}",
+        during.units.len()
+    );
+    assert!(merged_out(&index, &pool, "zyzzyva").await);
+    // The catalogue switched off: every card's document deleted (whole segments, which Tantivy drops
+    // or merges by itself), the words out of the files.
+    index.set_catalogues(&[]);
+    let started = std::time::Instant::now();
+    index.sync(&pool).await.unwrap();
+    let off_pass = started.elapsed();
+    let started = std::time::Instant::now();
+    let gone = merged_out(&index, &pool, "synthetic").await;
+    println!(
+        "bench: {n_cards} cards switched off: pass {off_pass:?}; words out of the files {:?} after; index {} MB",
+        started.elapsed(),
         walk(&dir) / 1_000_000
     );
-    assert_eq!(index.purges(), 1);
-    assert!(!index.holds_word("synthetic"));
+    assert!(gone);
     let _ = std::fs::remove_dir_all(&dir);
 }
 fn walk(dir: &std::path::Path) -> u64 {
