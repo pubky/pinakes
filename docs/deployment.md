@@ -147,13 +147,14 @@ The publishing jobs run after both test jobs pass:
 1. Each job checks the tag, then checks that `main` itself pointed to the tagged commit on its
    first-parent line (`scripts/ci/release-on-main`). A tag on a feature branch, or on a commit
    that reached `main` only inside a merged branch, publishes nothing. The check peels the
-   pushed SHA to its commit and requires the checked-out tree to be that commit, so an annotated
-   tag's image tags name the commit, never the tag object.
+   pushed SHA to its commit (`git rev-parse "$GITHUB_SHA^{commit}"`) and requires the checked-out
+   tree to be that commit. For an annotated tag, such as the signed one below, the commit-named
+   image tags still name the commit and never the tag object.
 2. Each platform job sets up its database before it logs in to Docker Hub, so no registry
    credential is on disk during package installs.
 3. Each platform job builds its image with the org's
    `build_and_push` action (`pubky/ci-workflows`, pinned to a commit in `.github/workflows/ci.yml`)
-   and pushes it as `<full-commit-SHA>-<run-ID>-<arch>`. The Dockerfile builds inside each platform's Rust image and ignores the action's `TARGETARCH` build argument.
+   and pushes it as `<full-commit-SHA>-<run-ID>-amd64` or `<full-commit-SHA>-<run-ID>-arm64`. The Dockerfile builds inside each platform's Rust image and ignores the action's `TARGETARCH` build argument.
    The action's `latest` and `sha_tag` inputs are `false`, so platform jobs never write the shared
    tags.
 4. Each platform job pulls the image it pushed and runs `scripts/ci/container-smoke` on it: the
@@ -172,22 +173,24 @@ someone who can push tags. That protection comes from the repository settings be
 
 ### Repository settings for publishing
 
-The repository owner sets these; no file in the repository sets them:
+Owner prerequisites, not set by this repository's files:
 
-- A branch protection rule or ruleset on `main`, without bypass, that requires these status
-  checks: `Full test gate and mock e2e`, `Build and smoke image (amd64)` and
+- A branch protection rule or ruleset on `main` with these required status checks, without bypass:
+  `Full test gate and mock e2e`, `Build and smoke image (amd64)` and
   `Build and smoke image (arm64)`. Then every state on `main`'s first-parent line passed them, as
   `scripts/ci/release-on-main` assumes.
 - A tag ruleset for `refs/tags/v*` that lets only release maintainers create, update or delete
   those tags.
-- Two Actions secrets, in the repository or granted by the organization:
-  - `DOCKERHUB_USERNAME`: a Docker Hub account that may push `synonymsoft/pinakes`.
-  - `DOCKERHUB_TOKEN`: that account's token with write access to the image repository.
-- Optionally, a `release` Environment that holds the two secrets, limited to `v*` tags (with
+- Optionally, a `release` Environment that holds the two secrets below, limited to `v*` tags (with
   required reviewers if you want them). Create it and move the secrets into it first, then add
   `environment: release` to the `publish` and `manifest` jobs: naming an Environment in the
   workflow creates it with no protection rules. `scripts/ci/test_contracts.py` refuses an
   `environment:`, so change that contract in the same commit.
+
+Provision repository or explicitly granted organization Actions secrets before publishing:
+
+- `DOCKERHUB_USERNAME`: a Docker Hub account that may push `synonymsoft/pinakes`.
+- `DOCKERHUB_TOKEN`: that account's token with write access to the image repository.
 
 ### Release a version
 
