@@ -593,9 +593,11 @@ BEGIN
 END $$;
 
 CREATE TRIGGER resource_search_index_insert AFTER INSERT OR DELETE ON resource FOR EACH ROW EXECUTE FUNCTION queue_search_index();
+-- `point` is compared as bytes here and below: a geometry's `=` does not resolve under the empty
+-- search path `pg_restore` sets, so with it a dump of these two triggers would not restore.
 CREATE TRIGGER resource_search_index_update AFTER UPDATE OF uri, host, resolver, doc, status, name, type, type_path, category, point, start_at, end_at, venue_id, osm_type, osm_id, osm_version ON resource FOR EACH ROW
-    WHEN ((OLD.uri, OLD.host, OLD.resolver, OLD.doc, OLD.status, OLD.name, OLD.type, OLD.type_path, OLD.category, OLD.point, OLD.start_at, OLD.end_at, OLD.venue_id, OLD.osm_type, OLD.osm_id, OLD.osm_version)
-        IS DISTINCT FROM (NEW.uri, NEW.host, NEW.resolver, NEW.doc, NEW.status, NEW.name, NEW.type, NEW.type_path, NEW.category, NEW.point, NEW.start_at, NEW.end_at, NEW.venue_id, NEW.osm_type, NEW.osm_id, NEW.osm_version))
+    WHEN ((OLD.uri, OLD.host, OLD.resolver, OLD.doc, OLD.status, OLD.name, OLD.type, OLD.type_path, OLD.category, OLD.point::bytea, OLD.start_at, OLD.end_at, OLD.venue_id, OLD.osm_type, OLD.osm_id, OLD.osm_version)
+        IS DISTINCT FROM (NEW.uri, NEW.host, NEW.resolver, NEW.doc, NEW.status, NEW.name, NEW.type, NEW.type_path, NEW.category, NEW.point::bytea, NEW.start_at, NEW.end_at, NEW.venue_id, NEW.osm_type, NEW.osm_id, NEW.osm_version))
     EXECUTE FUNCTION queue_search_index();
 CREATE TRIGGER reference_search_index AFTER INSERT OR DELETE OR UPDATE ON reference FOR EACH ROW EXECUTE FUNCTION queue_search_index();
 CREATE TRIGGER score_search_index AFTER INSERT OR DELETE OR UPDATE ON resource_score FOR EACH ROW EXECUTE FUNCTION queue_search_index();
@@ -603,8 +605,8 @@ CREATE TRIGGER occurrence_search_index AFTER INSERT OR DELETE OR UPDATE ON occur
 CREATE TRIGGER alias_search_index AFTER INSERT OR DELETE OR UPDATE ON resource_alias FOR EACH ROW EXECUTE FUNCTION queue_search_index_alias();
 CREATE TRIGGER osm_search_index_insert AFTER INSERT OR DELETE ON osm_place FOR EACH ROW EXECUTE FUNCTION queue_search_index_osm();
 CREATE TRIGGER osm_search_index_update AFTER UPDATE OF doc, status, name, display_name, type, type_path, category, point, versions ON osm_place FOR EACH ROW
-    WHEN ((OLD.doc, OLD.status, OLD.name, OLD.display_name, OLD.type, OLD.type_path, OLD.category, OLD.point, OLD.versions)
-        IS DISTINCT FROM (NEW.doc, NEW.status, NEW.name, NEW.display_name, NEW.type, NEW.type_path, NEW.category, NEW.point, NEW.versions))
+    WHEN ((OLD.doc, OLD.status, OLD.name, OLD.display_name, OLD.type, OLD.type_path, OLD.category, OLD.point::bytea, OLD.versions)
+        IS DISTINCT FROM (NEW.doc, NEW.status, NEW.name, NEW.display_name, NEW.type, NEW.type_path, NEW.category, NEW.point::bytea, NEW.versions))
     EXECUTE FUNCTION queue_search_index_osm();
 CREATE TRIGGER reference_search_index_truncate AFTER TRUNCATE ON reference FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_all();
 CREATE TRIGGER score_search_index_truncate AFTER TRUNCATE ON resource_score FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_all();
