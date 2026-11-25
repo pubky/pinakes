@@ -119,11 +119,12 @@ six hours). A refusal before Prometheus first scrapes a new target is its starti
 alert shows only at the next refusal.
 
 `CatalogueImportFailed` (warning) fires for an hour after a catalogue's import or update run
-failed, for a catalogue that is on: `pinakesd catalogue status` shows the error, and the run is
-tried again from its cursor every ten minutes, so a failure that persists keeps it firing.
-`CatalogueUpdateLag` (warning) fires when a catalogue that is on and has finished a full import
-has finished no import or update for two days. A catalogue that is off, or still in its first
-import, raises neither.
+failed: `pinakesd catalogue status` shows the error, and the run is tried again from its cursor
+every ten minutes, so a failure that persists keeps it firing. `CatalogueUpdateLag` (warning)
+fires when a catalogue has finished no import or update for two days. Both read only catalogues
+that are on and have finished a full import: a catalogue that is off raises neither, and the
+failures of a first import show in `pinakesd catalogue status` and
+`pinakes_catalogue_import_errors_total` alone.
 
 Run `scripts/check-ops`: it runs the test that parses the rules and the dashboard and checks
 every metric they name, and every fetch outcome a rule matches, against an initialized registry,

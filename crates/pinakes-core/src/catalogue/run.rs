@@ -400,11 +400,18 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
 
 /// The large catalogue, other than `catalogue`, whose full import is under way or was cut off
 /// (a failure, a restart) and is not switched off: it keeps the large-import turn until it
-/// finishes, since its temporary files stay on the disk meanwhile.
-async fn large_import_under_way(pool: &PgPool, catalogue: Catalogue) -> Result<Option<String>> {
+/// finishes, since its temporary files stay on the disk meanwhile. A catalogue that resumes a
+/// cut-off import of its own waits only for those before it in `Catalogue::ALL`: when two were
+/// cut off (one turned off and on again while the other ran), the first goes, then the other,
+/// and neither waits for the other forever.
+async fn large_import_under_way(
+    pool: &PgPool,
+    catalogue: Catalogue,
+    resuming: bool,
+) -> Result<Option<String>> {
     let large: Vec<&str> = Catalogue::ALL
         .into_iter()
-        .filter(|c| c.large() && *c != catalogue)
+        .filter(|c| c.large() && *c != catalogue && (!resuming || *c < catalogue))
         .map(Catalogue::name)
         .collect();
     Ok(sqlx::query_scalar(
@@ -443,7 +450,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
             set_waiting(pool, catalogue, why).await?;
             return Ok(Next::Wait(ctx.pace.turn));
         };
-        if let Some(other) = large_import_under_way(pool, catalogue).await? {
+        if let Some(other) = large_import_under_way(pool, catalogue, resumed.is_some()).await? {
             lock.release().await;
             let why = format!(
                 "{other}'s full import is under way and has not finished; one large import runs at a time"

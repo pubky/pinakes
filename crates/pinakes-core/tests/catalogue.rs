@@ -850,6 +850,51 @@ async fn a_cut_off_large_import_keeps_its_turn(pool: PgPool) {
     assert_eq!(state(&pool, Catalogue::Wikidata).await.cards, 25);
 }
 
+/// Two large catalogues whose full imports were both cut off (one switched off and on again
+/// while the other ran) do not wait for each other: the first in `Catalogue::ALL` resumes, then
+/// the other.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_cut_off_large_imports_resume_one_after_the_other(pool: PgPool) {
+    let ctx = context(&pool, plenty());
+    let place = |c: Card| Card {
+        uri: format!("https://www.openstreetmap.org/node/{}", &c.source_id[1..]),
+        r#type: "Place".into(),
+        ..c
+    };
+    let wikidata = Fixture::new(Catalogue::Wikidata, cards(25));
+    let osm = Fixture::new(Catalogue::Osm, cards(25).into_iter().map(place).collect());
+    // Both cut off after a batch: OpenStreetMap's while Wikidata is switched off.
+    *wikidata.fail_after.lock().unwrap() = Some(1);
+    assert!(run::step(&wikidata, &ctx).await.is_err());
+    let mut off = CataloguesConfig::default();
+    off.wikidata.enabled = false;
+    store::sync_switches(&pool, &off).await.unwrap();
+    *osm.fail_after.lock().unwrap() = Some(1);
+    assert!(run::step(&osm, &ctx).await.is_err());
+    store::sync_switches(&pool, &CataloguesConfig::default())
+        .await
+        .unwrap();
+    for catalogue in [Catalogue::Wikidata, Catalogue::Osm] {
+        assert_eq!(state(&pool, catalogue).await.run.as_deref(), Some("import"));
+    }
+    // OpenStreetMap waits for Wikidata, which goes.
+    assert_eq!(
+        run::step(&osm, &ctx).await.unwrap(),
+        Next::Wait(ctx.pace.turn)
+    );
+    assert!(state(&pool, Catalogue::Osm)
+        .await
+        .waiting
+        .unwrap()
+        .starts_with("wikidata's"));
+    assert_eq!(run::step(&wikidata, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(run::step(&osm, &ctx).await.unwrap(), Next::Again);
+    for catalogue in [Catalogue::Wikidata, Catalogue::Osm] {
+        let s = state(&pool, catalogue).await;
+        assert_eq!((s.cards, s.run), (25, None), "{catalogue}");
+    }
+}
+
 /// A row the table's checks refuse is left out alone: the rest of its part is written.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_card_the_table_refuses_does_not_stop_its_part(pool: PgPool) {
@@ -868,6 +913,7 @@ async fn a_card_the_table_refuses_does_not_stop_its_part(pool: PgPool) {
     for value in [
         json!({"a": 1, "b": [1, 2.5, -3], "c": {"d": null, "e": "x\"y\u{e9}\n"}}),
         json!({"big": 1e30, "small": 1.5e-7, "neg": -12345678901234i64}),
+        json!([2.0, 0.5, 100.0, 1e-3]),
     ] {
         let printed: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
             .bind(&value)

@@ -95,7 +95,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "{{ $labels.source }} refused the configured key: check or rotate the {{ $labels.source }} key (a new key needs a Pinakes restart)"}
       - alert: CatalogueImportFailed
-        expr: (increase(pinakes_catalogue_import_errors_total[1h]) > 0) and on (catalogue) (pinakes_catalogue_enabled == 1)
+        expr: (increase(pinakes_catalogue_import_errors_total[1h]) > 0) and on (catalogue) (pinakes_catalogue_enabled == 1) and on (catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0)
         labels: {severity: warning}
         annotations: {summary: "A {{ $labels.catalogue }} catalogue import or update failed in the last hour; pinakesd catalogue status shows the error, and the run resumes from its cursor"}
       - alert: CatalogueUpdateLag

@@ -394,10 +394,10 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL THEN 0 ELSE extract(epoch FROM now()-greatest(last_import_at,last_update_at))::bigint END AS lag FROM catalogue_state").fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL THEN 0 ELSE extract(epoch FROM now()-greatest(last_import_at,last_update_at))::bigint END AS lag FROM catalogue_state").fetch_all(pool).await?;
         let previews: i64 = sqlx::query_scalar("SELECT count(*) FROM resource r WHERE r.orphaned_at IS NOT NULL AND r.orphaned_at=r.created_at AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id)")
             .fetch_one(pool)
             .await?;

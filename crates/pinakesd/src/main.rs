@@ -525,10 +525,13 @@ async fn drop_held(config: &Config, pool: &sqlx::PgPool, catalogue: Catalogue) -
     })
     .await?;
     println!("dropped {dropped} cards of catalogue {catalogue}; its state is reset");
-    let dir = config.catalogues.work_dir(catalogue);
+    // Named in full: a relative `catalogues.dir` is relative to this command's working directory.
+    let dir = std::path::absolute(config.catalogues.work_dir(catalogue))?;
     match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => println!("removed {}", dir.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("no directory {} to remove", dir.display())
+        }
         Err(error) => {
             return Err(error).with_context(|| format!("remove {}", dir.display()));
         }

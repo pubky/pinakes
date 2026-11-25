@@ -409,15 +409,16 @@ pub fn jsonb_text_len(value: &serde_json::Value) -> usize {
                 5
             }
         }
-        Value::Number(n) => match n.as_i64().map(|i| i.to_string()) {
-            Some(text) => text.len(),
-            // Rust prints a float in full, as PostgreSQL's numeric does.
-            None => n
-                .as_u64()
-                .map(|u| u.to_string())
-                .or_else(|| n.as_f64().map(|f| f.to_string()))
-                .map_or(usize::MAX / 4, |text| text.len()),
-        },
+        // PostgreSQL's numeric keeps a number's digits as written (`2.0`, `-12`), and writes one
+        // with an exponent out in full (`1e30`, `1.5e-7`), as Rust prints a float.
+        Value::Number(n) => {
+            let written = n.to_string();
+            if written.contains(['e', 'E']) {
+                n.as_f64().map_or(usize::MAX / 4, |f| f.to_string().len())
+            } else {
+                written.len()
+            }
+        }
         Value::String(s) => string(s),
         Value::Array(items) => {
             2 + items.iter().map(jsonb_text_len).sum::<usize>() + 2 * items.len().saturating_sub(1)
@@ -529,9 +530,10 @@ impl Card {
         if uri.len() > 2048 {
             return Err(Reject::Uri);
         }
-        if model::type_path(&self.r#type).is_empty() {
+        // Stored by its bare name (`Person`, never `schema:Person`), as resources store theirs.
+        let Some(r#type) = model::type_path(&self.r#type).pop() else {
             return Err(Reject::Type);
-        }
+        };
         let name = clean(&self.name, NAME_CAP);
         if name.is_empty() {
             return Err(Reject::Name);
@@ -594,7 +596,7 @@ impl Card {
             source,
             source_id: self.source_id.clone(),
             uri,
-            r#type: self.r#type.clone(),
+            r#type,
             name,
             other_names,
             description,
@@ -723,6 +725,13 @@ mod tests {
         assert_eq!(row.keys, ["wikidata:Q42".to_owned(), wikidata_page]);
         assert_eq!(row.related_uris, ["https://douglasadams.com/"]);
         assert_eq!(row.fame, 1.0);
+        // A type is stored by its bare name.
+        let mut prefixed = card();
+        prefixed.r#type = "https://schema.org/Person".into();
+        assert_eq!(
+            prefixed.checked(Catalogue::Wikidata).unwrap().r#type,
+            "Person"
+        );
         // The hash is the content's: the same card gives the same hash, a change another.
         assert_eq!(row, card().checked(Catalogue::Wikidata).unwrap());
         let mut changed = card();
