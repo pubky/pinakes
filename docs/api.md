@@ -1696,7 +1696,7 @@ Each entry is one identifier and what Pinakes answers for it:
 | `mb:{recording\|release\|release-group\|artist}:{mbid}` | `https://musicbrainz.org/{kind}/{mbid}` |
 | `isrc:{ISRC}` | MusicBrainz's ISRC page, `https://musicbrainz.org/isrc/{ISRC}` |
 | `osm:{node\|way\|relation}/{id}` | `https://www.openstreetmap.org/{type}/{id}` |
-| `doi:{DOI}` | `https://doi.org/{DOI}` |
+| `doi:{DOI}` | `https://doi.org/{DOI}`, the DOI in lower case |
 | A source's own scheme (`artic:`, `btc:`, `ln:`, `uniprot:`, `fr:`, …) | The object's page on the service, as the source builds it from the root |
 
 - A join key's page (Wikidata, MusicBrainz, OSM) is a card's `uri` itself. A `doi:` card's page
@@ -1708,9 +1708,9 @@ Each entry is one identifier and what Pinakes answers for it:
   page names the LEI only in its fragment, which a link drops. A `%`, `?` or `#` in a DOI is
   percent-encoded in its page.
 - No single page (`null`): an MBID without its entity (`mbid:`), an ISBN (an `isbn:` card has no
-  web page of its own), a barcode (`upc:`, `gtin:`) and the podcast keys. The keys of the also-on lookups (`imdb:`, `crate:`, `arxiv:`,
-  `steam:`, …) have none here either: their pages are the links those lookups list in
-  [Also on](#also-on). A web link is its own page.
+  web page of its own), a barcode (`upc:`, `gtin:`) and the podcast keys. The keys of the also-on
+  lookups (`imdb:`, `crate:`, `arxiv:`, `steam:`, …) have none here either: their pages are the
+  links those lookups list in [Also on](#also-on). A web link is its own page.
 - A test runs every entry through the code that builds the pages and checks that each page is an
   address of its card. Every source with roots of its own scheme has entries, and every such root
   among the spelling vectors has its page. `spelling_rules` covers the pages as it covers the

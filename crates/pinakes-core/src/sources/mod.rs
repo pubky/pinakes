@@ -1547,9 +1547,9 @@ mod tests {
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
     }
 
-    /// A source's page of a root answers for its root and for the source's other spellings of it.
-    /// `root_page_by` reads no switch: it folds with the source's own rule, which a switched-off
-    /// source's `alias_root_by` would not.
+    /// A source's page of a root answers for its root and for the source's other spellings of it,
+    /// folded with the source's own rule; `root_page_by` takes no switches, while the same
+    /// spelling folds to nothing through `alias_root_with` once the source is off.
     #[test]
     fn root_pages_fold_a_spelling() {
         if by_name("pdb").is_none() {

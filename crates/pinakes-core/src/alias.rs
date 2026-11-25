@@ -144,7 +144,8 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
         {
             // Its page reads back as the DOI (`doi_page` encodes `%`, `?` and `#`); one that
             // would not has no page.
-            let page = crate::resolver::cards::doi_page(&number);
+            let (_, page, _) =
+                crate::model::identity(&crate::resolver::cards::doi_page(&number)).ok()?;
             return (crate::resolver::cards::doi(&page).as_deref() == Some(number.as_str()))
                 .then_some((page, Core(Rule::Doi)));
         }
