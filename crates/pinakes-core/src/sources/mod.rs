@@ -1547,6 +1547,30 @@ mod tests {
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
     }
 
+    /// A source's page of a root answers for its root and for the source's other spellings of it,
+    /// with no switch read: the switched-off source folds nothing, its page still answers.
+    #[test]
+    fn root_pages_fold_a_spelling_whatever_the_switches() {
+        if by_name("pdb").is_none() {
+            return;
+        }
+        let page = Some(("pdb", "https://www.rcsb.org/structure/4HHB".to_owned()));
+        assert_eq!(root_page_by("pdb:4HHB"), page);
+        assert_eq!(root_page_by("pdb:4hhb"), page);
+        assert_eq!(root_page_by("https://www.rcsb.org/structure/4hhb"), page);
+        let mut off = SourcesConfig::default();
+        off.0.insert(
+            "pdb".into(),
+            Switch {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(alias_root_with("pdb:4hhb", Some(&off)), None);
+        assert_eq!(root_page_by("pdb:0000"), None);
+        assert_eq!(root_page_by("https://example.org/"), None);
+    }
+
     /// A source's own DOI prefix is a DOI prefix in lower case that ends at a separator, so it
     /// takes no other registrant's DOIs; an id it declares is one of its facts; a page hook
     /// declares none.

@@ -135,8 +135,8 @@ full list):
 - its block in `pinakes.example.toml` (and its variables in `.env.example`);
 - its fixture directories (those named after it) and its own test file, if any;
 - `e2e/samples/<name>.json`;
-- its lines in `data/spellings.json`, vectors and pages (rule `source/<name>`; Discogs's vectors
-  become rule `music/discogs`, basis `service`).
+- its lines in `data/spellings.json`, vectors and pages (rule `source/<name>`, and the `null` pages
+  in its schemes; Discogs's vectors become rule `music/discogs`, basis `service`).
 
 Shared code stays. A test that needs a source returns early without it, so no test changes. A
 removed source's keys stay in the database until they expire, and keep their grouping rule

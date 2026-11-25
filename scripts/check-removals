@@ -265,6 +265,7 @@ def remove(wt, kind, name):
         with open(p, encoding="utf-8") as f:
             doc = json.load(f)
         own = "source/%s" % name
+        doc_before = [dict(v) for v in doc["vectors"]]
         if name in SPELLINGS_HANDOVER:
             for v in doc["vectors"]:
                 if v.get("rule") == own:
@@ -274,7 +275,10 @@ def remove(wt, kind, name):
             kept = [v for v in doc["vectors"] if v.get("rule") != own]
             named = {v["root"] for v in kept if v["root"] != v["link"]}
             doc["vectors"] = [v for v in kept if not (v["link"] in gone and v.get("rule") == "none" and v["link"] not in named)]
-        doc["pages"] = [v for v in doc["pages"] if v.get("rule") != own]
+        # Its pages, and the identifiers of its schemes that have none (`null`, rule `none`).
+        schemes = {v["root"].split(":", 1)[0] for v in doc_before if v.get("rule") == own and not v["root"].startswith(("http:", "https:"))}
+        schemes |= {v["id"].split(":", 1)[0].lower() for v in doc["pages"] if v.get("rule") == own}
+        doc["pages"] = [v for v in doc["pages"] if v.get("rule") != own and not (v.get("rule") == "none" and v["id"].split(":", 1)[0].lower() in schemes)]
         with open(p, "w", encoding="utf-8") as f:
             f.write(spellings_text(doc))
 
@@ -621,6 +625,7 @@ PINAKES_DELTA_KEY=
   ],
   "pages": [
     {"id":"ab:1","page":"https://alpha-beta.example/d/1","rule":"source/alpha_beta"},
+    {"id":"AB:x","page":null,"rule":"none"},
     {"id":"gamma:2","page":"https://gamma.example/x/2","rule":"source/gamma"},
     {"id":"wikidata:Q1","page":"https://www.wikidata.org/wiki/Q1","rule":"wikidata"}
   ]
@@ -681,7 +686,7 @@ def self_test():
                 assert len(vectors) == 4 and spellings == spellings_text(json.loads(spellings)), spellings
                 assert {"link": "https://gamma.example/x/2", "root": "gamma:2", "basis": "service", "rule": "music/gamma"} in vectors, spellings
                 # Its pages go: the shared rule that takes its vectors builds no page.
-                assert [p["id"] for p in json.loads(spellings)["pages"]] == ["ab:1", "wikidata:Q1"], spellings
+                assert [p["id"] for p in json.loads(spellings)["pages"]] == ["ab:1", "AB:x", "wikidata:Q1"], spellings
         # A source with pages and no vectors: its pages go all the same.
         wt = os.path.join(base, "pages-only")
         shutil.copytree(tree, wt)

@@ -133,14 +133,15 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
         if matches!(scheme.as_str(), "http" | "https") {
             return None;
         }
-        let root = root(&written).map(|a| a.root).unwrap_or(written);
-        if let Some(number) = root
+        // No switch is read: a DOI in any letter case, and a source's spelling of its root
+        // (`root_page_by` folds it with the source's own rule).
+        if let Some(number) = written
             .strip_prefix("doi:")
-            .and_then(|_| crate::resolver::cards::doi(&root))
+            .and_then(|_| crate::resolver::cards::doi(&written))
         {
             return Some((crate::resolver::cards::doi_page(&number), Core(Rule::Doi)));
         }
-        if let Some((source, page)) = crate::sources::root_page_by(&root) {
+        if let Some((source, page)) = crate::sources::root_page_by(&written) {
             return Some((page, Named::Source(source)));
         }
     }
