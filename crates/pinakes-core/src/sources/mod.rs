@@ -185,6 +185,13 @@ pub trait Source: Send + Sync {
     fn alias_root(&self, _uri: &str) -> Option<String> {
         None
     }
+    /// The web page of a root in this source's own identifier scheme (`artic:…`, `btc:…`), from
+    /// the root alone: an address of the object that [`alias_root`](Source::alias_root) folds
+    /// back to the root. `root` is one of the source's roots ([`root_page_by`] folds any other
+    /// spelling first); `None` for a root that is a web page itself.
+    fn root_page(&self, _root: &str) -> Option<String> {
+        None
+    }
     /// A link in this source's own identifier scheme that can never name an object (a final
     /// `missing`, never fetched again).
     fn invalid(&self, _uri: &str) -> bool {
@@ -933,6 +940,14 @@ pub fn alias_root_by(uri: &str) -> Option<(&'static str, String)> {
     let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
     alias_root_by_with(uri, switches.as_ref())
 }
+/// The web page of a source's root in its own identifier scheme, from the root or another
+/// spelling of it, with the source's name ([`Source::root_page`]), whichever sources are on.
+pub fn root_page_by(uri: &str) -> Option<(&'static str, String)> {
+    REGISTRY.iter().find_map(|s| {
+        let root = s.alias_root(uri).unwrap_or_else(|| uri.to_owned());
+        Some((s.name(), s.root_page(&root)?))
+    })
+}
 #[cfg(test)]
 fn alias_root_with(uri: &str, switches: Option<&SourcesConfig>) -> Option<String> {
     alias_root_by_with(uri, switches).map(|(_, root)| root)
@@ -1530,6 +1545,31 @@ mod tests {
     fn repo(path: &str) -> String {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// A source's page of a root answers for its root and for the source's other spellings of it,
+    /// folded with the source's own rule; `root_page_by` takes no switches, while the same
+    /// spelling folds to nothing through `alias_root_with` once the source is off.
+    #[test]
+    fn root_pages_fold_a_spelling() {
+        if by_name("pdb").is_none() {
+            return;
+        }
+        let page = Some(("pdb", "https://www.rcsb.org/structure/4HHB".to_owned()));
+        assert_eq!(root_page_by("pdb:4HHB"), page);
+        assert_eq!(root_page_by("pdb:4hhb"), page);
+        assert_eq!(root_page_by("https://www.rcsb.org/structure/4hhb"), page);
+        let mut off = SourcesConfig::default();
+        off.0.insert(
+            "pdb".into(),
+            Switch {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(alias_root_with("pdb:4hhb", Some(&off)), None);
+        assert_eq!(root_page_by("pdb:0000"), None);
+        assert_eq!(root_page_by("https://example.org/"), None);
     }
 
     /// A source's own DOI prefix is a DOI prefix in lower case that ends at a separator, so it

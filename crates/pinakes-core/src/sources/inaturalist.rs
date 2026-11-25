@@ -301,6 +301,9 @@ impl Source for Inaturalist {
         let root = identifier(target(uri)?);
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        from_root(root).map(page)
+    }
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("inat:") && from_root(uri).is_none()
     }

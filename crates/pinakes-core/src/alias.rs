@@ -119,9 +119,73 @@ pub fn rooted(uri: &str) -> Option<(Alias, Named)> {
         found.2,
     ))
 }
+/// The web page Pinakes links for an identifier, built from the identifier alone, with the rule
+/// that builds it: a join key's page (`wikidata:{Q-id}`, `mb:{kind}:{mbid}`, `isrc:{ISRC}`,
+/// `osm:{type}/{id}`), or the page of a card whose root is no web link (`doi:…`, a source's own
+/// scheme such as `artic:…` or `btc:…`), in any spelling of that root, whichever sources are on.
+/// `data/spellings.json` (`pages`) lists examples of each. `None` for a web link (its own page)
+/// and for an identifier with no single page of its own (an MBID without its entity, an ISBN, a
+/// barcode, …).
+pub fn web_page(identifier: &str) -> Option<(String, Named)> {
+    use Named::Core;
+    let identifier = identifier.trim();
+    let mut key = identifier.to_owned();
+    if let Ok((_, written, scheme)) = crate::model::identity(identifier) {
+        // A key's kind in any letter case (`WIKIDATA:Q42`), as a stored link writes it.
+        key.clone_from(&written);
+        if matches!(scheme.as_str(), "http" | "https") {
+            return None;
+        }
+        // No switch is read: a DOI in any letter case, and a source's spelling of its root
+        // (`root_page_by` folds it with the source's own rule).
+        if let Some(number) = written
+            .strip_prefix("doi:")
+            .and_then(|_| crate::resolver::cards::doi(&written))
+        {
+            // Its page reads back as the DOI (`doi_page` encodes `%`, `?` and `#`); one that
+            // would not has no page.
+            let (_, page, _) =
+                crate::model::identity(&crate::resolver::cards::doi_page(&number)).ok()?;
+            return (crate::resolver::cards::doi(&page).as_deref() == Some(number.as_str()))
+                .then_some((page, Core(Rule::Doi)));
+        }
+        if let Some((source, page)) = crate::sources::root_page_by(&written) {
+            return Some((page, Named::Source(source)));
+        }
+    }
+    let key = crate::catalogue::stored_key(&key)?;
+    let (kind, value) = key.split_once(':')?;
+    let (page, rule) = match kind {
+        "wikidata" => (
+            crate::hubs::wikidata::item_page(&crate::hubs::qid(value)?),
+            Rule::Wikidata,
+        ),
+        "mb" => {
+            let (written, mbid) = value.split_once(':')?;
+            let kind = crate::hubs::MbKind::parse(written).filter(|k| k.as_str() == written)?;
+            let mbid = crate::hubs::mbid(mbid)?;
+            (
+                crate::hubs::musicbrainz::entity_page(kind, &mbid),
+                Rule::MusicBrainz,
+            )
+        }
+        "isrc" => (
+            crate::hubs::musicbrainz::isrc_page(&crate::music::isrc(value)?),
+            Rule::MusicBrainz,
+        ),
+        "osm" => {
+            crate::lookups::search_key("osm", value)?;
+            let osm =
+                crate::resolver::osm::parse_id(&format!("https://www.openstreetmap.org/{value}"))?;
+            (osm.uri(), Rule::Osm)
+        }
+        _ => return None,
+    };
+    Some((page, Core(rule)))
+}
 /// The version of the URI-only spelling rules (`/v1/info` `spelling_rules`): the first 16 hex
-/// characters of the BLAKE3 hash of `data/spellings.json`, the rules' test vectors, which a
-/// test holds equal to what [`rooted`] answers.
+/// characters of the BLAKE3 hash of `data/spellings.json`, the rules' test vectors and the
+/// identifier pages, which a test holds equal to what [`rooted`] and [`web_page`] answer.
 pub fn spelling_rules() -> &'static str {
     static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         blake3::hash(include_bytes!("../../../data/spellings.json")).to_hex()[..16].to_owned()

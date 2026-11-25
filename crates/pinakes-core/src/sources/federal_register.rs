@@ -28,6 +28,12 @@ pub fn identifier(number: &str) -> String {
     format!("fr:{number}")
 }
 
+/// The document's short address on federalregister.gov, from its number alone. A card's page is
+/// the address the API names (with its date and title slug), else this one; both are aliases.
+pub fn page(number: &str) -> String {
+    format!("https://www.federalregister.gov/d/{number}")
+}
+
 fn date(y: &str, m: &str, d: &str) -> bool {
     y.len() == 4
         && m.len() == 2
@@ -321,9 +327,7 @@ pub fn card(mut doc: ResourceMeta, document: Document) -> ResourceMeta {
     doc.site = "Federal Register".into();
     doc.name = Some(document.title);
     doc.description = document.description;
-    let page = document
-        .html_url
-        .unwrap_or_else(|| format!("https://www.federalregister.gov/d/{}", document.number));
+    let page = document.html_url.unwrap_or_else(|| page(&document.number));
     for (key, value) in [
         ("document_type", Some(document.document_type)),
         ("agencies", list(&document.agencies)),
@@ -385,6 +389,10 @@ impl Source for FederalRegister {
     fn alias_root(&self, uri: &str) -> Option<String> {
         let root = identifier(&number(uri)?);
         (root != uri).then_some(root)
+    }
+    fn root_page(&self, root: &str) -> Option<String> {
+        let number = document_number(root.strip_prefix("fr:")?)?;
+        (identifier(&number) == root).then(|| page(&number))
     }
     fn invalid(&self, uri: &str) -> bool {
         uri.strip_prefix("fr:")
@@ -890,6 +898,17 @@ mod tests {
         assert!(a["page_url"].starts_with(
             "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory"
         ));
+        // The page the API names and the root's own page are both addresses of the root.
+        use crate::sources::Source;
+        let page = super::FederalRegister.root_page("fr:2026-18291").unwrap();
+        assert_eq!(page, "https://www.federalregister.gov/d/2026-18291");
+        for p in [&a["page_url"], &page] {
+            assert_eq!(
+                super::FederalRegister.alias_root(p).as_deref(),
+                Some("fr:2026-18291"),
+                "{p}"
+            );
+        }
         let doc = doc.bounded(crate::sources::attributes()).unwrap();
         assert_eq!(doc.attributes.len(), 7);
     }

@@ -288,6 +288,15 @@ pub fn isbn13(number: &str) -> String {
         .sum();
     format!("{body}{}", (10 - sum % 10) % 10)
 }
+/// A DOI's page on the DOI proxy, `https://doi.org/{DOI}`: an alias of the `doi:` card. A `%`,
+/// `?` or `#` in the DOI is percent-encoded, so the page's path reads back as the DOI ([`doi`]).
+pub fn doi_page(number: &str) -> String {
+    let path = number
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23");
+    format!("{DOI_URL}{path}")
+}
 pub fn doi(uri: &str) -> Option<String> {
     let raw = if let Some(s) = uri.strip_prefix("doi:") {
         s.to_owned()
@@ -639,7 +648,7 @@ pub fn parse_doi(uri: &str, f: &Fetched, ttl: u64) -> Result<ResourceMeta> {
     }
     if let Some(number) = doi(uri) {
         crate::group_keys::add(&mut d, "doi", &number);
-        d.aliases.push(format!("https://doi.org/{number}"));
+        d.aliases.push(doi_page(&number));
     }
     // Crossref puts the landing page in resource.primary.URL and its CSL `URL` is the DOI
     // proxy; DataCite's CSL `URL` is the landing page. Publisher HTML links name it too.

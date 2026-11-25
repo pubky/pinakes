@@ -182,6 +182,9 @@ impl Source for DockerHub {
         let root = identifier(&target(uri)?);
         (root != uri).then_some(root)
     }
+    fn root_page(&self, root: &str) -> Option<String> {
+        from_root(root).map(|r| page(&r))
+    }
     fn invalid(&self, uri: &str) -> bool {
         uri.starts_with("docker:") && from_root(uri).is_none()
     }

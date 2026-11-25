@@ -392,6 +392,23 @@ pub fn checked(source: &dyn super::Source, card: &Card) -> ResourceMeta {
         bounded.related_total, doc.related_total,
         "related totals changed"
     );
+    // A root in the source's own scheme has a page from the root alone (`Source::root_page`,
+    // the identifier pages of data/spellings.json); it and the card's own page are addresses of
+    // the root.
+    if !matches!(card.id.split_once(':'), Some(("http" | "https", _))) {
+        let page = source
+            .root_page(&card.id)
+            .unwrap_or_else(|| panic!("{}: no page for the root {}", source.name(), card.id));
+        for p in [&page, &card.url] {
+            assert_eq!(
+                source.alias_root(p).as_deref(),
+                Some(card.id.as_str()),
+                "{}: {p} is no address of {}",
+                source.name(),
+                card.id
+            );
+        }
+    }
     bounded
 }
 

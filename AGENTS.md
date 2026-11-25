@@ -95,6 +95,8 @@ When a change adds something operators must do, document it in `docs/operations.
 spellings` writes this build's answers to copy over the file). A root listed there stays a
 spelling of its card: a rule that gives links another root folds the old root into the new one
 too. Never remove a vector but with its source ([docs/api.md](docs/api.md#spelling-vectors)).
+A source whose roots are in a scheme of its own builds their web page in `fn root_page`, with
+entries in the file's `pages` ([identifier pages](docs/api.md#identifier-pages)).
 
 **Keys and facts.** Only a hub (MusicBrainz, Wikidata) or a service's own record of its own ID
 makes a join key. What a page says about itself (`sameAs`, a canonical link to another page, an
@@ -133,8 +135,8 @@ full list):
 - its block in `pinakes.example.toml` (and its variables in `.env.example`);
 - its fixture directories (those named after it) and its own test file, if any;
 - `e2e/samples/<name>.json`;
-- its lines in `data/spellings.json` (rule `source/<name>`; Discogs's become rule `music/discogs`,
-  basis `service`).
+- its lines in `data/spellings.json`, vectors and pages (rule `source/<name>`, and the `null` pages
+  in its schemes; Discogs's vectors become rule `music/discogs`, basis `service`).
 
 Shared code stays. A test that needs a source returns early without it, so no test changes. A
 removed source's keys stay in the database until they expire, and keep their grouping rule
