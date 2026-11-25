@@ -1090,6 +1090,11 @@
             },
             "type": "array"
           },
+          "spelling_rules": {
+            "description": "The version of the URI-only spelling rules (docs/api.md, Spelling vectors): the first 16\nhex characters of the BLAKE3 hash of `data/spellings.json`, the vectors this build answers\nexactly. It changes with every change to that file.",
+            "example": "3f9a0c1d2e4b5a69",
+            "type": "string"
+          },
           "user_agent": {
             "description": "The User-Agent this instance's requests to other services carry: its version and the\noperator's contact (`http.contact`), when set.",
             "type": "string"
@@ -1103,6 +1108,7 @@
           "api_shape",
           "user_agent",
           "resolves",
+          "spelling_rules",
           "limits",
           "osm_licence"
         ],

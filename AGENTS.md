@@ -126,7 +126,8 @@ full list):
 - `docs/sources/<name>.md` and its line in `docs/sources/README.md`;
 - its block in `pinakes.example.toml` (and its variables in `.env.example`);
 - its fixture directories (those named after it) and its own test file, if any;
-- `e2e/samples/<name>.json`.
+- `e2e/samples/<name>.json`;
+- its lines in `data/spellings.json` (rule `source/<name>`).
 
 Shared code stays. A test that needs a source returns early without it, so no test changes. A
 removed source's keys stay in the database until they expire, and keep their grouping rule

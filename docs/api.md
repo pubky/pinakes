@@ -149,6 +149,7 @@ skipped. Sending both lists, or neither, is a 400.
 | `api_shape` | `2`: one flat object per card |
 | `user_agent` | The User-Agent this instance's requests to other services carry: its version and the operator's contact (`http.contact`), when set |
 | `resolves` | The kinds of links this instance resolves: `web`, `pubky`, `geo`, `osm`, `event`, `calendar` and the card kinds `media`, `isbn`, `doi`, `nostr`, `activitypub` and `official`, those that are on |
+| `spelling_rules` | The version of the URI-only spelling rules: the first 16 hex characters of the BLAKE3 hash of `data/spellings.json` ([Spelling vectors](#spelling-vectors)) |
 | `limits` | The sizes and budgets a client must respect: `lookup`, `change_lookup` and `occurrence_lookup` (500 each), `search_page` (500), the `related_*` limits ([Related](#related)), `collapse_refs_per_member`, `requests_per_minute`, `previews_per_minute` and `previews_per_uri_per_minute` |
 | `osm_licence` | `{licence, attribution, url, dump, updated_at}`: the ODbL licence of OSM-derived values, the dump's path, and when the dump was last written (`null` before the first) |
 | `attributions` | What a client must show while it shows values from a service, `[{provider, notice, logo, url}]` ([Credits](#credits)). Absent when there are none. |
@@ -1577,6 +1578,8 @@ Aliases follow these rules:
 - **A Meetup date's number and token** ([below](#meetup-dates)).
 - **A podcast episode's page** ([below](#podcast-episode-pages)).
 
+The rules that need only the URI have test vectors ([below](#spelling-vectors)).
+
 ### Music service links
 
 | Service | Spellings | Canonical URL |
@@ -1636,6 +1639,36 @@ The publisher test uses the registrable domain and the shared hosts Pinakes know
 (`data/multi-tenant-hosts.json`). On a host that serves several publishers by path and is not
 listed there, one publisher's feed can still name another's page that reads as a plain page or
 article.
+
+### Spelling vectors
+
+`data/spellings.json` holds examples of every rule above that needs only the URI, so another
+indexer can fold links as Pinakes does without asking a Pinakes. Each vector is one link and what
+Pinakes answers for it:
+
+| Field | Meaning |
+| --- | --- |
+| `link` | The link as written |
+| `root` | The URI of the card Pinakes answers for it |
+| `basis` | The alias basis: `tracking`, `osm`, `identifier`, `service` or `cursor`; `null` when the link is no alias |
+| `rule` | The rule that names the root: `tracking`, `osm`, `cursor`, `isbn`, `doi`, `wikipedia`, `wikidata`, `musicbrainz`, `music/{service}` or `source/{name}` (an official source's addresses); `identity` when only normalization changes the link ([IDs and URIs](#ids-and-uris)), `none` when nothing does |
+
+- A test runs every vector through the code that roots links, so the file says what the build
+  does: a rule change that changes an answer fails it until the file says the same. Every rule
+  has vectors, and every root is its own root with a vector of its own.
+- `GET /v1/info` `spelling_rules` is the version: the first 16 hex characters of the BLAKE3 hash
+  of the file. It changes with every change to the file. A copy whose hash matches is the rule
+  set that instance runs.
+- The rules are read-side only. Pinakes folds a link when it reads it and never rewrites anyone's
+  tags: a tag stays on the link its author wrote, and its references count for the root.
+- A root once listed stays a spelling of its card. A rule change that gives links another root
+  also folds the old root into the new one (its vector names the new root), and
+  `pinakesd reextract` moves the stored aliases.
+- The vectors hold with every source on. A source switched off folds none of its links, so its
+  `source/{name}` vectors do not hold on that instance; a build without the source has none.
+- Not in the file, because they need a fetch and cannot be reproduced offline: a page's own
+  canonical or permanent redirect, a Meetup date's number and token, an official API's answer,
+  and a podcast feed naming its episode's page (alias bases `canonical` and `source`).
 
 ## Changes
 

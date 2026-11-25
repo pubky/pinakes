@@ -308,7 +308,9 @@ registry lines, nothing else. `scripts/test` and `scripts/e2e --mock` then pass 
   `crates/pinakes-core/tests/fixtures/lookups/<family>/` (recordings several modules read are in
   `shared/` there, never in a directory named after a source), and its own test file
   (`crates/pinakes-core/tests/<name>.rs` or `tests/also_on_<name>.rs`) if it has one;
-- its live end-to-end samples, `e2e/samples/<name>.json`.
+- its live end-to-end samples, `e2e/samples/<name>.json`;
+- its spelling vectors, the lines of `data/spellings.json` whose `rule` is `source/<name>`
+  ([Spelling vectors](../api.md#spelling-vectors)).
 
 An instance that runs a build without the source may keep a `[sources.<name>]` block (or
 `PINAKES__SOURCES__<NAME>__ENABLED`) that only sets `enabled`: the daemon logs a warning and
@@ -319,8 +321,8 @@ ignores it. A block that still carries a `token` or a `key` stops the daemon at 
 `scripts/check-removals [--tests] [NAME…]` proves a removal. On a scratch worktree it removes each
 source by this list and checks that nothing of the source's own is left. It looks for the
 source's ID and display name where every source has lines of its own, parses the example
-configuration and `.env.example`, and finds a link to its page anywhere, independently of what it
-deleted; prose elsewhere that names the source is listed for a reader. It then builds every test
+configuration, `.env.example` and the spelling vectors, and finds a link to its page anywhere,
+independently of what it deleted; prose elsewhere that names the source is listed for a reader. It then builds every test
 target with warnings as errors, and with `--tests` runs the workspace's tests too, which catch what
 the build cannot (a test of another source that relied on it, a recording it took along). A
 removal that would need any other edit is named.
