@@ -51,8 +51,10 @@ A video makes no request.
 
 TikTok refuses a request with a sign-in redirect, a challenge page, or a 401 or 403. A profile never
 read before then gets the card of its shape alone, "Profile on tiktok.com", with the description
-"Blocked by the site." and the `blocked` fact. The link still resolves, groups and counts. A
-refusal on a refresh keeps the card read before, and the link is asked again in an hour.
+"Blocked by the site." and the `blocked` fact. The link still resolves, groups and counts. A refusal
+on a refresh keeps the card read before. After a refusal the link is asked again a day later, then
+2, 4 and 7 days later, and every 7 days while the refusals go on
+([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

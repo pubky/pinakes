@@ -215,9 +215,15 @@ pub trait Source: Send + Sync {
         &[]
     }
     /// Whether a card quotes people's own posts (a comment, a social post): social content keeps
-    /// a 200-character excerpt, refreshes within the hour and is purged once the object is gone.
+    /// a 200-character excerpt, refreshes within `social_refresh_secs` (an hour) and is purged
+    /// once the object is gone.
     fn social(&self, _doc: &ResourceMeta) -> bool {
         false
+    }
+    /// The longest a social card of this source goes before it is read again: an hour, or longer
+    /// for a service that refuses frequent requests.
+    fn social_refresh_secs(&self) -> u64 {
+        3600
     }
     /// Plain example links with the card type they resolve to: the OpenAPI examples, also
     /// listed in `docs/sources/<name>.md`.

@@ -129,7 +129,7 @@ the start:
 | Calendars and feeds | 1 day, 12 hours, 6 hours, 1 hour by the same tiers, or the feed's own TTL |
 | Cursor feeds | Every 5 minutes |
 | OpenStreetMap objects | Every 30 days (`limits.osm_ttl_secs`) |
-| Social content | At least every hour |
+| Social content | At least every hour; Instagram every day |
 
 No interval is shorter than an hour, except cursor feeds and a card that names when it changes
 (an auction's end), which is read again then, at least a minute later. One read at the end plus 24 hours makes
@@ -171,7 +171,8 @@ becomes a card's name. Pinakes does not work around walls.
 
 The social-platform sources (Instagram, Facebook, LinkedIn, X and others) handle a refusal
 differently: the link still gets a card of its shape alone, marked with the `blocked` fact, so it
-resolves, groups and counts. Two sources can make a card for a walled web page from data the site
+resolves, groups and counts. A refused link is asked again a day later, then less often, up to once a
+week. Two sources can make a card for a walled web page from data the site
 or a registry publishes elsewhere ([sources](sources/README.md)):
 
 - `feed`: the exact item in the same site's RSS or Atom feed or news sitemap;
@@ -246,7 +247,8 @@ Mastodon, X, Reddit, Hacker News, Nostr and other sources whose page says so). T
 social content and follow stricter rules:
 
 - the card keeps a short excerpt, at most 200 characters;
-- the card is read again at least every hour;
+- the card is read again at least every hour (an Instagram card every day: Instagram refuses an
+  address that asks often);
 - once the original is confirmed gone, the card keeps only its link, site and status, with the
   type `SocialMediaPosting`. Its text, name, image, facts, also-on links and change history are
   deleted, and so is what its aliases kept;

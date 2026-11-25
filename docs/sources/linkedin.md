@@ -57,9 +57,10 @@ A post makes no request.
 
 LinkedIn refuses a request with its own status 999, a sign-in redirect, a challenge page, or a 401,
 403 or 451. A link never read before then gets the card of its shape alone, "Profile on
-linkedin.com" (an `Organization` for a company), with the description "Blocked by the site." and
-the `blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the
-card read before, and the link is asked again in an hour.
+linkedin.com" (an `Organization` for a company), with the description "Blocked by the site." and the
+`blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the card
+read before. After a refusal the link is asked again a day later, then 2, 4 and 7 days later, and
+every 7 days while the refusals go on ([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

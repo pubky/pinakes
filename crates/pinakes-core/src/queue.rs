@@ -421,6 +421,44 @@ async fn off_origin(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
 /// (`sources::retry`, `event::adapters::service::upstream_status`, the egress's 429, a card
 /// reader's or Nominatim's). The daemon's own waits (`OWN_WAITS`) are not among them.
 const UPSTREAM_WAITS: [&str; 3] = ["upstream", "http_4xx", "http_5xx"];
+/// The first wait after a social site refused a link (its sign-in wall, a challenge, a 401, 403
+/// or 451: the `blocked` card, or a stored card kept through a refusal): a day, doubling with each
+/// refusal in a row up to `WALL_BACKOFF_MAX_SECS` ([`wall_backoff`]). Asking a site that refuses
+/// the request again soon only makes it refuse longer.
+pub const WALL_BACKOFF_SECS: u64 = 86400;
+/// The longest wait between two reads of a link its social site keeps refusing: a week.
+pub const WALL_BACKOFF_MAX_SECS: u64 = 7 * 86400;
+/// The wait after the `streak`-th refusal in a row (1 is the first): `WALL_BACKOFF_SECS`, doubled
+/// for each refusal before it, at most `WALL_BACKOFF_MAX_SECS` (1, 2, 4, 7, 7, … days).
+pub fn wall_backoff(streak: u32) -> u64 {
+    WALL_BACKOFF_SECS
+        .saturating_mul(
+            1u64.checked_shl(streak.saturating_sub(1))
+                .unwrap_or(u64::MAX),
+        )
+        .min(WALL_BACKOFF_MAX_SECS)
+}
+/// A social site refused the refresh of a stored card that says more, or of one found gone
+/// (`changes::save` kept it): the card and its status stay, nothing is charged, and the link is
+/// read again (`refresh_at` and `next_attempt_at`, so it is no overdue refresh) after
+/// [`wall_backoff`] of the refusals in a row (the streak is kept in `timeout_streak` while
+/// `last_error` is `wall`; a saved `blocked` card continues it, `changes::save`).
+async fn refused(pool: &PgPool, job: &Job) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='wall' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
+    if let Some(streak) = streak {
+        let streak = streak.saturating_add(1);
+        sqlx::query("UPDATE resource SET timeout_streak=$2,lease_until=NULL,priority_at=NULL,last_error='wall',refresh_at=now()+$3*interval '1 second',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
+            .bind(&job.id)
+            .bind(streak)
+            .bind(wall_backoff(streak as u32) as f64)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 /// The daemon's own waits, which say nothing about the link and charge nothing: its host budget
 /// (`rate_limited`), a cached failure replayed (`discovery_cached`) and the operator's own quota
 /// at a service (`quota`: GitHub's token rate limit, Nominatim's 429).
@@ -830,7 +868,9 @@ async fn finish_job(
             doc.ttl_secs = 0;
         }
         if crate::resolver::cards::social(&doc) {
-            doc.ttl_secs = doc.ttl_secs.min(3600);
+            doc.ttl_secs = doc
+                .ttl_secs
+                .min(crate::resolver::cards::social_refresh_secs(&doc));
         }
         let attrs = match resolver.name() {
             "web" | "official" => crate::sources::attributes(),
@@ -905,14 +945,16 @@ async fn finish_job(
                 denied(pool, job, cfg, retry).await?;
             } else if retry.class == "off_origin" {
                 off_origin(pool, job, cfg).await?;
+            } else if retry.class == "wall" {
+                refused(pool, job).await?;
             } else if UPSTREAM_WAITS.contains(&retry.class) {
                 upstream_wait(pool, job, cfg, retry).await?;
             } else {
                 // The daemon's own waits (`OWN_WAITS`) say nothing new about the link and charge
-                // nothing: a refused-connection or upstream-wait streak stays, so its backoff
-                // keeps growing.
+                // nothing: a refused-connection, upstream-wait or refusal (`wall`) streak stays,
+                // so its backoff keeps growing.
                 let own = OWN_WAITS.contains(&retry.class);
-                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
+                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND (last_error IN ('connect','wall') OR last_error=ANY($6)) THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND (last_error IN ('connect','wall') OR last_error=ANY($6)) THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
                     .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).bind(own).bind(&UPSTREAM_WAITS[..]).execute(pool).await?;
             }
         } else if crate::resolver::unreached(&error) {

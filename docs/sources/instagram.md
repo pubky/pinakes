@@ -12,7 +12,7 @@ a plain card. Posts, reels and profiles are social content.
 | Fetches | `GET` of the root: `https://www.instagram.com/{name}/`, `/p/{code}/` or `/reel/{code}/` |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.instagram.com` |
-| Refresh | Within the hour (social content) |
+| Refresh | Every day (social content, read less often than other sites': Instagram refuses an address that asks often). After a refusal, a day later, doubling to every 7 days |
 | Card types | `SocialMediaPosting` (post), `VideoObject` (reel), `Person` (profile) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt, purged when Instagram answers 404 or 410 ([social content](../design.md#social-content)) |
@@ -63,7 +63,14 @@ profile's page usually answers with the sign-in redirect.
 A link never read before then gets the card of its shape alone ("Post on instagram.com", "Video on
 instagram.com" or "Profile on instagram.com"), with the description "Blocked by the site." and the
 `blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the card
-read before, and the link is asked again in an hour.
+read before. After a refusal the link is asked again a day later, then 2, 4 and 7 days later, and
+every 7 days while the refusals go on ([refusals](../operations.md#failures-and-retries)).
+
+A sign-in redirect whose address carries `is_from_rle` (Instagram's rate-limit enforcement) refuses
+every page to the address Pinakes asks from, not only this one. It counts as a refusal at once,
+without asking for the sign-in page, and no request goes to `www.instagram.com` for a day: links due
+meanwhile wait, and a new link is read once the day is over. The pause ends when the daemon
+restarts.
 
 ## Card
 
@@ -77,9 +84,14 @@ and the caption (`Name on Instagram: "caption"`).
 - `description` is the first 200 characters of the caption, with its line breaks; without a
   caption, of the page's description.
 - `image` is the page's image.
+- `embed` is Instagram's own frame for the post, from the link alone ([embed](../api.md#embed)):
+  `https://www.instagram.com/p/{code}/embed/captioned/` for a post,
+  `https://www.instagram.com/reel/{code}/embed/captioned/` for a reel (one read from `/tv/{code}/`
+  too). Its `kind` is `post`, without `height` or `aspect`: the frame sets its own height. The card
+  has it whether the page was read, answered without the post's tags, or refused.
 
-The card takes these only from the object's own page: the address the page gives itself (`og:url`,
-else the address the fetch ended at) must hold the link's code.
+The card takes its name, description and image only from the object's own page: the address the
+page gives itself (`og:url`, else the address the fetch ended at) must hold the link's code.
 
 Any other page, or one without these tags, gives the plain card: "Post on instagram.com" or "Video
 on instagram.com". A stored card that says more stays until a second read, an hour later by default
@@ -89,7 +101,8 @@ The change history stays, because the object is not known to be gone.
 ### Profiles
 
 A profile is a `Person` named by its display name. `description` is at most 200 characters of the
-page's description after its counts, without e-mail addresses. `image` is the picture.
+page's description after its counts, without e-mail addresses. `image` is the picture. A profile
+has no `embed`.
 
 The page's title must name the link's name (`Name (@name) • Instagram photos and videos`).
 Otherwise the card is the plain one, "Profile on instagram.com" with the `handle` fact, and it
@@ -118,7 +131,8 @@ The card credits nothing. A post's or reel's author is in `author_name`.
 enabled = false
 ```
 
-Instagram links then get ordinary web cards.
+Instagram links then get ordinary web cards. A post's or reel's `embed` stays, because it comes from
+the link alone.
 
 ## Examples
 

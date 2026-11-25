@@ -99,6 +99,25 @@ fn wall_path(walls: &Walls, path: &str) -> bool {
                 .is_some_and(|rest| rest.starts_with(['/', '.']))
     })
 }
+/// A site's sign-in redirect that says it refuses every request from this address for a while,
+/// not the page asked for, by the site's registrable domain and the query parameter that says
+/// so: Instagram's `is_from_rle` (its rate-limit enforcement). On any other site the parameter
+/// means nothing: a link may lead anywhere through a redirect it chooses.
+const ADDRESS_REFUSALS: &[(&str, &str)] = &[("instagram.com", "is_from_rle")];
+/// Whether a redirect from `from` to `target` is a sign-in page of the same site (`wall_paths`)
+/// whose query says that site refuses the whole address for a while (`ADDRESS_REFUSALS`).
+pub fn refuses_address(from: &Url, target: &Url) -> bool {
+    fn site(u: &Url) -> Option<&str> {
+        u.host_str().and_then(psl::domain_str)
+    }
+    let Some(domain) = site(from).filter(|d| site(target) == Some(*d)) else {
+        return false;
+    };
+    wall_path(&WALLS, target.path())
+        && ADDRESS_REFUSALS.iter().any(|(site, param)| {
+            *site == domain && target.query_pairs().any(|(k, _)| k == *param)
+        })
+}
 /// A challenge page (bot wall, captcha, sign-in redirect) is `Blocked`, a meta refresh or
 /// script redirect stub is a `Redirect` hop, anything else is content.
 /// `Err` when the answer is too complex to parse.
@@ -340,6 +359,37 @@ pub(crate) fn parsed(f: &Fetched, text: &str, html: &scraper::Html) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Instagram's sign-in redirect for rate-limit enforcement refuses the address, not the
+    /// page; a plain sign-in redirect, another site's page or a page that is no sign-in does not.
+    #[test]
+    fn a_rate_limit_sign_in_redirect_refuses_the_address() {
+        let from = Url::parse("https://www.instagram.com/p/DgB34vHhlaT/").unwrap();
+        let to = |s: &str| Url::parse(s).unwrap();
+        assert!(refuses_address(
+            &from,
+            &to("https://www.instagram.com/accounts/login/?next=%2Fp%2FDgB34vHhlaT%2F&is_from_rle")
+        ));
+        assert!(refuses_address(
+            &to("https://instagram.com/p/DgB34vHhlaT/"),
+            &to("https://www.instagram.com/accounts/login/?is_from_rle=1")
+        ));
+        for target in [
+            "https://www.instagram.com/accounts/login/?next=%2Fp%2FDgB34vHhlaT%2F",
+            "https://www.instagram.com/p/DgB34vHhlaT/?is_from_rle",
+            "https://login.example.com/accounts/login/?is_from_rle",
+        ] {
+            assert!(!refuses_address(&from, &to(target)), "{target}");
+        }
+        // The parameter means nothing on another site.
+        let other = to("https://short.example.com/x");
+        for target in [
+            "https://short.example.com/accounts/login/?is_from_rle",
+            "https://short.example.com/login?is_from_rle=1",
+        ] {
+            assert!(!refuses_address(&other, &to(target)), "{target}");
+        }
+    }
 
     /// The wall check reads the page in the encoding it names: a windows-1252 challenge's
     /// curly apostrophe matches its marker.
