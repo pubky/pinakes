@@ -131,6 +131,16 @@ fn every_root_is_its_own_root() {
     }
 }
 
+/// The family of an `alias::Named` rule (a new family fails to compile here until
+/// `every_rule_has_vectors` asks for its vectors).
+fn family(named: alias::Named) -> &'static str {
+    match named {
+        alias::Named::Core(_) => "core",
+        alias::Named::Source(_) => "source",
+        alias::Named::Music(_) => "music",
+    }
+}
+
 /// Every rule of `alias::Rule` (a new one fails to compile here until listed).
 fn core_rules() -> Vec<Rule> {
     use Rule::*;
@@ -185,6 +195,14 @@ fn every_rule_has_vectors() {
     for v in file().vectors {
         *count.entry(v.rule).or_default() += 1;
     }
+    // The families asked for below: core rules, official sources, music services.
+    let families = [
+        alias::Named::Core(Rule::Cursor),
+        alias::Named::Source("federal_register"),
+        alias::Named::Music(Service::Spotify),
+    ]
+    .map(family);
+    assert_eq!(families, ["core", "source", "music"]);
     let mut rules: Vec<String> = core_rules()
         .into_iter()
         .map(|r| r.name().to_owned())

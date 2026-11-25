@@ -1,0 +1,2 @@
+# The spelling vectors are hashed byte for byte (`/v1/info` `spelling_rules`): never rewrite their line ends.
+data/spellings.json -text

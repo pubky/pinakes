@@ -324,10 +324,10 @@ ignores it. A block that still carries a `token` or a `key` stops the daemon at 
 source by this list and checks that nothing of the source's own is left. It looks for the
 source's ID and display name where every source has lines of its own, parses the example
 configuration, `.env.example` and the spelling vectors, and finds a link to its page anywhere,
-independently of what it deleted; prose elsewhere that names the source is listed for a reader. It then builds every test
-target with warnings as errors, and with `--tests` runs the workspace's tests too, which catch what
-the build cannot (a test of another source that relied on it, a recording it took along). A
-removal that would need any other edit is named.
+independently of what it deleted; prose elsewhere that names the source is listed for a reader.
+It then builds every test target with warnings as errors, and with `--tests` runs the workspace's
+tests too, which catch what the build cannot (a test of another source that relied on it, a
+recording it took along). A removal that would need any other edit is named.
 
 Shared code stays: `sources/kit.rs`, `sources/social.rs`, `sources/biodiversity.rs`, `music.rs`,
 `music_sources.rs`, `wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`,
