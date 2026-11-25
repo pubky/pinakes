@@ -129,7 +129,10 @@ pub fn rooted(uri: &str) -> Option<(Alias, Named)> {
 pub fn web_page(identifier: &str) -> Option<(String, Named)> {
     use Named::Core;
     let identifier = identifier.trim();
+    let mut key = identifier.to_owned();
     if let Ok((_, written, scheme)) = crate::model::identity(identifier) {
+        // A key's kind in any letter case (`WIKIDATA:Q42`), as a stored link writes it.
+        key.clone_from(&written);
         if matches!(scheme.as_str(), "http" | "https") {
             return None;
         }
@@ -145,7 +148,7 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
             return Some((page, Named::Source(source)));
         }
     }
-    let key = crate::catalogue::stored_key(identifier)?;
+    let key = crate::catalogue::stored_key(&key)?;
     let (kind, value) = key.split_once(':')?;
     let (page, rule) = match kind {
         "wikidata" => (

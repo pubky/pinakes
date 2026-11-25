@@ -898,6 +898,17 @@ mod tests {
         assert!(a["page_url"].starts_with(
             "https://www.federalregister.gov/documents/2026/09/09/2026-18291/self-regulatory"
         ));
+        // The page the API names and the root's own page are both addresses of the root.
+        use crate::sources::Source;
+        let page = super::FederalRegister.root_page("fr:2026-18291").unwrap();
+        assert_eq!(page, "https://www.federalregister.gov/d/2026-18291");
+        for p in [&a["page_url"], &page] {
+            assert_eq!(
+                super::FederalRegister.alias_root(p).as_deref(),
+                Some("fr:2026-18291"),
+                "{p}"
+            );
+        }
         let doc = doc.bounded(crate::sources::attributes()).unwrap();
         assert_eq!(doc.attributes.len(), 7);
     }
