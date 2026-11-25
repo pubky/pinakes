@@ -11,3 +11,5 @@ search-index/
 *.bundle
 
 /e2e/node_modules/
+# Python bytecode of the scripts, when another script imports one.
+__pycache__/

@@ -926,14 +926,25 @@ pub fn key(source: &str) -> Option<crate::event::adapters::SecretKey> {
 
 /// The static alias root of a source's spelling, from the link alone, while that source is on.
 pub fn alias_root(uri: &str) -> Option<String> {
-    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
-    alias_root_with(uri, switches.as_ref())
+    alias_root_by(uri).map(|(_, root)| root)
 }
+/// [`alias_root`] with the name of the source whose rule names the root.
+pub fn alias_root_by(uri: &str) -> Option<(&'static str, String)> {
+    let switches = SWITCHES.read().unwrap_or_else(|e| e.into_inner());
+    alias_root_by_with(uri, switches.as_ref())
+}
+#[cfg(test)]
 fn alias_root_with(uri: &str, switches: Option<&SourcesConfig>) -> Option<String> {
+    alias_root_by_with(uri, switches).map(|(_, root)| root)
+}
+fn alias_root_by_with(
+    uri: &str,
+    switches: Option<&SourcesConfig>,
+) -> Option<(&'static str, String)> {
     REGISTRY
         .iter()
         .filter(|s| switches.is_none_or(|c| c.enabled(s.name())))
-        .find_map(|s| s.alias_root(uri))
+        .find_map(|s| Some((s.name(), s.alias_root(uri)?)))
 }
 /// A link no source could ever resolve (a malformed identifier of a source's own scheme).
 pub fn invalid(uri: &str) -> bool {

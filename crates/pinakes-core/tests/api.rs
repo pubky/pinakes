@@ -147,11 +147,18 @@ async fn info_the_openapi_document_a_card_read_and_lookup(pool: PgPool) {
             "limits",
             "osm_licence",
             "resolves",
+            "spelling_rules",
             "user_agent",
             "version"
         ],
         "{info}"
     );
+    // The version of the spelling rules: the hash of the vectors this build answers.
+    assert_eq!(
+        info["spelling_rules"],
+        pinakes_core::alias::spelling_rules()
+    );
+    assert_eq!(info["spelling_rules"].as_str().map(str::len), Some(16));
     // The User-Agent its requests carry, so a harness can send the same: with no contact set,
     // without one.
     assert_eq!(

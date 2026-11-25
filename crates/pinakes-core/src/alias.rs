@@ -31,38 +31,102 @@ pub struct Alias {
 }
 /// The root of a URI known from the URI alone, when it differs from the URI itself.
 pub fn root(uri: &str) -> Option<Alias> {
+    rooted(uri).map(|(alias, _)| alias)
+}
+/// A rule of [`rooted`] that is neither a music service's nor an official source's ([`Named`]). A
+/// new rule gets a variant here, which `tests/spellings.rs` makes list and give vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    Cursor,
+    Osm,
+    Isbn,
+    Doi,
+    Wikipedia,
+    Wikidata,
+    MusicBrainz,
+    Tracking,
+}
+impl Rule {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cursor => "cursor",
+            Self::Osm => "osm",
+            Self::Isbn => "isbn",
+            Self::Doi => "doi",
+            Self::Wikipedia => "wikipedia",
+            Self::Wikidata => "wikidata",
+            Self::MusicBrainz => "musicbrainz",
+            Self::Tracking => "tracking",
+        }
+    }
+}
+/// The rule that named a root ([`rooted`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Named {
+    Core(Rule),
+    /// An official source's spellings, by the source's name.
+    Source(&'static str),
+    Music(crate::music::Service),
+}
+impl Named {
+    /// The rule's name in `data/spellings.json`: a [`Rule`]'s, `source/{name}` or
+    /// `music/{service}` (`music::Service::token`).
+    pub fn name(self) -> String {
+        match self {
+            Self::Core(rule) => rule.name().to_owned(),
+            Self::Source(name) => format!("source/{name}"),
+            Self::Music(service) => format!("music/{}", service.token()),
+        }
+    }
+}
+/// [`root`] with the rule that named it. `data/spellings.json` lists examples of each.
+pub fn rooted(uri: &str) -> Option<(Alias, Named)> {
+    use Named::Core;
     let (_, uri, _) = crate::model::identity(uri).ok()?;
     let found = if let Some(root) = crate::event::adapters::cursor::canonical_root(&uri) {
-        Some((root, "cursor"))
+        Some((root, "cursor", Core(Rule::Cursor)))
     } else if let Some(osm) = crate::resolver::osm::parse_id(&uri) {
-        Some((osm.uri(), "osm"))
+        Some((osm.uri(), "osm", Core(Rule::Osm)))
     } else if let Some(isbn) = crate::resolver::cards::isbn(&uri) {
         Some((
             format!("isbn:{}", crate::resolver::cards::isbn13(&isbn)),
             "identifier",
+            Core(Rule::Isbn),
         ))
     } else if let Some(doi) = crate::resolver::cards::doi(&uri) {
-        Some((format!("doi:{doi}"), "identifier"))
-    } else if let Some(root) = crate::sources::alias_root(&uri) {
-        Some((root, "identifier"))
+        Some((format!("doi:{doi}"), "identifier", Core(Rule::Doi)))
+    } else if let Some((source, root)) = crate::sources::alias_root_by(&uri) {
+        Some((root, "identifier", Named::Source(source)))
     } else if let Some(music) = crate::music::parse(&uri) {
-        Some((music.canonical, "service"))
+        Some((music.canonical, "service", Named::Music(music.service)))
     } else if let Some(article) = crate::wikipedia::parse(&uri) {
-        Some((article.canonical, "service"))
+        Some((article.canonical, "service", Core(Rule::Wikipedia)))
     } else if let Some((_, item)) = crate::hubs::wikidata::item_link(&uri) {
-        Some((item, "service"))
+        Some((item, "service", Core(Rule::Wikidata)))
     } else if let Some((_, _, page)) = crate::hubs::musicbrainz::entity_link(&uri) {
-        Some((page, "service"))
+        Some((page, "service", Core(Rule::MusicBrainz)))
     } else if let Some((_, page)) = crate::hubs::musicbrainz::isrc_link(&uri) {
-        Some((page, "service"))
+        Some((page, "service", Core(Rule::MusicBrainz)))
     } else {
-        untracked(&uri).map(|root| (root, "tracking"))
+        untracked(&uri).map(|root| (root, "tracking", Core(Rule::Tracking)))
     }?;
     let (_, root, _) = crate::model::identity(&found.0).ok()?;
-    (root != uri).then_some(Alias {
-        root,
-        basis: found.1,
-    })
+    (root != uri).then_some((
+        Alias {
+            root,
+            basis: found.1,
+        },
+        found.2,
+    ))
+}
+/// The version of the URI-only spelling rules (`/v1/info` `spelling_rules`): the first 16 hex
+/// characters of the BLAKE3 hash of `data/spellings.json`, the rules' test vectors, which a
+/// test holds equal to what [`rooted`] answers.
+pub fn spelling_rules() -> &'static str {
+    static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        blake3::hash(include_bytes!("../../../data/spellings.json")).to_hex()[..16].to_owned()
+    });
+    &VERSION
 }
 /// The URI without its tracking parameters, if it had any. Parameters are dropped from the raw
 /// query string, so every kept value keeps its own encoding.

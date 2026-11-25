@@ -3984,6 +3984,11 @@ pub struct Info {
     pub user_agent: String,
     /// The kinds of links this instance resolves: its routes and card kinds that are on.
     pub resolves: Vec<String>,
+    /// The version of the URI-only spelling rules (docs/api.md, Spelling vectors): the first 16
+    /// hex characters of the BLAKE3 hash of `data/spellings.json`, the vectors this build answers
+    /// exactly. It changes with every change to that file.
+    #[schema(example = "3f9a0c1d2e4b5a69")]
+    pub spelling_rules: String,
     pub limits: InfoLimits,
     pub osm_licence: OsmLicence,
     /// What a client must show while it shows values from these services, each the
@@ -4097,6 +4102,7 @@ pub async fn info(State(state): State<AppState>) -> Json<Info> {
         api_shape: 2,
         user_agent: crate::resolver::egress::user_agent(&c.egress.contact),
         resolves,
+        spelling_rules: crate::alias::spelling_rules().into(),
         limits: InfoLimits {
             lookup: 500,
             change_lookup: 500,
