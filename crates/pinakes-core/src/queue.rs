@@ -904,8 +904,10 @@ async fn finish_job(
             // than `max_backoff_secs` from now and no earlier than it was due anyway. Once an
             // hour at most, so a step that fails every time costs one fetch an hour; no attempt
             // is charged. When this cannot be written either, the step waits for the card's
-            // own next full read.
-            if doc.status == Status::Ok {
+            // own next full read. A refused read's card (`blocked`) keeps its refusals' wait.
+            if doc.status == Status::Ok
+                && doc.attributes.get("blocked").is_none_or(|b| b != "true")
+            {
                 let again = async {
                     sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=$1 AND validators<>'{}' AND EXISTS(SELECT 1 FROM resource WHERE id=$1 AND generation=$2)")
                         .bind(&job.id).bind(job.generation).execute(pool).await?;

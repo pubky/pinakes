@@ -114,9 +114,9 @@ pub fn refuses_address(from: &Url, target: &Url) -> bool {
         return false;
     };
     wall_path(&WALLS, target.path())
-        && ADDRESS_REFUSALS.iter().any(|(site, param)| {
-            *site == domain && target.query_pairs().any(|(k, _)| k == *param)
-        })
+        && ADDRESS_REFUSALS
+            .iter()
+            .any(|(site, param)| *site == domain && target.query_pairs().any(|(k, _)| k == *param))
 }
 /// A challenge page (bot wall, captcha, sign-in redirect) is `Blocked`, a meta refresh or
 /// script redirect stub is a `Redirect` hop, anything else is content.

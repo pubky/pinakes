@@ -59,8 +59,9 @@ LinkedIn refuses a request with its own status 999, a sign-in redirect, a challe
 403 or 451. A link never read before then gets the card of its shape alone, "Profile on
 linkedin.com" (an `Organization` for a company), with the description "Blocked by the site." and the
 `blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the card
-read before. After a refusal the link is asked again a day later, then 2, 4 and 7 days later, and
-every 7 days while the refusals go on ([refusals](../operations.md#failures-and-retries)).
+read before. After a refusal the link is asked again after a day, then after 2, 4 and 7 more days,
+and every 7 days while one refusal follows another
+([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

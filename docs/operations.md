@@ -1004,7 +1004,7 @@ class (`last_error`) decides what a failure costs:
 | `relay_outage`, `inconclusive`, `indexer_unavailable`, `disabled` and other waits a source names | PKARR relays are down; Nostr indexers couldn't settle; a setting is missing (SEC EDGAR without a contact) | No | Never |
 | `missing_unconfirmed` | One missing answer, not yet confirmed | No | Never |
 | `wall` | A [challenge page](#access-walls); status `unreachable` | Yes | After `limits.max_failures` |
-| `wall` on a social card | A social site refused a read: a stored card that says more stays with its status, else the link gets the `blocked` card | No; read again after 1, 2, 4, then every 7 days | Never |
+| `wall` on a social card | A social site refused a read: a stored card that says more, or one found gone, stays with its status; else the link gets the `blocked` card | No; read again after 1, 2, 4, then every 7 days | Never |
 | `policy` | Refused by the egress policy | Yes | At the first attempt |
 | `unsupported` | An OSM-host page that is no object or location link | Final | No |
 | `too_complex` | A [parse](#html-parsing) past its limits | Final | No |
@@ -1021,10 +1021,11 @@ Details:
   card yet shows `error` after `limits.max_failures` in a row.
 - **Never answered.** The streak is kept in `timeout_streak` while `last_error` is `connect`. A link
   with no card yet turns `error` after `limits.max_failures` in a row and is still retried.
-- **Refusals.** A social site's refusal (its sign-in redirect, a challenge page, a 401, 403 or 451) is
-  read again a day later, then 2, 4 and 7 days later, and every 7 days while the refusals go on. The
-  streak is kept in `timeout_streak` while `last_error` is `wall`, both for a kept card and for a
-  `blocked` card; a read that answers ends it. A card found gone stays gone: a refusal says nothing
+- **Refusals.** A link a social site refuses (its sign-in redirect, a challenge page, a 401, 403 or
+  451, or a status of its own such as LinkedIn's 999) is read again after a day, then after 2, 4 and 7
+  more days, and every 7 days while one refusal follows another. The streak is kept in
+  `timeout_streak` while `last_error` is `wall`, both for a kept card and for a `blocked` card; a read
+  that answers ends it, and another failure in between starts it again. A card found gone stays gone: a refusal says nothing
   about the object. Asking a site that refuses the request again soon only makes it refuse longer.
 - **Own waits** keep the streak of a refused connection, an upstream wait or a refusal.
 
@@ -1144,8 +1145,9 @@ title never becomes a card's name. `pinakes_fetch_total` counts it as outcome `b
 
 A sign-in redirect whose query says the site refuses the whole address for a while, not the page
 (Instagram's `is_from_rle`), is a wall at once: the sign-in page is not asked for, and no request goes
-to that host for a day. Every link of the host waits meanwhile (`rate_limited`, charged nothing). The
-pause is the daemon's own and ends with a restart.
+to that host for a day. Every link of the host waits meanwhile (`rate_limited`, charged nothing, asked
+again each hour without a request), and those due count in `pinakes_refresh_overdue` until the pause
+ends. The pause is the daemon's own and ends with a restart.
 
 A wall hook may answer in its place, also for plain 401 and 403 answers, within six seconds. The site's
 own feed lists the exact link (`feed`), or a source's record names it (an IMDb title by its Wikidata item,

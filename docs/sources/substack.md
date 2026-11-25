@@ -67,8 +67,8 @@ When Substack refuses the request, the card is the link's shape alone, marked wi
 `blocked`. A post's card is then a `SocialMediaPosting` named "Post on substack.com"; a
 publication's or a profile's is a `Person` named "Profile on substack.com". Its description is
 "Blocked by the site." The link still resolves, groups and counts. On a refresh, a refusal keeps the
-card read before, as an access wall on a web page does. After a refusal the link is asked again a
-day later, then 2, 4 and 7 days later, and every 7 days while the refusals go on
+card read before, as an access wall on a web page does. After a refusal the link is asked again
+after a day, then after 2, 4 and 7 more days, and every 7 days while one refusal follows another
 ([refusals](../operations.md#failures-and-retries)).
 
 ## Card

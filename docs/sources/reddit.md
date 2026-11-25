@@ -69,8 +69,8 @@ or a 401. A link never read before then gets the card of its shape alone, "Post 
 "Profile on reddit.com" (for a subreddit or user), with the description "Blocked by the site." and
 the `blocked` fact. It keeps the type its readable card has, so a refused post is still social
 content. The link still resolves, groups and counts. A refusal on a refresh keeps the card read
-before. After a refusal the link is asked again a day later, then 2, 4 and 7 days later, and every 7
-days while the refusals go on ([refusals](../operations.md#failures-and-retries)).
+before. After a refusal the link is asked again after a day, then after 2, 4 and 7 more days, and
+every 7 days while one refusal follows another ([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

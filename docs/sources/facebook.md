@@ -58,8 +58,8 @@ that does not exist redirects to the sign-in page too, so it reads as refused an
 A page never read before then gets the card of its shape alone, an `Organization` named "Profile on
 facebook.com", with the description "Blocked by the site." and the `blocked` fact. The link still
 resolves, groups and counts. A refusal on a refresh keeps the card read before. After a refusal the
-link is asked again a day later, then 2, 4 and 7 days later, and every 7 days while the refusals go
-on ([refusals](../operations.md#failures-and-retries)).
+link is asked again after a day, then after 2, 4 and 7 more days, and every 7 days while one refusal
+follows another ([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

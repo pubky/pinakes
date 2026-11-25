@@ -1368,8 +1368,8 @@ fn csl_date(v: &Value) -> Option<String> {
 }
 /// Social content: a note or post whose card quotes its text (Nostr, ActivityPub, a Pubky
 /// object described by its content, an official-API source's posts and comments). Its excerpt
-/// is short, refreshes within the hour (`social_refresh_secs`) and is purged, with its change
-/// history, once the object is confirmed gone.
+/// is short, refreshes within `social_refresh_secs` (an hour by default) and is purged, with its
+/// change history, once the object is confirmed gone.
 pub fn social(doc: &ResourceMeta) -> bool {
     match doc.source.as_str() {
         "nostr" | "activitypub" => matches!(
