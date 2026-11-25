@@ -4104,7 +4104,7 @@
             }
           },
           {
-            "description": "`true`: only things someone referenced on Pubky. Every card this instance lists today is\none, so the answer is the same with or without it.",
+            "description": "`true`: only things someone referenced on Pubky: no catalogue card nobody referenced.",
             "in": "query",
             "name": "referenced",
             "required": false,
