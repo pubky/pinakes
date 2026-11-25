@@ -1610,7 +1610,9 @@ catalogue is read, and the catalogue tables stay empty.
 
 `catalogue_state` holds one row per catalogue: its phase (`idle`, `import`, `update`, `failed`,
 `disabled`), the run under way and where it resumes, where the next update starts, its cards, the
-upstream version, when the last full import and update finished, why it waits, and its errors.
+upstream version, when the last full import and update finished, how current its cards are
+(`current_as_of`: the upstream time of the data the last finished run left), why it waits, and its
+errors.
 
 ### Turn a catalogue off
 
@@ -1618,7 +1620,6 @@ Set `[catalogues.<name>] enabled = false`, or `[catalogues] enabled = false` for
 ([keys](#catalogue-sections)), and restart the daemon. A catalogue that is off:
 
 - starts no importer;
-- leaves search and lookups at once: Pinakes reads only the cards of catalogues that are on;
 - keeps its rows, so turning it back on doesn't import it again from the start. Its state row's
   phase is `disabled` while the daemon runs with it off, and a run it had under way resumes from
   its cursor when it is on again.
@@ -1631,8 +1632,8 @@ pinakesd --config <path> catalogue drop <name>
 ```
 
 `catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, when its
-last full import and update finished, why it waits and its last error. The last error stays after
-a later success; the metrics count every failure.
+last full import and update finished, how current its cards are, why it waits and its last error.
+The last error stays after a later success; the metrics count every failure.
 
 `catalogue drop <name>` deletes the catalogue's cards, 10,000 per transaction, and its state row,
 so it starts over with a full import when it is turned on again. Then it deletes the catalogue's
@@ -1646,20 +1647,31 @@ is) and prints the directory it removed, or that there was none. It refuses:
 
 `scripts/lock-waits` names these locks `catalogue <name>` and `large catalogue import`.
 
-### Importers
+### Importer rules
 
-Each catalogue's importer runs as a background task of `pinakesd`, started only for a catalogue
-that is on.
+No importer is registered in this version, so `pinakesd` starts no importer task. Once a
+catalogue has one, its importer runs as a background task of `pinakesd`, started only for a
+catalogue that is on, and follows these rules:
 
 | Rule | What the task does |
 | --- | --- |
-| One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. While another process holds it, waits and says so in `waiting`. |
-| What runs | A full import when none has finished, then an update a day after the last finished full import or update. An update that finds nothing new still finishes: that is what the update lag measures. |
+| One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
+| What runs | A full import when none has finished, then an update a day after the last finished full import or update. An update that can't apply the changes (a change stream too far behind) hands over to a full import. |
+| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
 | Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
 | Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |
-| Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is a run whose lock's database session is gone. Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
+| Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is a run whose lock's database session has ended, and one whose importer panicked. Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
+| Failures | Stored and logged by class (`download`, `parse`, `disk`, `lock_lost`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
 | Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. |
+
+### A large import that keeps failing
+
+A large catalogue's full import that fails is resumed every ten minutes, and keeps the
+large-import turn meanwhile: the other large catalogues' full imports wait for it
+(`pinakes_catalogue_waiting_for_turn`, alert `CatalogueTurnBlocked`). `catalogue status` names it
+in the others' `waiting` and shows its `last_error`. Fix the cause, or switch it off and restart
+(its cut-off import then no longer holds the turn; it resumes when it is on again), or drop it.
 
 ## Monitoring
 
@@ -1685,7 +1697,8 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CursorReset` | info | A feed resync or [feed reset](#feed-resets). |
 | `PreviewCapacityReached` | warning | [New previews](#new-previews). |
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
-| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importers](#importers). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
+| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
+| `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
 
 A new key needs a restart.
 

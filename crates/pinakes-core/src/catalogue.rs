@@ -22,6 +22,7 @@ use crate::model;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 
+pub mod failure;
 pub mod run;
 pub mod store;
 
@@ -379,8 +380,9 @@ pub fn valid_key(key: &str) -> bool {
         && !value.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// A key as it is stored: [`valid_key`], with a DOI lower case and an ISBN as its ISBN-13, the
-/// forms a resource's keys take, and a `url:` key a resource ID; `None` for one that is not valid.
+/// A key as it is stored: [`valid_key`], with a DOI lower case, an ISBN as its ISBN-13 and an
+/// ISRC and a Wikidata ID upper case, the forms a resource's keys take, and a `url:` key a
+/// resource ID; `None` for one that is not valid.
 pub fn stored_key(key: &str) -> Option<String> {
     let key = key.trim();
     if !valid_key(key) {
@@ -392,6 +394,8 @@ pub fn stored_key(key: &str) -> Option<String> {
         "isbn" => crate::resolver::cards::isbn(key)
             .map(|isbn| format!("isbn:{}", crate::resolver::cards::isbn13(&isbn))),
         "url" => model::valid_id(value).then(|| key.to_owned()),
+        // Resources key an ISRC and a Wikidata ID in upper case (`isrc:GBUM71029604`, `wikidata:Q42`).
+        "isrc" | "wikidata" => Some(format!("{kind}:{}", value.to_ascii_uppercase())),
         _ => Some(key.to_owned()),
     }
 }
@@ -852,6 +856,11 @@ mod tests {
         assert_eq!(
             stored_key(" wikidata:Q42 ").as_deref(),
             Some("wikidata:Q42")
+        );
+        assert_eq!(stored_key("wikidata:q42").as_deref(), Some("wikidata:Q42"));
+        assert_eq!(
+            stored_key("isrc:gbum71029604").as_deref(),
+            Some("isrc:GBUM71029604")
         );
         assert_eq!(link_key("nostr:note1abc"), None);
         assert_eq!(

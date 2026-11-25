@@ -921,6 +921,13 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
             ][..],
         ),
         (
+            "CatalogueTurnBlocked",
+            &[
+                "pinakes_catalogue_waiting_for_turn == 1",
+                "pinakes_catalogue_import_errors_total",
+            ],
+        ),
+        (
             "CatalogueUpdateLag",
             &[
                 "pinakes_catalogue_update_lag_seconds > 172800",

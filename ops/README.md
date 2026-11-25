@@ -62,7 +62,8 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_catalogue_enabled{catalogue}` | Whether the catalogue is on (1) or off (0) in the configuration the daemon started with |
 | `pinakes_catalogue_last_import_timestamp_seconds{catalogue}` | When its last full import finished; 0 before the first |
 | `pinakes_catalogue_last_update_timestamp_seconds{catalogue}` | When its last update finished; 0 before the first |
-| `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds since its last finished full import or update; 0 before its first full import has finished |
+| `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds its cards are behind upstream: since `current_as_of`, the upstream time of the data its last finished run left (a dump's date, the last change applied); 0 before its first full import has finished. An update that finds nothing new doesn't lower it |
+| `pinakes_catalogue_waiting_for_turn{catalogue}` | 1 while its full import waits for another large catalogue's full import (one runs at a time), else 0 |
 | `pinakes_catalogue_import_errors_total{catalogue}` | Failed import and update runs; kept in the database (`catalogue_state.error_count`), so a restart does not reset it |
 | `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service, as each signals one (a 401; a 403 where the service uses it for a refused key, not GitHub's rate limit; a token endpoint answering anything but 200, 408, 429 or 5xx), never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `osm` (Nominatim's 401 or 403), `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
 
@@ -121,10 +122,14 @@ alert shows only at the next refusal.
 `CatalogueImportFailed` (warning) fires for an hour after a catalogue's import or update run
 failed: `pinakesd catalogue status` shows the error, and the run is tried again from its cursor
 every ten minutes, so a failure that persists keeps it firing. `CatalogueUpdateLag` (warning)
-fires when a catalogue has finished no import or update for two days. Both read only catalogues
+fires when a catalogue's cards are more than two days behind upstream. Both read only catalogues
 that are on and have finished a full import: a catalogue that is off raises neither, and the
 failures of a first import show in `pinakesd catalogue status` and
-`pinakes_catalogue_import_errors_total` alone.
+`pinakes_catalogue_import_errors_total` alone. `CatalogueTurnBlocked` (warning) covers the one
+stall that leaves: a large catalogue's full import that keeps failing keeps the large-import turn,
+so another large catalogue waits for it. It fires when a catalogue has waited six hours for the
+turn while a large catalogue's runs keep failing; fix the failing import's cause, switch it off
+(its cut-off import then no longer holds the turn) or `pinakesd catalogue drop` it.
 
 Run `scripts/check-ops`: it runs the test that parses the rules and the dashboard and checks
 every metric they name, and every fetch outcome a rule matches, against an initialized registry,

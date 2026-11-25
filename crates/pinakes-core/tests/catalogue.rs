@@ -6,7 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pinakes_core::{
     catalogue::{
-        run::{self, Context, Importer, Job, Next, Pace, Plan, Run, SessionLock},
+        run::{self, Context, Importer, Job, Next, Pace, Plan, Run, SessionLock, UpdateEnd},
         store::{self, State},
         Card, Catalogue, CataloguesConfig,
     },
@@ -17,7 +17,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::{
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -41,6 +41,12 @@ struct Fixture {
     started_from: Mutex<Vec<Option<serde_json::Value>>>,
     /// For an update: the cards that changed and the source IDs removed upstream.
     changes: Mutex<(Vec<Card>, Vec<String>)>,
+    /// How an update ends.
+    update_end: Mutex<UpdateEnd>,
+    /// The upstream time a run states (`Job::set_current_as_of`); none: it states nothing.
+    current: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    /// Panic once, in the next import.
+    panic_once: AtomicBool,
     need: u64,
 }
 impl Fixture {
@@ -55,6 +61,9 @@ impl Fixture {
             entered: Arc::default(),
             started_from: Mutex::default(),
             changes: Mutex::default(),
+            update_end: Mutex::new(UpdateEnd::Done),
+            current: Mutex::default(),
+            panic_once: AtomicBool::new(false),
             need: 1000,
         }
     }
@@ -78,6 +87,9 @@ impl Importer for Fixture {
             .lock()
             .unwrap()
             .push(job.cursor().cloned());
+        if self.panic_once.swap(false, Ordering::SeqCst) {
+            panic!("the fixture importer panicked");
+        }
         let start = job.cursor().and_then(|c| c["next"].as_u64()).unwrap_or(0) as usize;
         let items = self.items.lock().unwrap().clone();
         let mut written = 0;
@@ -98,9 +110,12 @@ impl Importer for Fixture {
             }
         }
         job.upstream_version("2026-11-24").await?;
+        if let Some(at) = *self.current.lock().unwrap() {
+            job.set_current_as_of(at);
+        }
         Ok(())
     }
-    async fn update(&self, job: &mut Job<'_>) -> Result<()> {
+    async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         self.started_from
             .lock()
             .unwrap()
@@ -114,7 +129,30 @@ impl Importer for Fixture {
             .and_then(|p| p["sequence"].as_u64())
             .unwrap_or(0);
         job.set_position(json!({ "sequence": sequence + 1 }));
-        Ok(())
+        if let Some(at) = *self.current.lock().unwrap() {
+            job.set_current_as_of(at);
+        }
+        Ok(*self.update_end.lock().unwrap())
+    }
+}
+
+/// A directory of a test's own, removed when it is dropped.
+struct TempDir(std::path::PathBuf);
+impl TempDir {
+    fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "pinakes-catalogue-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -133,21 +171,24 @@ fn card(n: usize) -> Card {
 fn cards(n: usize) -> Vec<Card> {
     (0..n).map(card).collect()
 }
-fn context(pool: &PgPool, free: Arc<AtomicU64>) -> Context {
+/// A runner's context over its own temporary `catalogues.dir` (removed with the `TempDir`), with
+/// short waits.
+fn context(pool: &PgPool, free: Arc<AtomicU64>) -> (Context, TempDir) {
+    let dir = TempDir::new();
     let mut config = Config::default();
-    config.catalogues.dir = std::env::temp_dir()
-        .join(format!("pinakes-catalogue-test-{}", std::process::id()))
-        .to_string_lossy()
-        .into_owned();
+    config.catalogues.dir = dir.0.to_string_lossy().into_owned();
     let mut ctx = Context::new(pool.clone(), Arc::new(config));
     ctx.free_disk = Arc::new(move |_| Ok(free.load(Ordering::SeqCst)));
     ctx.pace = Pace {
         retry: Duration::from_millis(20),
         disk: Duration::from_millis(20),
         turn: Duration::from_millis(20),
+        lock_check: Duration::from_millis(100),
     };
-    ctx
+    (ctx, dir)
 }
+/// How long a test waits for what a task does: long, so a loaded build slot doesn't fail it.
+const DEADLINE: Duration = Duration::from_secs(60);
 fn plenty() -> Arc<AtomicU64> {
     Arc::new(AtomicU64::new(u64::MAX))
 }
@@ -174,7 +215,8 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..500 {
+    let started = std::time::Instant::now();
+    while started.elapsed() < DEADLINE {
         if check().await {
             return;
         }
@@ -189,7 +231,7 @@ where
 /// what was removed upstream, touching no other row.
 #[sqlx::test(migrations = "../../migrations")]
 async fn imports_rewrite_only_changed_cards_and_remove_unseen_ones(pool: PgPool) {
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     let fixture = Fixture::new(Catalogue::Wikidata, cards(25));
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
     let s = state(&pool, Catalogue::Wikidata).await;
@@ -290,7 +332,7 @@ async fn imports_rewrite_only_changed_cards_and_remove_unseen_ones(pool: PgPool)
 /// removes nothing a failed import did not read. The task records the failure and tries again.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_failed_import_resumes_from_its_cursor(pool: PgPool) {
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     // A first import of 25 that breaks off after one batch.
     let fixture = Fixture::new(Catalogue::Tranco, cards(25));
     let tranco = |c: Card| Card {
@@ -330,7 +372,7 @@ async fn a_failed_import_resumes_from_its_cursor(pool: PgPool) {
     .await;
     let s = state(&pool, Catalogue::Tranco).await;
     assert_eq!(s.error_count, 1);
-    assert!(s.last_error.as_deref().unwrap().contains("broke off"));
+    assert_eq!(s.last_error.as_deref(), Some("unclassified"));
     assert_eq!(s.phase, "idle");
     assert_eq!(
         fixture.started_from.lock().unwrap()[1],
@@ -344,7 +386,7 @@ async fn a_failed_import_resumes_from_its_cursor(pool: PgPool) {
 /// row; the next task resumes from there.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_cut_off_by_a_restart_resumes(pool: PgPool) {
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     let mut fixture = Fixture::new(Catalogue::Osm, vec![]);
     *fixture.items.lock().unwrap() = cards(30)
         .into_iter()
@@ -358,7 +400,7 @@ async fn a_run_cut_off_by_a_restart_resumes(pool: PgPool) {
     let fixture = Arc::new(fixture);
     let (stop, shutdown) = watch::channel(false);
     let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
-    tokio::time::timeout(Duration::from_secs(5), fixture.entered.notified())
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
         .await
         .unwrap();
     stop.send(true).unwrap();
@@ -404,10 +446,11 @@ async fn a_run_cut_off_by_a_restart_resumes(pool: PgPool) {
 }
 
 /// Two processes never import one catalogue: while another session holds its lock the task
-/// waits and says why, and goes on once it is free. The drop takes the same lock.
+/// waits, writing nothing (the state row is the importing process's), and goes on once it is
+/// free. The drop takes the same lock.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_catalogue_lock_keeps_a_second_importer_out(pool: PgPool) {
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     let other = SessionLock::try_take(&pool, Catalogue::Software.lock_key())
         .await
         .unwrap()
@@ -428,15 +471,15 @@ async fn the_catalogue_lock_keeps_a_second_importer_out(pool: PgPool) {
         .collect();
     fixture.batch = 2;
     let fixture = Arc::new(fixture);
+    // The importing process's row, as it left it.
+    let before = store::ensure_state(&pool, Catalogue::Software)
+        .await
+        .unwrap();
     let (stop, shutdown) = watch::channel(false);
     let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
-    until("the wait for the lock", || async {
-        store::state(&pool, Catalogue::Software)
-            .await
-            .unwrap()
-            .is_some_and(|s| s.waiting.is_some_and(|w| w.contains("lock is held")))
-    })
-    .await;
+    // Many tries of the lock (one every 20 ms) leave the row as it was.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(state(&pool, Catalogue::Software).await, before);
     assert_eq!(count(&pool, Catalogue::Software).await, 0);
     assert!(fixture.started_from.lock().unwrap().is_empty());
     other.release().await;
@@ -477,7 +520,7 @@ async fn the_catalogue_lock_keeps_a_second_importer_out(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_waits_for_free_disk(pool: PgPool) {
     let free = Arc::new(AtomicU64::new(999));
-    let ctx = context(&pool, free.clone());
+    let (ctx, _dir) = context(&pool, free.clone());
     let fixture = Fixture::new(Catalogue::Musicbrainz, vec![]);
     *fixture.items.lock().unwrap() = cards(3)
         .into_iter()
@@ -516,7 +559,7 @@ async fn a_run_waits_for_free_disk(pool: PgPool) {
 /// small catalogue's import and a large catalogue's update go ahead.
 #[sqlx::test(migrations = "../../migrations")]
 async fn large_full_imports_run_one_at_a_time(pool: PgPool) {
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     let mut wikidata = Fixture::new(Catalogue::Wikidata, cards(15));
     let gate = Arc::new(Notify::new());
     wikidata.gate = Some(gate.clone());
@@ -525,7 +568,7 @@ async fn large_full_imports_run_one_at_a_time(pool: PgPool) {
         let (wikidata, ctx) = (wikidata.clone(), ctx.clone());
         tokio::spawn(async move { run::step(&*wikidata, &ctx).await })
     };
-    tokio::time::timeout(Duration::from_secs(5), wikidata.entered.notified())
+    tokio::time::timeout(DEADLINE, wikidata.entered.notified())
         .await
         .unwrap();
     let place = |c: Card| Card {
@@ -684,7 +727,7 @@ async fn switches_set_the_phase_and_keep_the_run(pool: PgPool) {
         ("idle", Some(json!({"next": 5})))
     );
     // A step resumes it.
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     let fixture = Fixture::new(
         Catalogue::Osm,
         cards(8)
@@ -732,7 +775,7 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     store::ensure_state(&pool, Catalogue::Wikidata)
         .await
         .unwrap();
-    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '50 hours' WHERE catalogue='wikidata'")
+    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '1 hour',current_as_of=now()-interval '50 hours' WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
         .unwrap();
@@ -743,6 +786,8 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     assert_eq!(get(&metrics2.catalogue_cards, "wikidata"), 42);
     assert_eq!(get(&metrics2.catalogue_enabled, "wikidata"), 1);
     assert_eq!(get(&metrics2.catalogue_enabled, "tranco"), 0);
+    // The lag counts from how current the data is, not from the update that finished an hour
+    // ago.
     let lag = get(&metrics2.catalogue_lag, "wikidata");
     assert!((50 * 3600..50 * 3600 + 60).contains(&lag), "{lag}");
     let now = chrono::Utc::now().timestamp();
@@ -801,7 +846,7 @@ fn only_the_importers_of_catalogues_that_are_on_start() {
 /// switched off.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_cut_off_large_import_keeps_its_turn(pool: PgPool) {
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     let wikidata = Fixture::new(Catalogue::Wikidata, cards(25));
     *wikidata.fail_after.lock().unwrap() = Some(1);
     assert!(run::step(&wikidata, &ctx).await.is_err());
@@ -829,6 +874,11 @@ async fn a_cut_off_large_import_keeps_its_turn(pool: PgPool) {
         s.waiting
     );
     assert_eq!((s.run, s.generation), (None, 0));
+    // The wait shows on `/metrics`: OpenStreetMap waits for the turn, Wikidata holds it.
+    let metrics = Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    let turn = |c: &str| metrics.catalogue_turn.with_label_values(&[c]).get();
+    assert_eq!((turn("osm"), turn("wikidata")), (1, 0));
     // The large-import lock is free again: nothing holds the turn but the state row.
     let large = SessionLock::try_take(&pool, pinakes_core::locks::CATALOGUE_LARGE_IMPORT)
         .await
@@ -855,7 +905,7 @@ async fn a_cut_off_large_import_keeps_its_turn(pool: PgPool) {
 /// the other.
 #[sqlx::test(migrations = "../../migrations")]
 async fn two_cut_off_large_imports_resume_one_after_the_other(pool: PgPool) {
-    let ctx = context(&pool, plenty());
+    let (ctx, _dir) = context(&pool, plenty());
     let place = |c: Card| Card {
         uri: format!("https://www.openstreetmap.org/node/{}", &c.source_id[1..]),
         r#type: "Place".into(),
@@ -926,4 +976,189 @@ async fn a_card_the_table_refuses_does_not_stop_its_part(pool: PgPool) {
             "{value}"
         );
     }
+}
+
+/// How current the cards are is what the importer says (a dump's date, the time of the last
+/// change applied), and the update lag counts from it: an update that says nothing leaves it
+/// where it was. An update can hand over to a full import, which starts in a new generation
+/// without marking the data current.
+#[sqlx::test(migrations = "../../migrations")]
+async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let at = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    let fixture = Fixture::new(Catalogue::Wikidata, cards(5));
+    *fixture.current.lock().unwrap() = Some(at("2026-11-20T00:00:00Z"));
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(
+        state(&pool, Catalogue::Wikidata).await.current_as_of,
+        Some(at("2026-11-20T00:00:00Z"))
+    );
+    // An update that finds nothing new and says nothing: finished, the data no more current.
+    *fixture.current.lock().unwrap() = None;
+    *fixture.next.lock().unwrap() = Some(Run::Update);
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert!(s.last_update_at.is_some());
+    assert_eq!(s.current_as_of, Some(at("2026-11-20T00:00:00Z")));
+    let metrics = Metrics::new().unwrap();
+    metrics.refresh(&pool).await.unwrap();
+    let lag = metrics.catalogue_lag.with_label_values(&["wikidata"]).get();
+    let behind = (chrono::Utc::now() - at("2026-11-20T00:00:00Z")).num_seconds();
+    assert!((behind - 60..=behind + 60).contains(&lag), "{lag} {behind}");
+    // An update that applied changes up to a time: current as of it.
+    *fixture.current.lock().unwrap() = Some(at("2026-11-22T00:00:00Z"));
+    *fixture.next.lock().unwrap() = Some(Run::Update);
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(
+        state(&pool, Catalogue::Wikidata).await.current_as_of,
+        Some(at("2026-11-22T00:00:00Z"))
+    );
+    // An update that can't apply the changes asks for a full import: nothing marked current,
+    // the update not counted as finished, a new generation begun.
+    let before = state(&pool, Catalogue::Wikidata).await;
+    *fixture.current.lock().unwrap() = Some(at("2026-11-25T00:00:00Z"));
+    *fixture.update_end.lock().unwrap() =
+        UpdateEnd::NeedsImport("the change stream is more than five days behind");
+    *fixture.next.lock().unwrap() = Some(Run::Update);
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(
+        (s.run.as_deref(), s.phase.as_str()),
+        (Some("import"), "import")
+    );
+    assert_eq!(s.generation, before.generation + 1);
+    assert_eq!(
+        (s.current_as_of, s.last_update_at),
+        (before.current_as_of, before.last_update_at)
+    );
+    // The next step runs that import from the start, unasked.
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(fixture.started_from.lock().unwrap().last(), Some(&None));
+    assert_eq!((s.run, s.generation, s.cards), (None, 2, 5));
+    assert_eq!(s.current_as_of, Some(at("2026-11-25T00:00:00Z")));
+    // A full import that says nothing is current as of its end.
+    *fixture.current.lock().unwrap() = None;
+    *fixture.next.lock().unwrap() = Some(Run::Import);
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    let current = state(&pool, Catalogue::Wikidata)
+        .await
+        .current_as_of
+        .unwrap();
+    assert!((chrono::Utc::now() - current).num_seconds() < 60);
+}
+
+/// A run whose catalogue lock's session ends (an administrator, a database restart) is cut off
+/// as a failure (`lock_lost`), and the task takes the lock again and resumes from the cursor.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let mut fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    let fixture = Arc::new(fixture);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    // End the session that holds the catalogue's lock.
+    let ended: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid",
+    )
+    .bind(Catalogue::Wikidata.lock_key())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(ended);
+    until("the lost lock recorded", || async {
+        state(&pool, Catalogue::Wikidata).await.error_count == 1
+    })
+    .await;
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(s.last_error.as_deref(), Some("lock_lost"));
+    assert_eq!(s.cursor, Some(json!({"next": 10})));
+    // Let the resumed run past its first batch.
+    gate.notify_one();
+    until("the resumed import", || async {
+        state(&pool, Catalogue::Wikidata)
+            .await
+            .last_import_at
+            .is_some()
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        fixture.started_from.lock().unwrap()[..2],
+        [None, Some(json!({"next": 10}))]
+    );
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.cards, s.error_count, s.phase.as_str()), (25, 1, "idle"));
+}
+
+/// An importer that panics fails its run (`panic`), recorded like any failure: the task goes on
+/// and the run is tried again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_panicking_importer_is_a_failed_run(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Fixture::new(
+        Catalogue::Tranco,
+        cards(3)
+            .into_iter()
+            .map(|c| Card {
+                uri: format!("https://{}.example/", c.source_id.to_lowercase()),
+                r#type: "WebSite".into(),
+                ..c
+            })
+            .collect(),
+    );
+    fixture.panic_once.store(true, Ordering::SeqCst);
+    let fixture = Arc::new(fixture);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    until("the import after the panic", || async {
+        store::state(&pool, Catalogue::Tranco)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.last_import_at.is_some())
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    let s = state(&pool, Catalogue::Tranco).await;
+    assert_eq!((s.error_count, s.last_error.as_deref()), (1, Some("panic")));
+    assert_eq!(s.cards, 3);
+}
+
+/// A failure is stored and logged by its class: an importer's error text never reaches
+/// `last_error`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failure_is_stored_by_its_class(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Fixture::new(Catalogue::Tranco, vec![]);
+    *fixture.items.lock().unwrap() = cards(25)
+        .into_iter()
+        .map(|c| Card {
+            uri: format!("https://{}.example/", c.source_id.to_lowercase()),
+            r#type: "WebSite".into(),
+            ..c
+        })
+        .collect();
+    *fixture.fail_after.lock().unwrap() = Some(1);
+    let fixture = Arc::new(fixture);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    until("the failure recorded", || async {
+        store::state(&pool, Catalogue::Tranco)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.error_count == 1)
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    let s = state(&pool, Catalogue::Tranco).await;
+    // The fixture's error text ("the fixture dump broke off") stands for an upstream's.
+    assert_eq!(s.last_error.as_deref(), Some("unclassified"));
 }

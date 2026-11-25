@@ -63,6 +63,9 @@ pub struct State {
     pub upstream_version: Option<String>,
     pub last_import_at: Option<DateTime<Utc>>,
     pub last_update_at: Option<DateTime<Utc>>,
+    /// How current the cards are: the upstream time of the data the last finished run left (a
+    /// dump's date, the time of the last change applied). The update lag counts from it.
+    pub current_as_of: Option<DateTime<Utc>>,
     /// Why the importer waits (free disk, another large import, its lock), while it does.
     pub waiting: Option<String>,
     /// The last failure, kept after a later success; `error_count` counts them all.
@@ -77,13 +80,15 @@ impl State {
     }
 }
 
-/// The state row of `catalogue`, made when it has none.
+/// The state row of `catalogue`, made when it has none: one statement, so a drop that deletes
+/// the row at the same time can't leave it missing between a write and a read.
 pub async fn ensure_state(pool: &PgPool, catalogue: Catalogue) -> Result<State> {
-    sqlx::query("INSERT INTO catalogue_state(catalogue) VALUES($1) ON CONFLICT DO NOTHING")
-        .bind(catalogue.name())
-        .execute(pool)
-        .await?;
-    Ok(state(pool, catalogue).await?.expect("the row just made"))
+    Ok(sqlx::query_as(
+        "INSERT INTO catalogue_state(catalogue) VALUES($1) ON CONFLICT (catalogue) DO UPDATE SET catalogue=excluded.catalogue RETURNING *",
+    )
+    .bind(catalogue.name())
+    .fetch_one(pool)
+    .await?)
 }
 pub async fn state(pool: &PgPool, catalogue: Catalogue) -> Result<Option<State>> {
     Ok(
@@ -393,13 +398,14 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             t.format("%Y-%m-%d %H:%M:%SZ").to_string()
         })
     };
-    let mut lines = vec![[
+    let mut lines: Vec<[String; 9]> = vec![[
         "catalogue".to_owned(),
         "enabled".into(),
         "phase".into(),
         "cards".into(),
         "last import".into(),
         "last update".into(),
+        "current as of".into(),
         "waiting".into(),
         "last error".into(),
     ]];
@@ -417,11 +423,12 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             state.map_or(0, |s| s.cards).to_string(),
             at(state.and_then(|s| s.last_import_at)),
             at(state.and_then(|s| s.last_update_at)),
+            at(state.and_then(|s| s.current_as_of)),
             one_line(state.and_then(|s| s.waiting.as_deref())),
             one_line(state.and_then(|s| s.last_error.as_deref())),
         ]);
     }
-    let widths: Vec<usize> = (0..8)
+    let widths: Vec<usize> = (0..9)
         .map(|i| {
             lines
                 .iter()
@@ -463,6 +470,7 @@ mod tests {
             upstream_version: Some("2026-11-24".into()),
             last_import_at: Some("2026-11-24T10:00:00Z".parse().unwrap()),
             last_update_at: None,
+            current_as_of: Some("2026-11-23T00:00:00Z".parse().unwrap()),
             waiting: None,
             last_error: Some("timed\nout".into()),
             error_count: 1,
@@ -483,6 +491,8 @@ mod tests {
                 "2026-11-24",
                 "10:00:00Z",
                 "-",
+                "2026-11-23",
+                "00:00:00Z",
                 "-",
                 "timed",
                 "out"
@@ -491,7 +501,67 @@ mod tests {
         let wikidata: Vec<_> = lines[1].split_whitespace().collect();
         assert_eq!(
             wikidata,
-            ["wikidata", "yes", "idle", "0", "-", "-", "-", "-"]
+            ["wikidata", "yes", "idle", "0", "-", "-", "-", "-", "-"]
+        );
+    }
+
+    /// The table's own checks refuse a row `Card::checked` let through (here a link over the
+    /// column's 2048 bytes): that row alone is left out, unstamped and uncounted, and the rest of
+    /// its part is written.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn the_table_s_checks_refuse_one_row_and_keep_its_part(pool: PgPool) {
+        ensure_state(&pool, Catalogue::Wikidata).await.unwrap();
+        let card = |n: usize| Card {
+            source_id: format!("Q{n}"),
+            uri: format!("https://en.wikipedia.org/wiki/Item_{n}"),
+            r#type: "Thing".into(),
+            name: format!("Item {n}"),
+            ..Default::default()
+        };
+        let mut rows: Vec<Row> = (0..4)
+            .map(|n| card(n).checked(Catalogue::Wikidata).unwrap())
+            .collect();
+        rows[2].uri = format!("https://example.org/{}", "a".repeat(3000));
+        let mut tx = pool.begin().await.unwrap();
+        let report = write_part(&mut tx, Catalogue::Wikidata, 1, &rows)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            (report.inserted, report.rejected, report.unchanged),
+            (3, 1, 0)
+        );
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT source_id FROM catalogue_card ORDER BY source_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(ids, ["Q0", "Q1", "Q3"]);
+        assert_eq!(
+            state(&pool, Catalogue::Wikidata)
+                .await
+                .unwrap()
+                .unwrap()
+                .cards,
+            3
+        );
+        // Again, with Q2 stored as it was before: the refused version neither replaces nor
+        // stamps it, so the import that ends removes it.
+        let stored = card(2).checked(Catalogue::Wikidata).unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        write_part(&mut tx, Catalogue::Wikidata, 1, &[stored])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let report = write_part(&mut tx, Catalogue::Wikidata, 2, &rows)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!((report.unchanged, report.rejected), (3, 1));
+        assert_eq!(
+            finish_import(&pool, Catalogue::Wikidata, 2).await.unwrap(),
+            1
         );
     }
 }

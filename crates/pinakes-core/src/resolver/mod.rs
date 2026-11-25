@@ -663,9 +663,6 @@ mod tests {
             "/same_recording.rs",
             "/resolver/mod.rs",
             "pinakesd/src/main.rs",
-            // A catalogue import's failure: its own database writes, or its catalogue's bulk
-            // files at the addresses the importer names, never a link someone referenced.
-            "/catalogue/run.rs",
         ];
         let mut found = vec![];
         for (path, call) in log_calls() {

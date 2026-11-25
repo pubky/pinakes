@@ -76,14 +76,16 @@ pub struct Metrics {
     pub token_refusals: IntCounterVec,
     /// Per catalogue (`catalogue::Catalogue`), each from the start: its cards, whether it is on
     /// in the daemon's configuration ([`Metrics::catalogue_switches`]), when its last full
-    /// import and its last update finished (0: never), how long ago it was last current (0
-    /// before its first finished import) and its failed runs.
+    /// import and its last update finished (0: never), how far its cards are behind upstream
+    /// (`current_as_of`; 0 before its first finished import), its failed runs, and whether it
+    /// waits for the large-import turn.
     pub catalogue_cards: IntGaugeVec,
     pub catalogue_enabled: IntGaugeVec,
     pub catalogue_import: IntGaugeVec,
     pub catalogue_update: IntGaugeVec,
     pub catalogue_lag: IntGaugeVec,
     pub catalogue_errors: IntCounterVec,
+    pub catalogue_turn: IntGaugeVec,
 }
 impl Metrics {
     pub fn new() -> Result<Self> {
@@ -302,13 +304,19 @@ impl Metrics {
             catalogue_lag: metric!(
                 IntGaugeVec,
                 "pinakes_catalogue_update_lag_seconds",
-                "Seconds since each catalogue's last finished full import or update (0 before the first full import finished)",
+                "Seconds each catalogue's cards are behind upstream: since the upstream time of the data its last finished run left (0 before the first full import finished)",
                 &["catalogue"]
             ),
             catalogue_errors: metric!(
                 IntCounterVec,
                 "pinakes_catalogue_import_errors_total",
                 "Failed catalogue import and update runs, by catalogue",
+                &["catalogue"]
+            ),
+            catalogue_turn: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_waiting_for_turn",
+                "Whether each catalogue's full import waits for another large catalogue's (1) or not (0)",
                 &["catalogue"]
             ),
             registry,
@@ -342,6 +350,7 @@ impl Metrics {
             out.catalogue_update.with_label_values(&name);
             out.catalogue_lag.with_label_values(&name);
             out.catalogue_errors.with_label_values(&name);
+            out.catalogue_turn.with_label_values(&name);
         }
         Ok(out)
     }
@@ -394,7 +403,7 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL THEN 0 ELSE extract(epoch FROM now()-greatest(last_import_at,last_update_at))::bigint END AS lag FROM catalogue_state").fetch_all(pool).await?;
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
@@ -489,6 +498,9 @@ impl Metrics {
                 &self.catalogue_errors.with_label_values(&[name]),
                 value("error_count")?,
             );
+            self.catalogue_turn
+                .with_label_values(&[name])
+                .set(value("turn")?);
         }
         self.group_key_conflicts.set(groups.try_get("conflicts")?);
         self.preview_backlog.set(previews);

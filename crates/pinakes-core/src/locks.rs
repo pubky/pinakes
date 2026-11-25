@@ -100,7 +100,7 @@ pub enum Check {
 /// ended this session). Any other error may leave the session open, with its lock (57014, a
 /// cancelled statement): it counts as a check with no answer, and the check made at once after
 /// it finds a session that did end by its closed connection.
-fn failed_check(error: &sqlx::Error) -> Check {
+pub(crate) fn failed_check(error: &sqlx::Error) -> Check {
     use sqlx::Error::{Database, Io, PoolClosed, Protocol};
     match error {
         Io(_) | PoolClosed | Protocol(_) => Check::Gone,

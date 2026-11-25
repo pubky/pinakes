@@ -319,6 +319,8 @@ Nexus replay. Budget backup retention apart from the database itself.
 
 ## Catalogues
 
+These apply once a catalogue has an importer ([importer rules](operations.md#importer-rules)):
+
 - **Free disk.** Before a run starts or resumes, its importer compares the free disk under its
   directory (`catalogues.dir/<name>`) with what the run still needs. While it is short, the run
   waits, and `pinakesd catalogue status` and the log say why. Only that file system is checked;

@@ -268,7 +268,7 @@ async fn start(
         return Ok(None);
     }
     if let Some(command) = catalogue {
-        catalogue_command(&pool, &config, command).await?;
+        catalogue_command(&pool, &config, command, &mut std::io::stdout()).await?;
         return Ok(None);
     }
     // Build the public document now, so a malformed recipe file stops startup before workers,
@@ -487,24 +487,25 @@ fn refuse_enabled_drop(config: &Config, catalogue: Catalogue) -> Result<()> {
     Ok(())
 }
 /// `catalogue status` prints each catalogue's state; `catalogue drop NAME` deletes a catalogue's
-/// cards and state while holding its lock, so no importer writes meanwhile.
+/// cards and state while holding its lock, so no importer writes meanwhile. Both print to `out`.
 async fn catalogue_command(
     pool: &sqlx::PgPool,
     config: &Config,
     command: CatalogueCommand,
+    out: &mut dyn std::io::Write,
 ) -> Result<()> {
     use pinakes_core::catalogue::{run::SessionLock, store};
     match command {
         CatalogueCommand::Status => {
             let states = store::states(pool).await?;
-            println!("{}", store::status_table(&config.catalogues, &states));
+            writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
         }
         CatalogueCommand::Drop(catalogue) => {
             let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
                 bail!("an importer of catalogue {catalogue} is running (a pinakesd started with it enabled): switch it off and restart that daemon, then drop");
             };
             // The lock is held until the cards, the state row and the files are gone.
-            let dropped = drop_held(config, pool, catalogue).await;
+            let dropped = drop_held(config, pool, catalogue, out).await;
             lock.release().await;
             dropped?;
         }
@@ -514,23 +515,31 @@ async fn catalogue_command(
 
 /// The drop, under the catalogue's lock: its cards and state row, then its directory of
 /// downloads and temporary files (`catalogues.dir/<name>`).
-async fn drop_held(config: &Config, pool: &sqlx::PgPool, catalogue: Catalogue) -> Result<()> {
+async fn drop_held(
+    config: &Config,
+    pool: &sqlx::PgPool,
+    catalogue: Catalogue,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
     // A line per million cards, so a long drop shows it is moving.
     let mut shown = 0;
     let dropped = pinakes_core::catalogue::store::drop_catalogue(pool, catalogue, |n| {
         if n >= shown + 1_000_000 {
             shown = n;
-            println!("dropped {n} cards of catalogue {catalogue} so far");
+            let _ = writeln!(out, "dropped {n} cards of catalogue {catalogue} so far");
         }
     })
     .await?;
-    println!("dropped {dropped} cards of catalogue {catalogue}; its state is reset");
+    writeln!(
+        out,
+        "dropped {dropped} cards of catalogue {catalogue}; its state is reset"
+    )?;
     // Named in full: a relative `catalogues.dir` is relative to this command's working directory.
     let dir = std::path::absolute(config.catalogues.work_dir(catalogue))?;
     match tokio::fs::remove_dir_all(&dir).await {
-        Ok(()) => println!("removed {}", dir.display()),
+        Ok(()) => writeln!(out, "removed {}", dir.display())?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("no directory {} to remove", dir.display())
+            writeln!(out, "no directory {} to remove", dir.display())?
         }
         Err(error) => {
             return Err(error).with_context(|| format!("remove {}", dir.display()));
@@ -1019,6 +1028,85 @@ mod tests {
             waited >= after + lost && waited < after + lost + Duration::from_millis(1500),
             "{waited:?}"
         );
+    }
+    /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
+    /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
+    /// prints the table.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn the_drop_command_takes_the_lock_and_removes_the_directory(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{run::SessionLock, store, Card};
+        let root = std::env::temp_dir().join(format!("pinakesd-drop-test-{}", std::process::id()));
+        let mut config = Config::default();
+        config.catalogues.dir = root.to_string_lossy().into_owned();
+        config.catalogues.wikidata.enabled = false;
+        let card = Card {
+            source_id: "Q1".into(),
+            uri: "https://en.wikipedia.org/wiki/One".into(),
+            r#type: "Thing".into(),
+            name: "One".into(),
+            ..Card::default()
+        };
+        store::upsert(&pool, Catalogue::Wikidata, 1, &[card], None)
+            .await
+            .unwrap();
+        let dir = config.catalogues.work_dir(Catalogue::Wikidata);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dump.part"), b"x").unwrap();
+        let drop = CatalogueCommand::Drop(Catalogue::Wikidata);
+        // An importer holds the lock: refused, nothing deleted.
+        let importer = SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut out = Vec::new();
+        let refused = catalogue_command(&pool, &config, drop, &mut out)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("is running"), "{refused}");
+        assert!(dir.join("dump.part").exists());
+        assert!(store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_some());
+        importer.release().await;
+        // Free: the cards, the state row and the directory go, and the output says so.
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, drop, &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        let absolute = std::path::absolute(&dir).unwrap();
+        assert!(
+            printed.contains("dropped 1 cards of catalogue wikidata"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(&format!("removed {}", absolute.display())),
+            "{printed}"
+        );
+        assert!(!dir.exists());
+        assert!(store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_none());
+        // Again: nothing left, and no directory to remove.
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, drop, &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("dropped 0 cards"), "{printed}");
+        assert!(printed.contains("no directory"), "{printed}");
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, CatalogueCommand::Status, &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert_eq!(printed.lines().count(), 8);
+        let wikidata: Vec<_> = printed.lines().nth(1).unwrap().split_whitespace().collect();
+        assert_eq!(wikidata[..2], ["wikidata", "no"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
     /// A drop refuses a catalogue its configuration has on, and says how to switch it off.
     #[test]
