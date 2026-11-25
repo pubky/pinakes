@@ -615,7 +615,7 @@ pub fn tools() -> Vec<Tool> {
     vec![
         tool(
             "search",
-            "Search the links people referenced on Pubky. Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, refs, type, name, description, site, point, start, end, group, also_on). For group tags, batch each exact non-derived also_on member's uri and optional refs (at most 5) with the card's own links; no extra group read is needed for those members. Returns a cursor for the next page and, with facet, counts over every match.",
+            "Search the links people referenced on Pubky, and the cards of the open catalogues this instance imports (with referenced: true, only referenced links). Every filter is optional and they combine: text, a schema.org type (Event includes MusicEvent; Place includes cafés), tags, a circle on the map, a time window, one exact identifier. Returns compact cards (id, uri, refs, type, name, description, site, point, start, end, group, also_on, and a catalogue card's labels). For group tags, batch each exact non-derived also_on member's uri and optional refs (at most 5) with the card's own links; no extra group read is needed for those members. Returns a cursor for the next page and, with facet, counts over every match.",
             json!({"type":"object","additionalProperties":false,"properties":{
                 "q":{"type":"string","description":"Words in the name or description, at most 256 bytes; accents and case do not matter, the last word may be the start of one, and a name similar to the text (a typo) or holding it inside a word matches too. Up to three characters of letters and digits (spaces counted; not Hebrew, Arabic or a script written without spaces) match a name only where a word starts."},
                 "type":{"type":"array","items":{"type":"string"},"maxItems":10,"description":"Schema.org types, any of them, each with its subtypes: e.g. [\"Place\"], [\"Event\"], [\"MusicRecording\", \"MusicAlbum\", \"MusicGroup\"]. A single type as a string is accepted too."},
@@ -640,7 +640,7 @@ pub fn tools() -> Vec<Tool> {
                 "reach":{"type":"string","enum":["following","friends","wot_2"],"description":"Only links that the viewer's follows (or friends, or two steps of follows) referenced. Needs viewer. wot_2 only where the instance has it."},
                 "boost":{"type":"string","enum":["following","friends","wot_2"],"description":"Rank first the links the viewer's follows (or friends, or two steps of follows) referenced, leaving nothing out. Needs viewer; with the default sort, relevance or trending. wot_2 only where the instance has it."},
                 "viewer":{"type":"string","description":"With reach or boost: a 52-character pubky public key."},
-                "referenced":{"type":"boolean","description":"true: only things someone referenced on Pubky (every card here is one today)."},
+                "referenced":{"type":"boolean","description":"true: only things someone referenced on Pubky, no catalogue card nobody referenced."},
                 "limit":{"type":"integer","minimum":1,"maximum":500,"description":"Cards per page, default 50."},
                 "cursor":{"type":"string","description":"The cursor of the previous page, with the same filters."}
             }}),
@@ -826,6 +826,10 @@ fn compact(base: &str, card: &Value) -> Value {
         if !card[key].is_null() {
             out.insert(key.into(), card[key].clone());
         }
+    }
+    // A catalogue card's source labels (suggested tags), when it has any.
+    if card["labels"].as_array().is_some_and(|l| !l.is_empty()) {
+        out.insert("labels".into(), card["labels"].clone());
     }
     let mut shortened = false;
     if let Some(description) = card["description"].as_str() {

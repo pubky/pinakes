@@ -199,7 +199,7 @@ async fn the_disk_index_follows_writes_within_a_pass(pool: PgPool) {
     // `reindex` builds the next generation and switches to it; the old one is removed.
     let before = std::fs::read_to_string(dir.join("CURRENT")).unwrap();
     let mut reported = 0;
-    let units = search_index::reindex(&pool, &dir, |n| reported = n)
+    let units = search_index::reindex(&pool, &dir, &[], |n| reported = n)
         .await
         .unwrap();
     assert_eq!(units, 1);
@@ -443,7 +443,9 @@ async fn a_closed_index_keeps_the_queue_short_and_no_partial_generation(pool: Pg
         .max_connections(1)
         .connect_lazy_with(pool.connect_options().as_ref().clone());
     gone.close().await;
-    assert!(search_index::reindex(&gone, &dir, |_| {}).await.is_err());
+    assert!(search_index::reindex(&gone, &dir, &[], |_| {})
+        .await
+        .is_err());
     let generations: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()

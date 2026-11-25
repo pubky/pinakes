@@ -608,6 +608,12 @@ fn path(query: &str) -> String {
         .collect();
     format!("/v1/search?{}", encoded.join("&"))
 }
+/// A page without its cursor, which each daemon signs with its own key: whether there is one.
+fn uncursored(page: &Value) -> Value {
+    let mut page = page.clone();
+    page["cursor"] = page["cursor"].is_null().into();
+    page
+}
 fn ids_of(page: &Value) -> Vec<String> {
     page["items"]
         .as_array()
@@ -790,6 +796,10 @@ async fn the_query_set_finds_what_postgres_finds(pool: PgPool) {
     let state = AppState::new(pool.clone(), config.clone()).unwrap();
     let index = state.search_index.clone();
     let indexed = api::router(state);
+    // Every catalogue off: with the catalogue tables empty, every answer is the same.
+    let mut off_config = config.clone();
+    off_config.catalogues.enabled = false;
+    let off = api::router(AppState::new(pool.clone(), off_config).unwrap());
     let mut state = AppState::new(pool.clone(), config).unwrap();
     // A daemon's index that is not open: every search reads Postgres alone.
     state.search_index = SearchIndex::on_disk("/nonexistent/pinakes-search-index");
@@ -815,6 +825,11 @@ async fn the_query_set_finds_what_postgres_finds(pool: PgPool) {
         let a = common::get(&indexed, &path(&query)).await;
         let b = common::get(&postgres, &path(&query)).await;
         assert_eq!(ids_of(&a), ids_of(&b), "{query}");
+        assert_eq!(
+            uncursored(&a),
+            uncursored(&common::get(&off, &path(&query)).await),
+            "{query}: catalogues off"
+        );
         assert_eq!(a["facets"], b["facets"], "{query}");
         assert_eq!(a["cursor"].is_null(), b["cursor"].is_null(), "{query}");
         checked += 1;
@@ -827,7 +842,13 @@ async fn the_query_set_finds_what_postgres_finds(pool: PgPool) {
                 format!("{q}&limit=50")
             }
         };
-        let found = ids_of(&common::get(&indexed, &path(&wide(query))).await);
+        let page = common::get(&indexed, &path(&wide(query))).await;
+        assert_eq!(
+            uncursored(&page),
+            uncursored(&common::get(&off, &path(&wide(query))).await),
+            "{query}: catalogues off"
+        );
+        let found = ids_of(&page);
         let before = ids_of(&common::get(&postgres, &path(&wide(query))).await);
         let top: Vec<&String> = before.iter().take(20).collect();
         // Postgres' name similarity also finds names holding a word the text leaves out

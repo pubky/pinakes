@@ -47,7 +47,7 @@ use tantivy::{
 
 /// The version of the index's fields and analyzers, kept in each commit: an index written with
 /// another is rebuilt.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 /// How much a match in each field weighs (BM25 times this): the name most, then people's tags,
 /// other names and source labels, then the description.
 const NAME_BOOST: Score = 3.0;
@@ -131,6 +131,7 @@ struct Fields {
     category: Field,
     venue: Field,
     source: Field,
+    catalogue: Field,
     referenced: Field,
     cells: [Field; 3],
     lat: Field,
@@ -176,7 +177,8 @@ fn schema() -> (Schema, Fields) {
         category: s.add_text_field("category", STRING),
         venue: s.add_text_field("venue", STRING),
         source: s.add_text_field("source", STRING),
-        referenced: s.add_u64_field("referenced", INDEXED),
+        catalogue: s.add_text_field("catalogue", STRING),
+        referenced: s.add_u64_field("referenced", INDEXED | FAST),
         cells: [
             s.add_u64_field("cell_coarse", INDEXED),
             s.add_u64_field("cell_middle", INDEXED),
@@ -372,6 +374,10 @@ struct Payload {
     /// Every transaction below this ID had finished when the index read the queue; the ones at
     /// or above it may be read again.
     boundary: u64,
+    /// The catalogues whose cards the index holds, each with the end of the full import it read
+    /// them after (`catalogue_state.last_import_at`, empty when none had finished).
+    #[serde(default)]
+    catalogues: BTreeMap<String, String>,
 }
 
 /// One search unit as the index keeps it, read from Postgres.
@@ -402,6 +408,83 @@ struct Unit {
 /// line counts as its description, as its Postgres text does.
 const UNITS: &str = "SELECT r.unit_id, r.id AS resource_id, r.name, r.doc->>'description' AS description, p.display_name AS other, r.type AS type_name, r.type_path, r.host, r.category, r.venue_id, r.resolver, ST_Y(r.point) AS lat, ST_X(r.point) AS lon, r.start_at, r.end_at, s.score, s.updated_at AS scored_at, s.newest_at, ARRAY(SELECT DISTINCT f.label FROM effective_reference f WHERE f.resource_id=r.id AND f.label IS NOT NULL ORDER BY f.label) AS tags FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id LEFT JOIN osm_place p ON p.osm_type=r.osm_type AND p.osm_id=r.osm_id WHERE coalesce(r.doc->'attributes'->>'opted_out','')<>'true' AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id)";
 
+/// One catalogue card as the index keeps it.
+#[derive(sqlx::FromRow)]
+struct CardRow {
+    id: i64,
+    catalogue: String,
+    source: String,
+    uri: String,
+    type_name: String,
+    name: String,
+    other_names: Vec<String>,
+    description: Option<String>,
+    labels: Vec<String>,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    fame: f32,
+}
+/// The cards of the catalogues given.
+const CARDS: &str = "SELECT c.id, c.catalogue, c.source, c.uri, c.type AS type_name, c.name, c.other_names, c.description, c.labels, ST_Y(c.point) AS lat, ST_X(c.point) AS lon, c.fame FROM catalogue_card c WHERE c.catalogue=ANY($1)";
+/// The index's ID of a catalogue card's document (its unit ID is the resource ID its link would
+/// have, [`card_unit`]).
+fn card_key(id: i64) -> String {
+    format!("catalogue:{id}")
+}
+/// The unit ID of a catalogue card: the resource ID of its canonical link, so the card is the same
+/// unit once someone references the link.
+pub fn card_unit(uri: &str) -> Option<String> {
+    crate::model::identity(uri).ok().map(|(id, _, _)| id)
+}
+fn card_document(f: &Fields, card: &CardRow) -> Option<TantivyDocument> {
+    let unit = card_unit(&card.uri)?;
+    let mut doc = TantivyDocument::default();
+    doc.add_text(f.unit_id, &unit);
+    doc.add_text(f.resource_id, card_key(card.id));
+    let name = card.name.trim();
+    if !name.is_empty() {
+        doc.add_text(f.name, name);
+        doc.add_text(f.name_exact, squashed(name));
+        doc.add_text(f.name_grams, name);
+        doc.add_text(f.name_pieces, name);
+    }
+    for other in &card.other_names {
+        doc.add_text(f.other_names, other);
+    }
+    if let Some(description) = card.description.as_deref().filter(|d| !d.trim().is_empty()) {
+        doc.add_text(f.description, description);
+    }
+    for label in &card.labels {
+        doc.add_text(f.label, label);
+        doc.add_text(f.labels_text, label);
+    }
+    doc.add_text(f.type_name, &card.type_name);
+    for t in crate::model::type_path(&card.type_name) {
+        doc.add_text(f.type_path, t);
+    }
+    if let Some(host) = url::Url::parse(&card.uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    {
+        doc.add_text(f.host, host);
+    }
+    doc.add_text(f.source, &card.source);
+    doc.add_text(f.catalogue, &card.catalogue);
+    doc.add_u64(f.referenced, 0);
+    doc.add_f64(f.fame, f64::from(card.fame).clamp(0.0, 1.0));
+    doc.add_f64(f.activity, 0.0);
+    doc.add_i64(f.activity_at, 0);
+    if let (Some(lat), Some(lon)) = (card.lat, card.lon) {
+        doc.add_f64(f.lat, lat);
+        doc.add_f64(f.lon, lon);
+        if let Ok(point) = h3o::LatLng::new(lat, lon) {
+            for (field, resolution) in f.cells.iter().zip(CELL_RESOLUTIONS) {
+                doc.add_u64(*field, u64::from(point.to_cell(resolution)));
+            }
+        }
+    }
+    Some(doc)
+}
 fn document(f: &Fields, unit: &Unit) -> TantivyDocument {
     let mut doc = TantivyDocument::default();
     doc.add_text(f.unit_id, &unit.unit_id);
@@ -473,6 +556,10 @@ struct Open {
     reader: IndexReader,
     writer: std::sync::Mutex<IndexWriter>,
     progress: std::sync::Mutex<Progress>,
+    /// [`Payload::catalogues`] as the next commit records it.
+    catalogues: std::sync::Mutex<BTreeMap<String, String>>,
+    /// The last catalogue queue row an in-memory index read.
+    catalogue_seq: AtomicU64,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -482,7 +569,7 @@ struct Progress {
     applied: HashSet<u64>,
 }
 impl Open {
-    fn new(index: Index, boundary: u64) -> Result<Self> {
+    fn new(index: Index, boundary: u64, catalogues: BTreeMap<String, String>) -> Result<Self> {
         register(&index);
         let fields = schema().1;
         let reader = index
@@ -504,6 +591,8 @@ impl Open {
                 boundary,
                 applied: HashSet::new(),
             }),
+            catalogues: std::sync::Mutex::new(catalogues),
+            catalogue_seq: AtomicU64::new(0),
         })
     }
 }
@@ -528,8 +617,19 @@ pub struct SearchIndex {
     batch: i64,
     /// Text searches answered.
     served: AtomicU64,
+    /// The catalogues whose cards the index holds: those switched on.
+    catalogues: std::sync::RwLock<Vec<String>>,
 }
 impl SearchIndex {
+    /// Hold the cards of these catalogues (the ones switched on, `config.catalogues`); the
+    /// cards of any other leave the index at the next pass.
+    pub fn set_catalogues(&self, names: &[&str]) {
+        *self.catalogues.write().expect("catalogues lock") =
+            names.iter().map(|n| n.to_string()).collect();
+    }
+    fn catalogues(&self) -> Vec<String> {
+        self.catalogues.read().expect("catalogues lock").clone()
+    }
     /// An index in memory, built from the database on its first search and read up before
     /// every search after: what `AppState::new` holds until the daemon sets its own.
     pub fn in_memory() -> Arc<Self> {
@@ -560,6 +660,7 @@ impl SearchIndex {
         Self {
             batch: QUEUE_BATCH,
             served: AtomicU64::new(0),
+            catalogues: std::sync::RwLock::new(vec![]),
             home,
             open: std::sync::RwLock::new(None),
             pass: tokio::sync::Mutex::new(()),
@@ -681,7 +782,7 @@ impl SearchIndex {
                 tracing::warn!(dir = %dir.display(), "the text index was built from another database; rebuilding it from this one")
             }
             Ok(Some((index, payload))) if payload.format == FORMAT => {
-                self.set(Open::new(index, payload.boundary)?);
+                self.set(Open::new(index, payload.boundary, payload.catalogues)?);
                 tracing::info!(dir = %dir.display(), "text index opened");
                 return Ok(());
             }
@@ -696,17 +797,18 @@ impl SearchIndex {
             }
         }
         let started = std::time::Instant::now();
-        let (index, boundary, units) = build_generation(pool, dir, |n| {
-            tracing::info!(units = n, "building the text index")
-        })
-        .await?;
+        let (index, boundary, units, markers) =
+            build_generation(pool, dir, &self.catalogues(), |n| {
+                tracing::info!(units = n, "building the text index")
+            })
+            .await?;
         tracing::info!(
             units,
             secs = started.elapsed().as_secs(),
             "text index built"
         );
-        self.set(Open::new(index, boundary)?);
-        // The build read every transaction below its boundary.
+        self.set(Open::new(index, boundary, markers)?);
+        // The build read every transaction below its boundary, and every catalogue card.
         sqlx::query("DELETE FROM search_index_queue WHERE xid<$1::text::xid8")
             .bind(boundary.to_string())
             .execute(pool)
@@ -725,8 +827,8 @@ impl SearchIndex {
             }
             let index = Index::create_in_ram(schema().0);
             register(&index);
-            let (boundary, _) = fill(pool, &index, 1, |_| {}).await?;
-            self.set(Open::new(index, boundary)?);
+            let (boundary, _, markers) = fill(pool, &index, 1, &self.catalogues(), |_| {}).await?;
+            self.set(Open::new(index, boundary, markers)?);
         }
         Ok(self.current())
     }
@@ -809,7 +911,7 @@ impl SearchIndex {
                 applied,
             };
         }
-        Ok(())
+        self.sync_catalogues(pool, &open).await
     }
     /// The daemon's pass: the queue's rows in order, a batch at a time, until it runs dry; each
     /// batch's resources read again and committed, then its rows deleted. A row of a transaction
@@ -824,7 +926,7 @@ impl SearchIndex {
             .fetch_all(pool)
             .await?;
             if rows.is_empty() {
-                return Ok(());
+                break;
             }
             let full = rows.len() as i64 >= self.batch;
             let seqs: Vec<i64> = rows.iter().map(|(seq, _)| *seq).collect();
@@ -837,9 +939,158 @@ impl SearchIndex {
                 .execute(pool)
                 .await?;
             if !full {
+                break;
+            }
+        }
+        self.sync_catalogues(pool, open).await
+    }
+    /// The catalogue cards' part of a pass. A catalogue switched off: its documents leave the
+    /// index (its cards already left every search, which filters by the catalogues that are on).
+    /// A catalogue whose full import finished since the index read it: its documents are read
+    /// again, all of them. Then the cards an update run changed or removed
+    /// (`search_index_catalogue_queue`), a batch at a time.
+    async fn sync_catalogues(&self, pool: &PgPool, open: &Arc<Open>) -> Result<()> {
+        let enabled = self.catalogues();
+        let recorded = open.catalogues.lock().expect("markers").clone();
+        let markers = import_markers(pool, &enabled).await?;
+        let off: Vec<String> = recorded
+            .keys()
+            .filter(|c| !enabled.contains(c))
+            .cloned()
+            .collect();
+        let stale: Vec<String> = enabled
+            .iter()
+            .filter(|c| recorded.get(*c) != markers.get(*c))
+            .cloned()
+            .collect();
+        if !off.is_empty() || !stale.is_empty() {
+            self.reread_catalogues(pool, open, &off, &stale, &markers)
+                .await?;
+        }
+        loop {
+            let after = match self.home {
+                Home::Disk(_) => 0,
+                Home::Memory => open.catalogue_seq.load(Ordering::SeqCst) as i64,
+            };
+            let rows: Vec<(i64, i64)> = sqlx::query_as(
+                "SELECT seq, card_id FROM search_index_catalogue_queue WHERE seq>$1 ORDER BY seq LIMIT $2",
+            )
+            .bind(after)
+            .bind(self.batch)
+            .fetch_all(pool)
+            .await?;
+            let Some(&(last, _)) = rows.last() else {
+                return Ok(());
+            };
+            let full = rows.len() as i64 >= self.batch;
+            let mut ids: Vec<i64> = rows.iter().map(|(_, id)| *id).collect();
+            ids.sort();
+            ids.dedup();
+            let cards: Vec<CardRow> = sqlx::query_as(&format!("{CARDS} AND c.id=ANY($2)"))
+                .bind(&enabled)
+                .bind(&ids)
+                .fetch_all(pool)
+                .await?;
+            let applying = open.clone();
+            let boundary = committed_boundary(&open.index).unwrap_or(0);
+            tokio::task::spawn_blocking(move || applying.replace_cards(&ids, &cards, boundary))
+                .await??;
+            self.revision.fetch_add(1, Ordering::SeqCst);
+            match self.home {
+                Home::Disk(_) => {
+                    let seqs: Vec<i64> = rows.iter().map(|(seq, _)| *seq).collect();
+                    sqlx::query("DELETE FROM search_index_catalogue_queue WHERE seq=ANY($1)")
+                        .bind(&seqs)
+                        .execute(pool)
+                        .await?;
+                }
+                Home::Memory => open.catalogue_seq.store(last as u64, Ordering::SeqCst),
+            }
+            if !full {
                 return Ok(());
             }
         }
+    }
+    /// Remove the documents of the catalogues `off` and `stale`, add every card of `stale` again,
+    /// and commit, recording `markers` for `stale` and nothing for `off`.
+    async fn reread_catalogues(
+        &self,
+        pool: &PgPool,
+        open: &Arc<Open>,
+        off: &[String],
+        stale: &[String],
+        markers: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let boundary = committed_boundary(&open.index).unwrap_or(0);
+        let gone: Vec<String> = off.iter().chain(stale).cloned().collect();
+        let deleting = open.clone();
+        tokio::task::spawn_blocking(move || {
+            let writer = deleting.writer.lock().expect("writer lock");
+            for catalogue in &gone {
+                writer.delete_term(Term::from_field_text(deleting.fields.catalogue, catalogue));
+            }
+        })
+        .await?;
+        let added = async {
+            let mut cards = sqlx::query_as::<_, CardRow>(CARDS).bind(stale).fetch(pool);
+            let mut batch = Vec::with_capacity(ADD_BATCH);
+            loop {
+                let next = cards.try_next().await?;
+                let done = next.is_none();
+                batch.extend(next);
+                if batch.len() == ADD_BATCH || (done && !batch.is_empty()) {
+                    let adding = open.clone();
+                    let part = std::mem::take(&mut batch);
+                    tokio::task::spawn_blocking(move || -> Result<()> {
+                        let writer = adding.writer.lock().expect("writer lock");
+                        for card in &part {
+                            if let Some(doc) = card_document(&adding.fields, card) {
+                                writer.add_document(doc)?;
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await??;
+                }
+                if done {
+                    return anyhow::Ok(());
+                }
+            }
+        }
+        .await;
+        let committing = open.clone();
+        let (off, stale, markers) = (off.to_vec(), stale.to_vec(), markers.clone());
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut writer = committing.writer.lock().expect("writer lock");
+            if let Err(error) = added {
+                // Nothing half read stays for the next commit.
+                let _ = writer.rollback();
+                return Err(error);
+            }
+            let mut recorded = committing.catalogues.lock().expect("markers");
+            let before = recorded.clone();
+            for catalogue in &off {
+                recorded.remove(catalogue);
+            }
+            for catalogue in &stale {
+                if let Some(marker) = markers.get(catalogue) {
+                    recorded.insert(catalogue.clone(), marker.clone());
+                }
+            }
+            if let Err(error) = commit(&mut writer, boundary, &recorded) {
+                *recorded = before;
+                let _ = writer.rollback();
+                return Err(error);
+            }
+            drop(recorded);
+            committing.reader.reload()?;
+            // A catalogue's old documents leave the index files too, not only its searches.
+            purge(&committing.index, &mut writer, &committing.reader)?;
+            Ok(())
+        })
+        .await??;
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     /// `ids`, each once, with the roots of those that are aliases (an alias's references count
     /// for its root).
@@ -923,7 +1174,11 @@ impl Open {
             for unit in units {
                 writer.add_document(document(&self.fields, unit))?;
             }
-            commit(&mut writer, boundary)?;
+            commit(
+                &mut writer,
+                boundary,
+                &self.catalogues.lock().expect("markers"),
+            )?;
             Ok(())
         })();
         if result.is_err() {
@@ -939,21 +1194,67 @@ impl Open {
             .iter()
             .any(|id| !units.iter().any(|u| &u.resource_id == id && has_text(u)));
         if removed {
-            let segments: Vec<tantivy::index::SegmentId> = self
-                .reader
-                .searcher()
-                .segment_readers()
-                .iter()
-                .filter(|s| s.num_deleted_docs() > 0)
-                .map(|s| s.segment_id())
-                .collect();
-            if !segments.is_empty() {
-                writer.merge(&segments).wait()?;
-                self.reader.reload()?;
-            }
+            purge(&self.index, &mut writer, &self.reader)?;
         }
         Ok(())
     }
+}
+impl Open {
+    /// Replace the documents of the catalogue cards `ids` with `cards` (those still there, of a
+    /// catalogue that is on) and commit.
+    fn replace_cards(&self, ids: &[i64], cards: &[CardRow], boundary: u64) -> Result<()> {
+        let mut writer = self.writer.lock().expect("writer lock");
+        let result = (|| -> Result<()> {
+            for id in ids {
+                writer.delete_term(Term::from_field_text(
+                    self.fields.resource_id,
+                    &card_key(*id),
+                ));
+            }
+            for card in cards {
+                if let Some(doc) = card_document(&self.fields, card) {
+                    writer.add_document(doc)?;
+                }
+            }
+            commit(
+                &mut writer,
+                boundary,
+                &self.catalogues.lock().expect("markers"),
+            )?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = writer.rollback();
+        }
+        result?;
+        self.reader.reload()?;
+        Ok(())
+    }
+}
+/// Merge every committed segment that holds deleted documents, so their words leave the index
+/// files. A background merge may take one of them meanwhile: then the segments are read again,
+/// up to three times.
+fn purge(index: &Index, writer: &mut IndexWriter, reader: &IndexReader) -> Result<()> {
+    for attempt in 1..=3 {
+        let segments: Vec<tantivy::index::SegmentId> = index
+            .searchable_segment_metas()?
+            .into_iter()
+            .filter(|m| m.num_deleted_docs() > 0)
+            .map(|m| m.id())
+            .collect();
+        if segments.is_empty() {
+            break;
+        }
+        match writer.merge(&segments).wait() {
+            Ok(_) => break,
+            Err(error) if attempt < 3 => {
+                tracing::debug!(error = %crate::resolver::log_error(&error), "a text index merge raced another; reading the segments again");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    reader.reload()?;
+    Ok(())
 }
 /// Whether a unit has words a text search finds it by.
 fn has_text(unit: &Unit) -> bool {
@@ -961,11 +1262,16 @@ fn has_text(unit: &Unit) -> bool {
         .into_iter()
         .any(|t| t.as_deref().is_some_and(|t| !t.trim().is_empty()))
 }
-fn commit(writer: &mut IndexWriter, boundary: u64) -> Result<()> {
+fn commit(
+    writer: &mut IndexWriter,
+    boundary: u64,
+    catalogues: &BTreeMap<String, String>,
+) -> Result<()> {
     let mut prepared = writer.prepare_commit()?;
     prepared.set_payload(&serde_json::to_string(&Payload {
         format: FORMAT,
         boundary,
+        catalogues: catalogues.clone(),
     })?);
     prepared.commit()?;
     Ok(())
@@ -1007,8 +1313,9 @@ fn generation_name(name: &str) -> bool {
 async fn build_generation(
     pool: &PgPool,
     dir: &Path,
+    catalogues: &[String],
     progress: impl FnMut(u64) + Send,
-) -> Result<(Index, u64, u64)> {
+) -> Result<(Index, u64, u64, BTreeMap<String, String>)> {
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     // A generation `CURRENT` does not name is left from a build that did not finish.
     let current = std::fs::read_to_string(dir.join(CURRENT)).unwrap_or_default();
@@ -1024,11 +1331,11 @@ async fn build_generation(
     let built = async {
         let index = Index::create_in_dir(&path, schema().0)?;
         register(&index);
-        let filled = fill(pool, &index, REBUILD_THREADS, progress).await?;
+        let filled = fill(pool, &index, REBUILD_THREADS, catalogues, progress).await?;
         anyhow::Ok(filled)
     }
     .await;
-    let (boundary, units) = match built {
+    let (boundary, units, markers) = match built {
         Ok(built) => built,
         Err(error) => {
             // No partial generation stays on the disk.
@@ -1044,7 +1351,7 @@ async fn build_generation(
     remove_generations(dir, &name);
     let index = Index::open_in_dir(&path)?;
     register(&index);
-    Ok((index, boundary, units))
+    Ok((index, boundary, units, markers))
 }
 /// Remove every generation in `dir` but `keep`.
 fn remove_generations(dir: &Path, keep: &str) {
@@ -1066,8 +1373,9 @@ async fn fill(
     pool: &PgPool,
     index: &Index,
     threads: usize,
+    catalogues: &[String],
     mut progress: impl FnMut(u64) + Send,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, BTreeMap<String, String>)> {
     let fields = schema().1;
     let writer: Arc<IndexWriter> =
         Arc::new(index.writer_with_num_threads(threads, threads * WRITER_BYTES)?);
@@ -1080,6 +1388,7 @@ async fn fill(
             .fetch_one(&mut *tx)
             .await?;
     let boundary: u64 = boundary.parse().context("transaction ID")?;
+    let markers = import_markers(&mut *tx, catalogues).await?;
     let mut units = sqlx::query_as::<_, Unit>(UNITS).fetch(&mut *tx);
     let mut written = 0u64;
     let mut batch = Vec::with_capacity(ADD_BATCH);
@@ -1105,20 +1414,72 @@ async fn fill(
     }
     add(batch).await??;
     drop(units);
+    // The cards of the catalogues that are on, from the same snapshot.
+    let mut cards = sqlx::query_as::<_, CardRow>(CARDS)
+        .bind(catalogues)
+        .fetch(&mut *tx);
+    let mut batch = Vec::with_capacity(ADD_BATCH);
+    let add_cards = |batch: Vec<CardRow>| {
+        let writer = writer.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            for card in &batch {
+                if let Some(doc) = card_document(&fields, card) {
+                    writer.add_document(doc)?;
+                }
+            }
+            Ok(())
+        })
+    };
+    while let Some(card) = cards.try_next().await? {
+        batch.push(card);
+        written += 1;
+        if batch.len() == ADD_BATCH {
+            add_cards(std::mem::take(&mut batch)).await??;
+        }
+        if written.is_multiple_of(PROGRESS_EVERY) {
+            progress(written);
+        }
+    }
+    add_cards(batch).await??;
+    drop(cards);
     tx.commit().await?;
     let mut writer = Arc::try_unwrap(writer).map_err(|_| anyhow::anyhow!("writer still shared"))?;
+    let recorded = markers.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        commit(&mut writer, boundary)?;
+        commit(&mut writer, boundary, &recorded)?;
         writer.wait_merging_threads()?;
         Ok(())
     })
     .await??;
-    Ok((boundary, written))
+    Ok((boundary, written, markers))
+}
+/// For each catalogue given, the end of its last full import (empty when none has finished).
+async fn import_markers(
+    db: impl sqlx::PgExecutor<'_>,
+    catalogues: &[String],
+) -> Result<BTreeMap<String, String>> {
+    let found: Vec<(String, String)> = sqlx::query_as(
+        "SELECT catalogue, coalesce(last_import_at::text,'') FROM catalogue_state WHERE catalogue=ANY($1)",
+    )
+    .bind(catalogues)
+    .fetch_all(db)
+    .await?;
+    let mut markers: BTreeMap<String, String> = catalogues
+        .iter()
+        .map(|c| (c.clone(), String::new()))
+        .collect();
+    markers.extend(found);
+    Ok(markers)
 }
 /// `pinakesd reindex`: build the index in `dir` from the database into a new generation and
 /// switch to it; `progress` hears the units written so far. Returns the units written.
-pub async fn reindex(pool: &PgPool, dir: &Path, progress: impl FnMut(u64) + Send) -> Result<u64> {
-    let (_, _, units) = build_generation(pool, dir, progress).await?;
+pub async fn reindex(
+    pool: &PgPool,
+    dir: &Path,
+    catalogues: &[String],
+    progress: impl FnMut(u64) + Send,
+) -> Result<u64> {
+    let (_, _, units, _) = build_generation(pool, dir, catalogues, progress).await?;
     Ok(units)
 }
 
@@ -1165,6 +1526,9 @@ pub struct TextQuery {
     pub referenced_since: Option<DateTime<Utc>>,
     /// Referenced units only.
     pub referenced: bool,
+    /// The catalogues whose cards may be listed (switched on, and the search lets catalogue
+    /// cards in); empty: referenced units only.
+    pub catalogues: Vec<String>,
     /// Leave out job postings that ended by this instant (whole seconds before it, so the index
     /// never leaves out one Postgres keeps).
     pub open_jobs_at: Option<DateTime<Utc>>,
@@ -1187,6 +1551,8 @@ pub struct Candidate {
     /// Found by its words (as the index reads them); `false`: proposed by the text inside its
     /// name or its name's pieces, for Postgres to check as it matches text.
     pub words: bool,
+    /// A catalogue card's ID (`catalogue_card.id`); `None` for a referenced unit.
+    pub card: Option<i64>,
 }
 
 /// One item of the text: words to find (one word, or several as a phrase), with its sign.
@@ -1267,11 +1633,16 @@ impl Open {
                             .and_then(|v| v.as_str().map(str::to_owned))
                             .context("stored ID")
                     };
+                    let resource_id = text(self.fields.resource_id)?;
+                    let card = resource_id
+                        .strip_prefix("catalogue:")
+                        .and_then(|id| id.parse().ok());
                     Ok(Candidate {
                         unit_id: text(self.fields.unit_id)?,
-                        resource_id: text(self.fields.resource_id)?,
+                        resource_id,
                         relevance,
                         words,
+                        card,
                     })
                 })
                 .collect()
@@ -1305,6 +1676,7 @@ fn ranked(
         let fast = segment.fast_fields();
         let f64s = |name: &str| fast.f64(name).ok();
         let i64s = |name: &str| fast.i64(name).ok();
+        let referenced = fast.u64("referenced").ok();
         let (fame, activity, activity_at, newest, start, lat, lon) = (
             f64s("fame"),
             f64s("activity"),
@@ -1326,7 +1698,12 @@ fn ranked(
             };
             let key = match order {
                 TextOrder::Relevance => relevance + ACTIVITY_WEIGHT * active(),
-                TextOrder::Activity => active(),
+                // A catalogue card nobody referenced: after every referenced unit, the best known
+                // first, as without text.
+                TextOrder::Activity => match referenced.as_ref().and_then(|c| c.first(doc)) {
+                    Some(0) => f(&fame).unwrap_or(0.0) - 1.0,
+                    _ => active(),
+                },
                 TextOrder::Recent => i(&newest).unwrap_or(0) as f64,
                 TextOrder::Start => -(i(&start).unwrap_or(i64::MAX) as f64),
                 TextOrder::Distance(lat0, lon0) => match (f(&lat), f(&lon)) {
@@ -1391,11 +1768,18 @@ impl Open {
                 IndexRecordOption::Basic,
             ))
         };
-        if q.referenced {
-            out.push(must(Box::new(TermQuery::new(
-                Term::from_field_u64(f.referenced, 1),
-                IndexRecordOption::Basic,
-            ))));
+        // Referenced units, and the cards of the catalogues the search may list.
+        let referenced: Box<dyn Query> = Box::new(TermQuery::new(
+            Term::from_field_u64(f.referenced, 1),
+            IndexRecordOption::Basic,
+        ));
+        if q.referenced || q.catalogues.is_empty() {
+            out.push(must(referenced));
+        } else {
+            out.push(must(Box::new(BooleanQuery::new(vec![
+                (Occur::Should, referenced),
+                (Occur::Should, set(f.catalogue, &q.catalogues)),
+            ]))));
         }
         if !q.types.is_empty() {
             out.push(must(set(f.type_path, &q.types)));

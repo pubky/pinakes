@@ -1325,6 +1325,39 @@ CREATE TABLE catalogue_state (
 );
 
 
+-- The catalogue cards an update run changed or removed, for the text index (`search_index`). A
+-- full import queues nothing: the index reads the catalogue's cards again once the import has
+-- finished (`catalogue_state.last_import_at`), so a first import of millions of cards never
+-- passes through this table.
+CREATE TABLE search_index_catalogue_queue (
+    seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    card_id bigint NOT NULL
+);
+
+-- The changed cards of a statement, when their catalogue's run is an update.
+CREATE FUNCTION queue_search_index_catalogue() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO search_index_catalogue_queue(card_id)
+            SELECT n.id FROM changed_new n JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run = 'update';
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO search_index_catalogue_queue(card_id)
+            SELECT n.id FROM changed_new n JOIN changed_old o ON o.id = n.id JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run = 'update'
+            WHERE n.content_hash IS DISTINCT FROM o.content_hash OR n.catalogue IS DISTINCT FROM o.catalogue;
+    ELSE
+        INSERT INTO search_index_catalogue_queue(card_id)
+            SELECT o.id FROM changed_old o JOIN catalogue_state s ON s.catalogue = o.catalogue AND s.run = 'update';
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE TRIGGER catalogue_card_search_index_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
+CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card REFERENCING OLD TABLE AS changed_old NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
+CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
+-- Search pages without text read the cards: their ETag moves with them.
+CREATE TRIGGER catalogue_card_revision BEFORE INSERT OR DELETE OR UPDATE OF catalogue, uri, type, name, other_names, description, labels, point, fame OR TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
+
 -- ── Rows the code updates in place ───────────────────────────────────────────────────────────
 
 -- The search revision starts at 1.

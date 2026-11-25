@@ -291,6 +291,7 @@ async fn start(
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let mut state = AppState::new(api_pool, config.clone())?;
     let search_index = pinakes_core::search_index::SearchIndex::on_disk(&config.search.index_dir);
+    search_index.set_catalogues(&config.catalogues.enabled_names());
     state.search_index = search_index.clone();
     // Both listeners are bound before any task or worker starts: from here on nothing waits,
     // so a signal during startup never cuts off a worker that has claimed a job.
@@ -576,7 +577,16 @@ async fn reindex(config: Option<PathBuf>) -> Result<()> {
     let dir = PathBuf::from(&config.search.index_dir);
     println!("building the text index in {}", dir.display());
     let started = std::time::Instant::now();
-    let units = pinakes_core::search_index::reindex(&pool, &dir, |n| println!("{n} units")).await?;
+    let catalogues: Vec<String> = config
+        .catalogues
+        .enabled_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let units = pinakes_core::search_index::reindex(&pool, &dir, &catalogues, |n| {
+        println!("{n} units and cards")
+    })
+    .await?;
     println!(
         "text index built: {units} units in {} s",
         started.elapsed().as_secs()
