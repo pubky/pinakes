@@ -50,11 +50,14 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
   `embed` is the frame that shows the link as its own site does (a player, a post, a map): load
   its `src` in a sandboxed iframe sized by `height` or `aspect`; `null` when there is none. Each
   `also_on` link carries its own.
-- **Only referenced links.** Search lists links someone tagged, replied to or embedded on Pubky.
+- **Only referenced links.** Search lists links someone tagged, replied to, embedded or added to a
+  collection on Pubky.
   Pinakes holds no posts, users or tags of its own: those are Nexus's (below).
 - **Groups.** Links that are the same thing on several services (a song on Spotify and on
-  Apple Music, a book's editions, an event on two platforms) form a group: `group.id` on each
-  card, `also_on` lists the others. Every link keeps its own card.
+  Apple Music, a DOI and its landing page, an event page and the same date in its organiser's
+  calendar) form a group: `group.id` on each card, `also_on` lists the others. Every link keeps
+  its own card. Only exact identifiers join a group; a match by title or time is a hint
+  (`kind: "maybe"` in `also_on`, or `maybe_same` on events and recordings).
 - **Podcasts.** A show's card (`PodcastSeries`) carries `episodes`: its latest 5 episodes with
   public audio or video, newest first, each with `uri`, `name`, `published` and a `stream` (`url`, `type`,
   `duration_s`) to play. `GET {{BASE}}/v1/resources/{id}/episodes` pages through its latest 1000,
@@ -62,7 +65,8 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
 - **Places and events.** `point` places a card on the map; events have `start`, `end` and, for
   calendars, one card per occurrence.
 - **Identifiers.** Books, papers, music, films, podcasts and OSM objects carry exact keys:
-  `isbn:`, `doi:`, `isrc:`, `upc:`, `mbid:`, `wikidata:`, `imdb:`, `podcast:`, `osm:`.
+  `isbn:`, `doi:`, `isrc:`, `upc:`, `mb:recording:` (and the other `mb:` kinds), `wikidata:`,
+  `imdb:`, `podcast:`, `osm:`. Search's `key=` also takes `mbid:{uuid}` for any MusicBrainz kind.
 - **Other Pubky apps.** `pubky://` objects of other apps, such as a Loopky deck or a marketplace
   listing, are cards too, with `open_in` naming the clients that open them.
 
@@ -247,9 +251,9 @@ Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
 ## Limits
 
 - **Per-IP budget**: 120 requests a minute over every public route by default
-  (`limits.requests_per_minute` in `GET {{BASE}}/v1/info`). A `reach` search costs 6, a `related`
-  search 6. Over budget is a 429 with `Retry-After: 60`. An MCP message costs one, and a tool
-  call costs what its REST call costs on top.
+  (`limits.requests_per_minute` in `GET {{BASE}}/v1/info`). A `reach` or `boost` search costs 6, a
+  `related` search 6. Over budget is a 429 with `Retry-After: 60`. An MCP message costs one, and a tool
+  call costs what its REST call costs on top; the `social` tool costs one per 100 URIs it asks.
 - **Pages**: `limit` 1–500, default 50. Follow `cursor`; a full page does not mean there is no
   more.
 - **Inputs**: a URI at most 2048 bytes, `q` at most 256 bytes, at most 5 tags, bodies at most
@@ -273,6 +277,8 @@ Errors are `{"error": "…"}` with the status:
 | 413 | Body over 2 MB | Send less |
 | 429 | Over the per-IP budget | Wait the `Retry-After` seconds. Ask fewer, larger questions: one search with `facet`, or `POST /v1/resources/lookup` for up to 500 links at once |
 | 502 | Nexus did not answer a `reach` search in time | Retry once, or drop `reach` |
+| 503 | The instance has read all the new links it takes this hour (`POST /v1/resolve`) | Wait the `Retry-After` seconds; links it knows still read |
+| 504 | The request took longer than the instance's timeout (30 s by default) | Retry once with a narrower question |
 | 500 | Internal | Retry once |
 
 `GET {{BASE}}/v1/openapi.json` describes every route and parameter.

@@ -1,37 +1,71 @@
 # Castro
 
-Episodes on Castro. Castro has no public API, so this source is a page hook: the web route
-reads the page as usual, and the page's own metadata names the card (its `og:title`, "Darknet
-Diaries: Conti (59m)", its description and cover). The hook adds what makes it the episode: the
-file it plays and its show. No key, no account.
+Pinakes improves the cards of episode pages on Castro. Castro has no public API, so this source is a
+page hook: it claims no links, the web route reads the page as usual, and the hook adds the file the
+episode plays and its show's Apple ID from that page. No key is needed.
 
-## Pages
+| | |
+| --- | --- |
+| Source | `castro`, official source, page hook |
+| Links | `castro.fm/episode/{id}`, read by the web route |
+| Fetches | Nothing beyond the page the web route fetches |
+| Credentials | None |
+| Rate | Shared per-host default, 1 request per second (`limits.host_requests_per_second`) |
+| Refresh | With the page ([refresh](../design.md#refresh)) |
+| Card types | `PodcastEpisode` |
+| Keys | None (facts only); the also-on source `podcasts` keys its cards |
+| Credit | None |
+| Switch | `[sources.castro] enabled`, on by default |
 
-`https://castro.fm/episode/{id}`. The page names:
-- the file its player plays: the one `<source>` of `<audio id="co-supertop-castro-episode">`,
-  the show's own enclosure;
-- the show's Apple Podcasts ID: the one ID its links name. Every link of the page is looked at
-  (any `href`, the "Listen on" links among them): Apple Podcasts' `…/id{n}`,
-  `pca.st/itunes/{n}`, `castro.fm/itunes/{n}`.
+## Links
 
-A page with no player, more than one file, or a file that is no public link (signed, expiring)
-keeps its page card. A page naming two Apple IDs names none. Nothing behind a login is read.
+The hook runs on `https://castro.fm/episode/{id}`, with or without `www.` and with any parameters,
+and on a link that redirects to one. An ID is letters and digits.
 
-## What it reads
+Not read here: show pages (`castro.fm/podcast/{id}`) and Apple ID links (`castro.fm/itunes/{id}`).
+The also-on source `podcasts` looks up the Apple ID links.
 
-Nothing beyond the page the web route fetched.
+## What it fetches
+
+Nothing of its own. From the page's HTML the hook reads:
+
+- **The file**: the one `<source>` of `<audio id="co-supertop-castro-episode">`, which is the show's
+  own enclosure.
+- **The show's Apple Podcasts ID**: the one ID the page's links name, among every `href` of the form
+  Apple Podcasts' `…/id{n}`, `pca.st/itunes/{n}` or `castro.fm/itunes/{n}`. A page that names two
+  IDs names none.
+
+A page without a player, with more than one file, or whose file is no public link (a signed or
+expiring one) keeps its page card.
 
 ## Card
 
-The page's card, typed `PodcastEpisode`, with the file as its [`stream`](../api.md#stream) and
-the show's Apple ID as `podcast_apple`. The also-on `podcasts` source then finds
-the episode on Apple Podcasts. It takes the one episode among the show's latest that iTunes
-lists with that very file, and from there the episode's keys. Castro's word alone is no key: a
-page joins by what Apple confirms. `details.from` is `castro`.
+The card is the page's, from its own metadata (`og:title`, description and cover), with these
+changes:
+
+- the type is `PodcastEpisode`;
+- the file is the [stream](../api.md#stream);
+- `from` is `castro`.
 
 | Fact | Meaning |
 | --- | --- |
 | `podcast_apple` | The show's Apple Podcasts ID |
+
+## Keys and groups
+
+The page records no key: Castro's word alone joins nothing. The also-on source `podcasts`
+takes the one episode among the show's latest 200 that iTunes lists with this very file, and gives
+the page that episode's keys.
+
+## Turn it off
+
+```toml
+[sources.castro]
+enabled = false
+```
+
+Castro episode pages then keep the card their own metadata makes. The link alone still types it
+`PodcastEpisode`, but it has no stream and no keys.
 
 ## Examples
 

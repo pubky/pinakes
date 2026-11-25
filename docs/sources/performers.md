@@ -1,41 +1,108 @@
 # `performers`: an event's performers, keyed to the artist on the page's own service
 
-One of the music sources of [also on](../api.md#also-on): links on music services are looked up exactly, never by title or name.
+This source runs on event pages that name their performers in their structured data. It records
+each performer's name, and the performer's MusicBrainz artist as a key only when the event page
+belongs to the service of the artist link it gives. A name alone never becomes a key, and nothing
+is searched by name.
 
-`performers`: an event page (`MusicEvent`, or any event) that names its performers
-in its own structured data (schema.org `performer`) has each performer's name as the fact
-`performer`. The artist's identity is the key `mb:artist:…` only where the page speaks for the
-service of a link it gives for the performer (`url`, `sameAs`): a Songkick concert naming a
-Songkick artist page, a Bandsintown event naming a Bandsintown artist page, a music service's own
-event page naming that service's artist page, when MusicBrainz relates the link (in the spelling
-MusicBrainz stores: Songkick and Bandsintown artists by number) to exactly one artist; that MBID is
-also the fact `performer_mbid`. The page is the one the fetch ended on, after redirects (a Songkick
-address that redirects off Songkick is the other site's page); a stored card that does not record
-it keys nothing until its page is read again. Any other page chose the identity it names, so it is
-a fact at most: the artist MusicBrainz relates one of its links to, else a MusicBrainz artist page
-it names, is the fact `performer_mbid`, never a key. A performer without either keeps its first
-link as the fact `performer_link`. A name alone is never a key, and nothing is searched by name; a
-performer the page does not key is facts only (a read's `facts`), not found by `key=`.
-Text search (`q=`) matches an event's name and description, not its performers: an act the page
-names only in `performer` (a festival's support act) is not found by it.
-Performers are read from the page's own event node only: one whose `url` (else its `@id`) names
-the page, tracking parameters and fragments aside, or one naming no page in a head script or as
-the main entity of the page's own node; never from another event the page describes, and never
-because a sibling node names the page (a body script's event naming no page gives none). Among
-events the page's own is read first. A page keeps up to 16 performers with 8 links each, within
-2 KB. Events [group](../api.md#groups) only with events, so the key never joins a concert to the
-artist's pages; it makes the concert the artist's event:
-`GET /v1/search?key=mbid:{artist}&type=MusicEvent&from=now&sort=start` lists an artist's upcoming
-concerts, soonest first.
+| | |
+| --- | --- |
+| Source | `performers`, also-on source |
+| Runs on | Event cards (`MusicEvent` or any other `Event`) whose page names performers (schema.org `performer`) |
+| Asks | MusicBrainz `ws/2`: a URL lookup for all the page's performer links (`GET /url?resource=…&resource=…`), usually one request |
+| Credentials | None |
+| Rate | 1 request per second on `musicbrainz.org`, shared with every other MusicBrainz read |
+| Rows live | 30 days; rows expire after 60 |
+| Keys | `mb:artist:…` |
+| Links | None |
+| Facts | `performer`, `performer_mbid`, `performer_link` |
+| Switch | `[also_on.sources.performers] enabled`, on by default |
 
-## Operations
+## What it does
 
-Each event page naming performers (up to 16, with 8 links each, within 2 KB of the document)
-costs one MusicBrainz URL request for all its performers' readable links together and no other
-(an artist's page on a music service, Songkick or Bandsintown; at most two per performer; a link
-the answer leaves out is unknown until the next run, and a busy or failed request fails the run of
-a page on a performer link's service, which retries, while another page records what it says
-without MusicBrainz and asks again after MusicBrainz's retry time; answers are cached an hour, so
-an artist's many concerts naming only that artist, by one link, ask once), and none for a
-performer the page names by a MusicBrainz artist page alone. `[also_on.sources.musicbrainz]
-base_url` points its reads at a MusicBrainz mirror, as for the other MusicBrainz sources.
+### Which performers it reads
+
+The page's card holds the performers its own event names in its structured data: the `performer`
+values of that event, each with a name and the links the page gives for it (`url`, `sameAs`).
+Another event the page describes beside its own (a venue's next show) gives none. A card keeps up
+to 16 performers with up to 8 links each, within 2 KB.
+
+For each performer (at most 16), the source keeps at most two links that MusicBrainz can relate
+to an artist:
+
+- an artist page on a music service (Spotify, Apple Music, Deezer, TIDAL, …);
+- a Songkick artist page (`songkick.com/artists/{number}-…`), asked as
+  `https://www.songkick.com/artists/{number}`, the form MusicBrainz stores;
+- a Bandsintown artist page (`bandsintown.com/a/{number}-…`), asked as
+  `https://www.bandsintown.com/a/{number}`.
+
+A MusicBrainz artist page the page names for the performer is kept separately, as the page's own
+claim.
+
+### Key or fact
+
+The source asks MusicBrainz about every kept link of every performer together, usually in one
+request ([Cost](#cost)). A link MusicBrainz relates to exactly one artist names that artist. Then, for each performer:
+
+1. When the event page is on the same service (host) as a link that names an artist, that
+   artist's MBID becomes the key `mb:artist:{mbid}` and the fact `performer_mbid`. For example, a
+   Songkick concert page naming a Songkick artist page, a Bandsintown event naming a Bandsintown
+   artist page, or a music service's own event page naming that service's artist page.
+2. Otherwise, the artist MusicBrainz relates another link to, else the MusicBrainz artist page
+   the page names, is the fact `performer_mbid` only. Any page can name any artist, so this
+   identity is the page's choice, not the service's.
+3. A performer with neither keeps the first of its kept links as the fact `performer_link`.
+
+The event page's service is the host its fetch ended on, after redirects: a Songkick address that
+redirects off Songkick counts as the other site's page. A stored card that doesn't record where
+its performers were read gives no key until its page is read again.
+
+## Keys, links and facts
+
+| Fact | Meaning |
+| --- | --- |
+| `performer` | A performer's name, as the page gives it |
+| `performer_mbid` | The performer's MusicBrainz artist ID, keyed or not |
+| `performer_link` | The first of the performer's kept links, when no artist is known |
+
+Events [group](../api.md#groups) only with events, so the `mb:artist:…` key never joins a concert
+to the artist's own pages. It makes the concert one of the artist's events. To list an artist's
+upcoming concerts, soonest first:
+
+```
+GET /v1/search?key=mbid:{artist}&type=MusicEvent&from=now&sort=start
+```
+
+A performer the source doesn't key is in the card's facts only and isn't found by `key=`. Text
+search (`q=`) matches an event's name and description, not its performers: an act named only in
+`performer` (a festival's support act) isn't found by it.
+
+## Cost
+
+Each event page usually costs one MusicBrainz request, for all its performers' links together. A
+request carries at most 50 URLs, and an Apple Music artist link is asked under 20 storefront
+spellings, so it counts as 20 of them. A page with three or more Apple Music artist links therefore
+takes two or more requests. A performer named only by a MusicBrainz artist page costs nothing. Answers are cached for
+`limits.discovery_cache_secs` (an hour by default), so an artist's many concerts that name the
+artist by one link ask once.
+
+A link the answer leaves out is unknown until the next run. When the request fails (a busy
+MusicBrainz, or an answer larger than `limits.hub_body_bytes`):
+
+- A page on the service of one of its performer links fails its run. It keeps its earlier rows
+  and retries later.
+- Any other page records what it says without MusicBrainz (names, claimed MBIDs, links), and asks MusicBrainz again
+  after MusicBrainz's retry time.
+
+`[also_on.sources.musicbrainz] base_url` points these reads at a MusicBrainz mirror, as for the
+other MusicBrainz sources.
+
+## Turn it off
+
+```toml
+[also_on.sources.performers]
+enabled = false
+```
+
+Its stored keys and facts stop showing at once, so `key=mbid:{artist}&type=MusicEvent` doesn't
+list the events it keyed. The events' own cards, with their performers, stay as they are.

@@ -1,54 +1,124 @@
 # Instagram
 
-Instagram posts, reels and profiles, from their pages' Open Graph tags when Instagram writes
-them for a request without an account. No key and no account; Instagram's oEmbed endpoint needs
-an app token and is not used. Instagram shows almost everything to accounts only: such a link
-gets a plain card rather than a failure (below). Posts and reels are social content: the card
-quotes at most 200 characters and refreshes within the hour. A profile is social content too: it
-refreshes within the hour, is removed once it is gone, and its bio is published without e-mail
-addresses.
+Pinakes reads Instagram posts, reels and profiles from their pages' Open Graph tags, when Instagram
+writes them for a request without an account. No key or account is needed: Instagram's oEmbed
+endpoint needs an app token and is not used. Instagram refuses many requests, and such a link gets
+a plain card. Posts, reels and profiles are social content.
+
+| | |
+| --- | --- |
+| Source | `instagram`, official source |
+| Links | `instagram.com/{name}/`, `instagram.com/p/{code}/`, `instagram.com/reel/{code}/`, `instagram.com/tv/{code}/`; the same on `instagr.am` |
+| Fetches | `GET` of the root: `https://www.instagram.com/{name}/`, `/p/{code}/` or `/reel/{code}/` |
+| Credentials | None |
+| Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.instagram.com` |
+| Refresh | Within the hour (social content) |
+| Card types | `SocialMediaPosting` (post), `VideoObject` (reel), `Person` (profile) |
+| Keys | None (facts only) |
+| Social content | Yes: 200-character excerpt, purged when Instagram answers 404 or 410 ([social content](../design.md#social-content)) |
+| Credit | None |
+| Switch | `[sources.instagram] enabled`, on by default |
 
 ## Links
 
-A profile is named by its name, a post or reel by its code: `https://www.instagram.com/{name}/`,
-`https://www.instagram.com/p/{code}/` and `https://www.instagram.com/reel/{code}/` are the
-roots. The host without `www.`, instagr.am, a capitalised name, a missing trailing slash,
-`/tv/{code}/` and a post or reel address with its author's name first (`/{name}/p/{code}/`,
-`/{name}/reel/{code}/`) are aliases of them. Stories, tags and explore pages are not read.
+The roots are:
 
-## What it reads
+- a post: `https://www.instagram.com/p/{code}/`;
+- a reel: `https://www.instagram.com/reel/{code}/`;
+- a profile: `https://www.instagram.com/{name}/`.
 
-- A profile: `GET https://www.instagram.com/{name}/`. Instagram redirects a request without an
-  account to its sign-in page: the card is the plain one, "Profile on instagram.com", with the
-  name and the `blocked` fact. When Instagram writes the page's tags
-  (`Name (@name) • Instagram photos and videos`), the card has the name, bio and picture.
-- A post or reel: `GET` of its root. A public post's page carries its tags
-  (`Name on Instagram: "caption"`, the image, and its own address in `og:url`): the card has the
-  caption, author and image, taken only when that address has the link's code. A removed or
-  private post, and a reel that does not exist, answer 200 with a page without these tags: the
-  card is the plain one, "Post on instagram.com" or "Video on instagram.com". On a card read
-  before, such a page counts as a missing observation: the card stays until a confirming read
-  finds the same, then it becomes the plain one.
+These links are [aliases](../api.md#aliases) of the root:
 
-A request Instagram refuses (the sign-in redirect, a challenge, 401 or 403) gives the card of
-the link's shape alone with the `blocked` fact: the link still resolves, groups and counts. So
-does a page Instagram withholds where the request came from (451): it is not `missing`. A
-refusal on a refresh keeps the card read before, as a wall on a web page does.
+- the same addresses on `instagram.com`, `instagr.am` and `www.instagr.am`, or with `http`;
+- `/tv/{code}/`, an alias of the reel;
+- a post or reel address with its author's name first: `/{name}/p/{code}/`, `/{name}/reel/{code}/`;
+- a name with capitals (roots are lower case), an address without the trailing slash, or one with
+  query parameters.
+
+A name is at most 30 letters, digits, `_`, `.` and `-`. A code is 6 to 40 letters, digits, `_` and
+`-`.
+
+Instagram serves a reel under both `/p/{code}/` and `/reel/{code}/`, with the same code. The link
+alone cannot say whether a `/p/` code is a reel, so this source keeps the two apart: one reel linked
+both ways is two cards.
+
+Not read here: stories, `/explore/` pages, sign-in pages, a profile's sub-pages (such as
+`/{name}/reels/`) and Instagram's other own pages.
+
+## What it fetches
+
+One request per read, for the root's page. A 404 or 410 is `missing`. Any status that is neither
+listed here nor a refusal is an error, and the read is retried. A 429 waits at least the time its
+`Retry-After` header names (up to an hour), or 5 minutes when it names none. A 408 or a server
+error waits at least a minute.
+
+Instagram answers a removed or private post, and a reel that does not exist, with status 200 and a
+page without the object's tags. That answer gives the plain card (below), not `missing`.
+
+### Refused requests
+
+Instagram refuses a request with a sign-in redirect, a challenge page, or a 401, 403 or 451. A
+profile's page usually answers with the sign-in redirect.
+
+A link never read before then gets the card of its shape alone ("Post on instagram.com", "Video on
+instagram.com" or "Profile on instagram.com"), with the description "Blocked by the site." and the
+`blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the card
+read before, and the link is asked again in an hour.
 
 ## Card
 
-A profile is a `Person`, a post a `SocialMediaPosting`, a reel a `VideoObject`.
+### Posts and reels
 
-Instagram serves a reel under both forms (`/p/{code}/` and `/reel/{code}/`, one code), but this
-source keeps them apart: `/p/` names a post and `/reel/` a reel, and the link alone cannot say
-whether a `/p/` code is a reel. One reel linked both ways is therefore two cards, never one card
-for two different things.
+A post is a `SocialMediaPosting`, a reel a `VideoObject`. The page's title gives both the author
+and the caption (`Name on Instagram: "caption"`).
+
+- `name` is the first 120 characters of the caption on one line, or "Post by {author}" without a
+  caption.
+- `description` is the first 200 characters of the caption, with its line breaks; without a
+  caption, of the page's description.
+- `image` is the page's image.
+
+The card takes these only from the object's own page: the address the page gives itself (`og:url`,
+else the address the fetch ended at) must hold the link's code.
+
+Any other page, or one without these tags, gives the plain card: "Post on instagram.com" or "Video
+on instagram.com". A stored card that says more stays until a second read, an hour later by default
+(`limits.missing_ttl_secs`, at least an hour), answers the same; then the plain card replaces it.
+The change history stays, because the object is not known to be gone.
+
+### Profiles
+
+A profile is a `Person` named by its display name. `description` is at most 200 characters of the
+page's description after its counts, without e-mail addresses. `image` is the picture.
+
+The page's title must name the link's name (`Name (@name) • Instagram photos and videos`).
+Otherwise the card is the plain one, "Profile on instagram.com" with the `handle` fact, and it
+replaces a stored card at once.
+
+### Facts
 
 | Fact | Meaning |
 | --- | --- |
-| `author_name` | A post's or reel's author, as its page names them |
-| `handle` | A profile's name |
+| `author_name` | For a post or reel: the author, as the page's title names them |
+| `handle` | For a profile: its name, in lower case |
 | `blocked` | `true` when Instagram refused the request |
+
+## Keys and groups
+
+Instagram cards have no keys. Names and codes join nothing.
+
+## Credit
+
+The card credits nothing. A post's or reel's author is in `author_name`.
+
+## Turn it off
+
+```toml
+[sources.instagram]
+enabled = false
+```
+
+Instagram links then get ordinary web cards.
 
 ## Examples
 

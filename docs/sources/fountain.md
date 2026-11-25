@@ -1,41 +1,76 @@
 # Fountain
 
-Shows and episodes on Fountain. Fountain has no public API, so this source is a page hook: the
-web route reads the page as usual, and the page's own metadata names the card (its title less
-" • Listen on Fountain", its description and cover; Fountain's site-wide Organization JSON-LD never
-does). The hook adds what makes it the show's or episode's feed card. No key, no account.
+Pinakes improves the cards of show and episode pages on Fountain. Fountain has no public API, so
+this source is a page hook: it claims no links, the web route reads the page as usual, and the hook
+adds the show's feed and the episode's item GUID from that page. No key is needed.
 
-## Pages
+| | |
+| --- | --- |
+| Source | `fountain`, official source, page hook |
+| Links | `fountain.fm/show/{id}`, `fountain.fm/episode/{id}`, read by the web route |
+| Fetches | Nothing beyond the page the web route fetches |
+| Credentials | None |
+| Rate | Shared per-host default, 1 request per second (`limits.host_requests_per_second`) |
+| Refresh | With the page ([refresh](../design.md#refresh)) |
+| Card types | `PodcastSeries`, `PodcastEpisode` |
+| Keys | None (facts only); the also-on source `podcasts` keys its cards |
+| Credit | None |
+| Switch | `[sources.fountain] enabled`, on by default |
 
-`https://fountain.fm/show/{id}` and `https://fountain.fm/episode/{id}`. The app data a page
-embeds in its scripts names:
-- the show's RSS feed (`rss`), taken only when the data names exactly one;
-- for an episode, the item GUID of the record whose `_id` is the page's own and whose `_type`
-  is `EPISODE` (the show's own record, also on the page, is not the item).
+## Links
 
-A page whose data names no feed, or an episode page without its own record, keeps its page card.
-Nothing behind a login is read.
+The hook runs on `https://fountain.fm/show/{id}` and `https://fountain.fm/episode/{id}`, with or
+without `www.` and with any parameters, and on a link that redirects to one. An ID is letters and
+digits. Pages under a show and profile pages (`/p/{npub}`) are not read here.
 
-## What it reads
+## What it fetches
 
-Nothing beyond the page the web route fetched.
+Nothing of its own. From the app data that the page embeds in its scripts the hook reads:
+
+- **The show's RSS feed** (`rss`), only when the data names exactly one.
+- **An episode's item GUID**, from the record whose `_id` is the page's own and whose `_type` is
+  `EPISODE`. The show's own record, which is also on the page, is not the item.
+
+A page whose data names no feed, and an episode page without its own record, keep their page card.
 
 ## Card
 
-The page's card, typed `PodcastSeries` (a show) or `PodcastEpisode` (an episode), with its feed
-as `podcast_feed` and an episode's item GUID as `podcast_guid`: the facts a podcast feed's own
-card carries. The podcasts also-on source then reads the feed (and the item), and finds the show
-or episode on Apple Podcasts, Podcast Index and the services Wikidata names. The page is no
-service's own record of the show: a show's page is keyed with the show's keys only when the feed
-names it as the show's page (the channel's `<link>`), and an episode's page only when the item's
-`<link>` names it; otherwise the page lists those links without joining them. An episode's card
-names its show in `related` (`rel: "show"`, the feed, unless its address carries a credential).
-`details.from` is `fountain`.
+The card is the page's, from its own metadata, with these changes:
+
+- the type is `PodcastSeries` for a show and `PodcastEpisode` for an episode;
+- an episode names its show in `related` (`rel: "show"`, the feed), unless the feed's address
+  carries a credential;
+- `from` is `fountain`.
 
 | Fact | Meaning |
 | --- | --- |
 | `podcast_feed` | The show's RSS feed |
 | `podcast_guid` | An episode's item GUID in that feed |
+
+A podcast feed's own card carries the same two facts.
+
+## Keys and groups
+
+The page records no key, because it is no service's own record of the show. The also-on source
+`podcasts` reads the feed and the item, finds the show or episode on Apple Podcasts,
+Podcast Index and the services Wikidata names, and gives an episode without a stream the item's
+[stream](../api.md#stream). It gives the page keys as follows:
+
+- A show's page takes the show's keys only when the feed names it as the show's page (the channel's
+  `<link>`). Otherwise the page lists the show's links without joining them.
+- An episode's page takes the item key only when the item's `<link>` names it. It takes the
+  Apple track and file that iTunes lists for the item's GUID in either case, once iTunes confirms
+  the Apple ID Podcast Index names for the feed.
+
+## Turn it off
+
+```toml
+[sources.fountain]
+enabled = false
+```
+
+Fountain pages then keep the card their own metadata makes. The link alone still types them
+`PodcastSeries` or `PodcastEpisode`, but they name no feed, so `podcasts` does not find them.
 
 ## Examples
 

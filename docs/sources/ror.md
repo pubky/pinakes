@@ -1,53 +1,107 @@
 # ROR
 
-Research organizations from the Research Organization Registry, read from its v2 API by ROR id.
-CC0; no key; one request per second. Cards carry the attribution "Research Organization Registry
-(CC0)".
+Pinakes reads research organizations in the Research Organization Registry from its v2 API, by ROR
+ID. No key is needed.
+
+| | |
+| --- | --- |
+| Source | `ror`, official source |
+| Links | `ror.org/{id}`, `api.ror.org/v2/organizations/{id}` and the older API paths; root `ror:{id}` |
+| Fetches | `GET https://api.ror.org/v2/organizations/{id}` |
+| Credentials | None |
+| Rate | 1 request per second on `api.ror.org` |
+| Refresh | Daily, as every official card ([refresh](../design.md#refresh)) |
+| Card types | `EducationalOrganization`, `MedicalOrganization`, `GovernmentOrganization`, `Corporation`, `NGO`, `ArchiveOrganization`, `ResearchOrganization`, `Organization` |
+| Keys | `wikidata:Q…`, the Wikidata item ROR names for the organization |
+| Credit | "Research Organization Registry (CC0)", in `attribution` |
+| Switch | `[sources.ror] enabled`, on by default |
 
 ## Links
 
-A ROR id is `0`, six Crockford base32 characters and two check digits (ISO 7064 mod 97-10 over
-the base32 value), e.g. `03yrm5c26`; it is read in any case and kept in lower case. An id with a
-wrong check is not a ROR link. `ror:{id}` and every address of an organization are one resource:
+A ROR ID is `0`, six Crockford base32 characters and two check digits (ISO 7064 mod 97-10 over the
+base32 value), such as `03yrm5c26`. A link's ID is read in any letter case and kept in lower case.
+An ID with a wrong check is not a ROR link.
 
-- `https://ror.org/{id}` (`http`, with or without `www.`);
-- `https://api.ror.org/v2/organizations/{id}`, and the older `…/v1/organizations/{id}` and
-  `…/organizations/{id}`.
+Every address of one organization is one resource. The root is `ror:{id}`, and these links are
+[aliases](../api.md#aliases) of it:
 
-An id the API does not know (404) is `missing`.
+- `https://ror.org/{id}`, also over `http` and with `www.`;
+- `https://api.ror.org/v2/organizations/{id}`, and the older `https://api.ror.org/v1/organizations/{id}`
+  and `https://api.ror.org/organizations/{id}`.
 
-## What it reads
+A `ror:` root must hold a valid ID in lower case. Any other `ror:` root is `missing` at once and
+never fetched.
 
-`GET https://api.ror.org/v2/organizations/{id}`.
+Not read here: searches on ror.org or the API, and deeper paths such as `ror.org/{id}/x`.
+
+## What it fetches
+
+One request per read: `GET https://api.ror.org/v2/organizations/{id}`. An ID the API doesn't know
+(404) is `missing`. An answer for another organization is an error, and the read is retried.
 
 ## Card
 
-`name` is the organization's display name, `site` "ROR". The location is set when ROR gives
-exactly one location. The year an organization was established is a fact, not a start date.
+The type follows ROR's types:
 
-The type follows ROR's types: `education` → `EducationalOrganization`, `healthcare` →
-`MedicalOrganization`, `government` → `GovernmentOrganization`, `company` → `Corporation`,
-`nonprofit` → `NGO`, `archive` → `ArchiveOrganization`, `facility` → `ResearchOrganization`
-(`funder` and `other` say nothing about the kind). When the types map to exactly one of these, the
-card has it; otherwise it is `Organization`.
+| ROR type | Card type |
+| --- | --- |
+| `education` | `EducationalOrganization` |
+| `healthcare` | `MedicalOrganization` |
+| `government` | `GovernmentOrganization` |
+| `company` | `Corporation` |
+| `nonprofit` | `NGO` |
+| `archive` | `ArchiveOrganization` |
+| `facility` | `ResearchOrganization` |
+
+`funder` and `other` say nothing about the kind. When the organization's types map to exactly one
+of the card types above, the card has it; otherwise it is `Organization`. For example,
+`education; funder` is `EducationalOrganization`, and `education; healthcare` is `Organization`.
+
+- `site` is "ROR" and `name` the organization's display name. The card has no description and no
+  image.
+- The location, and the `city`, `country` and `country_code` facts, are set only when ROR gives
+  exactly one location.
+- The year the organization was established is a fact (`established`), not a `start`.
+- The `page_url` fact is `https://ror.org/{id}`. Because the root `ror:{id}` is not a web link, the
+  API also lists that page in `open_in`.
+- `attribution` is "Research Organization Registry (CC0)".
 
 | Fact | Meaning |
 | --- | --- |
 | `established` | The year it was established |
-| `types` | ROR's types, e.g. `education; funder` |
+| `types` | ROR's types, for example `education; funder` |
 | `status` | `active`, `inactive` or `withdrawn` |
-| `city`, `country`, `country_code` | Its one location (GeoNames) |
+| `city`, `country`, `country_code` | Its one location (from GeoNames) |
 | `website` | Its website |
-| `acronyms`, `other_names`, `labels` | Other names: acronyms, other names ROR lists (its aliases), names in other languages |
+| `acronyms` | Its acronyms |
+| `other_names` | The other names ROR lists for it (ROR calls them aliases) |
+| `labels` | Its names in other languages, without the display name |
 | `domains` | Its web domains |
-| `wikidata`, `isni`, `fundref`, `grid` | Its id in each registry, when ROR names one preferred id or only one (ISNI without spaces) |
+| `wikidata`, `isni`, `fundref`, `grid` | Its ID in each registry, when ROR names a preferred ID or only one ID of that registry (ISNI without spaces) |
 | `page_url` | `https://ror.org/{id}` |
 
-## Groups
+ROR's "aliases" are other names, published as `other_names`. They are not the card's
+[aliases](../api.md#aliases), which are other links to it.
 
-The organization's Wikidata id is also its key `wikidata:Q…` (the `own_ids` also-on source): the
-card joins the group of the Wikidata item's card. Its ISNI, Crossref Funder and GRID ids are
-facts only and join nothing.
+## Keys and groups
+
+The organization's Wikidata item is its key `wikidata:Q…` (the `own_ids` also-on
+source records it). The card then joins the [group](../api.md#groups) of the Wikidata item's card.
+Its ISNI, Crossref Funder and GRID IDs are facts only and join nothing.
+
+## Credit
+
+The `attribution` line credits the Research Organization Registry and states the data's licence,
+CC0.
+
+## Turn it off
+
+```toml
+[sources.ror]
+enabled = false
+```
+
+ROR links then get ordinary web cards, and `ror:` roots wait until the source is on again.
 
 ## Examples
 

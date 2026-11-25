@@ -1,130 +1,182 @@
 # API keys and credentials
 
-Pinakes needs a PostgreSQL connection, not a paid API bundle. Provider credentials are optional:
-missing credentials remove that provider's enrichment, not the rest of the index. A web fallback
-is best-effort; a provider's page may itself be walled. Source switches still apply when a key is set.
-See [deployment](deployment.md), [operations](operations.md) and the [source catalogue](sources/README.md).
+Pinakes needs one secret to run: the PostgreSQL connection URL. Every provider credential is
+optional. Without one, only that provider's part is missing: its links get ordinary web cards,
+or its enrichment is left out, and the rest of the index works. A source's switch still applies
+when its key is set.
+
+See [deployment](deployment.md) for where the daemon runs, [operations](operations.md) for every
+setting, and the [source catalogue](sources/README.md) for each source.
 
 ## Store and load secrets
 
-Use environment variables only for secrets, never the TOML file, command-line arguments, git,
-URLs shared with others, support tickets or logs. Copy [`.env.example`](../.env.example) into a
-service-user-owned file outside the checkout, set mode `0600`, and inject it with systemd
-`EnvironmentFile=` or your runtime's secret store. `pinakesd` does not load a dotenv file itself.
-A shell-compatible file can be loaded before starting the daemon with `set -a; . /path/to/dev.env; set +a`.
-Do not enable shell tracing or print the environment. Protect database URLs as secrets too.
+Keep secrets in the environment, never in the TOML file, on the command line, in git, in a shared
+URL, a support ticket or a log.
 
-`PINAKES__SECTION__KEY` overrides the corresponding TOML setting; unknown keys stop startup.
-The single-underscore names below are deliberate. Spotify/TIDAL named variables override their
-section values. GitHub/CourtListener short token names and Discogs consumer names fill only unset
-settings; do not keep competing values in TOML or other environment variables. Empty named values
-are ignored, except `PINAKES_NEXUS_AUTHORIZATION`, whose empty value clears authorization.
-Rotate at the provider, update the protected environment and restart; never log a token to test it.
+1. Copy [`.env.example`](../.env.example) to a file outside the checkout, owned by the service
+   user, with mode `0600`.
+2. Fill in the values you use. Every value in the example is a placeholder.
+3. Load it with systemd `EnvironmentFile=`, `docker run --env-file`, or your runtime's secret
+   store. `pinakesd` does not read a dotenv file itself. From a shell, load it with
+   `set -a; . /path/to/pinakes.env; set +a`.
+
+Don't enable shell tracing or print the environment while the file is loaded. Treat the database
+URL as a secret too.
+
+To rotate a credential, change it at the provider, update the environment file and restart the
+daemon. Keys are read only at startup.
+
+## How variables are read
+
+Two forms set a credential:
+
+- `PINAKES__SECTION__KEY` (two underscores between parts) sets any key of the TOML file, such as
+  `PINAKES__SOURCES__STACK_EXCHANGE__KEY` for `[sources.stack_exchange] key`. It wins over the
+  file. An unknown key stops startup.
+- A variable a source names for itself (`PINAKES_NAME`, one underscore, or `TMDB_API_KEY`). A
+  build without that source ignores it.
+
+A named variable meets the file in one of three ways:
+
+| Variables | Effect |
+| --- | --- |
+| `PINAKES_SPOTIFY_CLIENT_*`, `PINAKES_TIDAL_CLIENT_*`, `TMDB_API_KEY` | Replaces the value in the file and in the `PINAKES__…` form |
+| `PINAKES_GITHUB_TOKEN`, `PINAKES_COURTLISTENER_TOKEN`, `PINAKES_DISCOGS_CONSUMER_*` | Fills the value only when the file and the `PINAKES__…` form leave it unset |
+| `PINAKES_NEXUS_AUTHORIZATION` | Replaces the value; set empty, it clears the value the file holds |
+
+Every other named variable that is set but empty is ignored. Don't keep competing values in the
+file and the environment.
+
+Pinakes keeps every credential out of logs, errors, `Debug` output and `/v1/info`.
 
 ## Instance settings
 
-| Environment variable | Purpose | Provisioning and minimum access |
+| Variable | Purpose | Notes |
 | --- | --- | --- |
-| `PINAKES__DATABASE_URL` | PostgreSQL connection | A database dedicated to Pinakes. A superuser creates it and its extensions; the role in the URL owns the database and is no superuser. Peer-authenticated sockets need no password. See [database operations](operations.md#database). |
-| `PINAKES__ADMIN_TOKEN` | Bearer authentication for admin routes, including metrics | Generate a long random token locally; required for non-loopback admin binds, recommended on loopback too (startup warns without one). Keep the listener private even with a token. |
-| `PINAKES__OSM__NOMINATIM_URL` | A hosted Nominatim whose base URL carries its key | Only for a keyed hosted Nominatim (see [deployment](deployment.md#nominatim)); a self-hosted one's URL is no secret and may stay in the TOML file. The key must be in the URL's path: user info, a query or a fragment is refused. Pinakes logs a request by its path below the base alone and shows the URL as `[REDACTED]`. |
-| `PINAKES_NEXUS_AUTHORIZATION` | Authorization for a protected Nexus | Obtain read access from the Nexus operator to the reference feed, reach lists/reach-set and resource batch view. Supply the entire header value, including `Bearer` or `Basic`. No redirect is followed; never put credentials in `nexus_url`. Omit for an unprotected Nexus. |
-| `PINAKES__HTTP__CONTACT` | Contact in the identifying User-Agent; not a secret | An operator-controlled contact address. SEC EDGAR links wait without it; it is not a universal switch that disables every key-free source. |
+| `PINAKES__DATABASE_URL` | The PostgreSQL connection URL, password included | Required. A peer-authenticated Unix socket needs no password (`postgresql:///pinakes?host=/var/run/postgresql`). See [database](operations.md#database). |
+| `PINAKES__ADMIN_TOKEN` | The bearer token for every admin route (metrics, operator info, stored documents, curation) | Required when `admin_listen` is not a loopback address; startup stops without it. On loopback the daemon starts and logs a warning. An empty token is refused, so leave the line commented until it has a value. Use a long random string. |
+| `PINAKES_NEXUS_AUTHORIZATION` | The whole `Authorization` header sent to a protected Nexus, such as `Bearer …` | Sent on every request to `nexus_url` and to no other host. Never put credentials in `nexus_url`. Leave it unset for an open Nexus. |
+| `PINAKES__OSM__NOMINATIM_URL` | A hosted Nominatim's base URL that carries its key | The key must be in the URL's path: a URL with user info, a query or a fragment is refused at startup. Pinakes shows the URL as `[REDACTED]`. A self-hosted Nominatim's URL is no secret and can stay in the TOML file. See [Nominatim](deployment.md#nominatim). |
+| `PINAKES__HTTP__CONTACT` | The operator's contact address in the User-Agent | Not a secret. Without it, SEC EDGAR links wait and are tried again every hour. |
 
 ## Optional provider credentials
 
-These are all credentialed providers in the current runtime configuration and event-adapter
-registry. Staging and production may share a provider application's API credentials where the
-provider's combined rate allowance permits it. Pool and budget their traffic explicitly; use separate apps/keys when required or when quota/revocation isolation
-is needed. Share self-hosted read-only datasets similarly, with capacity and licence checks
-([deployment](deployment.md#storage-model)), not writable databases or database/admin/Nexus secrets
-across security boundaries. Each environment still injects its credentials from its own protected
-secret store; sharing a provider allowance does not relax access controls or logging rules.
-Provider dashboards can require account verification or approval. Request read-only public-data
-access, never publishing, ticket sales, private repositories, user libraries or account
-administration.
+These are all the provider credentials Pinakes reads. Request read-only access to public data
+only; Pinakes needs no user sign-in, user scopes or write access from any of them.
 
-| Environment variable(s) | Obtain credentials / least privilege | What works without them |
+| Provider | Variables | Config keys | Used by |
+| --- | --- | --- | --- |
+| Spotify | `PINAKES_SPOTIFY_CLIENT_ID`, `PINAKES_SPOTIFY_CLIENT_SECRET` | `[spotify] client_id`, `client_secret` | `spotify`, `spotify_isrc`; `itunes_song` and `editions` for a Spotify track |
+| TIDAL | `PINAKES_TIDAL_CLIENT_ID`, `PINAKES_TIDAL_CLIENT_SECRET` | `[tidal] client_id`, `client_secret` | `tidal`, `tidal_isrc`; `itunes_song`, `youtube_match` and `editions` for a TIDAL track |
+| TMDB | `TMDB_API_KEY` | `[tmdb] api_key` | `tmdb` ([TMDB](#tmdb)) |
+| Discogs | `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN`, or `PINAKES_DISCOGS_CONSUMER_KEY` and `PINAKES_DISCOGS_CONSUMER_SECRET` | `[also_on.sources.discogs] token`, or `key` and `secret` | The `discogs` card source and its also-on half |
+| Podcast Index | `PINAKES__PODCAST_INDEX__KEY`, `PINAKES__PODCAST_INDEX__SECRET` | `[podcast_index] key`, `secret` | The `podcast_index` card source and the `podcasts` also-on source |
+| GitHub | `PINAKES_GITHUB_TOKEN` | `[sources.github] token` | `github` |
+| CourtListener | `PINAKES_COURTLISTENER_TOKEN` | `[sources.courtlistener] token` | `courtlistener` |
+| Stack Exchange | `PINAKES__SOURCES__STACK_EXCHANGE__KEY` | `[sources.stack_exchange] key` | `stack_exchange` |
+| Ticketmaster | `PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY` | `[event.adapters.platforms.ticketmaster] key` | The Ticketmaster event platform |
+
+What changes with each credential:
+
+| Provider | Without it | With it |
 | --- | --- | --- |
-| `PINAKES_SPOTIFY_CLIENT_ID`, `PINAKES_SPOTIFY_CLIENT_SECRET` | Create your application in the [Spotify developer dashboard](https://developer.spotify.com/dashboard). Pinakes uses [client credentials](https://developer.spotify.com/documentation/web-api/tutorials/client-credentials-flow), without user sign-in or user scopes. Development Mode requires the app-owner account to have Premium; see the [migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide). | No Spotify API ISRC/barcode enrichment. Spotify pages can still get web/media cards; exact MusicBrainz URL relations and Wikidata IDs can still join them, with partial coverage. [Source catalogue](sources/README.md#also-on). |
-| `PINAKES_TIDAL_CLIENT_ID`, `PINAKES_TIDAL_CLIENT_SECRET` | Register your app in the [TIDAL developer portal](https://developer.tidal.com/); use client credentials for public catalogue reads, no user-account scopes. [Quick start](https://developer.tidal.com/documentation/api-sdk/api-sdk-quick-start). | No TIDAL API ISRC/barcode enrichment; page cards and independent MusicBrainz/Wikidata links remain. [Source catalogue](sources/README.md#also-on). |
-| `TMDB_API_KEY` | Create a free API key in your TMDB account's [API settings](https://www.themoviedb.org/settings/api) and use its **API Read Access Token** (recommended; sent as `Authorization: Bearer`). The shorter v3 **API Key** also works ([TMDB](#tmdb)). Read-only; no user session. | No TMDB posters or overviews on film and series cards; their own page's image and text, and Commons images, remain. `/v1/info` names no TMDB attribution once no stored card holds a TMDB value. [Source catalogue](sources/README.md#also-on). |
-| `PINAKES__ALSO_ON__SOURCES__DISCOGS__TOKEN` **or** `PINAKES_DISCOGS_CONSUMER_KEY` plus `PINAKES_DISCOGS_CONSUMER_SECRET` | [Discogs developer settings](https://www.discogs.com/settings/developers): prefer an app's consumer pair, which grants catalogue images without identifying a user. A personal token is also supported but carries the token holder's account access; keep it private. Pinakes uses only public reads and needs no user OAuth grant. The token wins over the consumer pair. [Authentication reference](https://www.discogs.com/developers/#page:authentication). | Public Discogs records and barcode matching remain, without authenticated images and with the unauthenticated quota. [Source catalogue](sources/README.md). |
-| `PINAKES__PODCAST_INDEX__KEY`, `PINAKES__PODCAST_INDEX__SECRET` | Request the pair from [Podcast Index signup](https://api.podcastindex.org/signup). Use catalogue reads only; Pinakes signs requests with the pair, not a user login. | No Podcast Index API cards or its also-on lookup; RSS/Atom, Apple Podcasts and Wikidata paths remain. [Cards and podcast joins](sources/README.md). |
-| `PINAKES_GITHUB_TOKEN` (alternative: `PINAKES__SOURCES__GITHUB__TOKEN`) | [Create a fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new) with public-repository access and no added permissions. Choose an expiry; do not grant private repositories or write access. [GitHub token guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). | Repository links use the ordinary web resolver; the authenticated official API source is off. [Source catalogue](sources/README.md#sources). |
-| `PINAKES_COURTLISTENER_TOKEN` (alternative: `PINAKES__SOURCES__COURTLISTENER__TOKEN`) | Register/sign in to CourtListener and obtain your token from the [profile API-token page](https://www.courtlistener.com/profile/api-token/), as directed by the [REST API guide](https://www.courtlistener.com/help/api/rest/). Only opinion search reads are used; no write operation or RECAP upload is needed. | The opinion API source is off; ordinary web resolution may encounter CourtListener's challenge page. A refusal (401, or a 403 naming the token) switches the source off for an hour. [Source catalogue](sources/README.md#sources). |
-| `PINAKES__SOURCES__STACK_EXCHANGE__KEY` | [Register an app on Stack Apps](https://stackapps.com/apps/oauth/register) and use its **Key** (not the client secret; no access token, no user scopes). The key identifies the app and is not a secret, but Pinakes keeps it out of logs as it does a token. | The source runs on the keyless quota of 300 requests a day for the host address, paced to one request every 288 seconds. [Stack Exchange](sources/stack_exchange.md). |
-| `PINAKES__EVENT__ADAPTERS__PLATFORMS__TICKETMASTER__KEY` | [Ticketmaster developer signup](https://developer.ticketmaster.com/): request a Discovery API consumer key, not transaction or inventory-write access. [Discovery API](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/). | Ticketmaster's keyed adapter is disabled; its URLs can use ordinary web metadata. |
+| Spotify | The sources that ask Spotify are off. Spotify links still get their ordinary cards. | The sources ask the Web API with client credentials. Both values are needed. An app in Spotify's development mode answers only while the account that owns it has Premium; without it, every request gets 403. |
+| TIDAL | The sources that ask TIDAL are off. TIDAL links still get their ordinary cards. | The sources ask TIDAL's developer API with client credentials. Both values are needed. `[tidal] country` (default `US`) sets the catalogue's country. |
+| TMDB | `tmdb` is off: no request, and its stored values are hidden. | Film and series cards without an image or description take TMDB's poster and overview. |
+| Discogs | Discogs cards and the also-on lookup work without images. | Cards show images. The token wins when both a token and a consumer pair are set. Pinakes paces `api.discogs.com` at 25 requests a minute either way. |
+| Podcast Index | `podcast_index` declines and Podcast Index pages get web cards. `podcasts` never asks Podcast Index. | Pinakes signs API requests with the pair. Both values are needed. |
+| GitHub | `github` is off; repository links get web cards. | Repository links get cards from the REST API. |
+| CourtListener | `courtlistener` is off; opinion links get web cards, which may meet CourtListener's challenge page. | Opinion links get cards from its search API. |
+| Stack Exchange | The source runs on the keyless quota, 300 requests a day for the host's address, paced to one request every 288 seconds. | The quota is 10,000 requests a day, paced to match. The key identifies an app and is not a secret, but Pinakes keeps it out of logs as it does a token. |
+| Ticketmaster | The platform is off (`missing API key`); its links get web cards. | Event links are read from the Discovery API. The key is sent as the `apikey` query parameter on the wire only. |
 
-For the event adapters the configuration path is
-`event.adapters.platforms.<id>.key`; the full variable name is written out above.
-Their switches, routes and capabilities are defined in
-[`data/event-adapters.json`](../data/event-adapters.json), not inferred from a provider offering an API.
-Keys never enable an otherwise disabled platform automatically.
+A key never turns on a source or platform that is switched off.
+
+### Where to get them
+
+- **Spotify:** create an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
+  Pinakes uses the [client credentials flow](https://developer.spotify.com/documentation/web-api/tutorials/client-credentials-flow).
+- **TIDAL:** register an app in the [TIDAL developer portal](https://developer.tidal.com/).
+- **TMDB:** create an API key in your account's [API settings](https://www.themoviedb.org/settings/api)
+  and use its **API Read Access Token**.
+- **Discogs:** in [Discogs developer settings](https://www.discogs.com/settings/developers), create
+  an application for a consumer key and secret, or generate a personal access token. A personal
+  token carries its holder's account access, so prefer the consumer pair.
+- **Podcast Index:** request a key and secret at [api.podcastindex.org](https://api.podcastindex.org/signup).
+- **GitHub:** create a [fine-grained token](https://github.com/settings/personal-access-tokens/new)
+  with public-repository access and no added permissions, and give it an expiry.
+- **CourtListener:** sign in and copy the token from the [API token page](https://www.courtlistener.com/profile/api-token/).
+- **Stack Exchange:** [register an app on Stack Apps](https://stackapps.com/apps/oauth/register)
+  and use its **Key**, not its client secret.
+- **Ticketmaster:** request a Discovery API consumer key at [developer.ticketmaster.com](https://developer.ticketmaster.com/).
+
+### Event platforms
+
+The event platforms are listed in [`data/event-adapters.json`](../data/event-adapters.json). Only
+the entries with `"requires_key": true` need a key; Ticketmaster is the only one. Set it at
+`event.adapters.platforms.<id>.key`. A platform that needs a key is off until it has one (empty
+means no key).
+
+### Sources without a credential
+
+Every other source needs no credential. You switch each one off in its own section
+([switches](sources/README.md#switches)).
 
 ## TMDB
 
-`TMDB_API_KEY` (no `PINAKES_` prefix; `[tmdb] api_key` in the file is read too, but keep the key
-in the environment) lets the `tmdb` source ([source catalogue](sources/README.md#also-on)) add TMDB's poster and overview to a
-film or series card that has no image or description of its own, by the title's IMDb ID or
-Wikidata item alone. Set it to the **API Read Access Token** from
-[themoviedb.org/settings/api](https://www.themoviedb.org/settings/api): Pinakes sends it as a
-header. A v3 **API Key** (32 hexadecimal digits) works too; TMDB takes that one only in the
-query string, so Pinakes adds it to the request on the wire alone and caches, logs and reports
-the request without it. A value of neither form stops startup (the message never repeats it).
-Unset or empty, or with `[tmdb] enabled = false`, TMDB is off: no request, its stored rows
-hidden, its values gone from cards at their next read.
+`TMDB_API_KEY` has no `PINAKES_` prefix. `[tmdb] api_key` in the file is read too, but keep the
+key in the environment. With it, the `tmdb` source adds TMDB's poster and overview to a film or
+series card that has no image or description of its own. It finds the title by the card's IMDb ID
+or Wikidata item alone, never by its name.
 
-Pinakes credits every TMDB value on its card (`credits[]`, provider `tmdb`), `/v1/info` gives TMDB's notice ("This product uses the TMDB API
-but is not endorsed or certified by TMDB.") and logo for clients to show, and no TMDB value is
-kept longer than 60 days after the last read that answered ([operations](operations.md#also-on));
-with the key set, startup refuses a `limits.change_retention_days` over 120, and a change line
-holding a TMDB value goes after 120 days in any case, so change lines keep no TMDB value longer
-either.
+Pinakes accepts two forms:
 
-## Quotas and operating rules
+| Form | How Pinakes sends it |
+| --- | --- |
+| **API Read Access Token** (recommended), a JSON Web Token starting with `eyJ` | As `Authorization: Bearer …` |
+| v3 **API Key**, 32 hexadecimal digits | As the `api_key` query parameter, added on the wire only. Pinakes caches, logs and reports the request without it. |
 
-Provider quotas and Pinakes' configured pacing are different. The global per-host budget defaults
-to one request/second, with lower service-specific defaults and optional operator overrides;
-[operations](operations.md#also-on) describes how they combine. Do not treat an override as a
-provider quota increase. Honour `Retry-After` and check your account's actual allowance before
-raising rates. Multiple processes behind one public IP share upstream limits.
+A value of neither form stops startup; the error message never repeats the value.
 
-Verified provider examples: [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)
-allows one request/second per client IP; [public Nominatim](https://operations.osmfoundation.org/policies/nominatim/)
-allows at most one request/second and is not the production geocoder.
-[Spotify](https://developer.spotify.com/documentation/web-api/concepts/rate-limits) uses a rolling
-30-second window rather than a published universal requests/second figure.
-[Ticketmaster Discovery](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/)
-defaults to 5,000 calls/day and 5 requests/second.
-For other keys use the provider's or the account's quota.
+TMDB is off when the key is unset or empty, or with `[tmdb] enabled = false`. Then Pinakes sends
+no request, hides the stored rows, and drops TMDB values from cards at their next read.
 
-No key is needed for MusicBrainz, Wikidata, Open Library or iTunes lookup. They still require
-identification, caching, attribution and provider-specific pacing; see their source pages.
-The GovInfo source needs no api.data.gov key.
+While TMDB is on:
 
-**The Deezer API** needs no key and is on by default; `[also_on.sources.deezer] enabled = false`
-turns it off. That stops Deezer API reads and hides that source's own stored results, not the
-Deezer website: Deezer links from MusicBrainz, Wikidata or links people reference stay.
+- Every TMDB value on a card is credited (`credits[]`, provider `tmdb`).
+- `/v1/info` gives TMDB's notice ("This product uses the TMDB API but is not endorsed or certified
+  by TMDB.") and logo for clients to show. With TMDB off, it names TMDB only while a stored card
+  still holds a TMDB value.
+- No TMDB value stays on a card more than 60 days after the last read that answered
+  ([also on](operations.md#also-on)).
+- A change line holding a TMDB value is deleted after 120 days at most. Startup refuses a
+  `limits.change_retention_days` over 120 while TMDB is on.
 
-Keep the attributions and OSM dump described in [operations](operations.md#deployment-and-egress).
+## Check a key
 
-## Verify after setup
+After you set or change a key:
 
-Restart with the protected environment. Check private admin info and `/metrics` without logging
-headers or request URLs containing keys; public `/v1/info` intentionally exposes no credentials.
-The `ProviderKeyRefused` alert in `ops/alerts.yml` reads
-`pinakes_source_token_refusals_total{source}`, which counts every refusal of a configured key
-(as each provider signals it: a 401, a 403 where it means a refused key, or a refused token
-request; never a 429 or 5xx) for GitHub, CourtListener,
-Discogs, Spotify, TIDAL, TMDB, Podcast Index, Ticketmaster and Nominatim (`osm`). Load the alert rules before
-staging, and check that each provider you configured shows `0` on `/metrics` after the first
-cards using it are read. A rising value means the key is wrong, expired or revoked: fix it and
-restart (keys are read only at start; the count resets then). The alert clears six hours after
-the last refusal. GitHub, CourtListener, Discogs and the Podcast Index card source stop sending a
-refused key for an hour, then send it again (each new refusal counts and starts another hour). Spotify shows refusals while the app
-owner has no Premium plan.
-With the daemon stopped, `pinakesd --config <path> reextract also-on` queues fresh joins;
-`reextract web official` refreshes stored official-source cards. Start the daemon again and
-check representative cards, not just process health. See [re-extraction](operations.md#database)
-for the queues and retention behaviour when a source is disabled.
+1. Restart the daemon with the environment file loaded.
+2. Read a few cards that use the key. Check the cards themselves, not only process health.
+3. Check private `/metrics`. Don't log the request headers or a URL that holds a key.
+
+`pinakes_source_token_refusals_total{source}` counts each time a provider refused the configured
+credential since the daemon started. A refusal is a 401, a 403 where the provider means a refused
+key, or a refused token request; a 429 or 5xx never counts. Each source below shows `0` from
+startup:
+
+`courtlistener`, `discogs`, `github`, `osm` (a keyed Nominatim), `podcast_index`, `spotify`,
+`ticketmaster`, `tidal`, `tmdb`.
+
+The `ProviderKeyRefused` alert in [`ops/alerts.yml`](../ops/alerts.yml) fires while the count rose
+in the last six hours. A rising count means the key is wrong, expired or revoked. Fix it and
+restart; the count resets at startup.
+
+GitHub, CourtListener, Discogs and Podcast Index stop sending a refused credential for an hour,
+then send it again. Each new refusal counts and starts another hour. Meanwhile GitHub,
+CourtListener and Podcast Index links get web cards, and Discogs cards come without images.
+
+To apply a new key to cards already stored, stop the daemon and run
+`pinakesd --config <path> reextract also-on` for also-on results, or
+`pinakesd --config <path> reextract web official` for official-source cards, then start it again.
+See [re-extraction](operations.md#re-extraction).

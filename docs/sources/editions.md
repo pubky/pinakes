@@ -1,78 +1,171 @@
 # `editions`: which release each link of a recording or an album is on
 
-One of the music sources of [also on](../api.md#also-on): links on music services are looked up exactly, never by title or name.
+This source runs on track and album cards that carry a MusicBrainz key. It places the links on
+other services that the card may show on MusicBrainz releases, so that the card's
+[`also_on`](../api.md#also-on) shows, for each service, the link on the card's own release, else
+the link on the original edition. It never matches by title or name.
 
-`editions` runs last, after every source that finds links. For a track or album card with a
-MusicBrainz key (`mb:recording`, `mb:release`, `mb:release-group`), it places the links on other
-services that the card may show (its own, its group's members and their derived links) on
-MusicBrainz releases, so the card's `also_on` shows, of each service, the link on the card's own
-release, else on the original edition.
+| | |
+| --- | --- |
+| Source | `editions`, also-on source |
+| Runs on | Track links with exactly one `mb:recording:…` key; album links with an `mb:release:…` or `mb:release-group:…` key |
+| Asks | MusicBrainz `ws/2`: the releases of the recording or release group (`GET /release?recording=…` or `?release-group=…`, with their URL relations); for tracks, each track's album on its own service (iTunes, Spotify, TIDAL, Deezer) |
+| Credentials | None of its own. Spotify and TIDAL tracks are placed with the credentials of the `spotify` and `tidal` sources |
+| Rate | 1 request per second on `musicbrainz.org`; each service at its own pace |
+| Rows live | 30 days; rows expire after 60 |
+| Keys | None of its own. The derived links it adds are keyed by their release (`mb:release:…`) |
+| Links | On an album card: the card's own release's album pages on other services, exact |
+| Facts | `release`, `original_release` |
+| Switch | `[also_on.sources.editions] enabled`, on by default |
 
-- **The original release group** of a recording is the first of those MusicBrainz lists its
-  official releases in by type: an album, then a single, then an EP, then any other; one with no
-  secondary type (a compilation, a soundtrack, a live album) before one with; then the earliest
-  first release. An album's is its own.
-- **The original edition** is that group's official releases that name no later edition
-  (deluxe, legacy, anniversary, remastered, expanded, reissue, special or collector's edition,
-  bonus tracks, a box set, hi-res such as `24-bit` or `96 kHz`) in their disambiguation or in their
-  title past the group's (`… (Deluxe Edition)`); hi-res is a bit depth over 16 or a sample rate
-  over 48 kHz (`24-bit`, `96 kHz`), never a CD's `16-bit / 44.1 kHz`. "Edition" alone (standard,
-  original, explicit) names none, and a store's own copy of the original (`Apple Digital Master`,
-  `Mastered for iTunes`) is no later edition. The earliest first; of one date, digital ones, then
-  worldwide ones. A song first out on a soundtrack or a live album has only groups with secondary
-  types: the earliest of those is its original.
-- **The card's own release:** for a track, the release(s) MusicBrainz relates the album page of
-  the album its own service names to (below); for an album, the release(s) its link is a page of.
-- **Ranks:** the album pages MusicBrainz relates to the card's own release rank 0, then those of
-  the original edition's releases 1, 2, … in that order. So a service's link lands on its earliest
-  original release that has a page there: a 1975 release with a Spotify page before a 2011 one,
-  and a later digital release only when no earlier one has a page on that service. The pages come
-  with the browse of the releases (their URL relations), so no release is read on its own but a
-  card's own one the browse leaves out.
-- **Placing a link:** a track link is on such an album when its own service names that album as
-  the track's: Apple Music through iTunes (`lookup?id={track}`), Spotify by its Web API (with the
-  operator's credentials), TIDAL by its API (with the operator's credentials; every album TIDAL
-  names for the track) and Deezer by its API, each while its source is on. The card's own Spotify
-  track, a link someone referenced, is read for its album on its public page (`music:album`) where
-  the API does not answer; another Spotify link only while `[also_on] spotify_pages` is on (`true`
-  by default). An album link is on the release whose album pages name it. Only links a card may show
-  are read; never an album page nobody linked.
-- **Each link's outcome:**
-  - **placed** on the card's own release (rank 0) or the original edition's (1, 2, …);
-  - **on another release** (rank 1000, after unplaced links): its service names another album,
-    on a service an own or original release has a page on (a later edition, a compilation);
-  - **gone** (rank 1000, as on another release): its service names no album for it (a track it
-    no longer lists), so it never wins over a link it does;
-  - **unplaced** (no row): no own or original release has a page on its service;
-    Qobuz, YouTube and the other services name no album here, and among them the card's order is
-    unchanged;
-  - **kept**: the place recorded before stays, when this run cannot tell: the service failed (the
-    run comes back after five minutes), refused the operator's credentials (as Spotify does for an
-    app whose owner has no premium plan), the release list was cut short (MusicBrainz names more
-    releases than the pages read: only the card's own release then ranks), or more than eight
-    links of one service wait (tagged members first, then the derived links most members name).
-    A kept place lasts until it expires, twice the source's lifetime after it was recorded. When
-    the card's own album fails, every link keeps its place.
-  Only MusicBrainz failing (the release list, the card's own album's URL lookup) fails the run.
-- **An album card's own release's pages** on other services (its album on Deezer, TIDAL, Apple
-  Music, …, as MusicBrainz relates them) are derived links of this source, keyed by the release
-  (`mb:release:…`), and placed first. `musicbrainz` derives none for an album link it relates to
-  several releases of one group: it keys the group, which names no pages. So an album another
-  source lists for the same work (Wikidata may list several Deezer albums) never wins over the
-  card's own release's; it is on another release. A Discogs master is the group itself, never
-  another release.
-- **Facts:** `release` (the card's own release or releases, up to four) and `original_release`
-  (the original edition's releases with a page on a service, up to four), as MBIDs.
-- **When a group changes** (a member joins or leaves, a link becomes another's alias), the sources
-  of its music cards run again in ten minutes, so each places the links it may show now.
+`editions` runs last, after every source that finds links, so it can place what they found.
 
-The places are stored per card (`link_release`) and live as the source's other results do.
+## What it does
 
-## Operations
+### The candidates
 
-Per card: up to four pages of a recording's releases with their URL relations (an album's
-release group: up to two), the card's own track's album (one lookup, and a MusicBrainz URL lookup;
-a release of its own the browse leaves out is read), and each candidate track's album (at most
-eight per service); answers are shared for an hour. Nothing is read while a card has no link a
-service can place. After an upgrade, `pinakesd reextract also-on` places the links of every card
-already stored.
+The links it places are the ones the card may show: the other members of the card's
+[group](../api.md#groups) (tagged members first), then the derived links that other sources
+recorded for the group (those most members name first), at most 256. Of these it keeps the links
+at the card's level on another service than the card's own. It never reads an album page nobody
+linked.
+
+### The original release group and edition
+
+1. **The releases.** For a track, the source lists the recording's official album releases, up to
+   four pages of 100. When none of them is an album with no secondary type, it also lists the
+   recording's singles and EPs (one page). For an album, it lists the release group's official
+   releases, up to two pages of 100. The release group is the one the card's key names, else the
+   card's own release's.
+2. **The original release group.** For a track, this is the first release group in this order:
+   - no secondary type (a compilation, a soundtrack, a live album) before one with;
+   - then an album, a single, an EP, then any other type;
+   - then the earliest first release.
+
+   A song first released on a soundtrack or a live album has only groups with secondary types, so
+   the earliest of those is its original. For an album, the original group is its own.
+3. **The original edition.** These are the original group's official releases that name no later
+   edition, the earliest first. Of one date, digital releases come first, then worldwide ones. A
+   release names a later edition when its disambiguation, or its title past the group's title
+   (`… (Deluxe Edition)`), says:
+   - deluxe, legacy, anniversary, remaster(ed), expanded, reissue(d), collector's, bonus, box
+     set, special edition, super deluxe;
+   - hi-res: `hi-res`, `high resolution`, a bit depth over 16 (`24-bit`) or a sample rate over
+     48 kHz (`96 kHz`).
+
+   "Edition" alone (standard, original, explicit) names none, and neither does a CD's
+   `16-bit / 44.1 kHz`. A store's own copy of the original (`Apple Digital Master`,
+   `Mastered for iTunes`) is no later edition either.
+
+### The card's own release
+
+- For a track: the releases MusicBrainz relates to the album page of the album the track's own
+  service names (at most four). If the card's own album can't be read, every link keeps its
+  place (see below), because the card's own release is the rank all others count against.
+- For an album: the releases its `mb:release:…` keys name, else the releases MusicBrainz relates
+  its URL to (at most four).
+
+### Ranks
+
+The album pages MusicBrainz relates to the card's own release rank 0. Those of the original
+edition's releases rank 1, 2, … in the order above. So a service's link lands on its earliest
+original release that has a page there: a 1975 release with a Spotify page before a 2011 one, and
+a later digital release only when no earlier one has a page on that service.
+
+The pages come with the list of releases (their URL relations), so no release is read on its own,
+except a card's own release the list leaves out.
+
+### Placing a link
+
+A track link is on an album when its own service names that album as the track's:
+
+| Service | How it's asked | When |
+| --- | --- | --- |
+| Apple Music | iTunes `GET https://itunes.apple.com/lookup?id={track}&entity=song` | While `itunes` is on |
+| Spotify | Spotify Web API (`/v1/tracks/{id}`), else the track's public page (`music:album`) | While `spotify` is on, with its credentials or with `[also_on] spotify_pages` |
+| TIDAL | TIDAL API (`/v2/tracks/{id}?include=albums`): every album TIDAL names for the track | While `tidal` is on and has its credentials |
+| Deezer | Deezer API (`GET https://api.deezer.com/track/{id}`) | While `deezer` is on |
+
+The card's own Spotify track, a link someone referenced, is read on its public page where the API
+doesn't answer, whatever `spotify_pages` says. `[also_on] spotify_pages` is on by default. Links
+on other services (Qobuz, YouTube, …) name no album here.
+
+An album link is on the release whose album pages name it.
+
+### Each link's outcome
+
+| Outcome | When | Rank |
+| --- | --- | --- |
+| Placed | On the card's own release, or on an original-edition release | 0, or 1, 2, … |
+| On another release | Its service names another album, and an own or original release has a page on that service (a later edition, a compilation). A Discogs master is the release group itself, never another release | 1000 |
+| Gone | Its service names no album for it (a track it doesn't list), so it never wins over one that does | 1000 |
+| Unplaced | No own or original release has a page on its service. Among unplaced links, the card's order is unchanged | None (no row) |
+| Kept | The run can't tell (below). The place recorded before stays | As before |
+
+A link keeps its earlier place when:
+
+- its service failed (the run comes back after five minutes);
+- its service refused the operator's credentials (as Spotify does for an app whose owner has no
+  premium plan);
+- the release list was cut short (MusicBrainz names more releases than the pages read): then only
+  the card's own release ranks, and links not on it keep their places;
+- more than eight track links of one service wait, in the candidates' order;
+- the card's own album failed: then every link keeps its place.
+
+A kept place lasts until it expires, twice the source's lifetime after it was recorded. Only
+MusicBrainz failing (the release list, the card's own album's URL lookup) fails the whole run.
+
+## Keys, links and facts
+
+### An album card's own release's pages
+
+On an album card, the album pages MusicBrainz relates to the card's own release on other services
+(its album on Deezer, TIDAL, Apple Music, …) are derived links of this source. Each is keyed by
+its release (`mb:release:{mbid}`) and placed first (rank 0).
+
+`musicbrainz` derives none for an album link it relates to several releases of
+one group: it keys the group, which names no pages. With this source, an album another source
+lists for the same work (Wikidata may list several Deezer albums) never wins over the card's own
+release's; it is on another release.
+
+### Facts
+
+| Fact | Meaning |
+| --- | --- |
+| `release` | The MBID of the card's own release (at most four) |
+| `original_release` | The MBID of an original-edition release that has a page on a service (at most four) |
+
+The places are stored per card and live as the source's other rows do.
+
+### When a group changes
+
+When a member joins or leaves a group, or a link becomes another's alias, the sources of the
+group's music cards that carry a MusicBrainz key run again in ten minutes. Each card then places
+the links it may show after the change.
+
+## Cost
+
+Per card:
+
+- up to four pages of the recording's releases, or up to two of an album's release group;
+- for a track: the card's own track's album (one request to its service, and one MusicBrainz URL
+  lookup per album), and each candidate track's album, at most eight per service;
+- a card's own release the list leaves out: one read.
+
+MusicBrainz answers are cached for `limits.discovery_cache_secs` (an hour by default). A track
+card with no link a service can place reads nothing. An album card still reads its own release's
+pages.
+
+To place the links of every stored card, run `pinakesd reextract also-on`, which queues every
+resource's also-on run ([operations](../operations.md#also-on)).
+
+## Turn it off
+
+```toml
+[also_on.sources.editions]
+enabled = false
+```
+
+Its stored places, links and facts stop showing at once. Cards then pick each service's link as
+they pick among unplaced links ([also on](../api.md#also-on)), without preferring the card's own
+release or the original edition.

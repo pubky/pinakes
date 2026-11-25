@@ -1,57 +1,98 @@
 # Podcast Index
 
-Podcast Index pages, read from Podcast Index's API: a show by its feed id, an episode by its
-episode id. The website is never fetched. The API needs the operator's Podcast Index key and
-secret (`[podcast_index]`, or `PINAKES__PODCAST_INDEX__KEY` and `__SECRET`), the pair the also-on
-`podcasts` source uses. Without both, the source declines and the page gets an ordinary web card.
-The pair goes only to `api.podcastindex.org`, signed per request, and never appears in logs,
-errors or cards. A refusal of the pair (401, or a 403 whose `description` names the key) is
-counted in `pinakes_source_token_refusals_total{source="podcast_index"}`, which the
-`ProviderKeyRefused` alert reads, and switches the pair off for this source for an hour: the page
-gets a web card, as without a pair, and the pair is used again after the hour. The also-on
-`podcasts` lookups count a refusal by the same rule and hold that lookup back on their own.
+Pinakes reads shows and episodes on Podcast Index from the Podcast Index API, by feed ID and episode
+ID. The API needs the operator's key and secret. Without them, Podcast Index links get ordinary web
+cards.
+
+| | |
+| --- | --- |
+| Source | `podcast_index`, official source |
+| Links | `podcastindex.org/podcast/{feed id}`, with `?episode={episode id}` for an episode |
+| Fetches | `GET https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id={feed id}` and the show's feed, or `GET …/episodes/byid?id={episode id}` |
+| Credentials | Required: `[podcast_index] key` and `secret`, or `PINAKES__PODCAST_INDEX__KEY` and `PINAKES__PODCAST_INDEX__SECRET` ([API keys](../api-keys.md)). Off without both |
+| Rate | Shared per-host default, 1 request per second (`limits.host_requests_per_second`) |
+| Refresh | Daily, as every official card ([refresh](../design.md#refresh)) |
+| Card types | `PodcastSeries`, `PodcastEpisode` |
+| Keys | None from this source; the also-on source `podcasts` keys its cards |
+| Credit | None |
+| Switch | `[sources.podcast_index] enabled`, on by default |
 
 ## Links
 
-- a show: `https://podcastindex.org/podcast/{feed id}`;
-- an episode: `https://podcastindex.org/podcast/{feed id}?episode={episode id}`.
+| Link | Object |
+| --- | --- |
+| `https://podcastindex.org/podcast/{feed id}` | A show |
+| `https://podcastindex.org/podcast/{feed id}?episode={episode id}` | An episode |
 
-With or without `www.`; each spelling is an alias of the one above. A feed or episode id the API
-does not know, or an episode of another show than the page names, is `missing`.
+These are the roots. Every other spelling, with `www.`, over `http` or with other parameters, is an
+[alias](../api.md#aliases) of its root. An ID is a decimal number without a leading zero. Other
+pages of the site, such as its search, are not read here.
 
-## What it reads
+## What it fetches
 
-`GET https://api.podcastindex.org/api/1.0/podcasts/byfeedid?id={feed id}` for a show, and
-`GET https://api.podcastindex.org/api/1.0/episodes/byid?id={episode id}` for an episode, with the
-signed headers (`X-Auth-Key`, `X-Auth-Date`, `Authorization`). For a show, then its feed (the
-record's `url`, read on past the page cap to 8 MiB and cut there, cached for the card's lifetime), for the
-show's latest episodes ([Episodes](../api.md#episodes)); a feed that does not answer, or not
-within three seconds, leaves the show's stored list as it is.
+The website is never fetched.
+
+### The API
+
+One request per read, with signed headers (`X-Auth-Key`, `X-Auth-Date`, `Authorization`). The key
+and secret go only to `api.podcastindex.org` and never appear in logs, errors or cards.
+
+A feed or episode ID that the API does not know is `missing`, and so is an episode of another show
+than the page names. An answer for another ID is an error, and the read is retried.
+
+When Podcast Index refuses the pair (a 401, or a 403 whose `description` names the key), the page
+gets a web card. The source then leaves the pair unused for an hour, during which its pages get web
+cards. Each refusal is counted in
+`pinakes_source_token_refusals_total{source="podcast_index"}`, which the `ProviderKeyRefused` alert
+reads. The also-on `podcasts` lookups use the same pair and count a refusal by the same rule. A
+refusal there does not pause this source, nor this source's refusal those lookups.
+
+### The show's feed
+
+For a show, the source also reads the feed its record names, for the show's
+[episodes](../api.md#episodes). The feed is read up to 8 MiB and cut there, and cached for the
+card's lifetime. A feed that does not answer within three seconds leaves the show's stored list as
+it is.
 
 ## Card
 
-A show is a `PodcastSeries`, an episode a `PodcastEpisode`; `site` is "Podcast Index". `name` is
-the title, `description` its text without markup, `image` the artwork (an episode's own image,
-else its show's). An episode's [`stream`](../api.md#stream) is its enclosure (`enclosureUrl`,
-`enclosureType`, `duration`), when that is a public link.
+`site` is "Podcast Index".
+
+| Field | Show (`PodcastSeries`) | Episode (`PodcastEpisode`) |
+| --- | --- | --- |
+| `name` | The title | The title |
+| `description` | The description, as plain text | The description, as plain text |
+| `image` | The artwork | The episode's image, else its show's |
+| `stream` | | The enclosure, when it is a public link ([stream](../api.md#stream)) |
+| `related` | | The show's Podcast Index page (`rel: "show"`), by the show's title |
+| `episodes` | The latest 5 that have a `stream`; `GET /v1/resources/{id}/episodes` lists more | |
 
 | Fact | Meaning |
 | --- | --- |
 | `author` | A show's author |
 | `website` | The show's or episode's website |
 | `language` | A show's language |
-| `feed_url` | A show's feed, as Podcast Index reads it today |
+| `feed_url` | A show's feed, as Podcast Index reads it |
 | `published` | When an episode was published |
 | `duration` | An episode's length in seconds |
 | `show` | An episode's show page on Podcast Index |
 | `page_url` | The Podcast Index page |
 
-An episode's card names its show in `related` (`rel: "show"`, the show's Podcast Index page).
+## Keys and groups
 
-A show's latest episodes, from its feed, are listed by `GET /v1/resources/{id}/episodes`
-([Episodes](../api.md#episodes)); the show's card carries the latest 5 that have public audio
-or video (a `stream`) in `episodes`. The joins (Apple Podcasts, the feed, Spotify) come from the
-also-on [`podcasts`](../api.md#also-on) source.
+This source records no keys. The also-on source `podcasts` finds the show or episode on
+Apple Podcasts, in its feed, on Spotify and on other services, and records the keys that join them in
+a [group](../api.md#groups).
+
+## Turn it off
+
+```toml
+[sources.podcast_index]
+enabled = false
+```
+
+Podcast Index links then get ordinary web cards. The `podcasts` also-on source still asks
+Podcast Index with the same pair.
 
 ## Examples
 
