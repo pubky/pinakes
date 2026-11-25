@@ -58,8 +58,9 @@ These answers make a card `missing`:
   replaced by `[deleted]` or `[removed]`.
 
 An answer for another object, an answer of another shape and any status that is neither listed here
-nor a refusal are errors: the read is retried and a stored card stays. A 408, a 429 or a server
-error waits at least a minute.
+nor a refusal are errors: the read is retried and a stored card stays. A 429 waits at least the
+time its `Retry-After` header names (up to an hour), or 5 minutes when it names none. A 408 or a
+server error waits at least a minute.
 
 ### Refused requests
 

@@ -38,8 +38,9 @@ Not read here:
 
 One request per read: `GET https://bills-api.parliament.uk/api/v1/Bills/{id}`. An ID the API
 doesn't know (404) is `missing`. An answer for another bill, or one without a short title, is an
-error. A rate limit (429), a timeout (408) or a server error is retried after at least a minute.
-Any other status is an error.
+error. A 429 is retried after at least the time the API names (up to an hour), or 5 minutes when it
+names none. A timeout (408) or a server error is retried after at least a minute. Any other status
+is an error.
 
 ## Card
 
@@ -70,8 +71,7 @@ None. A bill and the Act it became on legislation.gov.uk are separate resources 
 
 ## Credit
 
-The `attribution` line credits the data under the Open Parliament Licence v3.0, the licence the
-Bills API states for it.
+The `attribution` line credits the data under the Open Parliament Licence v3.0.
 
 ## Turn it off
 

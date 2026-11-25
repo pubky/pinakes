@@ -22,6 +22,8 @@ A link names one object by its path below `/pub/`. These links get no route and 
 - a folder: a path that ends in `/` or holds a doubled slash (`//`);
 - a link with a query or a port;
 - a path with a segment that decodes to a separator or a dot segment (`%2F`, `..`);
+- a path inside a post in a namespace no profile reads (`/pub/<ns>/v1/posts/{id}/…`, such as a
+  version file);
 - a path outside `/pub/`.
 
 The owner must be written as its canonical z32 key. Any other spelling of the key is refused
@@ -63,7 +65,8 @@ resolver reads the body as JSON whatever its declared type.
 | 2xx | The object's card |
 | 404, 410 | `missing` |
 | 401, 403 | `unreachable` |
-| Other 4xx, 5xx | An error (`http_4xx`, `http_5xx`), retried as any fetch |
+| 429 | A wait: read again after the homeserver's `Retry-After` or the backoff, whichever is longer. No failure is charged. |
+| Other 4xx, 5xx | An error (`http_4xx`, `http_5xx`). Each one is a charged failure, and the link dead-letters after `limits.max_failures` ([failures](operations.md#failures-and-retries)). |
 
 The card stores the body's `content_type` and `content_length`; they are not published as facts.
 
@@ -231,7 +234,9 @@ A listening needs the envelope's `embed`, a `started_at` and an `expires_at`. It
 - Its name is its `name`, else `Now playing`.
 - Facts: `track`, `service`, `author` and `kind`.
 - It is current from `started_at` (with a minute's grace for the writer's clock) until
-  `expires_at`, for at most a day. Outside that window it has no card.
+  `expires_at`. Outside that window it has no card.
+- A listening whose `expires_at` is before its `started_at`, or more than a day after it, has no
+  card at all.
 
 ### Expiry
 
@@ -241,8 +246,8 @@ away, instead of at its usual time). Once the expiry has passed, the post has no
 
 ### Posts without a card
 
-A `music` `listen` has no card. It counts on its track instead (an `embed` reference, once Nexus
-sends one for the post). One card per play would be noise and a play-by-play history in a second
+A `music` `listen` has no card. A reference to its track (an `embed`) counts on the track's card
+instead. One card per play would be noise and a play-by-play history in a second
 index.
 
 A post in another namespace has no card when the namespace holds a control character or is

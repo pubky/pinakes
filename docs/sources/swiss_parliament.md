@@ -43,8 +43,9 @@ GET https://ws.parlament.ch/odata.svc/Business(ID={id},Language='DE')?$select=â€
 ```
 
 An ID the service doesn't know (404) is `missing`. An answer for another item, or one without a
-title, is an error. A rate limit (429), a timeout (408) or a server error is retried after at least
-a minute. Any other status is an error.
+title, is an error. A 429 is retried after at least the time the service names (up to an hour), or
+5 minutes when it names none. A timeout (408) or a server error is retried after at least a minute.
+Any other status is an error.
 
 ## Card
 
@@ -79,8 +80,7 @@ None.
 
 ## Credit
 
-The `attribution` line credits the Swiss Parliament's Parliamentary Services. The Parliament
-publishes this data as open data.
+The `attribution` line credits the Swiss Parliament's Parliamentary Services.
 
 ## Turn it off
 

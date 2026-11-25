@@ -55,8 +55,9 @@ For an old address, a first query finds the act that carries the dossier number 
 status. When there is no such act, or more than one, the card is `missing`; otherwise the second
 query reads that act.
 
-An ELI with no act is `missing`. A rate limit (429), a timeout (408) or a server error is retried
-after at least a minute. Any other status is an error.
+An ELI with no act is `missing`. A rate limit (429) is retried after at least the time its
+`Retry-After` header names (up to an hour), or 5 minutes when it names none. A timeout (408) or a
+server error is retried after at least a minute. Any other status is an error.
 
 ## Card
 

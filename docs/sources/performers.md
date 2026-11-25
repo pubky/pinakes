@@ -9,7 +9,7 @@ is searched by name.
 | --- | --- |
 | Source | `performers`, also-on source |
 | Runs on | Event cards (`MusicEvent` or any other `Event`) whose page names performers (schema.org `performer`) |
-| Asks | MusicBrainz `ws/2`: one URL lookup for all the page's performer links (`GET /url?resource=…&resource=…`) |
+| Asks | MusicBrainz `ws/2`: a URL lookup for all the page's performer links (`GET /url?resource=…&resource=…`), usually one request |
 | Credentials | None |
 | Rate | 1 request per second on `musicbrainz.org`, shared with every other MusicBrainz read |
 | Rows live | 30 days; rows expire after 60 |
@@ -41,8 +41,8 @@ claim.
 
 ### Key or fact
 
-The source asks MusicBrainz about every kept link of every performer in one request. A link
-MusicBrainz relates to exactly one artist names that artist. Then, for each performer:
+The source asks MusicBrainz about every kept link of every performer together, usually in one
+request ([Cost](#cost)). A link MusicBrainz relates to exactly one artist names that artist. Then, for each performer:
 
 1. When the event page is on the same service (host) as a link that names an artist, that
    artist's MBID becomes the key `mb:artist:{mbid}` and the fact `performer_mbid`. For example, a
@@ -79,8 +79,10 @@ search (`q=`) matches an event's name and description, not its performers: an ac
 
 ## Cost
 
-Each event page costs at most one MusicBrainz request, for all its performers' links together. A
-performer named only by a MusicBrainz artist page costs nothing. Answers are cached for
+Each event page usually costs one MusicBrainz request, for all its performers' links together. A
+request carries at most 50 URLs, and an Apple Music artist link is asked under 20 storefront
+spellings, so it counts as 20 of them. A page with three or more Apple Music artist links therefore
+takes two or more requests. A performer named only by a MusicBrainz artist page costs nothing. Answers are cached for
 `limits.discovery_cache_secs` (an hour by default), so an artist's many concerts that name the
 artist by one link ask once.
 

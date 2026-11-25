@@ -83,9 +83,9 @@ stands for; its group stays apart from theirs until a read succeeds.
 
 ## Cost
 
-Each page costs one MusicBrainz request for its entity, and an ISRC page one more for the ISRC.
-MusicBrainz has no lookup of several entities at once. A recording costs one more request for its
-original album, and one ISRC lookup per ISRC it carries (to see whether the ISRC names it alone).
+Each page costs one MusicBrainz request for its entity, and an ISRC page one more for the ISRC. A
+recording costs one more request for its original album, and one ISRC lookup per ISRC it carries
+(to see whether the ISRC names it alone).
 The page's card reads the same entity, so the source usually takes that answer from the cache
 (`limits.discovery_cache_secs`, an hour by default).
 

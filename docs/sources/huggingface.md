@@ -9,7 +9,7 @@ key is needed.
 | Links | `huggingface.co/{owner}/{name}`, `/datasets/{owner}/{name}`, `/spaces/{owner}/{name}` and their API URLs, also on `hf.co`; roots `hf:model/…`, `hf:dataset/…`, `hf:space/…` |
 | Fetches | `GET https://huggingface.co/api/{models\|datasets\|spaces}/{owner}/{name}` |
 | Credentials | None |
-| Rate | 1.6 requests per second on `huggingface.co` |
+| Rate | At most 1.6 requests per second on `huggingface.co`; the shared default of 1 per second (`limits.host_requests_per_second`) applies while it is lower |
 | Refresh | Daily, as every official card ([refresh](../design.md#refresh)) |
 | Card types | `SoftwareSourceCode` (a model), `Dataset`, `WebApplication` (a Space) |
 | Keys | `doi:…`, only for DOIs the Hub minted for the repo (`10.57967/hf/…`) |

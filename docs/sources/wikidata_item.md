@@ -39,7 +39,7 @@ The source reads the item and records, in this order:
 
 3. **Music-service pages** the item's IDs name, at every level (tracks, albums, artists, YouTube
    videos and playlists), up to four per property. The properties are the ones listed on the
-   `wikidata` page.
+   `wikidata` page, without `P2206` (a Discogs release).
 4. **Wikipedia articles**, one per language the item has a sitelink for. Major languages come
    first (`en`, `de`, `fr`, `es`, `it`, `ja`, `ru`, `pt`, `zh`, …), then the rest by language
    code.

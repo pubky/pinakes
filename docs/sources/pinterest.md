@@ -55,7 +55,8 @@ here nor a refusal is an error, and the read is retried.
 Pinterest answers its generic page, with status 200, for a name it doesn't know. That page does not
 say that the profile is gone: it gives the plain card (below), not `missing`.
 
-A 408, a 429 or a server error, to either request, waits at least a minute.
+A 429 to either request waits at least the time its `Retry-After` header names (up to an hour), or
+5 minutes when it names none. A 408 or a server error to either request waits at least a minute.
 
 ### Refused requests
 

@@ -7,7 +7,7 @@ and it is off without the operator's TIDAL credentials.
 | | |
 | --- | --- |
 | Source | `tidal_isrc`, also-on source |
-| Runs on | Another service's track or video with an `isrc:` key, another service's album or YouTube album playlist with a `upc:` key, and MusicBrainz recording, ISRC and release pages with such a key ([which cards](README.md#lookups-by-isrc-or-barcode)) |
+| Runs on | Another service's track or video with an `isrc:` key, another service's album or YouTube album playlist with a `upc:` key, and MusicBrainz recording, ISRC, release and release-group pages with such a key ([which cards](README.md#lookups-by-isrc-or-barcode)) |
 | Asks | TIDAL: `GET https://openapi.tidal.com/v2/tracks?countryCode={country}&filter[isrc]={ISRC}` and `GET …/v2/albums?countryCode={country}&filter[barcodeId]={barcode}` |
 | Credentials | Required: the same TIDAL app credentials as `tidal`, `[tidal] client_id` and `client_secret`, or `PINAKES_TIDAL_CLIENT_ID` and `PINAKES_TIDAL_CLIENT_SECRET`; off without both |
 | Rate | At most 2 requests per second on `openapi.tidal.com`, shared with `tidal`; 1 by default, as `limits.host_requests_per_second` is lower |
@@ -21,7 +21,7 @@ and it is off without the operator's TIDAL credentials.
 
 TIDAL's own tracks, albums and videos are not asked. The source uses only values that are keys: a
 shared ISRC is a fact, and TIDAL would answer with any of its recordings. It asks at most two values
-per card. For a track, its own ISRC comes first, then the hubs' ISRCs.
+per card. For a track, its own ISRC comes first, then its other `isrc:` keys.
 
 Every answer is read back. Only an item whose own `isrc`, or whose own `barcodeId` as GTIN-13, is
 the value asked counts. The catalogue is read in `[tidal] country` (`US` by default), as for
@@ -54,10 +54,12 @@ records no key for the card itself and no facts.
 
 One request per ISRC or barcode key, at most two per card. The answers are shared for
 `limits.discovery_cache_secs` (an hour by default) by credential pair, and go through the same token
-slot as `tidal`'s. Refused credentials, rate limits and outages are handled as `tidal` handles them
-(refused credentials (on the `tidal` page), rate
-limits (on the `tidal` page)), and either keeps the links an earlier run found.
-`pinakesd reextract also-on` asks for every stored track and album at once.
+slot as `tidal`'s. Refused credentials (held for `limits.also_on_refusal_hold_secs`, 300 seconds by
+default), rate limits and outages are handled as for `tidal`. Each keeps the links an earlier run
+found.
+
+To ask for every stored track and album at once, run `pinakesd reextract also-on` with the daemon
+stopped. It queues the also-on lookups of every stored resource.
 
 ## Turn it off
 

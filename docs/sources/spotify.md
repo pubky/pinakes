@@ -25,8 +25,10 @@ without the operator's Spotify app credentials.
    nothing.
 3. It records the value as a key (`via` `spotify`) and as a fact.
 
-The sources that run after it use those keys. `musicbrainz` and `deezer` look the same
-album or track up by them, and `itunes` lists a possibly same Apple Music album.
+The sources that run after it use those keys. `deezer` looks the same album or track up by them,
+`musicbrainz` looks an album up by its barcode, and `itunes` lists a possibly same Apple Music
+album. A track's ISRC reaches MusicBrainz only through this source, which asks it to decide how
+the ISRC is keyed ([Keys, links and facts](#keys-links-and-facts)).
 
 The source reads Spotify's own links only. `spotify_isrc` finds another service's
 track or album on Spotify, with the same credentials.
@@ -104,8 +106,8 @@ output.
 ### An app owner without Premium
 
 An app in Spotify's development mode answers only while the account that owns it has an active
-Premium subscription ([API keys](../api-keys.md)). Without it, the API answers every request with
-403, which Pinakes treats as refused credentials (class `forbidden`). To restore the source, renew
+Premium subscription ([API keys](../api-keys.md)). Without it, the API answers the app with 403,
+which Pinakes treats as refused credentials (class `forbidden`). To restore the source, renew
 Premium on the account that owns the app. Pinakes needs no new credentials and no restart: it asks
 Spotify again once the hold has ended, when a link is next read. To ask for every link at once, run
 `pinakesd reextract also-on` with the daemon stopped. It queues every resource's also-on lookups,

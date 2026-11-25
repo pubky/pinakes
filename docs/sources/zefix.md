@@ -1,8 +1,8 @@
 # Zefix
 
 Pinakes reads Swiss companies in the commercial register as linked data from LINDAS, the
-Confederation's linked-data service, by the company's register ID (EHRA ID). No key is needed. The
-zefix.ch pages are an application shell without metadata, and Pinakes never reads them.
+Confederation's linked-data service, by the company's register ID (EHRA ID). No key is needed.
+Pinakes never fetches the zefix.ch pages.
 
 | | |
 | --- | --- |
@@ -27,9 +27,8 @@ it:
 - its zefix.ch page, `https://www.zefix.ch/{lang}/search/entity/list/firm/{id}`, in German,
   French, Italian or English (`de`, `fr`, `it`, `en`), with any query.
 
-Not read here: searches on zefix.ch (`…/search/entity/list?mainSearch=…`). A UID (`CHE-…`) alone
-isn't read as a company either: one UID can belong to several register entries, such as a company
-registered at two seats.
+Not read here: searches on zefix.ch (`…/search/entity/list?mainSearch=…`) and a UID (`CHE-…`)
+alone.
 
 ## What it fetches
 
@@ -37,8 +36,9 @@ One SPARQL query per read, as a GET to `https://ld.admin.ch/query?query=…`. It
 statement about the company, its address and its identifiers, and the names of its legal form and
 seat.
 
-A company without a legal name in the answer is `missing`. A rate limit (429), a timeout (408) or a
-server error is retried after at least a minute. Any other status is an error.
+A company without a legal name in the answer is `missing`. A 429 is retried after at least the time
+LINDAS names (up to an hour), or 5 minutes when it names none. A timeout (408) or a server error is
+retried after at least a minute. Any other status is an error.
 
 ## Card
 

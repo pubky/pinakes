@@ -101,8 +101,10 @@ wait for `http.contact`.
 ### Errors and waits
 
 EDGAR asks for a User-Agent with an email address. While `http.contact` is empty, filing, document
-and company links are not sent: each read waits an hour and is tried again. A rate limit (429), a
-timeout (408) or a server error is retried after at least a minute. Any other status is an error.
+and company links are not sent: each read waits an hour and is tried again. A rate limit (429) is
+retried after at least the time its `Retry-After` header names (up to an hour), or 5 minutes when
+it names none. A timeout (408) or a server error is retried after at least a minute. Any other
+status is an error.
 
 ## Card
 

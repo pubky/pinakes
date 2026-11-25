@@ -59,10 +59,10 @@ page states, but only for a service that vouches for it (TIDAL). It looks the IS
 ### An album MusicBrainz doesn't relate by URL
 
 When no release or release group is related to an album link, the source can start from the
-album's barcode. It uses only `upc:` keys that another source recorded (TIDAL's own record of the
-album, or a service's or Discogs' record from an earlier run), at most two, and never one a
-MusicBrainz source recorded. Otherwise a release whose URL relation an editor removed would be
-found again by its own barcode.
+album's barcode. It uses only `upc:` keys that another source recorded, at most two: TIDAL's or
+Spotify's own record of the album in the same run, or a later source's (such as Deezer's or
+Discogs') from an earlier run. It never uses one a MusicBrainz source recorded. Otherwise a
+release whose URL relation an editor removed would be found again by its own barcode.
 
 For each barcode it searches MusicBrainz's barcode field alone (`GET /release?query=barcode:…`,
 asking for a 12-digit UPC in both spellings), and keeps only releases whose barcode is exactly

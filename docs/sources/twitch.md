@@ -34,7 +34,8 @@ These links are [aliases](../api.md#aliases) of the root:
 - a login with capitals (roots are lower case), an address with a trailing slash or query
   parameters.
 
-A login is 3 to 25 letters, digits and underscores. A video ID is a number of at most 20 digits. A
+A login is 3 to 25 letters, digits and underscores. Twitch's own path names, such as `directory`,
+`settings` and `videos`, are never a login. A video ID is a number of at most 20 digits. A
 clip slug is 8 to 120 letters, digits, `-` and `_`.
 
 Not read here: `player.twitch.tv` links, a channel's sub-pages (such as `/{login}/about`) and
@@ -42,9 +43,10 @@ Twitch's own pages (such as `/directory/…`).
 
 ## What it fetches
 
-A channel's or video's read makes one request, for the root's page. A 404 or 410 is `missing`. Any
-status that is neither listed here nor a refusal is an error, and the read is retried. A 408, a 429
-or a server error waits at least a minute.
+A channel's or video's read makes one request, for the root's page. A 404 or 410 is `missing`. A
+429 waits at least the time Twitch names (up to an hour), or 5 minutes when it names none. A 408 or
+a server error waits at least a minute. Any status that is neither listed here nor a refusal is an
+error, and the read is retried.
 
 Twitch answers one generic page, with status 200, for a channel that does not exist and for a page
 it names only to a browser. That page does not say that the object is gone: it gives the plain card

@@ -62,7 +62,9 @@ is a US Code title's package on its own (`/app/details/USCODE-2024-title26`).
 A law as printed in the Statutes at Large, by volume and first page.
 
 - Root: `https://www.govinfo.gov/app/details/STATUTE-{volume}/STATUTE-{volume}-Pg{page}`.
-- Alias: `/link/statute/{volume}/{page}`.
+- Aliases: its content under `/content/pkg/STATUTE-{volume}/…/STATUTE-{volume}-Pg{page}.*`, its
+  MODS record `/metadata/granule/STATUTE-{volume}/STATUTE-{volume}-Pg{page}/mods.xml`, the link
+  service's `/link/statute/{volume}/{page}`, and the legacy `gpo.gov/fdsys/granule/…` address.
 
 ### Not read here
 
@@ -88,8 +90,9 @@ which runs to tens of megabytes.
 
 - A record GovInfo doesn't have (400, 404, or a redirect to its `/error` page) is `missing`.
 - A record for another package, section, edition or page is an error.
-- A rate limit (429), a timeout (408) or a server error, such as a 503 for a record GovInfo is
-  still preparing, is retried after at least a minute.
+- A rate limit (429) is retried after at least the time its `Retry-After` header names (up to an
+  hour), or 5 minutes when it names none.
+- A timeout (408) or a server error (5xx) is retried after at least a minute.
 - A record larger than 1 MB is not read. The card then holds only what the link names: its
   citation as `name` and `citation` ("Public Law 117-58", "H.R. 3684 (enr), 117th Congress",
   "26 U.S.C. 501", "135 Stat. 429") and its `page_url`.
@@ -128,8 +131,7 @@ fact and joins nothing.
 
 ## Credit
 
-The card credits nothing. GovInfo's laws, bills and US Code are works of the US government, in the
-public domain.
+The card credits nothing.
 
 ## Turn it off
 

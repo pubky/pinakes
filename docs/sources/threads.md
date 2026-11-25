@@ -46,7 +46,8 @@ One request per read, for the page.
 - A post that does not exist sends the fetch to the home page (`/?error=invalid_post`): `missing`.
 - A 404 or 410 is `missing`.
 - Any status that is neither listed here nor a refusal is an error, and the read is retried.
-- A 408, a 429 or a server error waits at least a minute.
+- A 429 waits at least the time Threads names (up to an hour), or 5 minutes when it names none.
+- A 408 or a server error waits at least a minute.
 
 ### Refused requests
 

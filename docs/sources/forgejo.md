@@ -90,7 +90,9 @@ The answers mean:
   `missing`.
 - A repository the API answers 404 for: `missing` on codeberg.org and gitea.com, an ordinary web
   card on other hosts.
-- A 408, 429 or 5xx: read again after at least a minute.
+- A 429: read again after at least the time its `Retry-After` header names (up to an hour), or 5
+  minutes when it names none.
+- A 408 or 5xx: read again after at least a minute.
 - Any other status, a release answer for another tag, or an answer without the fields the card
   needs: an error, and the read is retried.
 

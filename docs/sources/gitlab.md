@@ -57,7 +57,9 @@ The `/-/` shapes are read on any host. A host answers as GitLab when it gives th
 (a project with its path, a branch or tag with its commit, a release with its tag, a list of
 commits), or GitLab's own error (`{"message": "404 …"}`). A host that answers otherwise, fails or
 does not answer is remembered for a day, in memory, and its links get ordinary web cards. A known
-instance is never marked as not GitLab.
+instance is never marked as not GitLab. An empty list of commits from an unknown host says nothing:
+the link gets a web card and the host is asked again. A request this daemon's own rate limit holds
+back is not an answer either: the host is not marked, and the link is tried again later.
 
 A page shaped like a project that the API does not know (a group, a user, an old page address)
 gets an ordinary web card. So does one on a host learned this way whose answer is not a project of

@@ -141,7 +141,7 @@ run's backoff ([operations](../operations.md#also-on)).
 
 ## Credit
 
-The card credits nothing beyond its `site`, "Discogs". Discogs states its release data as CC0.
+The card credits nothing beyond its `site`, "Discogs".
 
 ## Turn it off
 

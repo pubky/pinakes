@@ -53,7 +53,7 @@ the AlphaFold database.
 ## What it fetches
 
 An accession is read through UniProt's search by accession, which asks only for the fields the
-card uses (the full record can be over 1 MB):
+card uses (the full record is up to about 1 MB):
 
 `GET https://rest.uniprot.org/uniprotkb/search?query=accession:{ACC}&fields=…&format=json&size=2`
 

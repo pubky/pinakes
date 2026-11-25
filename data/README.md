@@ -1,7 +1,8 @@
 # Pinned vocabulary
 
-This directory holds the data sets Pinakes compiles into its binary: the schema.org vocabulary,
-time zone tables, the oEmbed provider registry and Pinakes's own tables. Nothing here is fetched
+This directory holds the data sets Pinakes compiles into its binary: the schema.org type table,
+time zone tables, the oEmbed provider registry and Pinakes's own tables. The schema.org release the
+type table is derived from is kept here too, but is not compiled in. Nothing here is fetched
 at runtime. An upstream file is pinned by version and SHA-256, and you update it with a change to
 the repository.
 
@@ -16,7 +17,7 @@ the repository.
 | `oembed-providers.json` | The oEmbed provider registry | `resolver/cards.rs` | `scripts/oembed-providers [FILE]` |
 | `multi-tenant-hosts.json` | Which part of a shared host is one publisher | `group_keys.rs` (`TENANT_RULES`) | By hand |
 | `api-recipes.json` | The named API examples | `recipes.rs`, `tests/recipes.rs`, `scripts/e2e --live-recipes` | By hand |
-| `event-adapters.json` | One entry per event platform | `event/adapters/mod.rs`, `config.rs` | By hand |
+| `event-adapters.json` | One entry per event platform | `event/adapters/mod.rs` (and a test in `config.rs`) | By hand |
 | `interstitial-markers.json` | Markers of a bot wall or challenge page | `resolver/interstitial.rs` | By hand |
 
 The licence files next to them (`LICENSE.schemaorg.txt`, `LICENSE.cldr.txt`, `LICENSE.rails.txt`,

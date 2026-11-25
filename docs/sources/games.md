@@ -58,7 +58,8 @@ The source reads a game's own page in these forms:
 | HowLongToBeat | `howlongtobeat.com/game/{id}` | P2816 |
 
 1. The source searches Wikidata for items that carry the page's ID. An ID with characters other than
-   ASCII letters, digits and `._:-/` is not searched.
+   ASCII letters, digits and `._-` (plus the `/` in a GOG ID) is not searched, so a PCGamingWiki
+   title with a `:` is not.
 2. It reads the items back and compares the ID byte for byte. Of several items, one that another of
    them replaces (P1366 "replaced by" or P1365 "replaces") gives way to its successor. If several still
    carry the ID, or the search has more than five hits, the source records nothing.

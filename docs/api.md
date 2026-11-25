@@ -13,7 +13,7 @@ users from Nexus in a separate call and join the two by URI: send a card's `uri`
 | Authentication | None on the public listener (`listen`). The admin listener (`admin_listen`) takes a bearer token ([Admin listener](#admin-listener)). |
 | Rate budget | 120 units per minute per client address by default (`api.requests_per_minute`), shared by every public route ([Limits and errors](#limits-and-errors)) |
 | CORS | Any origin by default (`api.cors_allow_origins = ["*"]`), no credentials ([CORS](#cors)) |
-| Errors | JSON `{"error": "…"}` with the HTTP status ([Limits and errors](#limits-and-errors)) |
+| Errors | JSON `{"error": "…"}` with the HTTP status, on the public `/v1` routes ([Errors](#errors)) |
 | Card shape | One flat object per card (`api_shape: 2` in `/v1/info`) |
 
 ## Basics
@@ -32,7 +32,8 @@ repository, and a test fails while the snapshot differs from the code.
 ### Authentication
 
 The public listener takes no credentials: no keys, cookies or tokens. It writes nothing except
-budgeted previews (`POST /v1/resolve`).
+budgeted previews (`POST /v1/resolve`) and the queue position of a known resource that a lookup
+moves to the front (`POST /v1/resources/lookup`).
 
 The admin listener needs `Authorization: Bearer <admin-token>` on every route except
 `GET /healthz` when `admin_token` is set ([Admin listener](#admin-listener)).
@@ -64,9 +65,14 @@ own caching rules ([OpenStreetMap and locations](#openstreetmap-and-locations)).
 
 Pinakes normalizes every URI and computes its resource ID itself:
 
-- Normalization lowercases the scheme and host and drops the default port, user info and
-  fragment (and the query of a `bitcoin:` payment request).
-- The ID is the BLAKE3 hash of the normalized URI: 32 lowercase hex characters.
+- A URI that parses as a URL is serialized as a URL: the scheme and host are lowercased, the
+  default port, user info and fragment are dropped, an empty path becomes `/`, dot segments
+  (`.`, `..`) are resolved and the path is percent-encoded. The query is kept in its order.
+- A URI without an authority (`nostr:`, `bitcoin:`, `isbn:`, …) keeps its text without the
+  fragment, and a `bitcoin:` payment request also without its query.
+- A URI that does not parse as a URL only has its scheme lowercased; the rest is kept exactly.
+- The ID is the first 16 bytes of the BLAKE3 hash of the normalized URI, as 32 lowercase hex
+  characters.
 - A URI is at most 2,048 bytes.
 
 IDs are Pinakes's own, so combine Pinakes with other indexes by URI. A missing upstream object
@@ -85,12 +91,12 @@ moves to the front of the refresh queue; its TTL, backoff and final state still 
 | `GET /v1/resources/{id}` | A 32-character resource ID | The card with the [read's fields](#resource-read); 404 if unknown |
 | `GET /v1/resources/by-uri` | `uri`: a link | As `GET /v1/resources/{id}` for the URI's ID ([By URI](#by-uri)); 404 if unknown. Nothing is fetched or stored. |
 | `POST /v1/resources/lookup` | Exactly one of `{"ids": […]}` (alias `resource_ids`) or `{"uris": […]}`, 1–500 entries | `[card]` in request order, duplicates kept, unknown entries skipped ([Lookup](#lookup)) |
-| `POST /v1/resolve` | `{"uri": "https://example.org/"}` | The card with the read's fields, within 3 seconds; else 202 with `status: "pending"` ([Resolution and status](#resolution-and-status)) |
+| `POST /v1/resolve` | `{"uri": "https://example.org/"}` | The card with the read's fields, within 3 seconds; else 202 with `status: "pending"`. 404 when the resource expired while the request waited; 429 or 503 with `Retry-After` over a [preview budget](#preview-budgets) ([Resolution and status](#resolution-and-status)) |
 | `GET /v1/resources/{id}/occurrences` | Optional `from`, `to`, `limit`, `cursor` | `{items: [occurrence card], cursor}` ([Calendars and occurrences](#calendars-and-occurrences)) |
 | `POST /v1/occurrences/lookup` | `{resource_ids?, uris?, from?, to?, limit?, cursor?}`: 1–500 feed IDs and links together | `{items: [occurrence card], cursor}` across the feeds, by start |
 | `GET /v1/resources/{id}/episodes` | Optional `limit`, `offset`, `q` | `{items: [episode], next_offset, truncated}`: a podcast show's latest episodes ([Episodes](#episodes)); 404 if unknown |
 | `GET /v1/resources/{id}/collections` | Optional `viewer`, `limit`, `cursor` | `{items: [{uri, author, indexed_at}], cursor}`: the public collections that hold the card's link ([Collections](#collections)); 404 if unknown |
-| `GET /v1/groups/{id}` | A 32-character group ID | `{id, type, curated, keys, members: [card]}` ([Groups](#groups)); 404 if unknown |
+| `GET /v1/groups/{id}` | A 32-character group ID | `{id, type, curated, keys, members: [card]}` ([Groups](#groups)); 404 if unknown; 400 for a malformed ID or while groups are off (`groups.enabled = false`) |
 | `POST /v1/changes/lookup` | `{resource_ids?, uris?, since?, cursor?, limit?}`: 1–500 IDs and links together | A page of [change lines](#change-line) ([Changes](#changes)) |
 | `GET /v1/info` | None | `{version, api_shape, user_agent, resolves, limits, osm_licence, attributions?}` ([Info](#info)) |
 | `GET /v1/dumps/osm_place.ndjson.gz` | None | The ODbL derivative database as a daily gzip file ([OpenStreetMap and locations](#openstreetmap-and-locations)) |
@@ -100,15 +106,15 @@ moves to the front of the refresh queue; its TTL, backoff and final state still 
 | `GET /llms.txt` | None | The usage guide for agents, as plain text ([Agents](#agents)) |
 | `GET /skill.md` | None | The same guide as an agent skill named `pinakes` ([Agents](#agents)) |
 | `POST /mcp` | One MCP JSON-RPC message | The MCP endpoint, when `api.mcp` is on ([Agents](#agents)). Not in the OpenAPI document. |
-| `GET /mcp` | None | For a browser (`Accept: text/html`), a short page on how to connect; any other GET gets 405 with `Allow: POST` |
+| `GET /mcp` | None | When `api.mcp` is on: for a browser (`Accept: text/html`), a short page on how to connect; any other GET gets 405 with `Allow: POST` |
 
 ### Admin routes
 
 | Method and path | Response |
 | --- | --- |
-| `GET /healthz` | 200 `ok`, or 503 ([Admin listener](#admin-listener)); takes no token |
+| `GET /healthz` | 200 `ok`, or 503 ([Admin listener](#admin-listener)); takes no token, but the [Host check](#admin-listener) applies |
 | `GET /metrics` | Prometheus text |
-| `GET /v1/info` | The public info plus ingestion, source, resolver and canary state |
+| `GET /v1/info` | The operator's state: ingestion, sources (canary state included), resolvers and queue statuses, counts and metrics ([Admin info](#admin-info)). Not the public info's fields. |
 | `GET /v1/resources/{id}/document` | The stored document with its internal fields |
 | `PUT /v1/groups/{id}` | Replaces a group's members ([Curation](#curation)) |
 | `DELETE /v1/groups/{id}` | Undoes a curation |
@@ -147,8 +153,8 @@ skipped. Sending both lists, or neither, is a 400.
 | `osm_licence` | `{licence, attribution, url, dump, updated_at}`: the ODbL licence of OSM-derived values, the dump's path, and when the dump was last written (`null` before the first) |
 | `attributions` | What a client must show while it shows values from a service, `[{provider, notice, logo, url}]` ([Credits](#credits)). Absent when there are none. |
 
-The admin listener's `/v1/info` adds manifests, resolver status, counts, ingestion, sources and
-metrics.
+The admin listener's `/v1/info` is a different object, the operator's state
+([Admin info](#admin-info)), without these fields.
 
 ## Response shapes
 
@@ -257,8 +263,8 @@ YouTube is not only music:
 
 Any other YouTube or Vimeo video has its channel as the fact `author`. A video's `duration` fact
 (seconds) is there when Pinakes read its length: from the page, or from the watch page read to
-find a label's upload on other music services. YouTube asks hosts it distrusts to sign in
-instead, so the length may be missing.
+find a label's upload on other music services. YouTube can answer the watch page with a
+sign-in page instead, so the length may be missing.
 
 A track's, album's or artist's page keeps its own video (a `VideoObject` in its JSON-LD) as a
 part of the page, not its card ([Lists](#lists)). The card's `site` is the service's name
@@ -297,10 +303,11 @@ or nothing, the name comes from the object's exact record. So does the descripti
 page's text is not the object's. The record is the Wikidata item that carries the page's own ID,
 or the service's own record (`media_records`, [docs/sources](sources/README.md)).
 
-That record is read while the page is, within a few seconds. When Wikidata is slower, the card
-keeps the page's name at first. The `titles` source then reads the same item without that time
-limit. When the card bears another name, it has the link read again, and the card takes the
-item's label (and description, where the page's is not the object's), usually within minutes.
+That record is read while the page is, within the page hook's limit (at most 3 seconds, 6 for a
+walled page). When Wikidata is slower, the card keeps the page's name at first. The `titles`
+source then reads the same item without that time limit. When the card bears another name, it
+has the link read again, and the card takes the item's label (and description, where the page's
+is not the object's).
 
 #### Pubky objects and gone posts
 
@@ -424,8 +431,9 @@ Other rules:
   spelling, a short link).
 - A tagged `also_on` member whose link names no frame shows the frame its own card shows.
 - A `missing` card, and a post found gone, have no frame.
-- A frame with a fixed height stored on a card of an audio type (a recording, an album, a
-  podcast or episode) is an `audio` player. A frame on a social post is a `post`.
+- A `rich` or `video` frame with a fixed height stored on a card of an audio type (a
+  recording, an album, a podcast or episode) is an `audio` player. A `rich` frame on a social
+  post is a `post`.
 
 Only a safe address is an embed:
 
@@ -472,7 +480,7 @@ Each such field has a credit in `credits`. Show the credit with the value, linke
 | `provider` | `wikipedia` (an article's summary), `wikimedia_commons` (a file), `wikidata` (an item's English description), `cover_art_archive` (a release's front cover) or `tmdb` (a film's or series' poster or overview) |
 | `source_url` | An `https:` URL of at most 1,024 bytes: the article; the file's page on Commons; the item's page on Wikidata (`https://www.wikidata.org/wiki/Q…`); for a cover, the cover art page of the release it is of on MusicBrainz (`https://musicbrainz.org/release/…/cover-art`); or the title's page on TMDB (`https://www.themoviedb.org/movie/…` or `/tv/…`) |
 | `author` | Plain text, at most 256 bytes: `Wikipedia contributors` for an article, the file's author for an image. `null` for a CC0 or public-domain file that names none, for a Wikidata description, for a cover and for TMDB's values. |
-| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID). `null` for a cover (no licence is given; cover art is its label's) and for TMDB's values. |
+| `license` | An SPDX licence ID (`CC-BY-SA-4.0`, `CC-BY-2.0`, `CC-BY-SA-3.0-DE`, `CC0-1.0`, `GPL-3.0-only`, `LGPL-2.1-or-later`), `public-domain`, or `Attribution` (Commons' licence of that name, which has no SPDX ID). `null` for a cover and for TMDB's values. |
 | `license_url` | The licence's text (`https:`): for a GNU licence, its version's text on gnu.org; for `Attribution`, its template's page on Commons. `null` for the public domain without a mark, for a cover and for TMDB's values. |
 | `lang` | The text's language: `en`, or another Wikipedia's code (`de`) when only that Wikipedia describes it; `null` for an image. A client may label or hide a text in a language its reader does not read. |
 | `excerpted` | `true` when the text is a part of a longer source: a summary is the article's first paragraphs, and one over 2,048 bytes is cut at a sentence or a word. A Wikidata description is whole (`false`). |
@@ -546,9 +554,9 @@ TMDB key. The credit names the title's page on TMDB and no author or licence; th
  "excerpted": false, "modified": false, "subject": null}
 ```
 
-A client that shows a value credited to `tmdb` must also show TMDB's logo (smaller and less
-prominent than its own marks) and TMDB's notice. `/v1/info` gives both in `attributions` while
-the instance uses TMDB, and while a stored card still holds a TMDB value:
+A client that shows a value credited to `tmdb` also shows TMDB's logo and notice. `/v1/info`
+gives both in `attributions` while the instance uses TMDB, and while a stored card still holds a
+TMDB value:
 
 ```json
 "attributions": [
@@ -743,8 +751,9 @@ Three caveats:
 - A group ID is the one a group of those members gets when it first forms. On an instance where
   the group formed differently it has another ID; take `group.id` from either member's card.
 
-The examples live in `data/api-recipes.json`. `tests/recipes.rs` runs every one against a
-fixture of the same URIs and checks that this section lists every recipe's request line.
+The examples live in `data/api-recipes.json`. `crates/pinakes-core/tests/recipes.rs` runs every
+one against a fixture of the same URIs and checks that this section lists every recipe's request
+line.
 `scripts/e2e --live-recipes` (also run by `--isolated-live`) resolves each `/v1/resolve` example
 live and checks its card's type, so an example whose page has gone stale fails there.
 
@@ -1042,8 +1051,8 @@ The answer is `{items, cursor, reach_truncated, facets?}`:
 
 The answer is 400 for an unknown parameter, invalid coordinates or dates, an out-of-range
 radius, an unknown type and incompatible options. A date outside years 0001–9999 gives the
-message `timestamp out of range`. An unknown type's error names it when the name is letters and
-digits only; anything else, such as a URL, gets a general message. Other statuses:
+message `timestamp out of range`. An unknown type's error names it when the name is 1–64 ASCII
+letters and digits; anything else, such as a URL, gets a general message. Other statuses:
 
 | Status | When |
 | --- | --- |
@@ -1322,7 +1331,7 @@ filters, together.
 | 400 | An unsupported scheme, a disabled resolver, or a [link that carries a credential](#links-that-carry-a-credential) |
 | 404 | The resource expired while the request waited (`resource expired`) |
 | 429 | Over a preview budget ([Preview budgets](#preview-budgets)) |
-| 503 | The instance's new previews for this hour are taken; nothing was stored |
+| 503 | The instance's new previews for this hour are taken, with `Retry-After`; nothing was stored |
 
 Ingestion and every preview share one queue entry per normalized URI, with one TTL, retry
 schedule and dead-letter state. A resource that was only previewed, never referenced, is not a
@@ -1385,21 +1394,31 @@ kept out of everything Pinakes stores or sends:
 | `ok` | The current metadata was accepted. |
 | `pending` | Queued and not resolved yet. A link's first missing answer leaves it `pending` until a second fetch confirms it. A link with no accepted card yet (a new preview) is asked again after `limits.backoff_secs` (30 s), and `POST /v1/resolve` answers 202 with `Retry-After` until then. |
 | `missing` | Confirmed gone by two fresh fetches. One missing answer keeps the last accepted metadata; the second fetch comes after `limits.missing_ttl_secs` (at least an hour). A repeated cached observation does not count twice. |
-| `unreachable` | The upstream denied access (401, 403) or answered with a challenge page (a bot wall, a captcha or a sign-in redirect). It is retried with backoff like an error ([access walls](design.md#access-walls)). |
+| `unreachable` | The upstream denied access (401, 403) or answered with a challenge page (a bot wall, a captcha or a sign-in redirect). It is retried with backoff and dead-letters after `limits.max_failures`, as an error does ([access walls](design.md#access-walls)). A denied secondary request (`upstream_denied`, such as an event platform's) is retried after the wait it names instead: the status turns `unreachable` only after three days, and the link never dead-letters. |
 | `error` | The fetch failed. It is retried with backoff and dead-letters after `limits.max_failures`. |
 
-A failed refresh keeps the last accepted metadata. More on errors:
+A failed refresh keeps the last accepted metadata. Whether the status changes depends on the
+failure ([failures and retries](operations.md#failures-and-retries)):
 
-- A link with no card yet shows `error` after `limits.max_failures` failures in a row. An
-  accepted card keeps its status.
-- A service that keeps answering 5xx, 408 or 429 makes the link wait the longer of its
-  `Retry-After` and the backoff, which grows while the answers last. A short outage never
-  dead-letters a link: it dead-letters only once the failures have lasted three days.
+- Most failures are charged and set the status at once, on an accepted card too: `error`, or
+  `unreachable` for a denial or a challenge page. This covers a web page, calendar feed or Pubky
+  object that answers 5xx, 408 or another 4xx that is neither missing nor a denial. The link
+  dead-letters after `limits.max_failures` failures in a row: at the defaults, about 8 minutes
+  (30 + 60 + 120 + 240 seconds of backoff).
+- A timeout is charged only past `limits.timeout_grace` in a row (by default from the fourth).
+  From then on the status is `error`.
+- Some answers are a wait, not a charged failure: an official source, an ISBN or DOI card or an
+  event platform that answers 5xx, 408 or 429, Nominatim's 5xx, and a 429 on any other request.
+  The link waits the longer of the answer's `Retry-After` and the backoff, which grows while the
+  answers last. An accepted card keeps its status, and a link with no card yet shows `error`
+  after `limits.max_failures` in a row. Such a link dead-letters, and turns `error`, only once
+  the failures have lasted three days.
 - A rate limit on the operator's own quota (GitHub's token, the operator's Nominatim) is no
   failure of the link.
 - A request that never got an answer from the upstream (the connection refused, reset or
-  aborted, or the host unreachable) says nothing about the link. It is retried with the capped
-  backoff for as long as that lasts, and never dead-letters.
+  aborted, or the host unreachable) says nothing about the link. An accepted card keeps its
+  status, and a link with no card yet shows `error` after `limits.max_failures` in a row. It is
+  retried with the capped backoff for as long as that lasts, and never dead-letters.
 
 ### Refresh
 
@@ -1412,8 +1431,8 @@ Refresh follows the time to an event's start ([refresh](design.md#refresh)):
 | 24 hours to 7 days | 6 hours |
 | Under 24 hours, or running | 1 hour |
 
-Calendars and feeds use `limits.refresh_container_secs` (1 day, 12 hours, 6 hours, 1 hour), with
-the feed's own TTL in place of the first two. Cursor feeds refresh every
+Calendars and feeds use `limits.refresh_container_secs` (1 day, 12 hours, 6 hours, 1 hour). A
+feed's own TTL takes the place of the first two and caps the third. Cursor feeds refresh every
 `limits.refresh_cursor_secs` (5 minutes). Every other interval is at least an hour. Adapter
 floors can lengthen these; OSM follows `limits.osm_ttl_secs`.
 
@@ -1571,7 +1590,7 @@ expiry.
 | `created` | The resource or occurrence got its first document |
 | `rescheduled` | Its start or end changed |
 | `relocated` | Its location or venue changed |
-| `cancelled`, `uncancelled` | It was cancelled, or a cancellation was lifted |
+| `cancelled`, `uncancelled` | It was cancelled or went `missing`, or that was undone |
 | `renamed` | Its name changed |
 | `details` | Anything else changed |
 | `deleted` | Its document was removed; orphan expiry emits it |
@@ -1702,7 +1721,9 @@ Pinakes holds a suspicious snapshot instead of applying it:
 - A snapshot that loses more than half its active keys, or adds more than
   `limits.feed_max_new_keys` (1,000) to a feed with rows, is held until an identical snapshot
   confirms it.
-- A feed over `limits.feed_max_rows` (10,000) is held until it shrinks.
+- A snapshot that would take a feed's stored and new rows together over
+  `limits.feed_max_rows` (10,000) is held until it shrinks. A snapshot that lists more than that
+  on its own is not held: it fails like an error.
 - `limits.feed_max_holds` (5) consecutive holds dead-letter the feed.
 
 A feed answering 404, 410 or 451, or an empty feed, counts as an empty snapshot: two of them
@@ -2149,8 +2170,8 @@ ranked by it, and each event keeps its own card.
 A background pass computes the pairs for events starting from a day ago to a year ahead, and
 again whenever an event's start, place or name changes; a request only reads them.
 
-- Each event keeps its best 20 pairs and is named by at most 40 others, so a change marks a
-  bounded number of events to refill their lists.
+- Each event keeps its best 20 pairs and is named by at most `limits.same_event_incoming_kept`
+  others (40 by default), so a change marks a bounded number of events to refill their lists.
 - A read examines at most 100 candidates. One that runs out with room left goes on from where it
   stopped in a later read.
 - A new or changed event is paired within about five seconds of its save, once the events before
@@ -2188,13 +2209,13 @@ Two recordings are possibly the same when all of these hold:
   nothing.
 - Their lengths, when both are known (the `duration` fact, else the page's), are within 3 s.
 
-`score` is 1 when both lengths are known and agree, 0.7 when one is unknown. Recordings whose
-artist and length (when they have one) a source states as facts come first, then those whose own
-page alone states them, each by score. Any page can copy a track's title, artist and length into
+`score` is 1 when both lengths are known and agree, 0.7 when either or both are unknown.
+Recordings whose artist and length (when they have one) a source states as facts come first, then
+those whose own page alone states them, each by score. Any page can copy a track's title, artist and length into
 its markup, and that never puts it ahead of a recording a service vouches for.
 
-A member of the card's own group and an alias are never listed, so a pair that a key later joins
-drops out of the hint by itself. The hint is weaker than a group: nothing is merged, counted or
+A member of the card's own group, an alias and a card that is not `ok` are never listed, so a
+pair that a key later joins drops out of the hint by itself. The hint is weaker than a group: nothing is merged, counted or
 ranked by it, and each recording keeps its own card.
 
 A background pass computes the pairs, and again whenever a recording's name, type, artist or
@@ -2591,8 +2612,9 @@ content type says.
   does not read as a feed is a `DataFeed` with no name.
 - A podcast feed is typed as media ([below](#media)).
 - A link that looks like a feed (its last segment ends `.atom`, `.rss`, `.rdf` or `.xml`, or is
-  named `feed`, `rss` or `atom`) is fetched with the feed types first in its `Accept` header,
-  because some sites answer a feed's URL with a 404 when HTML leads.
+  named `feed`, `rss` or `atom` with any extension or none, such as `feed.json`) is fetched with
+  the feed types first in its `Accept` header, because some sites answer a feed's URL with a 404
+  when HTML leads.
 
 ### Media
 
@@ -2945,21 +2967,23 @@ Over budget, the answer is 429 with `Retry-After: 60`.
 
 A handler's errors are `{"error": "…"}`. So is a request the server could not read (a query, a
 path, a body): it keeps its status and says what the route takes, never the input. A path no
-route has (404) and a method a route does not take (405) have no body.
+route has (404) and a method a route does not take (405) have no body. A few answers are plain
+text instead: the 405 of `GET /mcp`, and on the admin listener the 401, the 421 and
+`/healthz`'s answers.
 
 | Status | When |
 | --- | --- |
 | 400 | Malformed query parameters or JSON, invalid values, incompatible options |
 | 404 | An unknown resource, group or link |
 | 410 | A change cursor older than the retained history ([Changes](#changes)) |
-| 413 | A body over 2 MB |
+| 413 | A body over 2 MiB |
 | 415 | A body not sent as `application/json` |
 | 422 | JSON of the wrong shape |
 | 429 | Over a budget; `Retry-After` says when to try again |
 | 500 | An internal error, without database details. A handler panic is answered 500 by a backstop layer (logged with its path, counted in `pinakes_api_panics_total`), never a dropped connection. |
 | 501 | `wot_2` on an instance whose Nexus serves no reach set |
 | 502 | Nexus failed while a search read a `reach` or `boost` set |
-| 503 | The hour's new previews are taken, or the OSM dump is not written yet; with `Retry-After` |
+| 503 | The hour's new previews are taken, or the OSM dump is not written yet, with `Retry-After`; on the admin listener, the group writer is busy ([Curation](#curation)) |
 | 504 | The request took longer than `limits.request_timeout_secs` (30 s) |
 
 ### Timeouts and database
@@ -3026,10 +3050,11 @@ characters, then `…`), `image`, `site`, `point`, `start`, `end`, `credits`, `g
 card's full read (`GET /v1/resources/{id}`). A shortened description's credit is marked
 `excerpted`. Every answer names the REST URL of its full result.
 
-A failed request is the tool's error (`isError`). Its text is `{error, status, hint,
-retry_after_s?}`: the route's status and message, a hint on what to do, and the seconds of its
-`Retry-After` when it sent one (a 429, or the 503 of a new preview when the instance's hour is
-taken). An unknown tool is a JSON-RPC error.
+A failed request is the tool's error (`isError`). Its text is `{error, status, hint, url?,
+retry_after_s?}`: the route's status and message, a hint on what to do, the REST URL that failed
+(when a route answered), and the seconds of its `Retry-After` when it sent one (a 429, or the 503
+of a new preview when the instance's hour is taken). The 429 of `social`'s own budget charge
+carries no `retry_after_s`. An unknown tool is a JSON-RPC error.
 
 #### The social tool
 
@@ -3066,7 +3091,7 @@ text. Every other method is MCP's.
 - An MCP message spends one unit of the per-IP budget, and a tool call what its requests cost on
   top: a `reach` search 6, `types` two requests, `social` its lookup plus one per 100 URIs it
   asks Nexus.
-- Bodies are capped at 2 MB, as for every route. The routes keep their statement timeout, and
+- Bodies are capped at 2 MiB, as for every route. The routes keep their statement timeout, and
   `social` the Nexus client's 10-second timeout.
 - A tool call has one deadline for all its requests together: two seconds inside
   `limits.request_timeout_secs`, counted from the start of the request that carries it. Past it
@@ -3089,7 +3114,7 @@ to know.
 | --- | --- |
 | `GET /healthz` | 200 `ok` when the database answers `SELECT 1` within a second; 503 (`database unavailable`) when it does not, or (`stopping`) while the daemon is stopping (a background task ended) |
 | `GET /metrics` | Prometheus text; 503 until the database gauges have been read once |
-| `GET /v1/info` | The public info plus manifests, resolver status, counts, ingestion, sources and metrics |
+| `GET /v1/info` | The operator's state ([Admin info](#admin-info)) |
 | `GET /v1/resources/{id}/document` | The stored document with its internal fields |
 | `PUT /v1/groups/{id}`, `DELETE /v1/groups/{id}` | Group curation ([Curation](#curation)) |
 
@@ -3098,12 +3123,32 @@ to know.
 or wrong token gets 401 with `WWW-Authenticate: Bearer`. A non-loopback `admin_listen` without a
 token is refused at startup.
 
-**Host check.** The listener answers 421 to a request whose `Host` is not `localhost`, an IP
-address or a name in `admin_hosts`, before the token is checked. It sends no CORS headers.
+**Host check.** The listener answers 421 to a request whose `Host` (or HTTP/2 authority) is not
+`localhost`, an IP address or a name in `admin_hosts`, before the token is checked. The check
+applies to `GET /healthz` too. A request with neither a `Host` nor an authority passes. The
+listener sends no CORS headers.
 
-Public `/v1/info` shows only what a client needs ([Info](#info)). Errors are stored only as
-sanitized classes. Admin info and database metrics are cached for 15 seconds. Metrics and alerts
-are described in [ops](../ops/README.md).
+The 401 and 421 answers, and the health route's answers, are plain text, not JSON.
+
+### Admin info
+
+The admin listener's `GET /v1/info` is the operator's state. It does not carry the public info's
+`api_shape`, `user_agent`, `resolves`, `limits` or `attributions` ([Info](#info)):
+
+| Field | Meaning |
+| --- | --- |
+| `version` | The daemon's version |
+| `groups` | The `[groups]` settings |
+| `manifests` | Every adapter's manifest, with whether it is on |
+| `sources` | One row per source from the `source_state` table: last success, last error class, consecutive failures, change totals, held feeds, cursor resets, and the canary's state (the `canary_*` columns, such as `canary_ok` and `canary_missing`) |
+| `metrics` | Every Prometheus metric family with its samples |
+| `ingestion` | Per Nexus: `nexus`, `cursor`, `feed_length`, `lag`, `epoch` and `updated_at` |
+| `counts` | `resources`, `aliases`, `references` and `occurrences` |
+| `osm_licence` | As in the public info |
+| `resolvers` | Per route its settings (`enabled`, and `concurrency`, `requests_per_second` and other settings where the route has them), and `statuses`: per route and status, `count`, `dead_letter` and `leased`. Aliases are not counted in `statuses`. |
+
+Errors are stored only as sanitized classes. Admin info and database metrics are cached for 15
+seconds. Metrics and alerts are described in [ops](../ops/README.md).
 
 Canaries (`canary.enabled`) probe each enabled adapter every `limits.canary_interval_secs` (6
 hours) under the ordinary worker and host budgets. A web canary denied by host policy is

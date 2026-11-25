@@ -96,10 +96,8 @@ mempool.space, so a reference on any of them counts on the one card. The table `
 "Read only" means that a link there reads as the card, but the card does not list the site. The sites
 that refuse a plain client, and `mempool.emzy.de`, a copy of mempool.space, are read only.
 
-Each form was checked on the live site where the site shows the object, as a route where its pages
-render client-side, and on archived captures for the sites that refuse a plain client. Two networks
-are left out: `mempool.emzy.de`'s testnet, which answers 502, and Blockchain.com's `btc-testnet`
-pages, which show nothing that names their network.
+Two networks are not read: `mempool.emzy.de`'s testnet, which answers 502, and Blockchain.com's
+`btc-testnet` pages, which show nothing that names their network.
 
 Other chains on the same sites are not Bitcoin and name nothing here, for example
 Blockstream's `/liquid/…`, Blockchain.com's `/bch/…` and `/eth/…`, Blockchair's `/bitcoin-cash/…` and

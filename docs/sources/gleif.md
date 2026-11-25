@@ -40,8 +40,9 @@ Not read here:
 
 One request per read: `GET https://api.gleif.org/api/v1/lei-records/{LEI}`. An LEI GLEIF doesn't
 know (404) is `missing`. A record for another LEI, or one without a legal name, is an error, not a
-card. A rate limit (429), a timeout (408) or a server error is retried after at least a minute. Any
-other status is an error.
+card. A rate limit (429) is retried after at least the time its `Retry-After` header names (up to
+an hour), or 5 minutes when it names none. A timeout (408) or a server error is retried after at
+least a minute. Any other status is an error.
 
 ## Card
 

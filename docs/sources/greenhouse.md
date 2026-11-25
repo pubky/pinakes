@@ -55,8 +55,8 @@ The type is `JobPosting` ([Jobs](../api.md#jobs)).
 - `venue` is the workplace: the first place in the posting's location that is not remote. It is
   placed on the map as a career page's workplace is.
 
-The location is a list separated by `;`. The first 32 places are read, each from its first 1,024
-bytes. A place that says "Remote" ("Remote, United States", "Remote-Friendly, Europe") makes the
+The location is a list separated by `;`. The first 32 places are read. Whether a place is remote,
+and the regions it names, come from its first 1,024 bytes. A place that says "Remote" ("Remote, United States", "Remote-Friendly, Europe") makes the
 posting remote and names its regions. A posting can be remote and have a workplace.
 
 | Fact | Meaning |

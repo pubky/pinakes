@@ -204,7 +204,7 @@ resolver limits apply to pubky and to each card route.
 
 | Limit | Default | Range | Meaning |
 | --- | --- | --- | --- |
-| `max_failures` | `5` | 1–32 | Failures before a resource dead-letters. A service that keeps answering 5xx, 408 or 429 dead-letters a link only once its failures have lasted three days ([failures](#failures-and-retries)). |
+| `max_failures` | `5` | 1–32 | Charged failures before a resource dead-letters. A 5xx, 408 or 429 that a route reads as a wait charges none: such a link dead-letters only once its waits have lasted three days. A web page, calendar feed or Pubky object that answers 5xx or 408 is charged ([failures](#failures-and-retries)). |
 | `timeout_grace` | `3` | 0–32 | Consecutive timeouts that charge no failure. |
 | `backoff_secs` | `30` | 1–`max_backoff_secs` | First retry backoff (seconds). |
 | `max_backoff_secs` | `3600` | `backoff_secs`–86400 | Retry backoff ceiling (seconds). |
@@ -453,8 +453,8 @@ For the selected links, in batches of 1000, `reextract`:
 
 - re-runs the classification and queues each link to be read at once, revived from a dead letter
   (`dead_letter=false`, `attempts=0`, `timeout_streak=0`, `last_error=NULL`) or a final state;
-- drops their HTTP validators and, on the OSM route, their `osm_place` cache entry, so the next
-  fetch reads them in full;
+- drops their HTTP validators and, on the OSM route, expires their `osm_place` cache entry, so the
+  next fetch reads them in full;
 - queues their [also-on](#also-on) lookups, since an unchanged card wouldn't run them;
 - moves a link to its alias root when a rule now gives it one, and moves an alias to the root a
   rule now names;
@@ -550,7 +550,7 @@ Every fetch a reference can steer goes through one client, the egress. Two clien
 | Requests with credentials, a body or extra headers | A redirect is refused, or kept without being followed. |
 | Proxies | Environment proxies are ignored. |
 | Time | Ten seconds per fetch, its wait for a [pacing slot](#pacing) included. |
-| Content types | HTML, JSON, the listed image types and PDF; feeds and calendars. A reader may admit more. |
+| Content types | HTML, JSON, JPEG, PNG, WebP, GIF, AVIF and PDF; feeds and calendars. A reader may admit more. |
 
 Card images stay origin URLs and are never fetched. A link that is itself an image resolves to an
 ImageObject card.
@@ -586,7 +586,7 @@ Every HTML parse runs in a child process, `pinakesd parse-worker`. A daemon that
 doesn't start. All parses of one job (a page's extraction, a source's answer with many HTML
 descriptions, a calendar's events) share one worker and its limits: 1 s of CPU time (10 s in a debug
 build), 1 GiB of memory and a wall-clock deadline. At most as many jobs parse at once as the machine
-has cores. Text without markup (no `<`) is parsed in the daemon.
+has cores, and at least two. Text without markup (no `<`) is parsed in the daemon.
 
 | What happens | Result |
 | --- | --- |
@@ -627,7 +627,7 @@ Discogs, GitHub). The page fetch of web resolution and most official-API reads d
 | Success | The lifetime the reader asks for, at least an hour |
 | Failure | Five minutes, or the wait the service named, held between 1 and 300 seconds |
 | A 429 that names no wait | Five minutes |
-| TIDAL's and Spotify's 401 and 403 | Never, so a new token asks again |
+| TIDAL's and Spotify's 401 and 403; GitHub's and TMDB's 401 | Never, so a new token asks again |
 | A wait for Pinakes's own host budget | Never |
 
 ### User-Agent and contact
@@ -685,7 +685,7 @@ The daemon writes `osm_place.ndjson.gz` into `osm.dump_dir` at startup when it i
 [design](design.md#odbl-dump).
 
 - **Space.** The directory must be writable by the daemon and hold two copies of the file while one is
-  written: about 1.5 KB per cached place uncompressed, several times less gzipped.
+  written.
 - **Writing.** The daemon reads one repeatable-read snapshot without a statement timeout into a
   temporary file (`osm_place.ndjson.gz.{pid}.{random}.tmp`), syncs it and renames it into place.
 - **One writer per directory.** A writer holds `osm_place.ndjson.gz.lock`, so daemons sharing the
@@ -736,11 +736,11 @@ key. That memory holds 10,000 keys and is empty after a restart.
 
 | When no relay gave a usable packet | Result |
 | --- | --- |
-| Every relay answered 404 | No record. |
+| Every relay answered 404 | No record: `dns`, charged, and dead-lettered after `limits.max_failures`. |
 | Each relay that failed answered 5xx or didn't answer in time, and none answered 404 | `relay_outage`: read again after the longest `Retry-After` named (a minute when none was). No attempt is charged, and it never dead-letters. |
 | A relay answered 429 or its host had to be waited for, and none failed otherwise | Read again when the relay says, or its host is free. No attempt is charged. |
 | Every relay refused or reset the connection | Never reached an answer: retried with backoff, never dead-letters. |
-| Refused by the policy, a redirect, or a packet that doesn't verify; or a 5xx or timeout beside another relay's 404 | `connect`: retried with backoff, and dead-lettered after `limits.max_failures`. |
+| Refused by the policy, a redirect, a 4xx other than 404 and 429, or a packet that doesn't verify; a 5xx, a timeout or a refused connection beside another relay's 404; or only a packet older than one seen before | `connect`: retried with backoff, and dead-lettered after `limits.max_failures`. |
 
 A refusal by the policy on the homeserver side is stored as `policy` and dead-lettered at the first
 attempt: a redirect, a content type outside the list, a non-public address, an owner host that isn't
@@ -993,7 +993,7 @@ class (`last_error`) decides what a failure costs:
 | Class | When | Charged | Dead-letters |
 | --- | --- | --- | --- |
 | `timeout` | No answer in time | Past `limits.timeout_grace` in a row (by default from the fourth) | After `limits.max_failures` charged |
-| `upstream`, `http_5xx`, `http_4xx` as a wait | The service answered 5xx, 408 or 429 | No | Only once the failures have lasted three days |
+| `upstream`, `http_5xx`, `http_4xx` as a wait | An official source, an ISBN or DOI card, or an event platform got a 5xx, 408 or 429; Nominatim answered 5xx; any other request got a 429 | No | Only once the failures have lasted three days |
 | `connect`, never answered | Connection refused, reset or aborted, or host unreachable | No | Never |
 | `connect`, named by a resolver; TLS failures (stored `connect`) | A PKARR relay, a key-pinned homeserver, a bad certificate | Yes | After `limits.max_failures` |
 | `rate_limited`, `discovery_cached`, `quota` | The daemon's own wait: its host budget, a cached failure, the operator's quota (GitHub's token limit, Nominatim's 429) | No | Never |
@@ -1003,10 +1003,13 @@ class (`last_error`) decides what a failure costs:
 | `relay_outage`, `inconclusive`, `indexer_unavailable`, `disabled` and other waits a source names | PKARR relays are down; Nostr indexers couldn't settle; a setting is missing (SEC EDGAR without a contact) | No | Never |
 | `missing_unconfirmed` | One missing answer, not yet confirmed | No | Never |
 | `wall` | A [challenge page](#access-walls); status `unreachable` | Yes | After `limits.max_failures` |
+| `wall` on a social card | A social site's wall on a refresh of a stored card that says more; the card and its status stay | No; read again in an hour | Never |
 | `policy` | Refused by the egress policy | Yes | At the first attempt |
 | `unsupported` | An OSM-host page that is no object or location link | Final | No |
 | `too_complex` | A [parse](#html-parsing) past its limits | Final | No |
-| `dns`, `http_4xx`, `parse`, `too_large` and the rest | Anything else | Yes | After `limits.max_failures` |
+| `http_5xx`, `http_4xx` | A web page, calendar feed or Pubky object answered 5xx, or a 4xx that is neither missing, unreachable nor a 429 (408 included) | Yes | After `limits.max_failures`: at the defaults, about 8 minutes (30 + 60 + 120 + 240 seconds of backoff) |
+| Any charged failure on the `geo` route | A `geo:` URI or map point that fails to resolve | Yes | At the first attempt |
+| `dns`, `parse`, `too_large` and the rest | Anything else | Yes | After `limits.max_failures` |
 
 Details:
 
@@ -1029,7 +1032,8 @@ A missing result needs a second fresh fetch to confirm it.
 | Without one yet | `limits.backoff_secs` |
 
 The confirming fetch asks the upstream again, once per request, instead of replaying a cached answer.
-Only a wait the upstream named (a 408, 429 or 5xx, or GitHub's 403 for its rate limit) is replayed. The
+Only a wait is replayed: an answer that names one (a 408, 429 or 5xx, or GitHub's 403 for its rate
+limit), or a cached failure with no answer, such as a transport error. The
 wait charges nothing: `last_error` is `missing_unconfirmed`, the log line is `a missing answer waits for
 its confirming fetch`, and `pinakes_resolution_deferred_total{reason="missing_unconfirmed"}` counts it.
 
@@ -1265,8 +1269,8 @@ as any other page.
 | `posh` | On, marked fragile |
 | Every other platform | On |
 
-Each platform's `canary_note` in the table gives the reason and when it was checked; admin `/v1/info` shows
-the effective manifests.
+A platform's `canary_note` in the table, where it has one, says how its canary sample was chosen, or
+that the operator must configure one. Admin `/v1/info` shows the effective manifests.
 
 **Reading.** Luma, Meetup, Eventbrite, Partiful, Posh, RingCentral, Airmeet, Mobilizon, Gancio, Wikidata,
 Dice, Xceed, Ents24 and Ticketino supplement JSON-LD with bounded state parsing. JavaScript is never
@@ -1548,15 +1552,24 @@ stay.
 
 ### Tenant rules
 
-`data/multi-tenant-hosts.json` says which part of a multi-tenant host is one publisher. The canonical
-[alias](api.md#aliases) rule needs the same tenant.
+`data/multi-tenant-hosts.json` says which part of a multi-tenant host is one publisher
+(`group_keys::origin`). Two links have the same publisher when they have the same tenant; on any other
+host, the same registrable domain. The publisher must match when:
+
+- a page's ActivityPub object is read for its card;
+- a feed a page advertises lends the page its episode GUIDs;
+- a page joins a podcast episode;
+- an event page's calendar gives the page its `ics_uid` key.
 
 | Rule | Tenant |
 | --- | --- |
-| `"subdomain"` | The subdomain |
-| `"first_path_segment"` | The first path segment |
-| `{"path_segment": N}` | The path's segment N |
-| `{"path": {"segment": N, "skip": ["u/*"], "extend": ["s"], "query": ["src"]}}` | A segment, where `skip` drops a noise window (Google Calendar's `u/{n}`), `extend` takes the next segment too (anchor.fm `/s/{id}`), and `query` scopes by a parameter when the path is short (`embed?src=`) |
+| `"subdomain"` | The full host name |
+| `"first_path_segment"` | The host and the first path segment |
+| `{"path_segment": N}` | The host and the first N path segments |
+| `{"path": {"segment": N, "skip": ["u/*"], "extend": ["s"], "query": ["src"]}}` | The host and the first `segment` path segments, after `skip` drops a noise window (Google Calendar's `u/{n}`). `extend` takes the next segment too (anchor.fm `/s/{id}`), and `query` scopes by a parameter when the path is short (`embed?src=`). |
+
+A link with too few path segments (and no such query parameter) is a publisher of its own. A subdomain of a
+listed host takes the host's rule; the longest matching host wins.
 
 ## Monitoring
 
@@ -1625,7 +1638,7 @@ and they never write documents, the OSM cache or changes.
 
 Any other refusal of a canary's request (a content type, a redirect) is a failure. A platform with a
 `canary_link` (Infomaniak) reads its listing's first event link of the declared form, so it is as current as
-the provider keeps its listing. Any other reads its fixed sample, which its `canary_note` says when to rotate.
+the provider keeps its listing. Any other reads its fixed sample, which its `canary_note`, where it has one, describes.
 
 ### Links that carry a credential
 

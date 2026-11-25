@@ -58,8 +58,9 @@ GET https://www.ecfr.gov/api/versioner/v1/ancestry/{current or YYYY-MM-DD}/title
 ```
 
 A section or part eCFR doesn't know (404) is `missing`. An ancestry that doesn't end at the
-section or part asked for is an error. A rate limit (429), a timeout (408) or a server error is
-retried after at least a minute.
+section or part asked for is an error. A rate limit (429) is retried after at least the time its
+`Retry-After` header names (up to an hour), or 5 minutes when it names none. A timeout (408) or a
+server error is retried after at least a minute.
 
 ## Card
 
@@ -88,8 +89,7 @@ and joins nothing.
 
 ## Credit
 
-The card credits nothing. The Code of Federal Regulations is a work of the US government, in the
-public domain.
+The card credits nothing.
 
 ## Turn it off
 

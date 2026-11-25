@@ -11,10 +11,10 @@ publication and a post are not.
 | Fetches | `GET https://{name}.substack.com/`, `GET https://{name}.substack.com/p/{slug}` or `GET https://substack.com/@{handle}` |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) |
-| Refresh | Daily, as every official card ([refresh](../design.md#refresh)); a profile within the hour (social content) |
+| Refresh | Daily, as every official card ([refresh](../design.md#refresh)); a profile, and a publication's card while Substack refuses the request, within the hour (social content) |
 | Card types | `Blog`, `BlogPosting` or the article type the page declares (such as `NewsArticle`), `Person` |
 | Keys | None (facts only) |
-| Social content | Profiles only: 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |
+| Social content | Profiles, and a publication's card while Substack refuses the request (a `Person`): 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |
 | Credit | None |
 | Switch | `[sources.substack] enabled`, on by default |
 
@@ -58,7 +58,9 @@ The answers mean:
 - A profile fetch that ends on Substack's search (`/search/…`), which is where a handle that does
   not exist leads: the card is `missing`.
 - A 401, 403 or 451, or an access wall (a challenge): Substack refused the request (see below).
-- A 408, 429 or 5xx: the read is retried after at least a minute.
+- A 429: the read is retried after at least the time Substack names (up to an hour), or 5 minutes
+  when it names none.
+- A 408 or 5xx: the read is retried after at least a minute.
 - Any other status: an error, and the read is retried.
 
 When Substack refuses the request, the card is the link's shape alone, marked with the fact

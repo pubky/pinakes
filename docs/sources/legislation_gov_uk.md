@@ -70,8 +70,10 @@ request reads the item's introduction instead.
 
 - An item or provision the site doesn't know (400 or 404) is `missing`.
 - Data for another item, or without metadata or a title, is an error.
-- A rate limit (429), a timeout (408) or a server error is retried after at least a minute. Any
-  other status is an error.
+- A rate limit (429) is retried after at least the time its `Retry-After` header names (up to an
+  hour), or 5 minutes when it names none.
+- A timeout (408) or a server error is retried after at least a minute. Any other status is an
+  error.
 
 ## Card
 

@@ -82,8 +82,7 @@ join nothing.
 
 ## Credit
 
-The `attribution` line credits the creators and the licence. Zenodo's metadata is CC0; each record's
-files and text are under the licence the record states.
+The `attribution` line credits the creators and the licence.
 
 ## Turn it off
 

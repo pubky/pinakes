@@ -80,7 +80,7 @@ What changes with each credential:
 
 | Provider | Without it | With it |
 | --- | --- | --- |
-| Spotify | The sources that ask Spotify are off. Spotify links still get their ordinary cards. | The sources ask the Web API with client credentials. Both values are needed. |
+| Spotify | The sources that ask Spotify are off. Spotify links still get their ordinary cards. | The sources ask the Web API with client credentials. Both values are needed. An app in Spotify's development mode answers only while the account that owns it has Premium; without it, every request gets 403. |
 | TIDAL | The sources that ask TIDAL are off. TIDAL links still get their ordinary cards. | The sources ask TIDAL's developer API with client credentials. Both values are needed. `[tidal] country` (default `US`) sets the catalogue's country. |
 | TMDB | `tmdb` is off: no request, and its stored values are hidden. | Film and series cards without an image or description take TMDB's poster and overview. |
 | Discogs | Discogs cards and the also-on lookup work without images. | Cards show images. The token wins when both a token and a consumer pair are set. Pinakes paces `api.discogs.com` at 25 requests a minute either way. |

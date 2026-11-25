@@ -53,7 +53,8 @@ read either.
 
 ## What it fetches
 
-One request per read for a CID, asking for the properties the card uses:
+One request per read for a CID, asking for these properties (the card does not use
+`ConnectivitySMILES`):
 
 `GET https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/property/Title,IUPACName,MolecularFormula,MolecularWeight,InChIKey,SMILES,ConnectivitySMILES,XLogP,ExactMass/JSON`
 
@@ -72,8 +73,7 @@ The type is `MolecularEntity`.
 - `image` is the structure depiction,
   `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/PNG`.
 - `attribution` is "PubChem (NCBI)".
-- There is no description: PubChem's descriptions are texts of other databases, each under its own
-  licence.
+- There is no description.
 - The `page_url` fact is the compound's page, `https://pubchem.ncbi.nlm.nih.gov/compound/{cid}`.
   Because the root `pubchem:cid/{cid}` is not a web link, the API also lists that page in
   `open_in`.
@@ -95,7 +95,8 @@ None. The InChIKey is a fact only and joins no [group](../api.md#groups).
 
 ## Credit
 
-The `attribution` line credits PubChem at NCBI. The structure depictions are public domain.
+The `attribution` line credits PubChem at NCBI. PubChem states that its structure depictions (the
+card's `image`) are public domain.
 
 ## Turn it off
 

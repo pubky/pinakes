@@ -53,9 +53,9 @@ One request per read:
 
 `GET https://earthquake.usgs.gov/fdsnws/event/1/query?eventid={id}&format=geojson`
 
-The answer is the event with all its products, often over 100 KB. An ID the service doesn't know
-(404), an event it deleted (409) and an empty answer (204) are `missing`. An answer for an event
-that doesn't have the asked ID among its IDs is an error, and the read is retried.
+The answer is the event with all its products, and can be over 100 KB. An ID the service doesn't
+know (404), an event it deleted (409) and an empty answer (204) are `missing`. An answer for an
+event that doesn't have the asked ID among its IDs is an error, and the read is retried.
 
 ### Slow answers
 
@@ -64,8 +64,8 @@ longer than a request may take. The service keeps an answer only once it has del
 for under a minute, so an immediate retry is not sure to be faster.
 
 A read that times out is tried again after 10 minutes, and these retries don't count as failures.
-After three days of slow answers the link is `unreachable`, and its attempts count with the usual
-growing backoff ([refresh](../design.md#refresh)).
+After three days of slow answers the link is `unreachable` and is retried with the usual growing
+backoff ([refresh](../design.md#refresh)). It is never given up.
 
 ## Card
 
@@ -90,7 +90,7 @@ The type is `Event`.
 | `alert` | The PAGER alert level: `green`, `yellow`, `orange` or `red` |
 | `status` | `reviewed` or `automatic` |
 | `felt` | The number of "Did You Feel It?" reports |
-| `significance` | USGS's significance score (0 and up) |
+| `significance` | USGS's significance score |
 | `ids` | Every ID of the event |
 | `page_url` | The event page on earthquake.usgs.gov |
 

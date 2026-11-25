@@ -9,8 +9,8 @@ Each entry states what Pinakes does and why. The behaviour is described in detai
 ### Pinakes reads links; Nexus never does
 
 Nexus records references to links and never fetches them. Pinakes fetches and reads them. The two
-join by URI only, and Pinakes never parses the Pubky social specs itself: the Nexus feed decides
-which references exist.
+join by URI only. Pinakes never reads `pubky.app` or `/pub/social/` objects and never reads posts to
+find references: the Nexus feed decides which references exist.
 
 Why: Nexus stays small and fast and does one job, the social graph. Fetching the web is slow,
 rate-limited and fails in many ways; keeping it in a separate service keeps those failures out of
@@ -19,8 +19,8 @@ Nexus.
 ### Pubky's own social data is never indexed
 
 `pubky://` objects under `/pub/pubky.app/` and `/pub/social/` are never fetched and get no card.
-Objects of every other Pubky app get a card when someone references them, with the general card
-for an app no profile describes.
+Objects of other Pubky apps get a card when someone references them: the kinds an app's profile
+describes, and any object of an app no profile describes, which gets the general card.
 
 Why: posts, profiles, files and social events are Nexus's to describe. A second copy in Pinakes
 would drift from Nexus and could outlive a deleted post.
@@ -29,7 +29,8 @@ would drift from Nexus and could outlive a deleted post.
 
 Pinakes does not crawl the web and does not watch homeservers or other apps' namespaces. A link
 gets a card only when someone references it on Pubky or a client previews it with
-`POST /v1/resolve`. Search lists only links with at least one public reference.
+`POST /v1/resolve`, or when such a link derives it (a calendar's dates, an event page's organiser
+calendar). Search lists only links with at least one public reference.
 
 Why: what people reference is the signal Pinakes indexes. Watching namespaces would make Pinakes
 index posts nobody pointed at, and would need a watcher per app.
@@ -41,7 +42,8 @@ index posts nobody pointed at, and would need a watcher per app.
 A key (an ISRC, a MusicBrainz ID, a Wikidata item, a DOI, an OSM object) comes only from a hub's
 own record, a service's own record of its own object, or a registry that names a landing page the
 page confirms. What a page claims about itself (`sameAs`, a canonical link, an identifier in its
-markup) is at most a fact. Lookups ask services by identifier, never by title or artist name.
+markup) is at most a fact. Exact lookups ask services by identifier; a match by title, artist and
+length gives only a maybe link (below).
 
 Why: any page can claim any identifier. A wrong key would join two different things, and every
 member of their groups would then show the other's tags, image and links.
@@ -50,7 +52,7 @@ member of their groups would then show the other's tags, image and links.
 
 A match by metadata (the same title, artist and length; the same start time and a similar name)
 is returned as `kind: "maybe"` in `also_on`, or in `maybe_same`. It never becomes a key or a group.
-"Maybe" is a yes or no flag, not a confidence score. Clients may still show and play a maybe link,
+`kind: "maybe"` is a yes or no flag, not a confidence score. Clients may still show and play a maybe link,
 after the exact ones.
 
 Why: metadata matches are useful but can be wrong. Showing them as a hint helps readers without
@@ -59,7 +61,8 @@ letting one wrong guess spread through a group.
 ### Groups are hints, not merges
 
 A group lists resources that are the same thing. Each member keeps its own card, references and
-ranking; nothing is combined or stored with the group except membership. A group holds at most one
+ranking; nothing is merged into the group or stored with it except membership. Cards only read
+across it (Also on links, and for music a member's image when the card has none). A group holds at most one
 value of each single-object namespace, so a second MusicBrainz recording or Wikidata item is
 refused.
 
@@ -81,7 +84,8 @@ same song unmatched across services.
 ### Points never join
 
 `geo:` links and map links that name a coordinate become `Place` cards but never group, and
-located group members more than 500 m apart never join automatically.
+located group members farther apart than `limits.group_max_distance_m` (500 m) never join
+automatically.
 
 Why: a coordinate is not an identity. Two things at one spot are not the same thing.
 
@@ -134,13 +138,14 @@ an autoplay that a stored frame's address would turn on.
 
 Why: one place knows every provider's embed rules, and every client gets the same players.
 
-### A card always has a web page to open
+### An identifier card names its web page
 
-A card whose root is not a web link (`btc:`, `fr:`, `zenodo:` and other identifier roots) names
-the web page its source read it from in `open_in`, from the card's `page_url` fact.
+A card whose root is not a web link (`btc:`, `fr:`, `zenodo:` and other official sources'
+identifier roots) names the web page its source read it from in `open_in`, from the card's
+`page_url` fact.
 
-Why: a client must always be able to open the thing on the web, even for a card read on demand
-whose references are empty.
+Why: a client must be able to open the thing on the web, even for a card read on demand whose
+references are empty.
 
 ### Bitcoin amounts are integer base units
 
@@ -159,7 +164,7 @@ Cards that quote a person's own words (posts, comments, notes, and profile bios 
 Bluesky) keep a 200-character excerpt, are read again at least every hour, and are emptied once the
 original is confirmed gone: the card keeps only its link and status, with no text, name, image,
 facts, Also on links or change history. A post whose author has opted out of search on its service
-never matches a search, and its text is not kept in the change history.
+never matches a text search, and its text is not kept in the change history.
 
 Why: when someone deletes a post, Pubky clients must not keep showing it. Pinakes quotes, it does
 not archive.
@@ -177,7 +182,7 @@ fetch would cost a request and add nothing.
 
 ### Every source is on by default and can be turned off
 
-Every source ships enabled. An operator turns one off with `[sources.<name>] enabled = false` or
+Every official and also-on source ships enabled. An operator turns one off with `[sources.<name>] enabled = false` or
 `[also_on.sources.<id>] enabled = false`. A source that needs a credential does not run without
 one. Switching an also-on source off stops calls to its API and hides its stored rows at once, but
 never hides the site: links to that site found by other sources, or tagged by people, still show.
@@ -203,11 +208,12 @@ search Pinakes needs.
 
 ### OpenStreetMap data is published as a dump
 
-Everything Pinakes derives from OpenStreetMap is kept in one table, `osm_place`, and published
-daily as `GET /v1/dumps/osm_place.ndjson.gz` with its licence notice.
+Everything Pinakes derives from OpenStreetMap is kept in one table, `osm_place`, and published as
+`GET /v1/dumps/osm_place.ndjson.gz` with its licence notice, every `limits.osm_dump_every_hours`
+(24).
 
-Why: OpenStreetMap's data is published under the ODbL, and keeping every OSM-derived value in one
-table makes the published dump complete.
+Why: keeping every OSM-derived value in one table makes the published dump complete, with nothing
+OSM-derived left elsewhere.
 
 ## API
 
@@ -222,8 +228,7 @@ Why: clients compose filters freely, and one endpoint keeps the API small.
 
 The API has no clustering parameter. A client clusters the results of a page itself.
 
-Why: clients already cluster on the page they show, so server-side clustering added cost and no
-value.
+Why: clients cluster the page they show, so server-side clustering would add cost and no value.
 
 ### The resource type is Pinakes' reading
 
@@ -233,14 +238,15 @@ Why: a type set by one user would change the card for everyone.
 
 ## Operations
 
-### Back up curation and history only
+### The index is derived data
 
-The index can be rebuilt by replaying the Nexus feed and reading every link again. Only operator
-group curation (`group_override`) and the change journal (`resource_change`) cannot, so they are the
-tables to back up.
+The index can be rebuilt by replaying the Nexus feed and reading every link again. Operator group
+curation (`group_override`) and the change journal (`resource_change`) cannot, so they are the
+tables to back up. A production database is upgraded in place, never dropped
+([Database](operations.md#database)).
 
-Why: a fresh rebuild is simpler and cleaner than migrating old rows, so a production instance starts
-from an empty database.
+Why: keeping the index derived means a new instance needs only the Nexus feed, and code never has
+to carry repairs for rows an older build stored.
 
 ### The Nexus URL holds no secret
 

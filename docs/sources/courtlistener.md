@@ -98,8 +98,7 @@ None. Citations and docket numbers are facts and join nothing.
 
 ## Credit
 
-The `attribution` line credits CourtListener and the Free Law Project. Case law is in the public
-domain.
+The `attribution` line credits CourtListener and the Free Law Project.
 
 ## Turn it off
 

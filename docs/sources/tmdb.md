@@ -26,8 +26,9 @@ fills in TMDB's poster and overview. It is off without the operator's TMDB crede
    (`movie_results` and `tv_results` together). When the IMDb ID and the item name different
    titles, the card gets nothing.
 3. **The type.** A `Movie` card takes only a movie, and a `TVSeries` card only a series.
-4. **The card.** What TMDB says is recorded as facts, and the source asks for the card to be read
-   again at once. The card takes its values at that read.
+4. **The card.** What TMDB says is recorded as facts. When the facts change the card's `image`,
+   `description` or `credits`, the source asks for the card to be read again at once. The card takes
+   its values at that read.
 
 An image or description that TMDB gave earlier counts as none of the card's own. A card that has
 its own of both asks nothing.
@@ -60,8 +61,9 @@ The source records no keys and no links, so it joins nothing.
   dead-lettered or orphaned), the hourly maintenance removes them
   ([operations](../operations.md#also-on)).
 - Change lines keep a card's earlier values for `limits.change_retention_days` (90 by default).
-  While the credential is set, startup refuses more than 120. A change line that holds a TMDB
-  value is deleted after 120 days in any case, whether the source is on or off.
+  While the credential is set and `[tmdb] enabled` is on, startup refuses more than 120. A change
+  line that holds a TMDB value is deleted after 120 days in any case, whether the source is on or
+  off.
 
 ## Cost
 
@@ -100,9 +102,8 @@ licence. The overview's credit has `lang: "en"`, and `excerpted: true` when it w
 
 `/v1/info` lists TMDB in `attributions` while the source is on, and after that for as long as a
 stored card still holds a TMDB value. The entry gives the notice "This product uses the TMDB API but
-is not endorsed or certified by TMDB.", the URL of TMDB's logo and `https://www.themoviedb.org`. A
-client that shows a value credited to `tmdb` shows the notice and the logo, with the logo less
-prominent than its own marks.
+is not endorsed or certified by TMDB.", the URL of TMDB's logo and `https://www.themoviedb.org`.
+[Credits](../api.md#credits) says what a client shows with a value credited to `tmdb`.
 
 ## Turn it off
 
@@ -111,6 +112,10 @@ prominent than its own marks.
 enabled = false
 ```
 
-`[also_on.sources.tmdb] enabled = false` does the same, and so does an unset credential. No request
-is made (the egress refuses `api.themoviedb.org`), TMDB's stored rows are hidden from the next
-start, and every card that holds its values is due at once and loses them at that read.
+No request is made (the egress refuses `api.themoviedb.org`), and TMDB's stored rows are hidden from
+the next start. Every card with such rows is then due at once and loses TMDB's values at that read,
+unless it is final or dead-lettered: the hourly maintenance clears those.
+
+`[also_on.sources.tmdb] enabled = false` and an unset credential have the same effects, except that
+`[also_on.sources.tmdb] enabled = false` does not lift the startup check on
+`limits.change_retention_days`.

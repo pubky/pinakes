@@ -13,7 +13,7 @@ Commons MediaWiki API, by file name. No key is needed.
 | Refresh | Daily, as every official card ([refresh](../design.md#refresh)) |
 | Card types | `ImageObject`, `VideoObject`, `AudioObject`, `DigitalDocument`, `MediaObject` |
 | Keys | None (facts only) |
-| Credit | The file's credit line or author and its licence, in `attribution` |
+| Credit | The file's attribution text (else its author) and its licence, in `attribution` |
 | Switch | `[sources.commons] enabled`, on by default |
 
 ## Links
@@ -71,7 +71,7 @@ The type follows the file's MIME type: `ImageObject`, `VideoObject`, `AudioObjec
 - `image` is a 1280-pixel rendering, or the file itself when it is a JPEG, PNG, GIF or WebP at most
   1280 pixels wide.
 - `location` is the file's primary coordinates, when they are on Earth.
-- `attribution` is the file's credit line (else its author) and its licence, for example
+- `attribution` is the file's attribution text (else its author) and its licence, for example
   "© Frank Schulenburg / CC BY-SA 4.0".
 - The file's description page is the `page_url` fact. Because the root `commons:File:{Name}` is not
   a web link, the API also lists that page in `open_in`.
@@ -93,8 +93,10 @@ The type follows the file's MIME type: `ImageObject`, `VideoObject`, `AudioObjec
 
 ## Credit
 
-Every file has its own author and licence. The `attribution` line credits both, and the facts
-`author`, `credit`, `license_short_name`, `license_url` and `usage_terms` give them in full.
+Every file has its own author and licence. The `attribution` line credits the file's attribution
+text, else its author, with its licence. The facts `author` and `credit` (the source line) and the
+licence facts `license_short_name`, `license_url` and `usage_terms` hold what Commons states for
+the file. The attribution text itself is not a fact.
 
 ## Turn it off
 

@@ -41,8 +41,9 @@ other resources; the [also-on half](#also-on) gives them the document's key.
 
 One request per read: `GET https://www.federalregister.gov/api/v1/documents/{number}.json`. A
 number the API doesn't know (404) is `missing`. A record for another document number, or one
-without a publication date, title or type, is an error. A rate limit (429), a timeout (408) or a
-server error is retried after at least a minute.
+without a publication date, title or type, is an error. A rate limit (429) is retried after at
+least the time its `Retry-After` header names (up to an hour), or 5 minutes when it names none. A
+timeout (408) or a server error is retried after at least a minute.
 
 ## Card
 
@@ -123,8 +124,7 @@ the filing, not a copy of the document, and is not read.
 
 ## Credit
 
-The card credits nothing. Federal Register documents are works of the US government, in the
-public domain.
+The card credits nothing.
 
 ## Turn it off
 

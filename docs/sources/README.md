@@ -44,7 +44,7 @@ they record, and what a lookup costs.
 | --- | --- | --- |
 | [`castro`](castro.md) | Page hook: a Castro episode's file and show, from its own page | None |
 | [`commons`](commons.md) | Wikimedia Commons files (images, video, audio) by file name | None |
-| [`discogs`](discogs.md) | Discogs artists, masters and releases by ID | None |
+| [`discogs`](discogs.md) | Discogs artists, masters and releases by ID | Optional Discogs token or consumer key and secret (images) |
 | [`fountain`](fountain.md) | Page hook: a Fountain show's or episode's feed, from the data its page embeds | None |
 | [`internet_archive`](internet_archive.md) | Internet Archive items (books, films, audio, software) by identifier | None |
 | [`media_records`](media_records.md) | Page and wall hook: a film's, series', book's or podcast's page, from its exact record (Wikidata, Open Library, TVmaze, iTunes) | None |
@@ -167,7 +167,7 @@ source's page.
 | [`musicbrainz_containment`](musicbrainz_containment.md) | An exact recording's releases, as containment facts, never as identity | None |
 | [`performers`](performers.md) | An event's performers, keyed to the artist on the page's own service | None |
 | [`wikidata`](wikidata.md) | The Wikidata item of a music link | None |
-| [`discogs`](discogs.md#also-on) | A Discogs object's key and a release's barcodes | Optional Discogs token (images) |
+| [`discogs`](discogs.md#also-on) | A Discogs object's key and a release's barcodes | Optional Discogs token or consumer key and secret |
 | [`deezer`](deezer.md) | Deezer's own ISRCs and barcodes, and another service's track or album on Deezer by its ISRC or barcode | None |
 | [`spotify_isrc`](spotify_isrc.md) | Another service's track or album on Spotify, by its ISRC or barcode | Spotify app credentials; off without them |
 | [`tidal_isrc`](tidal_isrc.md) | Another service's track or album on TIDAL, by its ISRC or barcode | TIDAL client credentials; off without them |
@@ -221,7 +221,7 @@ plain web cards before are read by their source.
 
 ## Politeness
 
-- Every request carries the operator's contact in the User-Agent (`http.contact`, see
+- Every request carries the operator's contact, when set, in the User-Agent (`http.contact`, see
   [operations](../operations.md#deployment-and-egress)). While it is empty, the links of a source
   whose service requires an email address wait and are retried hourly.
 - Requests share the per-host budget, `limits.host_requests_per_second` (one per second by

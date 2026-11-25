@@ -20,8 +20,8 @@ Pinakes reads these Nexus `/v1` routes:
 
 - the resource changes feed, `GET /v1/resources/changes`, for every new or removed reference;
 - the batch view `POST /v1/stream/resources/by_ids`, which the `social` tool for agents uses;
-- `GET /v1/user/{viewer}/following`, `…/friends` and `…/reach-set`, for `reach` and `boost` in
-  search.
+- `GET /v1/user/{viewer}/following` and `…/friends`, for `reach` and `boost` in search, and
+  `…/reach-set` for `wot_2` when `nexus_reach_set` is on (off by default).
 
 ## The pipeline
 
@@ -54,10 +54,11 @@ A reference is one social act on a link, as Nexus reports it:
 | Reply, embed, collection item | Its author, the post file and the link |
 | Post | The post's version file |
 
-Several tags on one link never fetch it more than once. Pinakes never parses the Pubky social
-specs itself: Nexus decides which references exist.
+Several tags on one link never fetch it more than once. Pinakes never reads `pubky.app` or `/pub/social/`
+objects and never reads posts to find references: Nexus decides which references exist.
 
-**Search lists only links with at least one public reference.** A link someone only previewed
+**Search lists only links with at least one public reference.** A post's own row keeps its card
+alive but does not count as a reference for search. A link someone only previewed
 (`POST /v1/resolve`, used while composing a post) gets a card but is not a search result. A link
 that was never referenced is deleted after `limits.preview_grace_hours` (24 hours). A link whose
 last reference is removed is deleted after `limits.grace_days` (7 days); a new reference in that
@@ -85,20 +86,22 @@ Every link goes to one route, chosen from the link alone without any network req
 A link with any other scheme gets no card. When the route a link needs is switched off (a card
 route, an official source, calendars or an event platform), an `http` or `https` link falls back to
 `web`; a link in a source's own scheme (such as `fr:`) waits until the route is on again. A link that carries a credential (a password in the user info, a
-`token` or `key` parameter, a calendar's secret share link) is refused by `POST /v1/resolve` and
-is never stored except as the link itself
-([details](api.md#resolution-and-status)).
+`token` or `key` parameter, a calendar's secret share link) is never previewed: `POST /v1/resolve`
+answers 400. When someone references one on Pubky, it is read from its own site like any link, but
+the credential appears nowhere except in the link itself, and the link is never sent to another
+service ([details](api.md#resolution-and-status)).
 
 ## Identity and aliases
 
 Pinakes normalizes a link before it names a resource: lower-case scheme and host, no default port,
-no fragment and no user info; path and query stay as written. The resource ID is the first 16
+no fragment and no user info; path and query stay as the URL parser reads them. A `bitcoin:`
+payment link drops its query. The resource ID is the first 16
 bytes of the BLAKE3 hash of the normalized link, as 32 hex characters. The ID never changes.
 
 `http` and `https`, `www.` and a trailing slash are different links. One object under several
 spellings becomes one resource through **aliases**: the alias keeps its own ID but is never
 fetched, its references count for its root, and a read of the alias answers with the root's card.
-Aliases come only from rules that need no guessing:
+Aliases come only from rules that need no guessing. Some examples:
 
 - tracking parameters such as `utm_*` and `fbclid` are dropped;
 - the spellings of one object on one service (Spotify, Apple Music, YouTube, TIDAL, Wikipedia,
@@ -128,15 +131,20 @@ the start:
 | OpenStreetMap objects | Every 30 days (`limits.osm_ttl_secs`) |
 | Social content | At least every hour |
 
-No interval is shorter than an hour except cursor feeds. One read at the end plus 24 hours makes
+No interval is shorter than an hour, except cursor feeds and a card that names when it changes
+(an auction's end), which is read again then, at least a minute later. One read at the end plus 24 hours makes
 a dated resource final: it is not read again until a new reference reopens it. `geo:` points never
 change and are final at once. The tier values are `limits.refresh_resource_secs` and
 `limits.refresh_container_secs` ([operations](operations.md#queue-and-refresh)).
 
-A failed read keeps the last accepted card. A link is `missing` only after two fresh reads agree;
-for a link with an accepted card the second read comes at least an hour later. Failures back off exponentially and dead-letter after
-`limits.max_failures`; a service that is down or rate-limits Pinakes never dead-letters a link in
-less than three days. The statuses are explained in
+A failed read keeps the last accepted card's content, though its `status` can show `error` while the
+failures last. A link is `missing` only after two fresh reads agree;
+for a link with an accepted card the second read comes at least an hour later. Failures back off
+exponentially and dead-letter after `limits.max_failures`. When a service's API is down or
+rate-limits Pinakes (the official sources, event platforms, Nominatim), the waits are not charged,
+and a link dead-letters only after three days of them; a web page or calendar that answers 5xx is
+an ordinary failure. Details: [Queue and refresh](operations.md#queue-and-refresh). The statuses
+are explained in
 [Resolution and status](api.md#resolution-and-status).
 
 ## Fetching and crawling rules
@@ -148,8 +156,8 @@ Every fetch a link can steer goes through one egress client:
 - at most three redirects, each checked again; a 10-second timeout; size caps per kind of answer;
 - one request at a time per host and per address, paced to `limits.host_requests_per_second`
   (1 per second by default) or the lower rate a service publishes;
-- every request carries the operator's contact in the User-Agent,
-  `pinakes/<version> (+https://pubky.app; <contact>)`.
+- every request carries the User-Agent `pinakes/<version> (+https://pubky.app; <contact>)`, with
+  the operator's contact when one is set.
 
 Card images and embeds stay at their origin URLs: Pinakes never downloads or serves them. Nominatim
 and Nexus are trusted upstreams with clients of their own. Details:
@@ -157,14 +165,18 @@ and Nexus are trusted upstreams with clients of their own. Details:
 
 ## Access walls
 
-A bot wall, captcha, sign-in redirect or a 401 or 403 answer is a failed read, never a card: the
-link turns `unreachable` and is retried with backoff. A wall's title never becomes a card's name.
-Pinakes does not work around walls. Two sources can still make a card for a walled page from data
-the site or a registry publishes elsewhere ([sources](sources/README.md)):
+On the web route, a bot wall, captcha, sign-in redirect or a 401 or 403 answer is a failed read,
+never a card: the link turns `unreachable` and is retried with backoff. A wall's title never
+becomes a card's name. Pinakes does not work around walls.
+
+The social-platform sources (Instagram, Facebook, LinkedIn, X and others) handle a refusal
+differently: the link still gets a card of its shape alone, marked with the `blocked` fact, so it
+resolves, groups and counts. Two sources can make a card for a walled web page from data the site
+or a registry publishes elsewhere ([sources](sources/README.md)):
 
 - `feed`: the exact item in the same site's RSS or Atom feed or news sitemap;
-- `media_records`: the exact record of a walled IMDb title page (its Wikidata item) or Apple
-  Podcasts show page (its iTunes record).
+- `media_records`: the exact record of a walled IMDb title page (its Wikidata item), or of a
+  Pocket Casts, Castro or Overcast page that names a show's iTunes ID (its iTunes record).
 
 A wall never counts as the object being gone, so the last accepted card stays. The markers that
 detect a wall are in `data/interstitial-markers.json`
@@ -223,8 +235,8 @@ same start time and a similar name. Pinakes returns them, but never as a key or 
   ([Possibly the same recording](api.md#possibly-the-same-recording));
 - app store cards list possibly the same app ([Possibly the same app](api.md#possibly-the-same-app)).
 
-"Maybe" is a yes or no flag, not a confidence score. A maybe link is never merged, counted or
-ranked, because a wrong merge would show one thing's tags, image and links on another and would
+`kind: "maybe"` is a yes or no flag, not a confidence score; the `score` on a `maybe_same` entry
+only orders the entries. A maybe link is never merged, counted or ranked, because a wrong merge would show one thing's tags, image and links on another and would
 spread to every member of the group.
 
 ## Social content
@@ -300,12 +312,14 @@ address may download it 6 times an hour (`limits.osm_dump_downloads_per_hour`). 
   never fetched and get no card: posts, profiles, files, events and RSVPs there are Nexus's to
   describe. Other apps' objects get a card when someone references them ([Pubky apps](pubky-apps.md)).
 - **Links nobody referenced.** Pinakes does not crawl and does not watch any homeserver. A card
-  exists only for a link someone referenced or previewed. Reading a card fetches only what that
-  card needs: the link itself, its service's API record, and documents the page names for itself
-  (its calendar file, its podcast feed, its oEmbed answer).
+  exists only for a link someone referenced or previewed, or a resource such a link derives (a
+  calendar's dates, an event page's organiser calendar). Reading a card fetches what that card
+  needs: the link, its service's API record, documents the page names for itself (its calendar
+  file, its podcast feed, its oEmbed answer), the lookups of its sources, and for a walled page the
+  same site's feeds at their usual paths.
 - **Image bytes and media files.** Only their URLs are stored.
-- **Links that carry a credential** are never stored beyond the link itself, and never sent to
-  another service.
+- **Credentials in links.** A credential a referenced link carries is never stored anywhere but in
+  the link itself, and such a link is never sent to another service.
 
 ## Storage
 
@@ -323,6 +337,7 @@ main tables:
 | `resource_change` | The change journal |
 | `osm_place` | OpenStreetMap-derived facts (published as the ODbL dump) |
 
-Everything except `group_override` and `resource_change` can be rebuilt by replaying the Nexus feed
-and reading every link again, so those two are the tables to back up
+The index is derived data: replaying the Nexus feed and reading every link again rebuilds it.
+Operator curation (`group_override`) and the change journal (`resource_change`) are not derived,
+so those two are the tables to back up
 ([Database](operations.md#database)).

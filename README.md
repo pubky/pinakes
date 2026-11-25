@@ -22,7 +22,7 @@ to, embedded or collected which link. It records references to links and never f
 Pinakes reads the links.
 
 Clients combine the two by URI: **Pinakes ranks, Nexus hydrates.** A client asks Pinakes for cards
-and sends the cards' URIs (`uri`, the `aliases` that are other spellings of it, and for a calendar
+and sends the cards' URIs (`uri`, its `refs`, the `aliases` a full read lists, and for a calendar
 date `occurrence.feed_uri`) to Nexus `POST /v1/stream/resources/by_ids` as `uris`, in batches of
 100, for counts and tags. Pinakes IDs are its own and never match Nexus IDs.
 
@@ -32,7 +32,8 @@ Pinakes needs these Nexus `/v1` routes:
 | --- | --- |
 | `GET /v1/resources/changes` | The reference feed: every tag, reply, embed and collection item on a link |
 | `POST /v1/stream/resources/by_ids` | Social data for the `social` tool that agents use |
-| `GET /v1/user/{id}/following`, `…/friends`, `…/reach-set` | `reach` and `boost` in search |
+| `GET /v1/user/{id}/following`, `…/friends` | `reach` and `boost` in search |
+| `GET /v1/user/{id}/reach-set` | `wot_2` in search, when `nexus_reach_set` is on (off by default) |
 
 ## How it works
 
@@ -77,9 +78,9 @@ line, creates the schema, and starts the listeners and the background tasks.
 4. **Serve.** The public listener (port 8090 by default) serves `/v1`. The admin listener (port
    9090) serves `/metrics`, operator info, stored documents and group curation.
 
-Pinakes stores its data in PostgreSQL with PostGIS and `pg_trgm`. The whole index can be rebuilt by
-replaying the Nexus feed, except operator group curation and the change journal, which need a
-backup. [How Pinakes works](docs/design.md) explains every step and its rules.
+Pinakes stores its data in PostgreSQL with PostGIS and `pg_trgm`. The index is derived data that a
+replay of the Nexus feed rebuilds; operator group curation and the change journal are not, and need
+a backup. [How Pinakes works](docs/design.md) explains every step and its rules.
 
 ## Run locally
 
@@ -154,15 +155,18 @@ timeout and refresh interval has a default and can be set in an optional `[limit
 Any key can also be set in the environment as `PINAKES__SECTION__KEY`, for example
 `PINAKES__WEB__ENABLED=false` or `PINAKES__LIMITS__POLL_SECS=10`. Strings are literal; numbers,
 booleans and arrays are JSON. The environment wins over the file. Unknown keys and invalid values
-stop startup.
+stop startup, except retired keys, which are ignored with a warning.
 
 Secrets come from the environment. [`.env.example`](.env.example) lists them with placeholder
-values: the database URL, the admin token and the optional provider credentials (Spotify, TIDAL,
-Discogs, GitHub, CourtListener, Podcast Index, TMDB, Ticketmaster). Copy it to `.env`, fill in what
+values: the database URL, the admin token, the Nexus authorization, a keyed Nominatim URL and the
+optional provider credentials (Spotify, TIDAL, Discogs, GitHub, CourtListener, Podcast Index, TMDB,
+Ticketmaster). Copy it to `.env`, fill in what
 you use, and load it (`set -a; . ./.env; set +a`, systemd `EnvironmentFile=`, or
 `docker run --env-file`). Keep `.env` out of version control and readable by the service user only.
-A source's own variable, such as `PINAKES_GITHUB_TOKEN`, fills its value only when the file and the
-`PINAKES__…` form leave it unset. The [API-key guide](docs/api-keys.md) explains each credential and what works without it.
+A source's token or app-key variable (`PINAKES_GITHUB_TOKEN`, `PINAKES_COURTLISTENER_TOKEN`, the
+Discogs consumer pair) fills its value only when the file and the `PINAKES__…` form leave it unset;
+the credentials of a section of its own (`PINAKES_SPOTIFY_*`, `PINAKES_TIDAL_*`, `TMDB_API_KEY`)
+replace the file's value. The [API-key guide](docs/api-keys.md) explains each credential and what works without it.
 
 ## Test
 

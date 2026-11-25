@@ -22,10 +22,13 @@ without the operator's TIDAL credentials.
 1. For an album, the source reads `barcodeId`. For a track, it reads `isrc` and the track's length.
 2. An answer counts only when it is the item asked for. An item TIDAL does not have, or does not
    offer in the configured country, gives nothing.
-3. It records the value as a key (`via` `tidal`) and as a fact.
+3. It records the value as a fact, and as a key (`via` `tidal`) as described under
+   [Keys, links and facts](#keys-links-and-facts).
 
-The sources that run after it use those keys. `musicbrainz` and `deezer` look the same
-album or track up by them, and `itunes` lists a possibly same Apple Music album.
+The sources that run after it use those keys. `deezer` looks the album or track up by them,
+`musicbrainz` looks up by barcode an album whose link it doesn't have, and `itunes` lists a possibly
+same Apple Music album. For a track whose link it doesn't have, `musicbrainz` uses the ISRC that the
+track's own page states, not these keys.
 
 The source reads TIDAL's own links only. `tidal_isrc` finds another service's track
 or album on TIDAL, with the same credentials.

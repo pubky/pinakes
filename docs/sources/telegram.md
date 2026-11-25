@@ -49,7 +49,8 @@ post widget is an error, and the read is retried.
 One request, `GET https://t.me/{name}`, for the page's Open Graph tags. A 404 or 410 is `missing`.
 
 For either, any status that is neither listed here nor a refusal is an error, and the read is
-retried. A 408, a 429 or a server error waits at least a minute.
+retried. A 429 waits at least the time Telegram names (up to an hour), or 5 minutes when it names
+none. A 408 or a server error waits at least a minute.
 
 ### Refused requests
 
@@ -70,8 +71,8 @@ answers the same; then the plain card replaces it.
 
 A post is a `SocialMediaPosting`.
 
-- `name` is the first 120 characters of the text on one line, or "Post by {channel}" for a post
-  without text.
+- `name` is the first 120 characters of the text on one line, or "Post by {title}", with the
+  channel's title, for a post without text.
 - `description` is the first 200 characters of the text, with its line breaks.
 - `image` is the post's photo or video still.
 

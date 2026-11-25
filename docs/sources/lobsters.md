@@ -34,8 +34,10 @@ Not read here: tag pages (`/t/…`), the front page and every other Lobsters pag
 ## What it fetches
 
 Each read makes one request: `GET https://lobste.rs/s/{id}.json`. A story Lobsters does not know
-(404) is `missing`. A 408, 429 or 5xx answer is retried after at least a minute. Any other status,
-an answer for another story, or a story without a title is an error, and the read is retried.
+(404) is `missing`. A 429 is retried after at least the time its `Retry-After` header names (up to
+an hour), or 5 minutes when it names none. A 408 or 5xx answer is retried after at least a minute.
+Any other status, an answer for another story, or a story without a title is an error, and the read
+is retried.
 
 ## Card
 

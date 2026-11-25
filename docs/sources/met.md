@@ -80,8 +80,8 @@ is a fact only.
 
 ## Credit
 
-The `attribution` line credits The Metropolitan Museum of Art, and adds CC0 for a public-domain
-work, the only kind whose image the card shows. The API's data is CC0.
+The `attribution` line credits The Metropolitan Museum of Art. For a public-domain work, the only
+kind whose image the card shows, it adds CC0, the licence The Met states for its API's data.
 
 ## Turn it off
 

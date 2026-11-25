@@ -48,8 +48,9 @@ Not read here: stories, `/explore/` pages, sign-in pages, a profile's sub-pages 
 ## What it fetches
 
 One request per read, for the root's page. A 404 or 410 is `missing`. Any status that is neither
-listed here nor a refusal is an error, and the read is retried. A 408, a 429 or a server error waits
-at least a minute.
+listed here nor a refusal is an error, and the read is retried. A 429 waits at least the time its
+`Retry-After` header names (up to an hour), or 5 minutes when it names none. A 408 or a server
+error waits at least a minute.
 
 Instagram answers a removed or private post, and a reel that does not exist, with status 200 and a
 page without the object's tags. That answer gives the plain card (below), not `missing`.

@@ -7,7 +7,7 @@ the artist, the title and the length. Its links are `maybe` links, never keys.
 | --- | --- |
 | Source | `youtube_match`, also-on source |
 | Runs on | YouTube and YouTube Music videos that are a label's upload, as their stored card shows |
-| Asks | YouTube's watch page `https://www.youtube.com/watch?v={id}`; Deezer `GET https://api.deezer.com/search?q={artist} {title}` while `deezer` runs; TIDAL `GET https://openapi.tidal.com/v2/searchResults?countryCode={country}&filter[query]={artist} {title}&include=tracks.artists` while `tidal_isrc` runs |
+| Asks | YouTube's watch page `https://www.youtube.com/watch?v={id}`; Deezer `GET https://api.deezer.com/search?q={artist} {title}` while `deezer` runs; TIDAL `GET https://openapi.tidal.com/v2/searchResults?countryCode={country}&filter[query]={artist} {title}&include=tracks.artists` while `tidal_isrc` runs, with `[tidal] country` as the country |
 | Credentials | None of its own; the TIDAL search needs the operator's TIDAL credentials |
 | Rate | `www.youtube.com` at the shared per-host default (`limits.host_requests_per_second`), and Deezer's and TIDAL's paces |
 | Rows live | 30 days; rows expire after 60 |
@@ -77,14 +77,16 @@ Each answer is shared for `limits.discovery_cache_secs` (an hour by default).
 | What happens | What the source does |
 | --- | --- |
 | YouTube serves a sign-in page without video details (`playabilityStatus.status` `LOGIN_REQUIRED`), another wall, or a 403 | Retries six hours later (`youtube_login`), keeping what an earlier run found |
-| YouTube answers 429 or a 5xx | Retries after the wait YouTube named (`youtube_busy`), keeping what an earlier run found |
+| YouTube answers 429 | Retries after at least the wait YouTube named, or 5 minutes when it named none (`http_4xx`), keeping what an earlier run found |
+| YouTube answers a 5xx | Retries after at least the wait YouTube named, a minute or more (`youtube_busy`), keeping what an earlier run found |
 | The watch page is over the cap, or has no video details | Finds nothing, drops what an earlier run found, and does not retry |
 | Deezer's search fails (busy, down, or an unexpected answer) | Retries, keeping what an earlier run found |
 | TIDAL fails in a run with a Deezer match | Records the Deezer match beside the links an earlier run found. The run comes back after the wait TIDAL named, else after `limits.also_on_refusal_hold_secs` (300 seconds by default) |
 | TIDAL fails in a run without a Deezer match | Fails the run, which keeps every link an earlier run found |
 | TIDAL refuses the credentials | Records a Deezer match if there is one, and keeps every link an earlier run found. No run comes back early: the video is read again at its usual time |
 
-`pinakesd reextract also-on` asks for every stored video at once.
+To ask for every stored video at once, run `pinakesd reextract also-on` with the daemon stopped. It
+queues the also-on lookups of every stored resource, not only of videos.
 
 ## Turn it off
 

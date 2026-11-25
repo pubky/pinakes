@@ -57,10 +57,8 @@ most two, and one read per album the search lists, at most three. The answers ar
 `limits.discovery_cache_secs` (an hour by default) by credential pair, and go through the same token
 slot as `spotify`'s.
 
-Refused credentials, rate limits and outages are handled as `spotify` handles them
-(refused credentials (on the `spotify` page),
-rate limits (on the `spotify` page)), and either keeps the links an earlier run found.
-That includes an app owner without Premium (on the `spotify` page).
+Refused credentials (an app owner without Premium among them), rate limits and outages are handled
+as on the `spotify` page. Each keeps the links an earlier run found.
 
 A 403 on the read of one album belongs to that read, not to the credentials. The lookup is retried
 after `limits.also_on_refusal_hold_secs` (`forbidden_request`), keeping its links, and every other

@@ -69,8 +69,10 @@ asks for its CELEX number, ELI, resource types, document date, in-force flag and
   Publications Office page gets a web card.
 - More than one work for one identifier, a work without a CELEX number, or a work whose CELEX
   number is not the one asked for: an error.
-- A rate limit (429), a timeout (408) or a server error is retried after at least a minute. Any
-  other status is an error.
+- A rate limit (429) is retried after at least the time its `Retry-After` header names (up to an
+  hour), or 5 minutes when it names none.
+- A timeout (408) or a server error is retried after at least a minute. Any other status is an
+  error.
 
 ## Card
 

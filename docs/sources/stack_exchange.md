@@ -81,7 +81,7 @@ during a pause waits and tries again when it ends. These answers set a pause, of
 | `quota_remaining` is 0 | At least an hour |
 | The quota error (`error_id` 502) | The wait it names ("more requests available in N seconds"), else an hour |
 | "Too many requests" (`error_id` 503) | A minute |
-| None of these, with HTTP 429 or 503 | Its `Retry-After`, at least a minute |
+| None of these, with HTTP 429 or 503 | Its `Retry-After`, held between a minute and an hour; without one, 5 minutes for a 429 and a minute for a 503 |
 
 Pinakes reads the first 64 KiB of an error answer's JSON to find these. An API error 500 is also
 retried after its pause. Any other API error, such as `bad_parameter` for a site that does not

@@ -105,8 +105,8 @@ expire after twice that.
 ## Credit
 
 Each card, and the facts the also-on half records, carry
-`© {database} contributors, ODbL 1.0`. The databases' data is under the Open Database License
-(ODbL 1.0).
+`© {database} contributors, ODbL 1.0`. That line names the licence the databases state for their
+data, the Open Database License (ODbL 1.0).
 
 ## Turn it off
 

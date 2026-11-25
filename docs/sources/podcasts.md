@@ -99,12 +99,13 @@ Podcasts page. This works without a vouched GUID.
 **As a feed item.** When the show's GUID is vouched and the item's GUID is known, the episode gets
 the key `podcast:item:{show GUID}:{SHA-256 of the item GUID}`. The item GUID comes from iTunes for
 an Apple or Castro episode, from Podcast Index for its own episode page, from the card's
-`podcast_guid` for a feed card, and from the feed for any other page.
+`podcast_guid` for a feed card or a Fountain episode page, and from the feed for any other page.
 
 A page or a feed card gets the item key only when all of these hold:
 
-- the feed is vouched. For a feed card it is the card's feed. For any other page it is the feed its
-  own head names, followed through redirects;
+- the feed is vouched. For a feed card or a Fountain page it is the card's `podcast_feed`, read at
+  exactly that URL and never through a redirect. For any other page it is the feed its own head
+  names, followed through redirects;
 - one item of the feed has the page as its `<link>`, and for a page known only by its head, that
   item has audio or video;
 - the page is that item's own: no other item links it, and it is not the show's own link, a site's

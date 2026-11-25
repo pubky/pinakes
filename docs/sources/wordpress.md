@@ -33,9 +33,10 @@ A page names its post through any of these, on the page's own origin, in this or
    permalinks.
 
 A post ID is a positive decimal number of at most 12 digits. A WordPress installed in a
-subdirectory, such as `/blog/wp-json/…`, keeps that directory. Pinakes rebuilds the record's address
-from the origin, that directory and the ID alone, so no other path or query the page names is
-requested.
+subdirectory, such as `/blog/wp-json/…`, keeps that directory. The directory is at most 100 bytes of
+ASCII letters, digits, `-`, `_` and `/`. A link with any other directory is not read. Pinakes
+rebuilds the record's address from the origin, that directory and the ID alone, so no other path or
+query the page names is requested.
 
 Not read: records on another origin, pages' records (`/wp/v2/pages/…`) and any other link.
 

@@ -8,7 +8,7 @@ and procedure.
 
 ## Container
 
-The [Dockerfile](../Dockerfile) builds the release `pinakesd` binary in the `rust:1.98.1` image
+The [Dockerfile](../Dockerfile) builds the release `pinakesd` binary in the `rust:1.98.1-slim-bookworm` image
 for the platform being built, then copies it into a `debian:bookworm-slim` runtime image.
 
 | Property | Value |
@@ -152,9 +152,8 @@ The publishing jobs run after both test jobs pass:
 2. Each platform job sets up its database before it logs in to Docker Hub, so no registry
    credential is on disk during package installs.
 3. Each platform job builds its image with the org's
-   [`build_and_push` action](https://github.com/pubky/ci-workflows/tree/a57f2ae6382a8519ba4aa09d58b706f6b68a4426/.github/actions/docker/build_and_push)
-   at a pinned commit, and pushes it as `<full-commit-SHA>-<run-ID>-<arch>`. The Dockerfile
-   builds inside each platform's Rust image and ignores the action's `TARGETARCH` build argument.
+   `build_and_push` action (`pubky/ci-workflows`, pinned to a commit in `.github/workflows/ci.yml`)
+   and pushes it as `<full-commit-SHA>-<run-ID>-<arch>`. The Dockerfile builds inside each platform's Rust image and ignores the action's `TARGETARCH` build argument.
    The action's `latest` and `sha_tag` inputs are `false`, so platform jobs never write the shared
    tags.
 4. Each platform job pulls the image it pushed and runs `scripts/ci/container-smoke` on it: the
@@ -360,8 +359,9 @@ environment file, and keep tokens out of logs. Set up only the providers you use
    credentialed enrichment works.
 4. **Monitoring:** scrape the private `/metrics` and load the [supplied rules](../ops/README.md).
    Alert on stalled ingestion, dead letters, queue backlog and canary failures. Canaries are on by
-   default and send real requests to event platforms every `limits.canary_interval_secs` (6 hours);
-   `[canary] enabled = false` stops them ([canaries](operations.md#canaries)).
+   default. Every `limits.canary_interval_secs` (6 hours) they send real requests to event platforms
+   and read the web, OSM (Nominatim), media, ISBN and DOI samples. `[canary] enabled = false` stops
+   them ([canaries](operations.md#canaries)).
 5. **Attribution and caches:** keep OpenStreetMap attribution and the dump available. Don't put a
    cache in front of social excerpts that would keep them after Pinakes refreshes or purges them.
    Each source's credit and limits are on its page in the [source catalogue](sources/README.md).
