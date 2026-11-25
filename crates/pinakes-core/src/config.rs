@@ -47,6 +47,9 @@ pub struct Config {
     /// The Podcast Index API's key and secret, which the `podcasts` also-on source and the
     /// `podcast_index` source read (`podcast_index_api`).
     pub podcast_index: crate::podcast_index_api::PodcastIndexConfig,
+    /// `[catalogues]`: the catalogue imports' switches, work directory and per-catalogue keys
+    /// (`catalogue::CataloguesConfig`).
+    pub catalogues: crate::catalogue::CataloguesConfig,
     /// The sections sources own (`also_on::Source::section`, such as `[tidal]`), each read by its
     /// source alone (`Config::section`).
     #[serde(flatten)]
@@ -365,6 +368,7 @@ impl Config {
             canary: CanaryConfig::default(),
             also_on: Default::default(),
             podcast_index: Default::default(),
+            catalogues: Default::default(),
             sections: Sections::defaults(),
             nexus_url: "http://127.0.0.1:8080".into(),
             nexus_authorization: None,
@@ -1131,6 +1135,7 @@ impl Config {
         }
         self.cards.validate()?;
         self.sources.validate()?;
+        self.catalogues.validate()?;
         let contact = self.http.contact.trim();
         if !contact.is_empty()
             && (contact.len() > 254
@@ -1987,6 +1992,75 @@ mod tests {
         assert_eq!(&*config.osm.nominatim_url, base);
         let shown = format!("{config:?} {}", serde_json::to_string(&config).unwrap());
         assert!(!shown.contains("KEY-CANARY"), "{shown}");
+    }
+    /// `[catalogues]`: every catalogue is on by default, with OSM's region `planet`, OpenAlex's
+    /// `min_citations` 50 and no limit; a file without the section loads the same. Its keys
+    /// load from the file and from `PINAKES__CATALOGUES__…`; an unknown key or catalogue, a bad
+    /// region and a zero limit are refused.
+    #[test]
+    fn catalogue_switches_and_keys_load_and_unknown_ones_are_refused() {
+        use crate::catalogue::Catalogue;
+        let config = Config::default();
+        let c = &config.catalogues;
+        assert!(Catalogue::ALL.iter().all(|cat| c.enabled(*cat)));
+        assert_eq!(c.dir, "catalogues");
+        assert_eq!(c.osm.region, "planet");
+        assert_eq!(c.openalex.min_citations, 50);
+        assert_eq!((c.wikidata.limit, c.musicbrainz.limit), (None, None));
+        let file: Config = toml::from_str(
+            "[catalogues.osm]\nenabled = false\nregion = \"europe/switzerland\"\n[catalogues.wikidata]\nlimit = 1000\n[catalogues.openalex]\nmin_citations = 100\n",
+        )
+        .unwrap();
+        file.validate().unwrap();
+        let c = &file.catalogues;
+        assert!(!c.enabled(Catalogue::Osm) && c.enabled(Catalogue::Tranco));
+        assert_eq!(c.osm.region, "europe/switzerland");
+        assert_eq!(c.limit(Catalogue::Wikidata), Some(1000));
+        assert_eq!(c.limit(Catalogue::Musicbrainz), None);
+        assert_eq!(c.openalex.min_citations, 100);
+        let all_off: Config = toml::from_str("[catalogues]\nenabled = false\n").unwrap();
+        assert!(all_off.catalogues.enabled_set().is_empty());
+        for refused in [
+            serde_json::json!({"catalogues": {"wikipedia": {"enabled": true}}}),
+            serde_json::json!({"catalogues": {"osm": {"limit": 10}}}),
+            serde_json::json!({"catalogues": {"tranco": {"region": "planet"}}}),
+            serde_json::json!({"catalogues": {"osm": {"region": "../planet"}}}),
+            serde_json::json!({"catalogues": {"wikidata": {"limit": 0}}}),
+            serde_json::json!({"catalogues": {"musicbrainz": {"limit": "many"}}}),
+            serde_json::json!({"catalogues": {"dir": " "}}),
+        ] {
+            assert!(with(refused.clone()).is_err(), "{refused}");
+        }
+        let mut value = Config::defaults().unwrap();
+        apply_env(
+            &mut value,
+            [
+                ("PINAKES__CATALOGUES__OSM__REGION", "europe/germany"),
+                ("PINAKES__CATALOGUES__OSM__ENABLED", "false"),
+                ("PINAKES__CATALOGUES__WIKIDATA__LIMIT", "5000"),
+                ("PINAKES__CATALOGUES__OPENALEX__MIN_CITATIONS", "10"),
+                ("PINAKES__CATALOGUES__DIR", "/var/lib/pinakes/catalogues"),
+            ]
+            .map(|(k, v)| (k.to_owned(), v.to_owned())),
+        )
+        .unwrap();
+        let env = Config::from_value(value).unwrap();
+        let c = &env.catalogues;
+        assert_eq!(c.osm.region, "europe/germany");
+        assert!(!c.enabled(Catalogue::Osm));
+        assert_eq!(c.wikidata.limit, Some(5000));
+        assert_eq!(c.openalex.min_citations, 10);
+        assert_eq!(c.dir, "/var/lib/pinakes/catalogues");
+        let mut value = Config::defaults().unwrap();
+        let unknown = apply_env(
+            &mut value,
+            [(
+                "PINAKES__CATALOGUES__WIKIPEDIA__ENABLED".to_owned(),
+                "false".to_owned(),
+            )],
+        )
+        .and_then(|()| Config::from_value(value));
+        assert!(unknown.is_err());
     }
     /// Nominatim at `osm.nominatim_url` is the one OSM provider: a provider setting, in the file
     /// or as a `PINAKES__…` override, is refused at load, never ignored.

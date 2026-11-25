@@ -19,14 +19,31 @@ pub const CHANGE_SEQUENCE: i64 = 73822918;
 pub const ALIAS: i64 = 73822919;
 /// A group run, before the write order (`groups`).
 pub const GROUP: i64 = 73491620;
+/// A full import of a large catalogue (`catalogue::Catalogue::large`), held for that run: one at a
+/// time, so their temporary files never pile up on the disk.
+pub const CATALOGUE_LARGE_IMPORT: i64 = 73822921;
+/// One catalogue's importer, held by its task for as long as it runs and by `pinakesd catalogue
+/// drop` while it deletes (`catalogue::Catalogue::lock_key`): one key per catalogue, in the order
+/// of `catalogue::Catalogue::ALL`.
+pub const CATALOGUE: [i64; 7] = [
+    73822930, 73822931, 73822932, 73822933, 73822934, 73822935, 73822936,
+];
 /// Every key above, with the name `scripts/lock-waits` reports it by.
-pub const ALL: [(i64, &str); 6] = [
+pub const ALL: [(i64, &str); 14] = [
     (INSTANCE, "instance"),
     (WRITE_ORDER, "write order"),
     (INGEST, "ingest"),
     (CHANGE_SEQUENCE, "change sequence"),
     (ALIAS, "alias"),
     (GROUP, "group"),
+    (CATALOGUE_LARGE_IMPORT, "large catalogue import"),
+    (CATALOGUE[0], "catalogue wikidata"),
+    (CATALOGUE[1], "catalogue musicbrainz"),
+    (CATALOGUE[2], "catalogue osm"),
+    (CATALOGUE[3], "catalogue openalex"),
+    (CATALOGUE[4], "catalogue podcastindex"),
+    (CATALOGUE[5], "catalogue tranco"),
+    (CATALOGUE[6], "catalogue software"),
 ];
 
 /// The instance lock, held on a connection of its own until it is dropped. Only

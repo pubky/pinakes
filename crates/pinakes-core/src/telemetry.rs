@@ -74,6 +74,16 @@ pub struct Metrics {
     /// signals one (`sources::token_refused`; never a 429 or 5xx), by keyed source
     /// (`sources::KEYED`), each at 0 from the start.
     pub token_refusals: IntCounterVec,
+    /// Per catalogue (`catalogue::Catalogue`), each from the start: its cards, whether it is on
+    /// in the daemon's configuration ([`Metrics::catalogue_switches`]), when its last full
+    /// import and its last update finished (0: never), how long ago it was last current (0
+    /// before its first finished import) and its failed runs.
+    pub catalogue_cards: IntGaugeVec,
+    pub catalogue_enabled: IntGaugeVec,
+    pub catalogue_import: IntGaugeVec,
+    pub catalogue_update: IntGaugeVec,
+    pub catalogue_lag: IntGaugeVec,
+    pub catalogue_errors: IntCounterVec,
 }
 impl Metrics {
     pub fn new() -> Result<Self> {
@@ -265,6 +275,42 @@ impl Metrics {
                 &["state"]
             ),
             group_key_conflicts,
+            catalogue_cards: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_cards",
+                "Cards each catalogue holds",
+                &["catalogue"]
+            ),
+            catalogue_enabled: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_enabled",
+                "Whether each catalogue is on in the daemon's configuration (1) or off (0)",
+                &["catalogue"]
+            ),
+            catalogue_import: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_last_import_timestamp_seconds",
+                "When each catalogue's last full import finished (0: never)",
+                &["catalogue"]
+            ),
+            catalogue_update: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_last_update_timestamp_seconds",
+                "When each catalogue's last update finished (0: never)",
+                &["catalogue"]
+            ),
+            catalogue_lag: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_update_lag_seconds",
+                "Seconds since each catalogue's last finished full import or update (0 before the first full import finished)",
+                &["catalogue"]
+            ),
+            catalogue_errors: metric!(
+                IntCounterVec,
+                "pinakes_catalogue_import_errors_total",
+                "Failed catalogue import and update runs, by catalogue",
+                &["catalogue"]
+            ),
             registry,
             refresh_lock: Arc::default(),
             refreshed_once: Arc::default(),
@@ -288,7 +334,25 @@ impl Metrics {
         for source in crate::sources::KEYED {
             out.token_refusals.with_label_values(&[source]);
         }
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            let name = [catalogue.name()];
+            out.catalogue_cards.with_label_values(&name);
+            out.catalogue_enabled.with_label_values(&name);
+            out.catalogue_import.with_label_values(&name);
+            out.catalogue_update.with_label_values(&name);
+            out.catalogue_lag.with_label_values(&name);
+            out.catalogue_errors.with_label_values(&name);
+        }
         Ok(out)
+    }
+    /// Which catalogues are on (`pinakes_catalogue_enabled`), from the configuration the daemon
+    /// runs with; the alerts read only those.
+    pub fn catalogue_switches(&self, config: &crate::catalogue::CataloguesConfig) {
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            self.catalogue_enabled
+                .with_label_values(&[catalogue.name()])
+                .set(i64::from(config.enabled(catalogue)));
+        }
     }
     /// A source's series from the start, each at 0: its fetches by outcome, changes by class,
     /// held snapshots and cursor resets. A rule on `increase()` reads a rise from 0; a series
@@ -333,6 +397,7 @@ impl Metrics {
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL THEN 0 ELSE extract(epoch FROM now()-greatest(last_import_at,last_update_at))::bigint END AS lag FROM catalogue_state").fetch_all(pool).await?;
         let previews: i64 = sqlx::query_scalar("SELECT count(*) FROM resource r WHERE r.orphaned_at IS NOT NULL AND r.orphaned_at=r.created_at AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id)")
             .fetch_one(pool)
             .await?;
@@ -395,6 +460,35 @@ impl Metrics {
                     &row.try_get::<String, _>("status")?,
                 ])
                 .set(row.try_get("n")?);
+        }
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            let name = catalogue.name();
+            let row = catalogues.iter().find(|row| {
+                row.try_get::<String, _>("catalogue")
+                    .is_ok_and(|c| c == name)
+            });
+            let value = |column: &str| -> Result<i64> {
+                Ok(match row {
+                    Some(row) => row.try_get(column)?,
+                    None => 0,
+                })
+            };
+            self.catalogue_cards
+                .with_label_values(&[name])
+                .set(value("cards")?);
+            self.catalogue_import
+                .with_label_values(&[name])
+                .set(value("import")?);
+            self.catalogue_update
+                .with_label_values(&[name])
+                .set(value("update")?);
+            self.catalogue_lag
+                .with_label_values(&[name])
+                .set(value("lag")?);
+            sync_counter(
+                &self.catalogue_errors.with_label_values(&[name]),
+                value("error_count")?,
+            );
         }
         self.group_key_conflicts.set(groups.try_get("conflicts")?);
         self.preview_backlog.set(previews);
