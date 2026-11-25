@@ -1631,22 +1631,30 @@ The index is derived data, rebuilt from the database when it is missing.
   rows it read; a row of a transaction still running is read by a later pass. A card that is
   deleted, scrubbed or loses its last reference leaves every search at once (Postgres no longer
   lists it, or finds it without text) and the index within a pass. A pass that removed a card's
-  text merges the segments holding deleted documents, so its words leave the index files too;
-  segments with 5% deleted documents merge on their own.
-- **Catalogue cards.** A catalogue's full import queues nothing: once it has finished
-  (`catalogue_state.last_import_at`), the next pass removes the catalogue's documents and reads
-  all its cards again, so millions of imported cards never pass through a queue. An update run
-  queues the cards it changes or removes (`search_index_catalogue_queue`, by triggers on
-  `catalogue_card`), read a batch at a time as above. A catalogue switched off leaves every search
+  text (a post found gone, emptied or opted out, a catalogue card no longer listed) merges the
+  segments that hold the card's documents, current or deleted, so its words leave the index files
+  too; any other pass merges nothing, and segments with 5% deleted documents merge on their own.
+- **Catalogue cards.** A catalogue's full import queues only the cards whose texts it changes;
+  the cards it adds or removes are not queued: once it has finished
+  (`catalogue_state.last_import_at`), the daemon reads all the catalogue's cards again, 20,000 per
+  pass after the pass's queues, and when it has read the last one removes the documents of
+  earlier imports, so millions of imported cards never pass through a queue and referenced links
+  keep their 2 s meanwhile. Until then a removed card stays in the index, and Postgres, which
+  checks every candidate, leaves it out. An update run queues the cards it adds, changes or
+  removes (`search_index_catalogue_queue`, by triggers on `catalogue_card`), read a batch at a
+  time as above. A catalogue switched off leaves every search
   at once (searches read only the catalogues that are on) and the index at the daemon's next pass,
   which removes its documents; `pinakesd catalogue drop` then deletes its cards. A
   catalogue turned back on is read again at the next pass.
 - **Start.** The daemon opens the index. When the directory or its generation is missing,
-  unreadable, of another format, or built from another database, it logs a warning and builds the
+  unreadable, of another format, or built from another database (each database has its own
+  identity: a token in `search_index_database` and the database's Postgres ID, so a restored copy
+  or a second database on the cluster is another one), it logs a warning and builds the
   index from the database in the background (about a second per 2,000 units on the development
   data; catalogue cards at Tantivy's bulk rate); until then text searches read Postgres alone. A
-  build that fails is retried every minute; meanwhile the queue rows of finished transactions are
-  deleted (the next build reads everything), and a failed build leaves no partial generation.
+  build that fails is retried every minute; meanwhile the rows of finished transactions in both
+  queues are deleted (the next build reads everything), and a failed build leaves no partial
+  generation.
 - **Rebuild.** `pinakesd --config <path> reindex`, with the daemon stopped (it takes the instance
   lock), builds the index from the database into a new generation, prints its progress, switches
   to it and removes the old one. Use it after restoring a database from a backup, or to compact the

@@ -2261,6 +2261,49 @@ fn text_query(
         catalogues: vec![],
     })
 }
+/// `{unit}` has a reference that counts, in the author and reach scope.
+fn push_referenced(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    unit: &str,
+    q: &SearchQuery,
+    reach: &Option<crate::nexus::ReachSet>,
+) {
+    sql.push(format!(
+        " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id"
+    ));
+    scope(sql, q, reach);
+    sql.push(")");
+}
+/// `{unit}` carries the tags (any, or all with `match=all`), in the author and reach scope.
+fn push_tags(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    unit: &str,
+    q: &SearchQuery,
+    reach: &Option<crate::nexus::ReachSet>,
+    tags: &[String],
+) {
+    if tags.is_empty() {
+        return;
+    }
+    if q.match_mode.as_deref() == Some("all") {
+        for tag in tags {
+            sql.push(format!(
+                " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label="
+            ))
+            .push_bind(tag.clone());
+            scope(sql, q, reach);
+            sql.push(")");
+        }
+    } else {
+        sql.push(format!(
+            " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label=ANY("
+        ))
+        .push_bind(tags.to_vec())
+        .push(")");
+        scope(sql, q, reach);
+        sql.push(")");
+    }
+}
 /// Whether a search may list catalogue cards nobody referenced: not with `referenced=true`, a
 /// social filter, an identifier, a venue, a category, a time, a job posting's or a recipe's facts,
 /// nor ranked by references or a start (`recent`, `trending`, `start`), which such a card has
@@ -2331,7 +2374,7 @@ async fn card_units(
     .bind(catalogues)
     .fetch_all(pool)
     .await?;
-    unreferenced(pool, units_of(rows)).await
+    Ok(units_of(rows))
 }
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
 /// the filters let in, at most `cap`, through the `(type, fame)`, `fame`, `labels` and `point`
@@ -2408,11 +2451,11 @@ async fn best_known_cards(
     }
     match (sort, spatial.near) {
         (Some("distance"), Some((lat, lon, _))) => {
-            sql.push(" ORDER BY c.point<->ST_SetSRID(ST_MakePoint(")
+            sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
                 .push_bind(lon)
                 .push(",")
                 .push_bind(lat)
-                .push("),4326),c.id");
+                .push("),4326)::geography,c.id");
         }
         _ => {
             sql.push(" ORDER BY c.fame DESC,c.id");
@@ -2420,26 +2463,7 @@ async fn best_known_cards(
     }
     sql.push(" LIMIT ").push_bind(cap as i64);
     let rows: Vec<(i64, String, String)> = sql.build_query_as().fetch_all(pool).await?;
-    unreferenced(pool, units_of(rows)).await
-}
-/// `units` without those whose link a referenced resource has (by its unit ID, the resource ID
-/// of the link): that resource lists it.
-async fn unreferenced(pool: &PgPool, units: Vec<CardUnit>) -> Result<Vec<CardUnit>, ApiError> {
-    if units.is_empty() {
-        return Ok(units);
-    }
-    let ids: Vec<String> = units.iter().map(|u| u.unit_id.clone()).collect();
-    let referenced: std::collections::HashSet<String> =
-        sqlx::query_scalar("SELECT id FROM resource WHERE id=ANY($1) AND orphaned_at IS NULL")
-            .bind(&ids)
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .collect();
-    Ok(units
-        .into_iter()
-        .filter(|u| !referenced.contains(&u.unit_id))
-        .collect())
+    Ok(units_of(rows))
 }
 /// `card_unit`: the catalogue cards `units` as rows of `search_unit`'s columns, with their
 /// `labels` and `fame` (a referenced unit has `'{}'` and NULL), of a catalogue that is on. Its
@@ -2471,6 +2495,8 @@ fn push_card_units(
 }
 /// How many times `limits.search_text_candidates` a trending text search reads from the index.
 pub const TRENDING_CANDIDATES: usize = 20;
+/// The most candidates a trending text search reads, whatever the limit.
+pub const TRENDING_MOST: usize = 10_000;
 /// The text of `q`, when there is one to match (an empty `q` filters nothing).
 fn query_text(q: &SearchQuery) -> Option<&str> {
     q.q.as_deref().filter(|s| !s.is_empty())
@@ -3048,8 +3074,11 @@ pub async fn search(
             // A trending page ranks by the references inside its window, which only Postgres
             // counts: it is given more candidates (those referenced last inside the window) and
             // ranks them.
-            let cap = state.config.search.text_candidates
-                * if trending { TRENDING_CANDIDATES } else { 1 };
+            let cap = if trending {
+                (state.config.search.text_candidates * TRENDING_CANDIDATES).min(TRENDING_MOST)
+            } else {
+                state.config.search.text_candidates
+            };
             match state.search_index.candidates(&state.pool, query, cap).await {
                 Ok(found) => found,
                 Err(error) => {
@@ -3189,11 +3218,11 @@ pub async fn search(
     } else {
         let text = query_text(&q).filter(|_| sort == Some("relevance"));
         let indexed = text.is_some() && candidates.is_some();
-        // By activity, a catalogue card nobody referenced comes after every referenced unit, the
-        // best known first (`fame - 1`, below 0).
+        // By activity, a catalogue card nobody referenced comes after every referenced unit (whose
+        // score is 0 or more), the best known first (`fame - 2`, below -1).
         let by_fame = with_cards && !indexed;
         if by_fame {
-            sql.push("CASE WHEN r.fame IS NOT NULL THEN r.fame::double precision-1.0 ELSE ");
+            sql.push("CASE WHEN r.fame IS NOT NULL THEN r.fame::double precision-2.0 ELSE ");
         }
         if indexed {
             // The text index's relevance times (1 + fame), plus the activity score (with any
@@ -3247,16 +3276,27 @@ pub async fn search(
         // by one: the set is bounded, and a join would read every card.
         sql.push(" FROM related rel CROSS JOIN LATERAL (SELECT * FROM resource_unit u WHERE u.id=rel.resource_id OFFSET 0) r");
     } else if with_cards {
-        // The referenced units (the candidates' resources, with text) and the catalogue cards.
-        sql.push(
-            " FROM (SELECT su.*,'{}'::text[] AS labels,NULL::real AS fame FROM search_unit su",
-        );
+        // The referenced units (the candidates' resources, with text) and the catalogue cards,
+        // each branch with its own filters as plain conditions: references and people's tags on
+        // the referenced units, labels (their tags) on the cards.
+        sql.push(" FROM (SELECT su.*,'{}'::text[] AS labels,NULL::real AS fame FROM search_unit su WHERE true");
         if let Some(found) = &candidates {
-            sql.push(" WHERE su.id=ANY(")
+            sql.push(" AND su.id=ANY(")
                 .push_bind(candidate_resources(&found.units))
                 .push(")");
         }
-        sql.push(" UNION ALL SELECT * FROM card_unit) r");
+        push_referenced(&mut sql, "su", &q, &reach);
+        push_tags(&mut sql, "su", &q, &reach, &tags);
+        sql.push(" UNION ALL SELECT * FROM card_unit cu WHERE true");
+        if !tags.is_empty() {
+            sql.push(if q.match_mode.as_deref() == Some("all") {
+                " AND cu.labels@>"
+            } else {
+                " AND cu.labels&&"
+            })
+            .push_bind(tags.clone());
+        }
+        sql.push(") r");
     } else {
         sql.push(" FROM search_unit r");
     }
@@ -3387,50 +3427,12 @@ pub async fn search(
         // A post whose author has not opted in to search is never found by its text.
         sql.push(") AND coalesce(r.doc->'attributes'->>'opted_out','') <> 'true'");
     }
-    if related.is_none() {
-        // (A related row is referenced by a sampled tagger, who is in scope.) A catalogue card
-        // stands without references.
-        sql.push(if with_cards {
-            " AND (r.fame IS NOT NULL OR EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id"
-        } else {
-            " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id"
-        });
-        scope(&mut sql, &q, &reach);
-        sql.push(if with_cards { "))" } else { ")" });
+    if related.is_none() && !with_cards {
+        // (A related row is referenced by a sampled tagger, who is in scope.)
+        push_referenced(&mut sql, "r", &q, &reach);
     }
-    // A tag matches people's tags and, on a catalogue card, its source's labels.
-    let labels_or = if with_cards { " AND (" } else { " AND " };
-    if !tags.is_empty() {
-        if q.match_mode.as_deref() == Some("all") {
-            for tag in &tags {
-                sql.push(labels_or);
-                if with_cards {
-                    sql.push("r.fame IS NOT NULL AND ")
-                        .push_bind(tag.clone())
-                        .push("=ANY(r.labels) OR ");
-                }
-                sql.push(
-                    "EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=",
-                )
-                .push_bind(tag.clone());
-                scope(&mut sql, &q, &reach);
-                sql.push(if with_cards { "))" } else { ")" });
-            }
-        } else {
-            sql.push(labels_or);
-            if with_cards {
-                sql.push("r.fame IS NOT NULL AND r.labels&&")
-                    .push_bind(tags.clone())
-                    .push(" OR ");
-            }
-            sql.push(
-                "EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id AND f.label=ANY(",
-            )
-            .push_bind(tags)
-            .push(")");
-            scope(&mut sql, &q, &reach);
-            sql.push(if with_cards { "))" } else { ")" });
-        }
+    if !with_cards {
+        push_tags(&mut sql, "r", &q, &reach, &tags);
     }
     if let (true, Some(since)) = (related_groups, since) {
         // Each row's group (or the row alone) over the rows that pass: its members' taggers
@@ -3456,7 +3458,13 @@ pub async fn search(
             .push_bind(cap)
             .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
     }
-    sql.push("), page AS (SELECT * FROM filtered");
+    if with_cards {
+        // A catalogue card whose link a listed resource has is that resource: one row per unit,
+        // the resource's.
+        sql.push("), page AS (SELECT * FROM (SELECT DISTINCT ON (unit_id) * FROM filtered ORDER BY unit_id,fame IS NOT NULL) d");
+    } else {
+        sql.push("), page AS (SELECT * FROM filtered");
+    }
     if let Some(c) = &cursor {
         sql.push(" WHERE (rank,unit_id)<(")
             .push_bind(c.score)

@@ -527,6 +527,15 @@ CREATE TABLE search_index_queue (
 );
 CREATE INDEX search_index_queue_xid_idx ON search_index_queue USING btree (xid);
 
+-- This database, to the text index: a token made with the database, which the index records and
+-- checks with the database's own ID (`pg_database.oid`), so an index built from another database
+-- is never opened as this one's.
+CREATE TABLE search_index_database (
+    id integer PRIMARY KEY CONSTRAINT search_index_database_id_check CHECK (id = 1),
+    token uuid NOT NULL DEFAULT gen_random_uuid()
+);
+INSERT INTO search_index_database(id) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM search_index_database);
+
 -- A row's resource, or the resource of a row that names one (`resource_id`), on any change.
 CREATE FUNCTION queue_search_index() RETURNS trigger
     LANGUAGE plpgsql
@@ -1325,16 +1334,18 @@ CREATE TABLE catalogue_state (
 );
 
 
--- The catalogue cards an update run changed or removed, for the text index (`search_index`). A
--- full import queues nothing: the index reads the catalogue's cards again once the import has
--- finished (`catalogue_state.last_import_at`), so a first import of millions of cards never
--- passes through this table.
+-- The catalogue cards an update run changed or removed, and the cards a full import changed in
+-- place, for the text index (`search_index`). A full import's new and removed cards are not
+-- queued: the index reads the catalogue's cards again once the import has finished
+-- (`catalogue_state.last_import_at`), so a first import of millions of cards never passes
+-- through this table.
 CREATE TABLE search_index_catalogue_queue (
     seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     card_id bigint NOT NULL
 );
 
--- The changed cards of a statement, when their catalogue's run is an update.
+-- The changed cards of a statement: in an update run every change, in a full import the cards
+-- whose content changed in place.
 CREATE FUNCTION queue_search_index_catalogue() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
@@ -1343,7 +1354,7 @@ CREATE FUNCTION queue_search_index_catalogue() RETURNS trigger
             SELECT n.id FROM changed_new n JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run = 'update';
     ELSIF TG_OP = 'UPDATE' THEN
         INSERT INTO search_index_catalogue_queue(card_id)
-            SELECT n.id FROM changed_new n JOIN changed_old o ON o.id = n.id JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run = 'update'
+            SELECT n.id FROM changed_new n JOIN changed_old o ON o.id = n.id JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run IN ('update', 'import')
             WHERE n.content_hash IS DISTINCT FROM o.content_hash OR n.catalogue IS DISTINCT FROM o.catalogue;
     ELSE
         INSERT INTO search_index_catalogue_queue(card_id)
@@ -1352,6 +1363,9 @@ CREATE FUNCTION queue_search_index_catalogue() RETURNS trigger
     RETURN NULL;
 END $$;
 
+-- Searches without text read the cards near a point and on a host through these.
+CREATE INDEX catalogue_card_geography_idx ON catalogue_card USING gist ((point::geography));
+CREATE INDEX catalogue_card_host_idx ON catalogue_card USING btree ((substring(uri FROM '^[a-z][a-z0-9+.-]*://([^/?#:]+)')), fame DESC);
 CREATE TRIGGER catalogue_card_search_index_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
 CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card REFERENCING OLD TABLE AS changed_old NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
 CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();

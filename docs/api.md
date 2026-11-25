@@ -1089,7 +1089,10 @@ distance. `q` matches like this:
   `over` finds `Sovereign`) and a name similar to the text (`pg_trgm`'s `%`, similarity 0.3 or
   more: `kraftwerg` finds `Kraftwerk`, `daft punk` finds `Daft`). The index proposes the names
   that hold the text's three-letter pieces (at least 30% of them) and Postgres keeps those it
-  matches, so a typo finds only near names.
+  matches, so a typo finds only near names. It proposes them only while fewer than 50 cards hold
+  every word of the text in their name (with that many, those fill the first page), and leaves
+  out a piece more than 10,000 names and 5% of the index hold, asking one piece fewer for each
+  (one at least): a typo made of common pieces alone finds nothing this way.
 - A short `q` (letters and digits only, at most three characters, counting one space between
   words: `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a
   sign such as `/` or `™` starts a word too) and the description by whole words. Several short
@@ -1124,7 +1127,8 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   0, `status` `ok`; `group`, `also_on` and `maybe_same` are empty. OpenStreetMap cards carry the
   ODbL `attribution`. `GET /v1/resources/{id}` answers 404 for it until someone references the
   link;
-- a card whose `uri` a referenced resource has is listed once, as that resource;
+- a card whose `uri` a listed resource has is listed once, as that resource; a card whose
+  resource the search leaves out (not referenced any more, or not yet read) is listed as the card;
 - never listed with `referenced=true`, a social filter (`author`, `reach`, `related`,
   `in_collection`), `key`, `venue`, `category`, `remote`, `ingredient`, `from` or `to`, nor with
   `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;
@@ -1195,7 +1199,7 @@ text * (1 + fame) + activity
 With `q` and another `sort`, the index keeps the 500 matches that rank first in that order (the
 most active, the newest reference, the earliest start, the nearest), and the page ranks them as
 without `q`. With `sort=trending` it keeps the 10,000 matches (20 times
-`limits.search_text_candidates`) referenced last among those referenced inside `window`, and
+`limits.search_text_candidates`, at most 10,000) referenced last among those referenced inside `window`, and
 Postgres ranks them by their references inside the window: a match whose last reference in the
 window is older than those 10,000 is not listed. By activity, a catalogue card comes after every
 referenced unit, the best known first.

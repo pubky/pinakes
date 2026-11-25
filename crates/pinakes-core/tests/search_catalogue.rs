@@ -433,7 +433,7 @@ async fn an_update_run_changes_the_index(pool: PgPool) {
         .await
         .unwrap();
     assert!(queued > 0, "an update run queues its cards");
-    // An import queues nothing; the index reads the catalogue again when it ends.
+    // An import queues its new cards nothing; the index reads the catalogue again when it ends.
     sqlx::query("UPDATE catalogue_state SET run='import' WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
@@ -458,6 +458,156 @@ async fn an_update_run_changes_the_index(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(names(&common::get(&app, "/v1/search?q=dom").await), ["Dom"]);
+}
+
+/// A catalogue read again after its import, a part per pass: the queues are drained before each
+/// part, so a new tag is found while the re-read is under way; a card changed in place during the
+/// import is found by its new name before the import ends; at the end the cards gone since leave.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
+    let cards: Vec<Card> = (1..=6)
+        .map(|n| card(n, &format!("Peak {n}"), "Mountain", &[], None, 0.5))
+        .collect();
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    let index = search_index::SearchIndex::in_memory_with_reread_part(2);
+    index.set_catalogues(&["wikidata"]);
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        items(&common::get(&app, "/v1/search?q=peak").await).len(),
+        6
+    );
+    // A re-import: a card renamed in place, one added, one gone.
+    sqlx::query("UPDATE catalogue_state SET run='import',generation=2 WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut next: Vec<Card> = (1..=5)
+        .map(|n| card(n, &format!("Peak {n}"), "Mountain", &[], None, 0.5))
+        .collect();
+    next[0].name = "Summit One".into();
+    next[0].description = Some("Renamed.".into());
+    next.push(card(7, "Peak 7", "Mountain", &[], None, 0.5));
+    store::upsert(&pool, Catalogue::Wikidata, 2, &next, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=summit").await),
+        ["Summit One"]
+    );
+    store::finish_import(&pool, Catalogue::Wikidata, 2)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now()+interval '1 second' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The first pass after the import: one part (two cards); the new card is not read yet, and a
+    // tag written meanwhile is found.
+    let link = referenced(
+        &pool,
+        "https://example.org/peak-guide",
+        "Peak guide",
+        "hiking",
+        1,
+    )
+    .await;
+    let page = names(&common::get(&app, "/v1/search?q=peak&limit=20").await);
+    assert!(page.contains(&"Peak guide".to_owned()), "{page:?}");
+    assert!(!page.contains(&"Peak 7".to_owned()), "{page:?}");
+    let _ = link;
+    // The passes after: every part, then the gone card leaves.
+    for _ in 0..4 {
+        common::get(&app, "/v1/search?q=peak").await;
+    }
+    let mut page = names(&common::get(&app, "/v1/search?q=peak&limit=20").await);
+    page.sort();
+    assert_eq!(
+        page,
+        [
+            "Peak 2",
+            "Peak 3",
+            "Peak 4",
+            "Peak 5",
+            "Peak 7",
+            "Peak guide"
+        ]
+    );
+}
+
+/// A card whose link a resource has that search does not list (a link referenced but not read
+/// yet) is still found as the card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_behind_a_pending_link_is_found(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Matterhorn", "Mountain", &["alps"], None, 0.9)],
+    )
+    .await;
+    let id = pinakes_core::store::ensure_resource(&pool, "https://en.wikipedia.org/wiki/Item_1")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reference(resource_id,author,kind,label,object_path,created_at) VALUES($1,$2,'tag','alps','/pub/app/tags/x',now())")
+        .bind(&id)
+        .bind(author(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = app(&pool, Config::default());
+    let page = common::get(&app, "/v1/search?q=matterhorn").await;
+    assert_eq!(names(&page), ["Matterhorn"]);
+    assert_eq!(items(&page)[0]["labels"], serde_json::json!(["alps"]));
+}
+
+/// Nearest first by the distance on the globe, also when the candidates are cut: far north, a
+/// card a few degrees of longitude away is nearer than fifty a degree of latitude away.
+#[sqlx::test(migrations = "../../migrations")]
+async fn nearest_first_is_the_distance_on_the_globe(pool: PgPool) {
+    let mut cards: Vec<Card> = (1..=50)
+        .map(|n| {
+            card(
+                n,
+                &format!("North {n}"),
+                "Place",
+                &[],
+                Some((80.9, 5.0 + n as f64 / 1000.0)),
+                0.5,
+            )
+        })
+        .collect();
+    cards.push(card(99, "East", "Place", &[], Some((80.0, 10.0)), 0.5));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    let mut config = Config::default();
+    config.search.text_candidates = 50;
+    let app = app(&pool, config);
+    let page = common::get(&app, "/v1/search?near=80.0,5.0&radius=200000&sort=distance").await;
+    assert_eq!(names(&page)[0], "East");
+}
+
+/// Without text, a card nobody referenced comes after every referenced link, even a card of fame 1
+/// and a link whose activity is 0 (its score not counted yet).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_famous_card_comes_after_an_inactive_link(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Matterhorn", "Mountain", &["alps"], None, 1.0)],
+    )
+    .await;
+    let id = referenced(&pool, "https://example.org/old", "Old page", "alps", 1).await;
+    sqlx::query("DELETE FROM resource_score WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = app(&pool, Config::default());
+    // Either order of the two IDs: the link first.
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?tags=alps").await),
+        ["Old page", "Matterhorn"]
+    );
 }
 
 /// The cost of catalogue cards in the index, for the handoff: 100,000 cards written by a full

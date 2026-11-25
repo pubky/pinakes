@@ -242,12 +242,125 @@ async fn typos_match_names_as_similar_as_postgres(pool: PgPool) {
             "{q}"
         );
     }
-    // A similar name is listed whatever the words find.
-    for n in 7..32 {
+    // A similar name is listed while fewer than TYPO_BELOW names hold the words; with that many,
+    // Postgres ranks them first, and the proposals are not read.
+    for n in 7..7 + search_index::TYPO_BELOW - 1 {
         card(&pool, n, &format!("Music {n}"), "Sound.", "music", 1).await;
     }
-    let page = ids_of(&common::get(&app, "/v1/search?q=music&limit=100").await);
+    let page = ids_of(&common::get(&app, "/v1/search?q=music&limit=200").await);
     assert!(page.contains(&musik), "{} cards", page.len());
+    card(&pool, 500, "Music 500", "Sound.", "music", 1).await;
+    let page = ids_of(&common::get(&app, "/v1/search?q=music&limit=200").await);
+    assert_eq!(page.len(), search_index::TYPO_BELOW);
+    assert!(!page.contains(&musik));
+}
+
+/// A pass that adds, changes or tags documents merges nothing: only a document with text that
+/// loses it (a post found gone) merges, and only the segments that held it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_ordinary_pass_merges_nothing(pool: PgPool) {
+    let index = SearchIndex::in_memory();
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let first = card(&pool, 1, "Aurora", "A page.", "sky", 1).await;
+    common::get(&app, "/v1/search?q=aurora").await;
+    // New links nobody has read yet (no name: no text), tags, a changed name.
+    for n in 2..12 {
+        let id = store::ensure_resource(&pool, &format!("https://example.org/pending/{n}"))
+            .await
+            .unwrap();
+        tag(&pool, &id, "new", n).await;
+        common::get(&app, "/v1/search?q=aurora").await;
+    }
+    tag(&pool, &first, "fresh", 99).await;
+    let second = card(&pool, 20, "Comet", "A page.", "space", 1).await;
+    common::get(&app, "/v1/search?q=comet").await;
+    let mut doc = ResourceMeta::new("https://example.org/index/20", "web", 86400);
+    doc.name = Some("Comet Hale-Bopp".into());
+    doc.set_type("WebPage");
+    sqlx::query("UPDATE resource SET name=$2, doc=$3 WHERE id=$1")
+        .bind(&second)
+        .bind("Comet Hale-Bopp")
+        .bind(serde_json::to_value(&doc).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    common::get(&app, "/v1/search?q=bopp").await;
+    assert_eq!(index.purges(), 0);
+    // A post found gone: one merge.
+    sqlx::query("UPDATE resource SET name=NULL, doc=jsonb_build_object('type','SocialMediaPosting','type_path',jsonb_build_array('Thing','CreativeWork','SocialMediaPosting'),'url',uri,'status','missing') WHERE id=$1")
+        .bind(&first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    common::get(&app, "/v1/search?q=aurora").await;
+    assert_eq!(index.purges(), 1);
+    assert!(!index.holds_word("aurora"));
+}
+
+/// An index built from one database is never opened as another's on the same cluster: the daemon
+/// rebuilds it from the database it is given.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_index_of_another_database_is_rebuilt(pool: PgPool) {
+    card(&pool, 1, "Aurora", "A page.", "sky", 1).await;
+    let dir = scratch("other-db");
+    let run = |pool: PgPool| {
+        let index = SearchIndex::on_disk(&dir);
+        let passed = prometheus::IntGauge::new("passed", "test").unwrap();
+        let opened = prometheus::IntGauge::new("opened", "test").unwrap();
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(index.clone().run(
+            pool,
+            Duration::from_millis(100),
+            passed,
+            opened.clone(),
+            shutdown,
+        ));
+        (index, opened, stop, task)
+    };
+    let (first, opened, stop, task) = run(pool.clone());
+    within(|| async { opened.get() == 1 }).await;
+    assert_eq!(found(&first, &pool, query("aurora", &[])).await.len(), 1);
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    // A second database on the same cluster, with its own card.
+    let name = format!("pinakes_index_other_{}", std::process::id());
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let other = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(pool.connect_options().as_ref().clone().database(&name))
+        .await
+        .unwrap();
+    pinakes_core::migrate(&other).await.unwrap();
+    // As a copy restored beside it would, it carries the first database's token.
+    let token: String = sqlx::query_scalar("SELECT token::text FROM search_index_database")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE search_index_database SET token=$1::uuid")
+        .bind(&token)
+        .execute(&other)
+        .await
+        .unwrap();
+    card(&other, 2, "Comet", "A page.", "space", 1).await;
+    let (second, opened, stop, task) = run(other.clone());
+    within(|| async { opened.get() == 1 }).await;
+    assert!(found(&second, &other, query("aurora", &[]))
+        .await
+        .is_empty());
+    assert_eq!(found(&second, &other, query("comet", &[])).await.len(), 1);
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    other.close().await;
+    sqlx::query(&format!("DROP DATABASE {name}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Activity counts on a log scale: a card a thousand accounts tagged does not pass the card the
@@ -407,8 +520,12 @@ async fn an_emptied_post_is_not_found_by_its_old_words(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_closed_index_keeps_the_queue_short_and_no_partial_generation(pool: PgPool) {
     card(&pool, 1, "Aurora", "A page.", "sky", 1).await;
+    sqlx::query("INSERT INTO search_index_catalogue_queue(card_id) VALUES (1)")
+        .execute(&pool)
+        .await
+        .unwrap();
     let queued = || async {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search_index_queue")
+        sqlx::query_scalar::<_, i64>("SELECT (SELECT count(*) FROM search_index_queue)+(SELECT count(*) FROM search_index_catalogue_queue)")
             .fetch_one(&pool)
             .await
             .unwrap()

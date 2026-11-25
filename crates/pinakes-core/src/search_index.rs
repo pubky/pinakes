@@ -69,6 +69,14 @@ const SUBSTRING_SCORE: Score = 8.0;
 /// Each three-letter piece a name shares with the text (Postgres' trigram similarity, `pg_trgm`),
 /// proposed to Postgres.
 const SIMILAR_PIECE_SCORE: Score = 0.5;
+/// The proposals (the text inside a name, similar names) run only while fewer matches than this
+/// hold every word of the text in their name: Postgres' own text search ranks those first, so with
+/// this many (a default page) no other reaches the first page.
+pub const TYPO_BELOW: usize = 50;
+/// The share of documents above which a three-letter piece is too common to ask for, once it is
+/// in at least [`COMMON_PIECE_DOCS`] documents.
+const COMMON_PIECE: f64 = 0.05;
+const COMMON_PIECE_DOCS: u64 = 10_000;
 /// `pg_trgm`'s similarity threshold (`%`): shared pieces over the pieces of both. A name holds at
 /// least the pieces it shares, so a name similar so shares at least 0.3 of the text's pieces: the
 /// least the index asks for.
@@ -89,6 +97,9 @@ pub const CELL_RESOLUTIONS: [h3o::Resolution; 3] = [
     h3o::Resolution::Eight,
 ];
 const MAX_CELLS: usize = 1100;
+/// Catalogue cards a pass reads again, of a catalogue whose import has finished: about three
+/// seconds of work, so the queues wait no longer.
+const REREAD_PART: i64 = 20_000;
 /// Queue rows read per pass.
 const QUEUE_BATCH: i64 = 20_000;
 /// The longest word the index keeps (bytes); a longer one is left out of the words.
@@ -132,6 +143,8 @@ struct Fields {
     venue: Field,
     source: Field,
     catalogue: Field,
+    import: Field,
+    has_text: Field,
     referenced: Field,
     cells: [Field; 3],
     lat: Field,
@@ -178,6 +191,8 @@ fn schema() -> (Schema, Fields) {
         venue: s.add_text_field("venue", STRING),
         source: s.add_text_field("source", STRING),
         catalogue: s.add_text_field("catalogue", STRING),
+        import: s.add_text_field("import", STRING),
+        has_text: s.add_u64_field("has_text", INDEXED),
         referenced: s.add_u64_field("referenced", INDEXED | FAST),
         cells: [
             s.add_u64_field("cell_coarse", INDEXED),
@@ -378,6 +393,19 @@ struct Payload {
     /// them after (`catalogue_state.last_import_at`, empty when none had finished).
     #[serde(default)]
     catalogues: BTreeMap<String, String>,
+    /// The database the index was built from ([`database_identity`]).
+    #[serde(default)]
+    database: String,
+}
+/// The database's identity for the index: the token made with it (`search_index_database`) and
+/// its ID in the cluster (`pg_database.oid`). A copy restored elsewhere, or another database on the
+/// same cluster, has another.
+async fn database_identity(db: impl sqlx::PgExecutor<'_>) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT (SELECT token::text FROM search_index_database WHERE id=1)||':'||(SELECT oid::text FROM pg_database WHERE datname=current_database())",
+    )
+    .fetch_one(db)
+    .await?)
 }
 
 /// One search unit as the index keeps it, read from Postgres.
@@ -436,7 +464,7 @@ fn card_key(id: i64) -> String {
 pub fn card_unit(uri: &str) -> Option<String> {
     crate::model::identity(uri).ok().map(|(id, _, _)| id)
 }
-fn card_document(f: &Fields, card: &CardRow) -> Option<TantivyDocument> {
+fn card_document(f: &Fields, card: &CardRow, import: &str) -> Option<TantivyDocument> {
     let unit = card_unit(&card.uri)?;
     let mut doc = TantivyDocument::default();
     doc.add_text(f.unit_id, &unit);
@@ -470,6 +498,7 @@ fn card_document(f: &Fields, card: &CardRow) -> Option<TantivyDocument> {
     }
     doc.add_text(f.source, &card.source);
     doc.add_text(f.catalogue, &card.catalogue);
+    doc.add_text(f.import, import);
     doc.add_u64(f.referenced, 0);
     doc.add_f64(f.fame, f64::from(card.fame).clamp(0.0, 1.0));
     doc.add_f64(f.activity, 0.0);
@@ -525,6 +554,9 @@ fn document(f: &Fields, unit: &Unit) -> TantivyDocument {
         }
     }
     doc.add_u64(f.referenced, 1);
+    if has_text(unit) {
+        doc.add_u64(f.has_text, 1);
+    }
     doc.add_f64(f.fame, 0.0);
     doc.add_f64(f.activity, unit.score.unwrap_or(0.0));
     doc.add_i64(f.activity_at, unit.scored_at.map_or(0, |t| t.timestamp()));
@@ -560,6 +592,22 @@ struct Open {
     catalogues: std::sync::Mutex<BTreeMap<String, String>>,
     /// The last catalogue queue row an in-memory index read.
     catalogue_seq: AtomicU64,
+    /// The database the index belongs to ([`database_identity`]).
+    database: String,
+    /// The catalogue being read again, in parts ([`Reread`]).
+    reread: std::sync::Mutex<Option<Reread>>,
+    /// Merges after a removal ([`purge`]), for tests.
+    purges: AtomicU64,
+}
+/// A catalogue read again after a full import, a part per pass ([`SearchIndex::sync_catalogues`]):
+/// its documents are rewritten in place, card by card, marked with the import read (`marker`);
+/// at the end those of cards gone since (not rewritten) are deleted and the marker recorded.
+#[derive(Clone, Debug)]
+struct Reread {
+    catalogue: String,
+    marker: String,
+    /// The last card rewritten (`catalogue_card.id`).
+    after: i64,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -569,7 +617,12 @@ struct Progress {
     applied: HashSet<u64>,
 }
 impl Open {
-    fn new(index: Index, boundary: u64, catalogues: BTreeMap<String, String>) -> Result<Self> {
+    fn new(
+        index: Index,
+        boundary: u64,
+        catalogues: BTreeMap<String, String>,
+        database: String,
+    ) -> Result<Self> {
         register(&index);
         let fields = schema().1;
         let reader = index
@@ -593,7 +646,19 @@ impl Open {
             }),
             catalogues: std::sync::Mutex::new(catalogues),
             catalogue_seq: AtomicU64::new(0),
+            database,
+            reread: std::sync::Mutex::new(None),
+            purges: AtomicU64::new(0),
         })
+    }
+    /// What the next commit records, with `boundary`.
+    fn stamp(&self, boundary: u64) -> Payload {
+        Payload {
+            format: FORMAT,
+            boundary,
+            catalogues: self.catalogues.lock().expect("markers").clone(),
+            database: self.database.clone(),
+        }
     }
 }
 
@@ -615,6 +680,8 @@ pub struct SearchIndex {
     revision: AtomicU64,
     /// Queue rows read at a time ([`QUEUE_BATCH`]).
     batch: i64,
+    /// Catalogue cards read again per pass ([`REREAD_PART`]).
+    reread_part: i64,
     /// Text searches answered.
     served: AtomicU64,
     /// The catalogues whose cards the index holds: those switched on.
@@ -648,6 +715,20 @@ impl SearchIndex {
             ..Self::with_home(Home::Memory)
         })
     }
+    /// [`SearchIndex::in_memory`] reading a catalogue again `part` cards per pass (tests).
+    #[doc(hidden)]
+    pub fn in_memory_with_reread_part(part: i64) -> Arc<Self> {
+        Arc::new(Self {
+            reread_part: part,
+            ..Self::with_home(Home::Memory)
+        })
+    }
+    /// How many merges removals caused (tests).
+    #[doc(hidden)]
+    pub fn purges(&self) -> u64 {
+        self.current()
+            .map_or(0, |open| open.purges.load(Ordering::SeqCst))
+    }
     /// [`SearchIndex::on_disk`] reading the queue `batch` rows at a time (tests).
     #[doc(hidden)]
     pub fn on_disk_with_batch(dir: impl Into<PathBuf>, batch: i64) -> Arc<Self> {
@@ -659,6 +740,7 @@ impl SearchIndex {
     fn with_home(home: Home) -> Self {
         Self {
             batch: QUEUE_BATCH,
+            reread_part: REREAD_PART,
             served: AtomicU64::new(0),
             catalogues: std::sync::RwLock::new(vec![]),
             home,
@@ -741,11 +823,16 @@ impl SearchIndex {
                     // The next build reads every unit again, from a later snapshot: every row this
                     // sees (those of finished transactions) is covered by it, so the queue does
                     // not grow while closed.
-                    if let Err(error) = sqlx::query("DELETE FROM search_index_queue")
-                        .execute(&pool)
-                        .await
-                    {
-                        tracing::warn!(error = %crate::resolver::log_error(&error), "the text index queue was not trimmed");
+                    let trimmed = async {
+                        sqlx::query("DELETE FROM search_index_queue")
+                            .execute(&pool)
+                            .await?;
+                        sqlx::query("DELETE FROM search_index_catalogue_queue")
+                            .execute(&pool)
+                            .await
+                    };
+                    if let Err(error) = trimmed.await {
+                        tracing::warn!(error = %crate::resolver::log_error(&error), "the text index queues were not trimmed");
                     }
                     tokio::select! {
                         _ = shutdown.changed() => return,
@@ -775,14 +862,23 @@ impl SearchIndex {
                 .fetch_one(pool)
                 .await?;
         let xmin: u64 = xmin.parse().context("transaction ID")?;
+        let database = database_identity(pool).await?;
         match open_current(dir) {
-            // A boundary past the database's transactions: an index of another database (one
-            // restored from a dump starts its transaction IDs anew).
-            Ok(Some((_, payload))) if payload.boundary > xmin => {
+            // Another database's index: another token or database ID, or a boundary past this
+            // cluster's transactions (a copy restored into another cluster starts them anew).
+            Ok(Some((_, payload)))
+                if payload.format == FORMAT
+                    && (payload.database != database || payload.boundary > xmin) =>
+            {
                 tracing::warn!(dir = %dir.display(), "the text index was built from another database; rebuilding it from this one")
             }
             Ok(Some((index, payload))) if payload.format == FORMAT => {
-                self.set(Open::new(index, payload.boundary, payload.catalogues)?);
+                self.set(Open::new(
+                    index,
+                    payload.boundary,
+                    payload.catalogues,
+                    database,
+                )?);
                 tracing::info!(dir = %dir.display(), "text index opened");
                 return Ok(());
             }
@@ -807,7 +903,7 @@ impl SearchIndex {
             secs = started.elapsed().as_secs(),
             "text index built"
         );
-        self.set(Open::new(index, boundary, markers)?);
+        self.set(Open::new(index, boundary, markers, database)?);
         // The build read every transaction below its boundary, and every catalogue card.
         sqlx::query("DELETE FROM search_index_queue WHERE xid<$1::text::xid8")
             .bind(boundary.to_string())
@@ -828,7 +924,8 @@ impl SearchIndex {
             let index = Index::create_in_ram(schema().0);
             register(&index);
             let (boundary, _, markers) = fill(pool, &index, 1, &self.catalogues(), |_| {}).await?;
-            self.set(Open::new(index, boundary, markers)?);
+            let database = database_identity(pool).await?;
+            self.set(Open::new(index, boundary, markers, database)?);
         }
         Ok(self.current())
     }
@@ -946,26 +1043,22 @@ impl SearchIndex {
     }
     /// The catalogue cards' part of a pass. A catalogue switched off: its documents leave the
     /// index (its cards already left every search, which filters by the catalogues that are on).
-    /// A catalogue whose full import finished since the index read it: its documents are read
-    /// again, all of them. Then the cards an update run changed or removed
-    /// (`search_index_catalogue_queue`), a batch at a time.
+    /// Then the cards an update run changed or removed, or a full import changed in place
+    /// (`search_index_catalogue_queue`), a batch at a time. Then one part of a catalogue whose
+    /// full import finished since the index read it ([`Reread`]), so a long re-read never holds
+    /// the queues back for more than a part.
     async fn sync_catalogues(&self, pool: &PgPool, open: &Arc<Open>) -> Result<()> {
         let enabled = self.catalogues();
         let recorded = open.catalogues.lock().expect("markers").clone();
-        let markers = import_markers(pool, &enabled).await?;
         let off: Vec<String> = recorded
             .keys()
             .filter(|c| !enabled.contains(c))
             .cloned()
             .collect();
-        let stale: Vec<String> = enabled
-            .iter()
-            .filter(|c| recorded.get(*c) != markers.get(*c))
-            .cloned()
-            .collect();
-        if !off.is_empty() || !stale.is_empty() {
-            self.reread_catalogues(pool, open, &off, &stale, &markers)
-                .await?;
+        if !off.is_empty() {
+            let removing = open.clone();
+            tokio::task::spawn_blocking(move || removing.remove_catalogues(&off)).await??;
+            self.revision.fetch_add(1, Ordering::SeqCst);
         }
         loop {
             let after = match self.home {
@@ -980,7 +1073,7 @@ impl SearchIndex {
             .fetch_all(pool)
             .await?;
             let Some(&(last, _)) = rows.last() else {
-                return Ok(());
+                break;
             };
             let full = rows.len() as i64 >= self.batch;
             let mut ids: Vec<i64> = rows.iter().map(|(_, id)| *id).collect();
@@ -1007,89 +1100,43 @@ impl SearchIndex {
                 Home::Memory => open.catalogue_seq.store(last as u64, Ordering::SeqCst),
             }
             if !full {
-                return Ok(());
+                break;
             }
         }
-    }
-    /// Remove the documents of the catalogues `off` and `stale`, add every card of `stale` again,
-    /// and commit, recording `markers` for `stale` and nothing for `off`.
-    async fn reread_catalogues(
-        &self,
-        pool: &PgPool,
-        open: &Arc<Open>,
-        off: &[String],
-        stale: &[String],
-        markers: &BTreeMap<String, String>,
-    ) -> Result<()> {
-        let boundary = committed_boundary(&open.index).unwrap_or(0);
-        let gone: Vec<String> = off.iter().chain(stale).cloned().collect();
-        let deleting = open.clone();
-        tokio::task::spawn_blocking(move || {
-            let writer = deleting.writer.lock().expect("writer lock");
-            for catalogue in &gone {
-                writer.delete_term(Term::from_field_text(deleting.fields.catalogue, catalogue));
-            }
-        })
-        .await?;
-        let added = async {
-            let mut cards = sqlx::query_as::<_, CardRow>(CARDS).bind(stale).fetch(pool);
-            let mut batch = Vec::with_capacity(ADD_BATCH);
-            loop {
-                let next = cards.try_next().await?;
-                let done = next.is_none();
-                batch.extend(next);
-                if batch.len() == ADD_BATCH || (done && !batch.is_empty()) {
-                    let adding = open.clone();
-                    let part = std::mem::take(&mut batch);
-                    tokio::task::spawn_blocking(move || -> Result<()> {
-                        let writer = adding.writer.lock().expect("writer lock");
-                        for card in &part {
-                            if let Some(doc) = card_document(&adding.fields, card) {
-                                writer.add_document(doc)?;
-                            }
-                        }
-                        Ok(())
+        // One part of a re-read: the one under way, else a catalogue with a newer import.
+        let current = open.reread.lock().expect("reread").clone();
+        let reread = match current {
+            Some(reread) if enabled.contains(&reread.catalogue) => Some(reread),
+            _ => {
+                let markers = import_markers(pool, &enabled).await?;
+                enabled
+                    .iter()
+                    .find(|c| recorded.get(*c) != markers.get(*c))
+                    .map(|c| Reread {
+                        catalogue: c.clone(),
+                        marker: markers.get(c).cloned().unwrap_or_default(),
+                        after: 0,
                     })
-                    .await??;
-                }
-                if done {
-                    return anyhow::Ok(());
-                }
             }
-        }
-        .await;
-        let committing = open.clone();
-        let (off, stale, markers) = (off.to_vec(), stale.to_vec(), markers.clone());
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut writer = committing.writer.lock().expect("writer lock");
-            if let Err(error) = added {
-                // Nothing half read stays for the next commit.
-                let _ = writer.rollback();
-                return Err(error);
-            }
-            let mut recorded = committing.catalogues.lock().expect("markers");
-            let before = recorded.clone();
-            for catalogue in &off {
-                recorded.remove(catalogue);
-            }
-            for catalogue in &stale {
-                if let Some(marker) = markers.get(catalogue) {
-                    recorded.insert(catalogue.clone(), marker.clone());
-                }
-            }
-            if let Err(error) = commit(&mut writer, boundary, &recorded) {
-                *recorded = before;
-                let _ = writer.rollback();
-                return Err(error);
-            }
-            drop(recorded);
-            committing.reader.reload()?;
-            // A catalogue's old documents leave the index files too, not only its searches.
-            purge(&committing.index, &mut writer, &committing.reader)?;
-            Ok(())
-        })
-        .await??;
+        };
+        *open.reread.lock().expect("reread") = reread.clone();
+        let Some(reread) = reread else {
+            return Ok(());
+        };
+        let cards: Vec<CardRow> =
+            sqlx::query_as(&format!("{CARDS} AND c.id>$2 ORDER BY c.id LIMIT $3"))
+                .bind(std::slice::from_ref(&reread.catalogue))
+                .bind(reread.after)
+                .bind(self.reread_part)
+                .fetch_all(pool)
+                .await?;
+        let done = (cards.len() as i64) < self.reread_part;
+        let after = cards.last().map_or(reread.after, |c| c.id);
+        let rewriting = open.clone();
+        let part = reread.clone();
+        tokio::task::spawn_blocking(move || rewriting.reread_part(&part, &cards, done)).await??;
         self.revision.fetch_add(1, Ordering::SeqCst);
+        *open.reread.lock().expect("reread") = (!done).then_some(Reread { after, ..reread });
         Ok(())
     }
     /// `ids`, each once, with the roots of those that are aliases (an alias's references count
@@ -1166,6 +1213,9 @@ fn committed_boundary(index: &Index) -> Option<u64> {
 impl Open {
     /// Replace the documents of `resources` with `units` and commit, recording `boundary`.
     fn replace(&self, resources: &[String], units: &[Unit], boundary: u64) -> Result<()> {
+        // The segments holding a document with text of these resources, before they are
+        // replaced: if one loses its text, only those segments are merged.
+        let texts = self.text_documents(resources)?;
         let mut writer = self.writer.lock().expect("writer lock");
         let result = (|| -> Result<()> {
             for id in resources {
@@ -1174,11 +1224,7 @@ impl Open {
             for unit in units {
                 writer.add_document(document(&self.fields, unit))?;
             }
-            commit(
-                &mut writer,
-                boundary,
-                &self.catalogues.lock().expect("markers"),
-            )?;
+            commit(&mut writer, &self.stamp(boundary))?;
             Ok(())
         })();
         if result.is_err() {
@@ -1187,16 +1233,173 @@ impl Open {
         }
         result?;
         self.reader.reload()?;
-        // A resource that lost its text (a post found gone, emptied or opted out, a card no longer
-        // searchable): merge every segment holding deleted documents now, so its words leave the
-        // index files, not only its searches.
-        let removed = resources
+        // A resource whose document had text and now has none (a post found gone, emptied or opted
+        // out, a card no longer searchable): merge the segments that held its document now, so its
+        // words leave the index files, not only its searches. A pass that only adds or changes
+        // documents merges nothing.
+        let lost: Vec<&String> = texts
             .iter()
-            .any(|id| !units.iter().any(|u| &u.resource_id == id && has_text(u)));
-        if removed {
-            purge(&self.index, &mut writer, &self.reader)?;
+            .filter(|(id, _)| !units.iter().any(|u| &u.resource_id == id && has_text(u)))
+            .map(|(id, _)| id)
+            .collect();
+        // Every segment that holds one of its documents, the current and earlier ones (deleted,
+        // their words still in the files).
+        let lost: Vec<tantivy::index::SegmentId> = if lost.is_empty() {
+            vec![]
+        } else {
+            let searcher = self.reader.searcher();
+            searcher
+                .segment_readers()
+                .iter()
+                .filter(|segment| {
+                    segment
+                        .inverted_index(self.fields.resource_id)
+                        .ok()
+                        .is_some_and(|inverted| {
+                            lost.iter().any(|id| {
+                                inverted
+                                    .terms()
+                                    .get(str::as_bytes(id))
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                            })
+                        })
+                })
+                .map(|segment| segment.segment_id())
+                .collect()
+        };
+        if !lost.is_empty() {
+            merge(&self.index, &mut writer, &self.reader, &lost)?;
+            self.purges.fetch_add(1, Ordering::SeqCst);
         }
         Ok(())
+    }
+    /// Of `resources`, those with a document that has text, each with its segment.
+    fn text_documents(
+        &self,
+        resources: &[String],
+    ) -> Result<Vec<(String, tantivy::index::SegmentId)>> {
+        let searcher = self.reader.searcher();
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermSetQuery::new(
+                    resources
+                        .iter()
+                        .map(|id| Term::from_field_text(self.fields.resource_id, id)),
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.fields.has_text, 1),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+        let found = searcher.search(&query, &tantivy::collector::DocSetCollector)?;
+        found
+            .into_iter()
+            .map(|address| {
+                let doc: TantivyDocument = searcher.doc(address)?;
+                let id = doc
+                    .get_first(self.fields.resource_id)
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .context("stored ID")?;
+                Ok((
+                    id,
+                    searcher.segment_reader(address.segment_ord).segment_id(),
+                ))
+            })
+            .collect()
+    }
+}
+impl Open {
+    /// Delete the documents of the catalogues `off`, stop recording them, commit, and merge their
+    /// words out of the files (a catalogue switched off is rare; its segments may be large).
+    fn remove_catalogues(&self, off: &[String]) -> Result<()> {
+        let mut writer = self.writer.lock().expect("writer lock");
+        let boundary = committed_boundary(&self.index).unwrap_or(0);
+        let before = self.catalogues.lock().expect("markers").clone();
+        for catalogue in off {
+            writer.delete_term(Term::from_field_text(self.fields.catalogue, catalogue));
+            self.catalogues.lock().expect("markers").remove(catalogue);
+        }
+        let result = commit(&mut writer, &self.stamp(boundary));
+        if let Err(error) = result {
+            *self.catalogues.lock().expect("markers") = before;
+            let _ = writer.rollback();
+            return Err(error);
+        }
+        self.reader.reload()?;
+        let segments = segments_with_deletes(&self.index)?;
+        merge(&self.index, &mut writer, &self.reader, &segments)?;
+        self.purges.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    /// One part of `reread`: rewrite the documents of `cards`, marked with its import; when it is
+    /// the last part, delete the catalogue's documents of other imports (cards gone since) and
+    /// record the import. One commit.
+    fn reread_part(&self, reread: &Reread, cards: &[CardRow], last: bool) -> Result<()> {
+        let mut writer = self.writer.lock().expect("writer lock");
+        let boundary = committed_boundary(&self.index).unwrap_or(0);
+        let before = self.catalogues.lock().expect("markers").clone();
+        let result = (|| -> Result<()> {
+            for card in cards {
+                writer.delete_term(Term::from_field_text(
+                    self.fields.resource_id,
+                    &card_key(card.id),
+                ));
+                if let Some(doc) = card_document(&self.fields, card, &reread.marker) {
+                    writer.add_document(doc)?;
+                }
+            }
+            if last {
+                writer.delete_query(Box::new(BooleanQuery::new(vec![
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.catalogue, &reread.catalogue),
+                            IndexRecordOption::Basic,
+                        )),
+                    ),
+                    (
+                        Occur::MustNot,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.import, &reread.marker),
+                            IndexRecordOption::Basic,
+                        )),
+                    ),
+                ])))?;
+                self.catalogues
+                    .lock()
+                    .expect("markers")
+                    .insert(reread.catalogue.clone(), reread.marker.clone());
+            }
+            commit(&mut writer, &self.stamp(boundary))
+        })();
+        if let Err(error) = result {
+            *self.catalogues.lock().expect("markers") = before;
+            let _ = writer.rollback();
+            return Err(error);
+        }
+        self.reader.reload()?;
+        Ok(())
+    }
+    /// The import a catalogue's documents are marked with now: the one being read again, else the
+    /// one recorded.
+    fn marker(&self, catalogue: &str) -> String {
+        match &*self.reread.lock().expect("reread") {
+            Some(reread) if reread.catalogue == catalogue => reread.marker.clone(),
+            _ => self
+                .catalogues
+                .lock()
+                .expect("markers")
+                .get(catalogue)
+                .cloned()
+                .unwrap_or_default(),
+        }
     }
 }
 impl Open {
@@ -1212,15 +1415,12 @@ impl Open {
                 ));
             }
             for card in cards {
-                if let Some(doc) = card_document(&self.fields, card) {
+                if let Some(doc) = card_document(&self.fields, card, &self.marker(&card.catalogue))
+                {
                     writer.add_document(doc)?;
                 }
             }
-            commit(
-                &mut writer,
-                boundary,
-                &self.catalogues.lock().expect("markers"),
-            )?;
+            commit(&mut writer, &self.stamp(boundary))?;
             Ok(())
         })();
         if result.is_err() {
@@ -1231,24 +1431,38 @@ impl Open {
         Ok(())
     }
 }
-/// Merge every committed segment that holds deleted documents, so their words leave the index
+/// The committed segments that hold deleted documents.
+fn segments_with_deletes(index: &Index) -> Result<Vec<tantivy::index::SegmentId>> {
+    Ok(index
+        .searchable_segment_metas()?
+        .into_iter()
+        .filter(|m| m.num_deleted_docs() > 0)
+        .map(|m| m.id())
+        .collect())
+}
+/// Merge `segments` (those still committed), so the deleted documents' words leave the index
 /// files. A background merge may take one of them meanwhile: then the segments are read again,
 /// up to three times.
-fn purge(index: &Index, writer: &mut IndexWriter, reader: &IndexReader) -> Result<()> {
+fn merge(
+    index: &Index,
+    writer: &mut IndexWriter,
+    reader: &IndexReader,
+    segments: &[tantivy::index::SegmentId],
+) -> Result<()> {
+    let mut wanted: Vec<tantivy::index::SegmentId> = segments.to_vec();
     for attempt in 1..=3 {
-        let segments: Vec<tantivy::index::SegmentId> = index
-            .searchable_segment_metas()?
-            .into_iter()
-            .filter(|m| m.num_deleted_docs() > 0)
-            .map(|m| m.id())
-            .collect();
-        if segments.is_empty() {
+        let committed: HashSet<tantivy::index::SegmentId> =
+            index.searchable_segment_ids()?.into_iter().collect();
+        wanted.retain(|s| committed.contains(s));
+        if wanted.is_empty() {
             break;
         }
-        match writer.merge(&segments).wait() {
+        match writer.merge(&wanted).wait() {
             Ok(_) => break,
             Err(error) if attempt < 3 => {
                 tracing::debug!(error = %crate::resolver::log_error(&error), "a text index merge raced another; reading the segments again");
+                // A segment merged meanwhile left: what took its documents still holds them.
+                wanted = segments_with_deletes(index)?;
             }
             Err(error) => return Err(error.into()),
         }
@@ -1262,17 +1476,9 @@ fn has_text(unit: &Unit) -> bool {
         .into_iter()
         .any(|t| t.as_deref().is_some_and(|t| !t.trim().is_empty()))
 }
-fn commit(
-    writer: &mut IndexWriter,
-    boundary: u64,
-    catalogues: &BTreeMap<String, String>,
-) -> Result<()> {
+fn commit(writer: &mut IndexWriter, payload: &Payload) -> Result<()> {
     let mut prepared = writer.prepare_commit()?;
-    prepared.set_payload(&serde_json::to_string(&Payload {
-        format: FORMAT,
-        boundary,
-        catalogues: catalogues.clone(),
-    })?);
+    prepared.set_payload(&serde_json::to_string(payload)?);
     prepared.commit()?;
     Ok(())
 }
@@ -1389,6 +1595,7 @@ async fn fill(
             .await?;
     let boundary: u64 = boundary.parse().context("transaction ID")?;
     let markers = import_markers(&mut *tx, catalogues).await?;
+    let database = database_identity(&mut *tx).await?;
     let mut units = sqlx::query_as::<_, Unit>(UNITS).fetch(&mut *tx);
     let mut written = 0u64;
     let mut batch = Vec::with_capacity(ADD_BATCH);
@@ -1421,9 +1628,13 @@ async fn fill(
     let mut batch = Vec::with_capacity(ADD_BATCH);
     let add_cards = |batch: Vec<CardRow>| {
         let writer = writer.clone();
+        let recorded_markers = markers.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             for card in &batch {
-                if let Some(doc) = card_document(&fields, card) {
+                let import = recorded_markers
+                    .get(&card.catalogue)
+                    .map_or("", String::as_str);
+                if let Some(doc) = card_document(&fields, card, import) {
                     writer.add_document(doc)?;
                 }
             }
@@ -1444,9 +1655,14 @@ async fn fill(
     drop(cards);
     tx.commit().await?;
     let mut writer = Arc::try_unwrap(writer).map_err(|_| anyhow::anyhow!("writer still shared"))?;
-    let recorded = markers.clone();
+    let payload = Payload {
+        format: FORMAT,
+        boundary,
+        catalogues: markers.clone(),
+        database,
+    };
     tokio::task::spawn_blocking(move || -> Result<()> {
-        commit(&mut writer, boundary, &recorded)?;
+        commit(&mut writer, &payload)?;
         writer.wait_merging_threads()?;
         Ok(())
     })
@@ -1652,9 +1868,17 @@ impl Open {
             None => vec![],
         };
         // The text inside a name and similar names, as Postgres finds them, for a text that is
-        // not short: proposed, and checked there.
-        if q.inside_words || words.is_none() {
-            if let Some(query) = self.proposals(&q.text, &filters) {
+        // not short: proposed, and checked there; only while fewer than [`TYPO_BELOW`] matches
+        // hold every word in their name (Postgres ranks those first, so with that many no other
+        // reaches a page).
+        let few = match self.name_words_query(&items, &filters) {
+            Some(names) => {
+                searcher.search(names.as_ref(), &tantivy::collector::Count)? < TYPO_BELOW
+            }
+            None => true,
+        };
+        if (q.inside_words && few) || words.is_none() {
+            if let Some(query) = self.proposals(&searcher, &q.text, &filters) {
                 let seen: HashSet<String> = out.iter().map(|c| c.unit_id.clone()).collect();
                 out.extend(
                     found(query.as_ref(), false)?
@@ -2043,18 +2267,70 @@ impl Open {
         clauses.extend(filters.iter().map(|(o, q)| (*o, q.box_clone())));
         Some(Box::new(BooleanQuery::new(clauses)))
     }
+    /// The units whose name (or other names) holds every word of the text, with the filters; `None`
+    /// when the text has `or` (it is not one set of words).
+    fn name_words_query(
+        &self,
+        items: &[Item],
+        filters: &[(Occur, Box<dyn Query>)],
+    ) -> Option<Box<dyn Query>> {
+        let f = &self.fields;
+        if items.iter().any(|i| matches!(i, Item::Or)) {
+            return None;
+        }
+        let in_name = |words: &[String]| -> Box<dyn Query> {
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Should, self.words_in(f.name, words)),
+                (Occur::Should, self.words_in(f.other_names, words)),
+            ]))
+        };
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Words(words, _) => Some((Occur::Must, in_name(words))),
+                Item::Not(words) => Some((Occur::MustNot, in_name(words))),
+                Item::Or => None,
+            })
+            .collect();
+        if !clauses.iter().any(|(o, _)| *o == Occur::Must) {
+            return None;
+        }
+        clauses.extend(filters.iter().map(|(o, q)| (*o, q.box_clone())));
+        Some(Box::new(BooleanQuery::new(clauses)))
+    }
     /// Names Postgres may find the text in otherwise: the text inside the name, or a name that
     /// shares at least 0.3 of the text's three-letter pieces (every name `pg_trgm` takes
     /// for similar, and some it does not), with the filters. Postgres checks each.
-    fn proposals(&self, text: &str, filters: &[(Occur, Box<dyn Query>)]) -> Option<Box<dyn Query>> {
+    fn proposals(
+        &self,
+        searcher: &tantivy::Searcher,
+        text: &str,
+        filters: &[(Occur, Box<dyn Query>)],
+    ) -> Option<Box<dyn Query>> {
         let f = &self.fields;
         let mut either: Vec<(Occur, Box<dyn Query>)> = vec![];
         if let Some(substring) = self.substring(text.trim()) {
             either.push((Occur::Should, substring));
         }
-        let pieces = pieces(text);
+        let all = pieces(text);
+        // A piece in more than COMMON_PIECE of the names (and COMMON_PIECE_DOCS) is left out and
+        // the count asked for lowered by one each, to one at least: a similar name still meets it
+        // with the rest, and the query reads only the rarer pieces' lists.
+        let names = searcher.num_docs().max(1) as f64;
+        let pieces: Vec<&String> = all
+            .iter()
+            .filter(|p| {
+                searcher
+                    .doc_freq(&Term::from_field_text(f.name_pieces, p))
+                    .map_or(true, |n| {
+                        n < COMMON_PIECE_DOCS || (n as f64) / names <= COMMON_PIECE
+                    })
+            })
+            .collect();
+        let least = ((all.len() as f64 * SIMILARITY).ceil() as usize)
+            .saturating_sub(all.len() - pieces.len())
+            .max(1);
         if !pieces.is_empty() {
-            let least = ((pieces.len() as f64 * SIMILARITY).ceil() as usize).max(1);
             let similar = BooleanQuery::with_minimum_required_clauses(
                 pieces
                     .iter()
