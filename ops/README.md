@@ -133,7 +133,11 @@ so another large catalogue waits for it. It fires when a catalogue has waited si
 turn while a large catalogue's runs keep failing; fix the failing import's cause, switch it off
 (its cut-off import then no longer holds the turn) or `pinakesd catalogue drop` it.
 
+The catalogue rules match their series per `instance` and `job`, so a Prometheus that scrapes
+several instances alerts for each on its own: `ops/alerts.test.yml` runs them with two scraped
+instances (`promtool test rules`).
+
 Run `scripts/check-ops`: it runs the test that parses the rules and the dashboard and checks
 every metric they name, and every fetch outcome a rule matches, against an initialized registry,
-then, when promtool is installed, `promtool check rules --lint-fatal` (a lint finding fails). `scripts/test` runs it, so a renamed or unregistered
+then, when promtool is installed, `promtool check rules --lint-fatal` (a lint finding fails) and the rule tests in `ops/alerts.test.yml`. `scripts/test` runs it, so a renamed or unregistered
 metric fails CI with or without promtool.

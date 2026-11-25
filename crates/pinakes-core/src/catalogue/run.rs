@@ -393,9 +393,10 @@ pub fn to_start(importers: Vec<Arc<dyn Importer>>, config: &Config) -> Vec<Arc<d
 
 /// Run `importer` until `shutdown`: take its catalogue's lock (waiting while another process
 /// holds it), then step ([`step`]) and wait as each step says. The lock is held from step to
-/// step and watched while a step runs: a step whose lock is lost is cut off, as a failure. A
-/// step cut off (a shutdown, a lost lock) leaves its run and cursor in the state row, and the
-/// next step resumes it.
+/// step and watched while a step runs: a step whose catalogue lock is lost is cut off and only
+/// logged, with nothing written to the state row (another daemon may hold the lock by then); the
+/// task takes the lock again and resumes. A step cut off (a shutdown, a lost lock) leaves its run
+/// and cursor in the state row, and the next step resumes it.
 pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch::Receiver<bool>) {
     let catalogue = importer.catalogue();
     let mut lock: Option<SessionLock> = None;
@@ -586,8 +587,9 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         config: &ctx.config,
         report: WriteReport::default(),
     };
-    // The large-import lock is watched while the run goes on: lost, the run stops as a failure
-    // and resumes from its cursor once the turn is its own again.
+    // The large-import lock is watched while the run goes on: lost while this task still holds
+    // the catalogue lock, the run stops as a recorded failure (`turn_lost`) and resumes from its
+    // cursor once the turn is its own again.
     let ran = async {
         match run {
             Run::Import => importer.import(&mut job).await.map(|()| UpdateEnd::Done),

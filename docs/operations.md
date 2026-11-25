@@ -1632,7 +1632,8 @@ pinakesd --config <path> catalogue drop <name>
 ```
 
 `catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, when its
-last full import and update finished, how current its cards are, why it waits and its last error.
+last full import and update finished, how current its cards are, a full import an update asked
+for (with its reason) and why it waits, and its last error.
 The last error stays after a later success; the metrics count every failure.
 
 `catalogue drop <name>` deletes the catalogue's cards, 10,000 per transaction, and its state row,
@@ -1693,7 +1694,7 @@ in the others' `waiting` and shows its `last_error`. Fix the cause, or switch it
 Scrape `GET /metrics` on the admin listener. [ops/README.md](../ops/README.md) has every series, the scrape
 setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafana/pinakes.json`).
 `scripts/check-ops` checks every metric they name against the registry, and runs `promtool check rules
---lint-fatal` when it is installed.
+--lint-fatal` and the rule tests (`ops/alerts.test.yml`) when it is installed.
 
 ### Alerts
 

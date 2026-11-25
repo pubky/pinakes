@@ -380,6 +380,23 @@ async fn sweep(
     }
 }
 
+/// The table's `waiting` cell: a full import an update asked for, with its reason, and why the
+/// importer waits.
+fn waiting_cell(state: Option<&State>) -> String {
+    let waiting = state.and_then(|s| s.waiting.as_deref());
+    match state.and_then(|s| s.import_requested.as_deref()) {
+        Some(reason) => {
+            let requested = format!("full import requested: {reason}");
+            match waiting {
+                Some(why) if !why.trim().is_empty() => {
+                    one_line(Some(&format!("{requested}; {why}")))
+                }
+                _ => one_line(Some(&requested)),
+            }
+        }
+        None => one_line(waiting),
+    }
+}
 /// A text on one line of the table: its control characters and line breaks as spaces.
 fn one_line(text: Option<&str>) -> String {
     match text {
@@ -427,7 +444,7 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             at(state.and_then(|s| s.last_import_at)),
             at(state.and_then(|s| s.last_update_at)),
             at(state.and_then(|s| s.current_as_of)),
-            one_line(state.and_then(|s| s.waiting.as_deref())),
+            waiting_cell(state),
             one_line(state.and_then(|s| s.last_error.as_deref())),
         ]);
     }
@@ -506,6 +523,46 @@ mod tests {
         assert_eq!(
             wikidata,
             ["wikidata", "yes", "idle", "0", "-", "-", "-", "-", "-"]
+        );
+        // A full import an update asked for shows with its reason, and why it waits.
+        let mut requested = State {
+            catalogue: "wikidata".into(),
+            phase: "idle".into(),
+            run: None,
+            generation: 1,
+            cursor: None,
+            position: None,
+            cards: 5,
+            upstream_version: None,
+            last_import_at: None,
+            last_update_at: None,
+            current_as_of: None,
+            import_requested: Some("the change stream is gone".into()),
+            waiting: Some("osm's full import is under way".into()),
+            last_error: None,
+            error_count: 0,
+            updated_at: Utc::now(),
+        };
+        let table = status_table(
+            &CataloguesConfig::default(),
+            std::slice::from_ref(&requested),
+        );
+        assert!(
+            table.lines().nth(1).unwrap().contains(
+                "full import requested: the change stream is gone; osm's full import is under way"
+            ),
+            "{table}"
+        );
+        requested.waiting = None;
+        let table = status_table(&CataloguesConfig::default(), &[requested]);
+        assert!(
+            table
+                .lines()
+                .nth(1)
+                .unwrap()
+                .trim_end()
+                .ends_with("full import requested: the change stream is gone  -"),
+            "{table}"
         );
     }
 

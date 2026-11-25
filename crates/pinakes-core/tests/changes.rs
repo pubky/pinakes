@@ -924,14 +924,14 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
             "CatalogueTurnBlocked",
             &[
                 "pinakes_catalogue_waiting_for_turn == 1",
-                "pinakes_catalogue_import_errors_total",
+                "and on (instance, job) (sum by (instance, job) (increase(pinakes_catalogue_import_errors_total",
             ],
         ),
         (
             "CatalogueUpdateLag",
             &[
-                "pinakes_catalogue_update_lag_seconds > on (catalogue) pinakes_catalogue_max_update_lag_seconds",
-                "pinakes_catalogue_enabled == 1",
+                "pinakes_catalogue_update_lag_seconds > on (instance, job, catalogue) pinakes_catalogue_max_update_lag_seconds",
+                "and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1)",
                 "pinakes_catalogue_last_import_timestamp_seconds > 0",
             ],
         ),
@@ -945,6 +945,21 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
                 rule["expr"].as_str().unwrap().contains(read),
                 "{alert}: {read}"
             );
+        }
+    }
+    // A Prometheus may scrape several instances: every catalogue rule that matches vectors
+    // matches them per instance and job, never across instances (`ops/alerts.test.yml` runs
+    // them with two).
+    for rule in rules {
+        let expr = rule["expr"].as_str().unwrap();
+        if expr.contains("pinakes_catalogue_") {
+            for clause in expr.split(" on (").skip(1) {
+                assert!(
+                    clause.starts_with("instance, job"),
+                    "{}: on ({clause}",
+                    rule["alert"].as_str().unwrap()
+                );
+            }
         }
     }
     let dashboard: Value =
