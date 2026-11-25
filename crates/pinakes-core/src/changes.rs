@@ -469,15 +469,18 @@ pub async fn save(
     // stays as it is and is asked again after the refusals' backoff (`queue::refused`), never
     // counted toward dead letter, so it keeps refreshing (and is purged once its object is gone).
     // The placeholder is only for a link never read, or one whose stored card says no more than
-    // its shape. A card found gone stays gone: a refusal says nothing about the object.
+    // its shape. A link found gone stays gone, also one never read whole (two 404s from the
+    // start): a refusal says nothing about the object.
+    let row_missing = row.try_get::<String, _>("status")? == Status::Missing.as_str();
     if doc.status == Status::Ok
         && doc.attributes.get("blocked").is_some_and(|b| b == "true")
-        && before.as_ref().is_some_and(|old| {
-            old["status"] == "missing"
-                || (old["status"] == "ok"
-                    && old["attributes"]["blocked"] != "true"
-                    && says_more_than(old, doc))
-        })
+        && (row_missing
+            || before.as_ref().is_some_and(|old| {
+                old["status"] == "missing"
+                    || (old["status"] == "ok"
+                        && old["attributes"]["blocked"] != "true"
+                        && says_more_than(old, doc))
+            }))
     {
         crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
         return Err(crate::resolver::RetryLater {

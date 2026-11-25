@@ -11,7 +11,7 @@ browser. No key or account is needed. Channels, videos and clips are social cont
 | Fetches | `GET https://www.twitch.tv/{login}` for a channel, `GET https://www.twitch.tv/videos/{id}` for a video; nothing for a clip |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.twitch.tv` |
-| Refresh | Within the hour (social content); a clip's refresh makes no request |
+| Refresh | Within the hour (social content); a clip's refresh makes no request. A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `Person` (channel), `VideoObject` (video, clip) |
 | Keys | None (facts only) |
 | Social content | Yes: 120 characters of a video's title, 200 of a bio; a channel or video is purged when Twitch answers 404 or 410 ([social content](../design.md#social-content)) |

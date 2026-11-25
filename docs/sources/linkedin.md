@@ -12,7 +12,7 @@ gets a plain card. Profiles, company pages and posts are social content.
 | Fetches | `GET https://www.linkedin.com/in/{slug}` or `GET https://www.linkedin.com/company/{slug}`; nothing for a post |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.linkedin.com` |
-| Refresh | Within the hour (social content); a post's refresh makes no request |
+| Refresh | Within the hour (social content); a post's refresh makes no request. A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `Person` (profile), `Organization` (company or school), `SocialMediaPosting` (post) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt of the about text; a profile or company page is purged when deleted ([social content](../design.md#social-content)) |

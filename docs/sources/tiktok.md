@@ -11,7 +11,7 @@ does. No key or account is needed. Videos and profiles are social content.
 | Fetches | `GET https://www.tiktok.com/oembed?url={profile}` for a profile; nothing for a video |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.tiktok.com` |
-| Refresh | Within the hour (social content); a video's refresh makes no request |
+| Refresh | Within the hour (social content); a video's refresh makes no request. A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `VideoObject` (video), `Person` (profile) |
 | Keys | None (facts only) |
 | Social content | Yes; the cards quote no text. A profile is purged when deleted ([social content](../design.md#social-content)) |

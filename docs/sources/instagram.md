@@ -12,7 +12,7 @@ a plain card. Posts, reels and profiles are social content.
 | Fetches | `GET` of the root: `https://www.instagram.com/{name}/`, `/p/{code}/` or `/reel/{code}/` |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.instagram.com` |
-| Refresh | Every day (social content, read less often than other sites': Instagram refuses an address that asks often). After a refusal, a day later, doubling to every 7 days |
+| Refresh | Every day (social content, read less often than other sites': Instagram refuses an address that asks often). A link Instagram refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `SocialMediaPosting` (post), `VideoObject` (reel), `Person` (profile) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt, purged when Instagram answers 404 or 410 ([social content](../design.md#social-content)) |
@@ -69,9 +69,11 @@ and every 7 days while one refusal follows another
 
 A sign-in redirect whose address carries `is_from_rle` (Instagram's rate-limit enforcement) refuses
 every page to the address Pinakes asks from, not only this one. It counts as a refusal at once,
-without asking for the sign-in page, and no request goes to `www.instagram.com` for a day: links due
-meanwhile wait, and a new link is read once the day is over. The pause ends when the daemon
-restarts.
+without asking for the sign-in page, and no request goes to Instagram (`www.instagram.com`,
+`instagram.com`) for a day, then for 2, 4 and 7 days after each such refusal in a row; any other
+answer from Instagram ends the streak. Links due meanwhile wait, and a new link is read once the
+pause is over. The pause is kept in memory: a restart forgets it, while each link's own wait is
+stored.
 
 ## Card
 

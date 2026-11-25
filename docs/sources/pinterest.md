@@ -10,7 +10,7 @@ Graph tags and JSON-LD. No key or account is needed. Pins and profiles are socia
 | Fetches | `GET https://www.pinterest.com/oembed.json?url={pin}` for a pin, `GET https://www.pinterest.com/{name}/` for a profile |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.pinterest.com` |
-| Refresh | Within the hour (social content) |
+| Refresh | Within the hour (social content). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `SocialMediaPosting` (pin), `Person` (profile) |
 | Keys | None (facts only) |
 | Social content | Yes: 120 characters of a pin's title, 200 of a bio, purged when deleted ([social content](../design.md#social-content)) |

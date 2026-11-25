@@ -11,7 +11,7 @@ publication and a post are not.
 | Fetches | `GET https://{name}.substack.com/`, `GET https://{name}.substack.com/p/{slug}` or `GET https://substack.com/@{handle}` |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) |
-| Refresh | Daily, as every official card ([refresh](../design.md#refresh)); a profile within the hour (social content); a link Substack refuses, a day later, doubling to every 7 days |
+| Refresh | Daily, as every official card ([refresh](../design.md#refresh)); a profile within the hour (social content); a link Substack refuses, after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `Blog`, `BlogPosting` or the article type the page declares (such as `NewsArticle`), `Person` |
 | Keys | None (facts only) |
 | Social content | Profiles, and a publication's card while Substack refuses the request (a `Person`): 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |

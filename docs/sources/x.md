@@ -10,7 +10,7 @@ tags. No key or account is needed. Posts and profiles are social content.
 | Fetches | `GET https://publish.x.com/oembed?omit_script=true&dnt=true&url={post}` for a post, `GET https://x.com/{handle}` for a profile |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `publish.x.com` and `x.com` |
-| Refresh | Within the hour (social content) |
+| Refresh | Within the hour (social content). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `SocialMediaPosting` (post), `Person` (profile) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt of a post, purged when deleted ([social content](../design.md#social-content)) |

@@ -248,7 +248,8 @@ social content and follow stricter rules:
 
 - the card keeps a short excerpt, at most 200 characters;
 - the card is read again at least every hour (an Instagram card every day: Instagram refuses an
-  address that asks often);
+  address that asks often); while the site refuses the read, after 1 day, doubling to every 7 days
+  ([refusals](operations.md#failures-and-retries));
 - once the original is confirmed gone, the card keeps only its link, site and status, with the
   type `SocialMediaPosting`. Its text, name, image, facts, also-on links and change history are
   deleted, and so is what its aliases kept;

@@ -1634,6 +1634,27 @@ mod tests {
         Ok(())
     }
 
+    /// A web resolver whose site refuses the read: the link's `blocked` card.
+    struct Refused;
+    #[async_trait::async_trait]
+    impl Resolver for Refused {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+            Ok(crate::sources::social::blocked(
+                ResourceMeta::new(uri, "web", 100),
+                crate::sources::social::Shape::Post,
+                "after-save.example.org",
+            ))
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(100)
+        }
+    }
     /// A web resolver that answers a page after `0` (never, within a test, when it is long).
     struct After(Duration);
     #[async_trait::async_trait]
@@ -1806,6 +1827,34 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// A refused read's card (`blocked`) whose step after the save fails keeps its refusals' wait
+    /// (a day): it is not read again within the hour as an accepted card is.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_blocked_card_keeps_its_wait_after_a_failed_step(pool: PgPool) {
+        // The `blocked` fact is a social source's; a build without one has no such card.
+        if !crate::sources::attributes().contains(&"blocked") {
+            return;
+        }
+        let uri = "https://after-save.example.org/refused";
+        let job = claimed(&pool, uri).await;
+        FAILS_AFTER_SAVE.lock().unwrap().push(uri.into());
+        let failures = crate::telemetry::after_save_failures("web");
+        run_batch(
+            &pool,
+            &Refused,
+            &QueueConfig::default(),
+            std::slice::from_ref(&job),
+        )
+        .await
+        .unwrap();
+        assert!(crate::telemetry::after_save_failures("web") > failures);
+        let (_, is_final, again, refresh) = schedule(&pool, &job.id).await;
+        assert!(!is_final);
+        let day = 86_340.0..=86_460.0;
+        assert!(again.is_some_and(|s| day.contains(&s)), "{again:?}");
+        assert!(refresh.is_some_and(|s| day.contains(&s)), "{refresh:?}");
     }
 
     /// A failure in what follows the save (the alias a page names) leaves the saved card as it

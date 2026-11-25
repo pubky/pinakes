@@ -148,12 +148,15 @@ struct Row {
     attempts: i32,
     dead_letter: bool,
     next_in: f64,
+    /// Seconds from now to `refresh_at` (none: `None`).
+    refresh_in: Option<f64>,
 }
 async fn row(pool: &PgPool, id: &str) -> Row {
-    let (status, name, blocked, last_error, streak, attempts, dead_letter, next_in) =
-        sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, i32, i32, bool, f64)>(
+    let (status, name, blocked, last_error, streak, attempts, dead_letter, next_in, refresh_in) =
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, i32, i32, bool, f64, Option<f64>)>(
             "SELECT status, doc->>'name', doc->'attributes'->>'blocked', last_error, timeout_streak, attempts, dead_letter, \
-             extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=$1",
+             extract(epoch FROM next_attempt_at-now())::float8, extract(epoch FROM refresh_at-now())::float8 \
+             FROM resource WHERE id=$1",
         )
         .bind(id)
         .fetch_one(pool)
@@ -168,6 +171,7 @@ async fn row(pool: &PgPool, id: &str) -> Row {
         attempts,
         dead_letter,
         next_in,
+        refresh_in,
     }
 }
 /// `seconds` from now, give or take a minute.
@@ -348,6 +352,11 @@ async fn a_refused_refresh_keeps_the_card_and_waits(pool: PgPool) {
             "{row:?}"
         );
         assert!(about(row.next_in, days * 86400), "{days} days: {row:?}");
+        // Its refresh waits as long: the kept card is no overdue refresh meanwhile.
+        assert!(
+            row.refresh_in.is_some_and(|r| about(r, days * 86400)),
+            "{days} days: {row:?}"
+        );
     }
     site.answer(path, Answer::Gone);
     read(&pool, &resolver, uri).await;
@@ -440,4 +449,42 @@ async fn a_rate_limited_address_pauses_the_whole_host(pool: PgPool) {
         (Some("wall"), 1, 0),
         "{refused:?}"
     );
+}
+
+/// A link found gone from its first reads (two 404s: it never had a card that said more) stays
+/// gone through a later refusal: no "Blocked by the site." card, and no frame.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_link_gone_from_the_start_stays_gone_through_a_refusal(pool: PgPool) {
+    if !has_instagram() {
+        return;
+    }
+    let site = Arc::new(Site::default());
+    let path = "/p/AAAAAnever/";
+    let uri = "https://www.instagram.com/p/AAAAAnever/";
+    site.answer(path, Answer::Gone);
+    let resolver = official(&site);
+    let id = read(&pool, &resolver, uri).await;
+    read(&pool, &resolver, uri).await;
+    let ever: bool = sqlx::query_scalar("SELECT ever_existed FROM resource WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!ever);
+    assert_eq!(row(&pool, &id).await.status, "missing");
+    site.answer(path, Answer::SignIn);
+    read(&pool, &resolver, uri).await;
+    let gone = row(&pool, &id).await;
+    assert_eq!(
+        (
+            gone.status.as_str(),
+            gone.blocked.as_deref(),
+            gone.last_error.as_deref()
+        ),
+        ("missing", None, Some("wall")),
+        "{gone:?}"
+    );
+    let card = common::get(&app(&pool), &format!("/v1/resources/{id}")).await;
+    assert_eq!(card["status"], "missing", "{card}");
+    assert_eq!(card["embed"], Value::Null, "{card}");
 }

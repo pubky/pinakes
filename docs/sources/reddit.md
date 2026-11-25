@@ -11,7 +11,7 @@ gets a plain card. Posts and users are social content.
 | Fetches | `GET https://www.reddit.com/comments/{id}.json?raw_json=1`, `GET https://www.reddit.com/r/{name}/about.json?raw_json=1` or `GET https://www.reddit.com/user/{name}/about.json?raw_json=1` |
 | Credentials | None |
 | Rate | 0.17 requests per second on `www.reddit.com` (Reddit's limit of 10 a minute without an account) |
-| Refresh | Posts and users: within the hour (social content). Subreddits: daily, as every official card ([refresh](../design.md#refresh)) |
+| Refresh | Posts and users: within the hour (social content). Subreddits: daily, as every official card ([refresh](../design.md#refresh)). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `DiscussionForumPosting` (post), `Organization` (subreddit), `Person` (user) |
 | Keys | None (facts only) |
 | Social content | Posts and users: 200-character excerpt, purged when deleted ([social content](../design.md#social-content)). Subreddits: no |

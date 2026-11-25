@@ -10,7 +10,7 @@ is needed. Channels and posts are social content.
 | Fetches | `GET https://t.me/{name}/{n}?embed=1` for a post, `GET https://t.me/{name}` for a channel |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `t.me` |
-| Refresh | Within the hour (social content) |
+| Refresh | Within the hour (social content). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `SocialMediaPosting` (post), `Person` (channel) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |

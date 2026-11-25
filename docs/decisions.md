@@ -161,10 +161,11 @@ Why: whole base units are exact and need no decimal formatting. Clients format t
 ### People can take back what they wrote
 
 Cards that quote a person's own words (posts, comments, notes, and profile bios on services such as
-Bluesky) keep a 200-character excerpt, are read again at least every hour (Instagram's every day),
-and are emptied once the original is confirmed gone: the card keeps only its link and status, with
-no text, name, image, facts, Also on links or change history. A post whose author has opted out of
-search on its service never matches a text search, and its text is not kept in the change history.
+Bluesky) keep a 200-character excerpt, are read again at least every hour (Instagram's every day;
+while the site refuses the read, after 1 day, doubling to every 7 days), and are emptied once the
+original is confirmed gone: the card keeps only its link and status, with no text, name, image,
+facts, Also on links or change history. A post whose author has opted out of search on its service
+never matches a text search, and its text is not kept in the change history.
 
 Why: when someone deletes a post, Pubky clients must not keep showing it. Pinakes quotes, it does
 not archive.

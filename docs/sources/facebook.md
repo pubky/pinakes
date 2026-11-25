@@ -11,7 +11,7 @@ Pages and posts are social content.
 | Fetches | `GET https://www.facebook.com/{name}` for a page; nothing for a post or video |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.facebook.com` |
-| Refresh | Pages and posts: within the hour (social content). Videos: daily, as every official card ([refresh](../design.md#refresh)) |
+| Refresh | Pages and posts: within the hour (social content). Videos: daily, as every official card ([refresh](../design.md#refresh)). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `Organization` (page), `SocialMediaPosting` (post), `VideoObject` (video) |
 | Keys | None (facts only) |
 | Social content | Pages and posts: 200-character excerpt of a page's about text; a page is purged when deleted ([social content](../design.md#social-content)). Videos: no |
