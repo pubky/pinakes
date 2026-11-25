@@ -68,6 +68,9 @@ CREATE TABLE resource (
     denied_since timestamp with time zone,
     -- Bumped by any change grouping reads (groups::fence).
     group_revision bigint NOT NULL DEFAULT 0,
+    -- The catalogue card the card is built from (`catalogue_card.id`), while it is: such a row is
+    -- never fetched (`keep_catalogue_backed`); it follows its catalogue card instead.
+    catalogue_card bigint,
     CONSTRAINT resource_event_boundary CHECK (event_boundary(doc) AND (coalesce(doc #>> '{venue,location_source}' NOT IN ('geocoded', 'osm'), true) OR point IS NULL)),
     CONSTRAINT resource_event_status CHECK (doc->>'event_status' IS NULL OR doc->>'event_status' IN ('scheduled', 'cancelled', 'postponed', 'rescheduled', 'moved_online')),
     CONSTRAINT resource_osm_separation CHECK ((osm_id IS NULL AND osm_type IS NULL) OR (osm_id IS NOT NULL AND osm_type IS NOT NULL AND osm_id > 0 AND osm_type IN ('node', 'way', 'relation') AND resolver IS NOT DISTINCT FROM 'osm' AND name IS NULL AND point IS NULL AND category IS NULL AND type IS NULL AND type_path IS NULL AND doc->>'type' IS NOT DISTINCT FROM 'Place' AND doc - ARRAY['type', 'url', 'osm_id', 'source', 'status'] = '{}')),
@@ -79,6 +82,7 @@ CREATE TABLE resource (
     CONSTRAINT resource_end_at_range CHECK (end_at >= '0001-01-01 00:00:00+00' AND end_at < '10000-01-01 00:00:00+00')
 );
 CREATE INDEX resource_category_idx ON resource USING btree (category);
+CREATE INDEX resource_catalogue_card_idx ON resource USING btree (catalogue_card) WHERE catalogue_card IS NOT NULL;
 CREATE INDEX resource_claim_priority_idx ON resource USING btree (resolver, priority_at DESC NULLS LAST, next_attempt_at) WHERE NOT dead_letter AND NOT final;
 CREATE INDEX resource_geography_idx ON resource USING gist ((point::geography));
 CREATE INDEX resource_host_idx ON resource USING btree (host);
@@ -708,12 +712,13 @@ UNION ALL
     WHERE u.occurrence IS NOT NULL AND r.status <> 'missing';
 
 -- A change grouping reads marks the resource dirty and bumps its `group_revision`; grouping's
--- fence (groups::fence) relies on the bump.
+-- fence (groups::fence) relies on the bump. A catalogue card's labels and version are no change
+-- to what grouping reads.
 CREATE FUNCTION mark_group_dirty() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
  IF TG_TABLE_NAME='resource' THEN
-  IF TG_OP='UPDATE' AND (NEW.doc-'fetched_at'-'ttl_secs'-'warnings') IS NOT DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings') THEN RETURN NULL; END IF;
+  IF TG_OP='UPDATE' AND (NEW.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') IS NOT DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') THEN RETURN NULL; END IF;
   INSERT INTO group_dirty(resource_id) VALUES(NEW.id) ON CONFLICT DO NOTHING;
  ELSE
   PERFORM 1 FROM resource WHERE id=CASE WHEN TG_OP='DELETE' THEN OLD.resource_id ELSE NEW.resource_id END FOR KEY SHARE;
@@ -792,6 +797,7 @@ CREATE TABLE resource_key (
 );
 CREATE INDEX resource_key_source_idx ON resource_key USING btree (resource_id, source);
 CREATE INDEX resource_key_key_idx ON resource_key USING btree (key);
+CREATE INDEX resource_key_catalogue_idx ON resource_key USING btree (key) WHERE source = 'catalogue';
 
 -- Facts a source reads for a resource (`isrc`, `upc`, `mbid`, `artist`, `duration`): shown in
 -- the read's `details.facts` and searchable by `key`; unlike keys they never join anything.
@@ -880,11 +886,12 @@ CREATE TABLE also_on_dirty (
 );
 CREATE INDEX also_on_dirty_due_idx ON also_on_dirty USING btree (next_attempt_at, resource_id);
 
--- A saved document (not a refetch that changed nothing) makes its sources due.
+-- A saved document (not a refetch that changed nothing, nor a catalogue card's new labels or
+-- content hash alone) makes its sources due.
 CREATE FUNCTION mark_also_on_dirty() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
- IF TG_OP='UPDATE' AND (NEW.doc-'fetched_at'-'ttl_secs'-'warnings') IS NOT DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings') AND NEW.status IS NOT DISTINCT FROM OLD.status THEN RETURN NULL; END IF;
+ IF TG_OP='UPDATE' AND (NEW.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') IS NOT DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') AND NEW.status IS NOT DISTINCT FROM OLD.status THEN RETURN NULL; END IF;
  INSERT INTO also_on_dirty(resource_id) VALUES(NEW.id)
   ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=least(also_on_dirty.next_attempt_at,now());
  RETURN NULL;
@@ -1371,6 +1378,128 @@ CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card
 CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
 -- Search pages without text read the cards: their ETag moves with them.
 CREATE TRIGGER catalogue_card_revision BEFORE INSERT OR DELETE OR UPDATE OF catalogue, uri, type, name, other_names, description, labels, point, fame OR TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
+
+-- A resource built from a catalogue card stays final and out of the fetch queue whatever writes
+-- its row (a new reference, a requeue, `reextract`): it changes when its card does
+-- (`catalogue_join_due`). Clearing `catalogue_card` gives the row back to the queue.
+CREATE FUNCTION keep_catalogue_backed() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+ NEW.final=true; NEW.dead_letter=false; NEW.next_attempt_at='infinity'; NEW.refresh_at=NULL; NEW.priority_at=NULL;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER keep_catalogue_backed BEFORE UPDATE ON resource FOR EACH ROW WHEN (NEW.catalogue_card IS NOT NULL) EXECUTE FUNCTION keep_catalogue_backed();
+
+-- Resources whose join with the catalogues is to be checked again (`catalogue::join::drain`): one
+-- built from a card that changed or went, one whose link a new or changed card holds (its `uri`,
+-- a `url:` key, the canonical link of a key, a related link), and one a build was cut off in (its
+-- mark until the build ends). The check builds the card again, joins another card, or gives the
+-- link back to the fetch queue. (Links built from a catalogue switched off are given back by the
+-- start's sweep, `catalogue::join::sweep`, without this queue.)
+CREATE TABLE catalogue_join_due (
+    resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
+    due_at timestamp with time zone NOT NULL DEFAULT now(),
+    -- When it was last marked: a check deletes the row only if it was not marked again meanwhile.
+    marked_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
+    attempts integer NOT NULL DEFAULT 0 CONSTRAINT catalogue_join_due_attempts_check CHECK (attempts >= 0)
+);
+CREATE INDEX catalogue_join_due_due_idx ON catalogue_join_due USING btree (due_at, resource_id);
+
+-- The extras of a resource built from a catalogue card, read in the background
+-- (`catalogue::extras`): its article's Wikipedia summary. `due_at` while a read is due (set when
+-- the card is built from a card or an article it has no read of, and when it is opened after
+-- `extras::KEEP`), `read_at` of the last read.
+CREATE TABLE catalogue_extras (
+    resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
+    due_at timestamp with time zone,
+    read_at timestamp with time zone,
+    -- The article the last read asked for: a card built again from the same one reads nothing.
+    article text,
+    attempts integer NOT NULL DEFAULT 0 CONSTRAINT catalogue_extras_attempts_check CHECK (attempts >= 0)
+);
+CREATE INDEX catalogue_extras_due_idx ON catalogue_extras USING btree (due_at, resource_id) WHERE due_at IS NOT NULL;
+
+-- The canonical links a join key names (`catalogue::join::link_keys` reads each back to the key):
+-- a row with one of these links joins a card holding the key when the card is written.
+CREATE FUNCTION catalogue_key_links(key text) RETURNS text[]
+    LANGUAGE sql IMMUTABLE
+    AS $$
+ SELECT CASE split_part(key,':',1)
+  WHEN 'mb' THEN CASE WHEN split_part(key,':',2) IN ('artist','recording','release','release-group') THEN ARRAY['https://musicbrainz.org/'||split_part(key,':',2)||'/'||split_part(key,':',3)] END
+  WHEN 'wikidata' THEN ARRAY['https://www.wikidata.org/wiki/'||substr(key,10)]
+  WHEN 'doi' THEN ARRAY[key]
+  WHEN 'arxiv' THEN ARRAY['https://arxiv.org/abs/'||substr(key,7),'https://arxiv.org/pdf/'||substr(key,7)]
+  WHEN 'openalex' THEN ARRAY['https://openalex.org/'||substr(key,10)]
+  WHEN 'crate' THEN ARRAY['https://crates.io/crates/'||substr(key,7),'https://docs.rs/'||substr(key,7),'https://docs.rs/crate/'||substr(key,7),'https://lib.rs/crates/'||substr(key,7)]
+  WHEN 'android' THEN ARRAY['https://f-droid.org/packages/'||substr(key,9)||'/','https://f-droid.org/packages/'||substr(key,9),'https://f-droid.org/en/packages/'||substr(key,9)||'/']
+  WHEN 'flathub' THEN ARRAY['https://flathub.org/apps/'||substr(key,9),'https://flathub.org/apps/details/'||substr(key,9)]
+  WHEN 'homepage' THEN ARRAY['https://'||substr(key,10)||'/','https://www.'||substr(key,10)||'/','http://'||substr(key,10)||'/','http://www.'||substr(key,10)||'/']
+ END
+$$;
+-- The resources new or changed cards name: the row of each card's link, of each `url:` key, of
+-- the canonical links its keys name, and of each related link; and the rows built from a changed
+-- or removed card. Each statement marks its rows in ID order, so two importers rarely wait on each
+-- other. The generic plan is kept (a plan made for each row would cost more than the work).
+CREATE FUNCTION catalogue_cards_inserted() RETURNS trigger
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+    AS $$ BEGIN
+ INSERT INTO catalogue_join_due(resource_id)
+  SELECT id FROM (
+   SELECT r.id FROM new_cards n JOIN resource r ON r.uri=n.uri
+   UNION SELECT r.id FROM new_cards n CROSS JOIN LATERAL unnest(n.keys) k JOIN resource r ON k LIKE 'url:%' AND r.id=substr(k,5)
+   UNION SELECT r.id FROM new_cards n CROSS JOIN LATERAL unnest(n.keys) k CROSS JOIN LATERAL unnest(catalogue_key_links(k)) l JOIN resource r ON r.uri=l
+   UNION SELECT r.id FROM new_cards n CROSS JOIN LATERAL unnest(n.related_uris) u JOIN resource r ON r.uri=u) x
+  ORDER BY id
+  ON CONFLICT (resource_id) DO UPDATE SET marked_at=clock_timestamp(),due_at=least(catalogue_join_due.due_at,now()),attempts=0;
+ RETURN NULL;
+END $$;
+-- One card whose content hash changed (an import's stamp of an unchanged card fires nothing).
+CREATE FUNCTION catalogue_card_changed() RETURNS trigger
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+    AS $$ BEGIN
+ INSERT INTO catalogue_join_due(resource_id)
+  SELECT id FROM (
+   SELECT r.id FROM resource r WHERE r.catalogue_card=NEW.id
+   UNION SELECT r.id FROM resource r WHERE r.uri IN (NEW.uri,OLD.uri)
+   UNION SELECT r.id FROM unnest(NEW.keys||OLD.keys) k JOIN resource r ON k LIKE 'url:%' AND r.id=substr(k,5)
+   UNION SELECT r.id FROM unnest(NEW.keys) k CROSS JOIN LATERAL unnest(catalogue_key_links(k)) l JOIN resource r ON r.uri=l
+   UNION SELECT r.id FROM unnest(NEW.related_uris||OLD.related_uris) u JOIN resource r ON r.uri=u) x
+  ORDER BY id
+  ON CONFLICT (resource_id) DO UPDATE SET marked_at=clock_timestamp(),due_at=least(catalogue_join_due.due_at,now()),attempts=0;
+ RETURN NULL;
+END $$;
+CREATE FUNCTION catalogue_cards_deleted() RETURNS trigger
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+    AS $$ BEGIN
+ INSERT INTO catalogue_join_due(resource_id)
+  SELECT id FROM (
+   SELECT r.id FROM old_cards o JOIN resource r ON r.catalogue_card=o.id
+   UNION SELECT r.id FROM old_cards o CROSS JOIN LATERAL unnest(o.related_uris) u JOIN resource r ON r.uri=u) x
+  ORDER BY id
+  ON CONFLICT (resource_id) DO UPDATE SET marked_at=clock_timestamp(),due_at=least(catalogue_join_due.due_at,now()),attempts=0;
+ RETURN NULL;
+END $$;
+-- Every row built from a card or related to one is checked again.
+CREATE FUNCTION catalogue_cards_truncated() RETURNS trigger
+    LANGUAGE plpgsql
+    SET plan_cache_mode TO 'force_generic_plan'
+    AS $$ BEGIN
+ INSERT INTO catalogue_join_due(resource_id)
+  SELECT id FROM (
+   SELECT id FROM resource WHERE catalogue_card IS NOT NULL
+   UNION SELECT resource_id FROM resource_key WHERE source='catalogue') x
+  ORDER BY id
+  ON CONFLICT (resource_id) DO UPDATE SET marked_at=clock_timestamp(),due_at=least(catalogue_join_due.due_at,now()),attempts=0;
+ RETURN NULL;
+END $$;
+CREATE TRIGGER catalogue_cards_inserted AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS new_cards FOR EACH STATEMENT EXECUTE FUNCTION catalogue_cards_inserted();
+CREATE TRIGGER catalogue_card_changed AFTER UPDATE ON catalogue_card FOR EACH ROW WHEN (OLD.content_hash IS DISTINCT FROM NEW.content_hash) EXECUTE FUNCTION catalogue_card_changed();
+CREATE TRIGGER catalogue_cards_deleted AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS old_cards FOR EACH STATEMENT EXECUTE FUNCTION catalogue_cards_deleted();
+CREATE TRIGGER catalogue_cards_truncated AFTER TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION catalogue_cards_truncated();
+
 
 -- ── Rows the code updates in place ───────────────────────────────────────────────────────────
 

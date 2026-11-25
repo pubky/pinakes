@@ -251,7 +251,11 @@ async fn imports_rewrite_only_changed_cards_and_remove_unseen_ones(pool: PgPool)
         (labels, keys),
         (
             vec!["some-genre".to_owned()],
-            vec!["wikidata:Q3".to_owned()]
+            // The card's own link's key, then its own keys.
+            vec![
+                pinakes_core::catalogue::link_key(&uri).unwrap(),
+                "wikidata:Q3".to_owned()
+            ]
         )
     );
     assert_eq!(generation, 1);

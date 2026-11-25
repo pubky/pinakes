@@ -779,6 +779,18 @@ async fn summary(
         },
     )
 }
+/// The summary of the Wikipedia article `page` (its link, in any language), credited to
+/// Wikipedia's contributors: a catalogue card's extra (`catalogue::extras`). `Missing` for no
+/// such article and for a disambiguation page; `Unread` for a transient failure.
+pub async fn article_summary(egress: &Egress, page: &str) -> Found {
+    let Some(article) = crate::wikipedia::parse(page) else {
+        return Found::Missing;
+    };
+    let lang = article.lang.clone();
+    read_summary(egress, "catalogue", &article.canonical, &lang, None)
+        .await
+        .unwrap_or(Found::Missing)
+}
 /// The article is a disambiguation page.
 struct Disambiguation;
 async fn read_summary(

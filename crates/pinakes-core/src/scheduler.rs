@@ -5,6 +5,33 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 
+/// The wait of an undated card that refreshes on the backoff rule: `base` (its route's undated
+/// wait: `limits.refresh_resource_secs`' first tier, an official card's own lifetime) after a
+/// read that changed it, twice the last wait after one that found it the same, up to `max`
+/// (`limits.refresh_max_secs`), and `max` for a link found gone. Events, calendars and feeds, dated
+/// cards, social content and a card that names when it changes are not on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Backoff {
+    pub base: u64,
+    pub max: u64,
+}
+impl Backoff {
+    /// The wait after a read; `previous` is the wait before it (the stored `ttl_secs`).
+    pub fn next(self, previous: u64, unchanged: bool) -> u64 {
+        // A base above the cap (a first tier configured past `refresh_max_secs`) is the cap.
+        let cap = self.max.max(self.base);
+        let base = self.base.max(1);
+        if unchanged {
+            previous.max(base).saturating_mul(2).min(cap)
+        } else {
+            base
+        }
+    }
+    /// The wait of a link two fresh reads found gone: the slowest rate.
+    pub fn gone(self) -> u64 {
+        self.max.max(self.base)
+    }
+}
 pub fn next(
     manifest: &Manifest,
     doc: &ResourceMeta,
@@ -87,6 +114,42 @@ pub fn container_next(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_unchanged_card_waits_twice_as_long_up_to_the_cap() {
+        let day = 86400;
+        let rule = Backoff {
+            base: 7 * day,
+            max: 90 * day,
+        };
+        let mut wait = rule.next(7 * day, false);
+        assert_eq!(wait, 7 * day);
+        let mut waits = vec![];
+        for _ in 0..6 {
+            wait = rule.next(wait, true);
+            waits.push(wait / day);
+        }
+        assert_eq!(waits, [14, 28, 56, 90, 90, 90]);
+        // A change starts over.
+        assert_eq!(rule.next(90 * day, false), 7 * day);
+        // A wait shorter than the base (an older rule's) doubles from the base.
+        assert_eq!(rule.next(3600, true), 14 * day);
+        assert_eq!(rule.gone(), 90 * day);
+        // An official card's own lifetime is its base.
+        let official = Backoff {
+            base: day,
+            max: 90 * day,
+        };
+        assert_eq!(official.next(day, true), 2 * day);
+        assert_eq!(official.next(64 * day, true), 90 * day);
+        // A base above the cap (a first tier configured past it) is the longest wait.
+        let odd = Backoff {
+            base: 100 * day,
+            max: 90 * day,
+        };
+        assert_eq!(odd.next(0, false), 100 * day);
+        assert_eq!(odd.next(100 * day, true), 100 * day);
+        assert_eq!(odd.gone(), 100 * day);
+    }
     #[test]
     fn cadence_table_floor_and_final() {
         let now: DateTime<Utc> = "2026-10-15T12:00:00Z".parse().unwrap();

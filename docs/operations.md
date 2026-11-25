@@ -187,6 +187,7 @@ Set a limit in `[limits]` or as `PINAKES__LIMITS__<NAME>`. A value outside its r
 | `refresh_resource_secs` | `[604800, 172800, 21600, 3600]` | each 1–31536000 | Resource refresh intervals by [tier](#refresh-tiers) (seconds). |
 | `refresh_container_secs` | `[86400, 43200, 21600, 3600]` | each 1–31536000 | Container (calendar, feed) refresh intervals by tier (seconds). |
 | `refresh_cursor_secs` | `300` | 1–86400 | Cursor feed refresh interval (seconds). |
+| `refresh_max_secs` | `7776000` | 3600–31536000 (a first `refresh_resource_secs` tier above it is the longest wait instead) | Longest wait between reads of an undated card that keeps answering the same, and the wait of a link found gone ([backoff](#refresh-backoff)) (seconds). |
 | `change_retention_days` | `90` | 1–3650 | Days change lines are retained. At most 120 while a TMDB credential is set. |
 | `canary_interval_secs` | `21600` | 3600–604800 | Canary interval (seconds). |
 
@@ -1058,6 +1059,12 @@ A missing result needs a second fresh fetch to confirm it.
 | With an accepted card | `limits.missing_ttl_secs`, at least an hour |
 | Without one yet | `limits.backoff_secs` |
 
+Once confirmed, a link on the [refresh backoff](#refresh-backoff) found gone for good (a page that
+answered 404 or 410) is read again only every `limits.refresh_max_secs` (90 days) until it answers
+again, or until nothing references it and [cleanup](#cleanup) removes it. Other confirmed missing
+links (a 451, a card source's "not found", a Pubky object) are read again after
+`limits.missing_ttl_secs`.
+
 The confirming fetch asks the upstream again, once per request, instead of replaying a cached answer.
 Only a wait is replayed: an answer that names one (a 408, 429 or 5xx, or GitHub's 403 for its rate
 limit), or a cached failure with no answer, such as a transport error. The
@@ -1083,8 +1090,9 @@ and the third when shorter. A feed follows its nearest date. Cursor feeds use
 
 | Card | Refresh |
 | --- | --- |
-| Web, media and other undated cards | The first tier |
-| Official cards | `limits.resolver_ttl_secs`, or sooner where the source asks |
+| Web, media and other undated cards | The first tier, then the [backoff](#refresh-backoff) |
+| Official cards | `limits.resolver_ttl_secs`, then the backoff; sooner where the source asks |
+| Cards built from a catalogue card | Never fetched: they change with their card ([catalogues](#shared-links-a-catalogue-holds)) |
 | Social content | Within the hour; Instagram's within the day. While the site refuses the read, the [refusals' backoff](#failures-and-retries) |
 | A dated card | One fetch 24 hours after its end (or start) makes it final |
 | A job posting | Its posting date doesn't end its refreshes |
@@ -1094,6 +1102,30 @@ and the third when shorter. A feed follows its nearest date. Cursor feeds use
 
 A new reference reopens a final resource; `geo:` stays final. HTTP validators are kept only for
 calendars, where they commit with the parsed snapshot.
+
+### Refresh backoff
+
+An undated card read from its link (the web, media, ISBN, DOI, Nostr, ActivityPub and official
+routes) waits longer each time it answers the same:
+
+| Read | Next wait |
+| --- | --- |
+| Changed the card (a new card included) | The base: the first tier (`limits.refresh_resource_secs`, 7 days), an official card's `limits.resolver_ttl_secs` |
+| Found the card the same, a 304 included | Twice the last wait, up to `limits.refresh_max_secs` (90 days) |
+| Confirmed the link gone for good (404, 410) | `limits.refresh_max_secs` |
+
+At the defaults an unchanged page is read after 7, 14, 28, 56 and then every 90 days. The last
+wait is the card's stored `ttl_secs`. Events (dated or not), calendars and feeds, podcast shows (a
+new episode is no change to the show's card), cards with a date, social content (within the hour),
+Pubky objects (their authors edit and delete them), a card that names when it changes,
+OpenStreetMap objects and `geo:` points keep the schedule above. A first tier above
+`limits.refresh_max_secs` is the longest wait instead. A stored
+card keeps its next refresh time when the daemon is upgraded: each moves to the backoff at its own
+next read.
+
+Opening a card (`GET /v1/resources/{id}`, `GET /v1/resources/by-uri`) whose refresh is due moves
+it to the front of the queue, as a lookup does: it is read again in the background and the open
+answers with the stored card. A card that is not due keeps its wait.
 
 ## Web pages and access walls
 
@@ -1686,7 +1718,7 @@ catalogue is read, and the catalogue tables stay empty.
 | `type` | The schema.org type, by its bare name (`Person`) |
 | `name`, `other_names`, `description` | Texts, without control characters |
 | `labels` | The source's labels as valid Pubky tag labels: lower case, at most 20 characters, no spaces, commas or colons. A label that can't be made one is left out. |
-| `keys` | Join keys in the forms resources carry (`wikidata:Q42`, `mb:recording:<mbid>`, `doi:` in lower case, `isbn:` as ISBN-13), and `url:<resource id>` for each link people share for the item |
+| `keys` | Join keys in the forms resources carry (`wikidata:Q42`, `mb:recording:<mbid>`, `doi:` in lower case, `isbn:` as ISBN-13), the card's own link's `url:<resource id>`, and `url:<resource id>` for each link the catalogue itself names as the item (a Wikipedia sitelink, a MusicBrainz URL relation): such a link is built from the card ([shared links](#shared-links-a-catalogue-holds)), so an importer keys only links its catalogue vouches for |
 | `related_uris` | Links in the item's group that are not the item, such as an official website |
 | `point`, `fame`, `details` | A point, a 0–1 fame from the source's own signal, and the catalogue's own extras |
 
@@ -1706,7 +1738,84 @@ Set `[catalogues.<name>] enabled = false`, or `[catalogues] enabled = false` for
   at its next pass ([text index](#text-index));
 - keeps its rows, so turning it back on doesn't import it again from the start. Its state row's
   phase is `disabled` while the daemon runs with it off, and a run it had under way resumes from
-  its cursor when it is on again.
+  its cursor when it is on again;
+- joins no shared link, and shows nothing of it on any card: no `labels`, no `from`. At its
+  first start with the catalogue off, the daemon gives the links built from its cards back to the
+  fetch queue in the background, due at times spread over the next day, and takes its keys off
+  every link, each label removal with a change line ([shared links](#shared-links-a-catalogue-holds)).
+  Later starts find nothing left to do.
+
+### Shared links a catalogue holds
+
+A link someone references, or resolves with `POST /v1/resolve`, that a catalogue card holds gets
+its card from the catalogue at once and is never fetched: it is catalogue-backed
+(`resource.catalogue_card`). Pinakes looks for the card before every fetch too, so a link shared
+before its catalogue was imported joins at its next refresh. A card holds a link:
+
+1. as its own link (`uri`, normalized);
+2. by the link's `url:` key, for a link people share for the item;
+3. by a key the link names by itself, its own catalogue's card first:
+
+| Link | Key |
+| --- | --- |
+| A MusicBrainz artist, release group, release or recording page | `mb:<entity>:<mbid>` |
+| A Wikidata item page | `wikidata:Q…` |
+| A DOI (`doi.org`, `doi:`) | `doi:` and the DOI in lower case |
+| An arXiv page | `arxiv:<id>` |
+| An OpenAlex work (`openalex.org/W…`, `/works/W…`) | `openalex:W…` |
+| A crates.io, docs.rs or lib.rs crate page | `crate:<name>` |
+| An F-Droid app page | `android:<package>` |
+| A Flathub app page | `flathub:<id>` |
+| A site's homepage (path `/`, no query) | `homepage:<host without www.>` |
+
+Two cards of one catalogue that hold a link equally join neither. A matching name or any other
+metadata never joins. OpenStreetMap cards back no link, and an OpenStreetMap link keeps its OSM
+route. A Podcast Index card backs no link either: a show's feed is fetched for its episodes, and
+joins the card's group as a related link. An event (dated or not) and a calendar (the event
+routes), a Pubky object, a `geo:` point,
+an alias, a link that carries a credential and social content (a post, even a gone one) are never
+built from a card and join no card's group. A page on an OpenStreetMap host may join a group but
+is never built from a card.
+
+A catalogue-backed card:
+
+- is built from the card: its type, name, description (cut to fit a card; left out when it
+  carries a credential), point and `labels`; `from` names the catalogue. Its first save writes a
+  change line, queues its [also-on](#also-on) sources and groups it, as a fetched card's does; a
+  later build writes a change line when a field it shows changed, and asks the also-on sources
+  and grouping again only when more than its labels changed;
+- carries the card's keys and `catalogue:<catalogue>:<id>`, so every link built from the card,
+  and every link that is one of its related links (`related_uris`, such as an official website),
+  shares a group. A related link keeps its own card (fetched, or built from another card such as
+  its site's Tranco card). A link related to two cards of one catalogue joins neither's group;
+  one group holds at most one card of each catalogue;
+- takes its article's Wikipedia summary as its description, read in the background when it is
+  built from a card or an article it has no summary of, and when it is opened more than 30 days
+  after the last read (`catalogue_extras`). A summary that carries a credential, or that would not
+  fit the card, is not taken;
+- is built again when its card changes. When the card is removed upstream, or no longer holds
+  the link, the link goes back to the fetch queue: it is due at once and keeps its card until the
+  fetch replaces it. The references people made stay on the link.
+
+A card names the links it holds when it is written: its own link, its `url:` keys, the canonical
+link of each of its keys (`catalogue_key_links`: the musicbrainz.org, wikidata.org, `doi:`,
+arxiv.org abstract and PDF, openalex.org, crates.io, docs.rs, lib.rs, F-Droid (English) and Flathub pages, and a homepage with
+or without `www.`) and its related links. The card table's triggers mark those links' rows in
+`catalogue_join_due`, so a link shared before the import joins then; a background task checks
+them, a hundred at a time. Another spelling of a key's link joins at its next fetch. A card never
+names a link that carries a credential, or a Pubky object: the importer refuses it. With every
+catalogue off nothing is looked up.
+
+| Metric | Says |
+| --- | --- |
+| `pinakes_catalogue_joins_total{catalogue,outcome}` | Links built (`built`), given back (`released`) and not built for a card that makes no valid card (`invalid`) |
+| `pinakes_catalogue_join_errors_total{stage}` | Failed joins (`referenced`, `before_fetch`, `drain`) and extras reads (`extras`), each tried again; `CatalogueJoinErrors` past ten joins an hour for an hour |
+| `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Join checks (`joins`) and extras reads (`extras`) due now, and the oldest one's wait; `CatalogueJoinsBehind` past six hours of joins. Extras follow Wikipedia's pace (a request a second at most), so after a first import they lag for hours by design |
+| `pinakes_catalogue_join_errors_total{stage="extras"}` | Also counts a summary Wikipedia didn't answer. A check that keeps failing backs off (to an hour for joins, a day for extras) and waits outside the backlog |
+
+To see the queues: `SELECT count(*), count(*) FILTER (WHERE due_at<=now()) AS due, min(due_at),
+max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, whose rows without a
+`due_at` are reads done).
 
 ### Status and drop
 
@@ -1799,6 +1908,8 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
 | `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
+| `CatalogueJoinsBehind` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): the oldest join check has waited over six hours. |
+| `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |
 | `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10; the log says why. Text searches read Postgres alone, or miss newer changes. |
 
 A new key needs a restart.

@@ -22,7 +22,9 @@ use crate::model;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 
+pub mod extras;
 pub mod failure;
+pub mod join;
 pub mod run;
 pub mod store;
 
@@ -402,7 +404,7 @@ pub fn valid_key(key: &str) -> bool {
 }
 
 /// A key as it is stored: [`valid_key`], with a DOI lower case, an ISBN as its ISBN-13 and an
-/// ISRC and a Wikidata ID upper case, the forms a resource's keys take, and a `url:` key a
+/// ISRC, a Wikidata ID and an OpenAlex ID upper case, the forms a resource's keys take, and a `url:` key a
 /// resource ID; `None` for one that is not valid.
 pub fn stored_key(key: &str) -> Option<String> {
     let key = key.trim();
@@ -415,8 +417,9 @@ pub fn stored_key(key: &str) -> Option<String> {
         "isbn" => crate::resolver::cards::isbn(key)
             .map(|isbn| format!("isbn:{}", crate::resolver::cards::isbn13(&isbn))),
         "url" => model::valid_id(value).then(|| key.to_owned()),
-        // Resources key an ISRC and a Wikidata ID in upper case (`isrc:GBUM71029604`, `wikidata:Q42`).
-        "isrc" | "wikidata" => Some(format!("{kind}:{}", value.to_ascii_uppercase())),
+        // Resources key an ISRC and a Wikidata ID in upper case (`isrc:GBUM71029604`, `wikidata:Q42`),
+        // and joins an OpenAlex work as `openalex:W…` (`join::link_keys`).
+        "isrc" | "wikidata" | "openalex" => Some(format!("{kind}:{}", value.to_ascii_uppercase())),
         _ => Some(key.to_owned()),
     }
 }
@@ -521,6 +524,11 @@ pub struct Row {
     #[serde(skip)]
     pub content_hash: [u8; 32],
 }
+/// Whether a card may name `uri` (normalized): not a link that carries a credential
+/// (`capability::is_capability`), and no Pubky object (Pubky's own data is never indexed).
+fn publishable(uri: &str) -> bool {
+    !crate::capability::is_capability(uri) && !uri.starts_with("pubky:")
+}
 fn clean(text: &str, cap: usize) -> String {
     let mut text: String = text
         .chars()
@@ -554,8 +562,9 @@ impl Card {
             return Err(Reject::SourceId);
         }
         let (_, uri, _) = model::identity(&self.uri).map_err(|_| Reject::Uri)?;
-        // Normalizing may lengthen a link (percent-encoding); the table holds 2048 bytes.
-        if uri.len() > 2048 {
+        // Normalizing may lengthen a link (percent-encoding); the table holds 2048 bytes. A link
+        // that carries a credential, or a Pubky object, is never a card's.
+        if uri.len() > 2048 || !publishable(&uri) {
             return Err(Reject::Uri);
         }
         // Stored by its bare name (`Person`, never `schema:Person`), as resources store theirs.
@@ -579,11 +588,12 @@ impl Card {
             .as_deref()
             .map(|d| clean(d, model::DESCRIPTION_CAP))
             .filter(|d| !d.is_empty());
+        // The card's own link's key comes first, so a read by the link's resource ID finds the
+        // card (`join::unshared`) and no cap cuts it.
         let mut seen = BTreeSet::new();
-        let keys = self
-            .keys
-            .iter()
-            .filter_map(|k| stored_key(k))
+        let keys = link_key(&uri)
+            .into_iter()
+            .chain(self.keys.iter().filter_map(|k| stored_key(k)))
             .filter(|k| seen.insert(k.clone()))
             .take(KEYS_CAP)
             .collect();
@@ -592,7 +602,7 @@ impl Card {
             .related_uris
             .iter()
             .filter_map(|u| model::identity(u).ok().map(|(_, u, _)| u))
-            .filter(|u| u.len() <= 2048 && seen.insert(u.clone()))
+            .filter(|u| u.len() <= 2048 && publishable(u) && seen.insert(u.clone()))
             .take(RELATED_CAP)
             .collect();
         let (lon, lat) = match &self.point {
@@ -750,7 +760,12 @@ mod tests {
             "url:{}",
             crate::identity::resource_id("https://www.wikidata.org/wiki/Q42")
         );
-        assert_eq!(row.keys, ["wikidata:Q42".to_owned(), wikidata_page]);
+        // The card's own link's key first (`join::unshared` reads a card by it).
+        let own = format!(
+            "url:{}",
+            crate::identity::resource_id("https://en.wikipedia.org/wiki/Douglas_Adams")
+        );
+        assert_eq!(row.keys, [own, "wikidata:Q42".to_owned(), wikidata_page]);
         assert_eq!(row.related_uris, ["https://douglasadams.com/"]);
         assert_eq!(row.fame, 1.0);
         // A type is stored by its bare name.

@@ -389,6 +389,18 @@ pub enum LocationSource {
     Page,
     Geocoded,
 }
+/// The catalogue card a card is built from: its catalogue and its ID there.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogueRef {
+    pub catalogue: String,
+    pub source_id: String,
+    /// The start of the card's content hash, as hex: the card is built again when it changes.
+    pub hash: String,
+    /// The Wikipedia article whose summary the description is (`catalogue::extras`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize, ToSchema)]
 pub struct OsmId {
     #[serde(rename = "type")]
@@ -482,7 +494,8 @@ pub struct ResourceMeta {
     #[schema(ignore)]
     pub event_spellings: Vec<String>,
     /// The HTTP status of an answer that failed (`status` is `Error`), so the queue records which
-    /// kind of failure it was; never stored.
+    /// kind of failure it was, or of a missing one (404, 410, 451), so the save knows a link gone
+    /// for good; never stored.
     #[serde(skip)]
     pub http_status: Option<u16>,
     /// Missing by its own content (a Pubky app's object without a card), not because its
@@ -552,6 +565,28 @@ pub struct ResourceMeta {
     #[serde(skip)]
     #[schema(ignore)]
     pub episodes_channel: crate::episodes::Channel,
+    /// The catalogue card this card was built from (`catalogue::join`), absent on a card read
+    /// from its link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    pub catalogue: Option<CatalogueRef>,
+    /// The backoff rule this reading's wait follows (`scheduler::Backoff`), set by the queue for
+    /// an undated card; the save picks the wait from whether the reading changed the card. Never
+    /// stored in the document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub backoff: Option<crate::scheduler::Backoff>,
+    /// The catalogue card (`catalogue_card.id`) the save marks this card as built from
+    /// (`resource.catalogue_card`), in the same write; `None` for a card read from its link.
+    /// Never stored in the document.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub backing: Option<i64>,
+    /// A catalogue card's labels, valid tag labels (`catalogue::label`): what the source says the
+    /// thing is, kept apart from people's tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
+    pub labels: Vec<String>,
     pub source: String,
     /// The also-on sources whose findings the queue wrote into this card itself, each with a
     /// fingerprint of every value it wrote (`titles`: the name and description; `films`,

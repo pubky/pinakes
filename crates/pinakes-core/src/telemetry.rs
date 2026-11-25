@@ -69,6 +69,10 @@ pub struct Metrics {
     /// Resources nothing ever referenced (only previewed), each kept for the preview grace; not
     /// derived children or venues.
     pub preview_backlog: IntGauge,
+    /// The catalogue joins (`joins`, `catalogue_join_due`) and extras (`extras`,
+    /// `catalogue_extras`) due now, and how long the oldest of each has been due.
+    pub catalogue_backlog: IntGaugeVec,
+    pub catalogue_backlog_age: IntGaugeVec,
     pub ingest_lag: IntGauge,
     pub ingest_success: IntGauge,
     pub ingest_resets: IntCounter,
@@ -192,10 +196,35 @@ impl Metrics {
             "Resources nothing ever referenced (only previewed, not a derived child or a venue), kept for the preview grace",
         )?;
         registry.register(Box::new(preview_backlog.clone()))?;
+        let catalogue_backlog = IntGaugeVec::new(
+            Opts::new(
+                "pinakes_catalogue_backlog",
+                "Catalogue join checks (joins) and extras reads (extras) due now",
+            ),
+            &["queue"],
+        )?;
+        registry.register(Box::new(catalogue_backlog.clone()))?;
+        let catalogue_backlog_age = IntGaugeVec::new(
+            Opts::new(
+                "pinakes_catalogue_backlog_age_seconds",
+                "How long the oldest due catalogue join check (joins) or extras read (extras) has been due (0: none)",
+            ),
+            &["queue"],
+        )?;
+        registry.register(Box::new(catalogue_backlog_age.clone()))?;
+        for queue in ["joins", "extras"] {
+            catalogue_backlog.with_label_values(&[queue]);
+            catalogue_backlog_age.with_label_values(&[queue]);
+        }
         registry.register(Box::new(ALSO_ON_SERVICE_ERRORS.clone()))?;
         registry.register(Box::new(ALSO_ON_RECORDING_KEY_CONFLICTS.clone()))?;
         registry.register(Box::new(RESOLUTION_DEFERRED.clone()))?;
         registry.register(Box::new(AFTER_SAVE_FAILURES.clone()))?;
+        registry.register(Box::new(CATALOGUE_JOINS.clone()))?;
+        registry.register(Box::new(CATALOGUE_JOIN_ERRORS.clone()))?;
+        for stage in ["referenced", "before_fetch", "drain", "extras"] {
+            CATALOGUE_JOIN_ERRORS.with_label_values(&[stage]);
+        }
         let out = Self {
             api_panics,
             api_requests,
@@ -203,6 +232,8 @@ impl Metrics {
             refresh_failures,
             preview_refused,
             preview_backlog,
+            catalogue_backlog,
+            catalogue_backlog_age,
             ingest_rejected: metric!(
                 IntCounterVec,
                 "pinakes_ingest_rejected_total",
@@ -436,6 +467,7 @@ impl Metrics {
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
+        let backlog = sqlx::query("SELECT (SELECT count(*) FROM catalogue_join_due WHERE due_at<=now()) AS joins,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_join_due WHERE due_at<=now()) AS joins_age,(SELECT count(*) FROM catalogue_extras WHERE due_at<=now()) AS extras,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_extras WHERE due_at<=now()) AS extras_age").fetch_one(pool).await?;
         let previews: i64 = sqlx::query_scalar("SELECT count(*) FROM resource r WHERE r.orphaned_at IS NOT NULL AND r.orphaned_at=r.created_at AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id)")
             .fetch_one(pool)
             .await?;
@@ -533,6 +565,14 @@ impl Metrics {
         }
         self.group_key_conflicts.set(groups.try_get("conflicts")?);
         self.preview_backlog.set(previews);
+        for queue in ["joins", "extras"] {
+            self.catalogue_backlog
+                .with_label_values(&[queue])
+                .set(backlog.try_get(queue)?);
+            self.catalogue_backlog_age
+                .with_label_values(&[queue])
+                .set(backlog.try_get(format!("{queue}_age").as_str())?);
+        }
         for state in ["parked", "stopped", "settled"] {
             self.group_budget
                 .with_label_values(&[state])
@@ -675,6 +715,49 @@ static AFTER_SAVE_FAILURES: std::sync::LazyLock<IntCounterVec> = std::sync::Lazy
     )
     .expect("static metric")
 });
+/// Resources built from a catalogue card (`built`: joined, or built again after the card
+/// changed) and given back to the fetch queue (`released`: the card went or its catalogue is
+/// off), by catalogue.
+static CATALOGUE_JOINS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_catalogue_joins_total",
+            "Resources built from a catalogue card (built) and given back to the fetch queue (released), by catalogue",
+        ),
+        &["catalogue", "outcome"],
+    )
+    .expect("static metric")
+});
+pub fn catalogue_join(catalogue: &str, outcome: &'static str) {
+    CATALOGUE_JOINS
+        .with_label_values(&[catalogue, outcome])
+        .inc();
+}
+/// Failed catalogue joins and extras reads, by where they ran (`referenced`, `before_fetch`,
+/// `drain`, `extras`): each is tried again (a fetch, a later check).
+static CATALOGUE_JOIN_ERRORS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_catalogue_join_errors_total",
+            "Failed catalogue joins and extras reads, by where they ran (each is tried again)",
+        ),
+        &["stage"],
+    )
+    .expect("static metric")
+});
+pub fn catalogue_join_error(stage: &'static str) {
+    CATALOGUE_JOIN_ERRORS.with_label_values(&[stage]).inc();
+}
+/// The failed joins counted for `stage` so far.
+pub fn catalogue_join_errors(stage: &'static str) -> u64 {
+    CATALOGUE_JOIN_ERRORS.with_label_values(&[stage]).get()
+}
+/// The joins counted for `catalogue` and `outcome` so far.
+pub fn catalogue_joins(catalogue: &str, outcome: &'static str) -> u64 {
+    CATALOGUE_JOINS
+        .with_label_values(&[catalogue, outcome])
+        .get()
+}
 pub fn after_save_failure(resolver: &str) {
     AFTER_SAVE_FAILURES.with_label_values(&[resolver]).inc();
 }

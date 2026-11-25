@@ -30,6 +30,10 @@ const POOL_CONNECTIONS: u32 = 20;
 const POOL_CLOSE: Duration = Duration::from_secs(5);
 /// How often retention and orphan cleanup run.
 const MAINTENANCE_PERIOD: Duration = Duration::from_secs(3600);
+/// The catalogue join checks one pass takes (`catalogue::join::drain`).
+const JOIN_BATCH: i64 = 100;
+/// The catalogue cards whose extras one pass reads (`catalogue::extras::run_due`).
+const EXTRAS_BATCH: i64 = 20;
 
 async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -327,6 +331,7 @@ async fn start(
         state.metrics.clone(),
         egress.clone(),
     )?;
+    let extras_egress = egress.clone();
     tasks.spawn_optional(
         "also-on",
         pinakes_core::also_on::run(
@@ -349,7 +354,7 @@ async fn start(
         loop {
             // A panicking line is skipped inside `apply`; anything else that panics is counted
             // (`pinakes_ingest_panics_total`) and retried like an error with the cursor held.
-            let poll = std::panic::AssertUnwindSafe(ingest::poll_once(
+            let poll = std::panic::AssertUnwindSafe(ingest::poll_referenced(
                 &ingest_pool,
                 &ingest_state.config.nexus_url,
                 &ingest_state.nexus,
@@ -360,9 +365,17 @@ async fn start(
             .catch_unwind();
             let polled = tokio::select! { _=ingest_shutdown.changed()=>break,result=poll=>result.unwrap_or_else(|_| { ingest_state.metrics.ingest_panics.inc(); Err(anyhow::anyhow!("ingestion panicked")) }) };
             match polled {
-                Ok(poll) => {
+                Ok((poll, referenced)) => {
                     if poll.lines > 0 {
                         tracing::info!(lines = poll.lines, "ingested Nexus batch");
+                        // A link a catalogue card holds gets its card now, before a worker
+                        // would fetch it.
+                        pinakes_core::catalogue::join::referenced(
+                            &ingest_pool,
+                            &ingest_state.config.queue,
+                            &referenced,
+                        )
+                        .await;
                         ingest_state.wake.notify_waiters();
                     }
                     // More may wait: the next page at once. After a reset, while a reset
@@ -377,6 +390,61 @@ async fn start(
                 }
             }
             tokio::select! { _=ingest_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(ingest_state.config.poll_secs))=>{} }
+        }
+    });
+    // Links built from a card of a catalogue that is off now go back to the fetch queue: the
+    // joins task does that first, in the background (until then an answer shows nothing of such a
+    // catalogue), then checks the links each card's write names.
+    let join_pool = pool.clone();
+    let join_config = config.queue.clone();
+    let mut join_shutdown = shutdown_rx.clone();
+    tasks.spawn("catalogue joins", async move {
+        let mut swept = false;
+        loop {
+            if !swept {
+                let sweep = pinakes_core::catalogue::join::sweep(&join_pool, &join_config.catalogues);
+                match tokio::select! { _=join_shutdown.changed()=>break,result=sweep=>result } {
+                    Ok(released) => {
+                        if released > 0 {
+                            tracing::info!(resources = released, "links built from a catalogue that is off are fetched again");
+                        }
+                        swept = true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"the catalogue sweep failed; it is tried again in a minute");
+                        tokio::select! {_=join_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(60))=>{}}
+                        continue;
+                    }
+                }
+            }
+            let batch = tokio::select! { _=join_shutdown.changed()=>break,result=pinakes_core::catalogue::join::drain(&join_pool,&join_config,JOIN_BATCH)=>result };
+            match batch {
+                Ok(n) if n as i64 == JOIN_BATCH => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"catalogue join checks will retry")
+                }
+                _ => {}
+            }
+            tokio::select! {_=join_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+        }
+    });
+    // The extras of cards built from catalogue cards (their Wikipedia summary), as they come due.
+    let extras_pool = pool.clone();
+    let mut extras_shutdown = shutdown_rx.clone();
+    tasks.spawn("catalogue extras", async move {
+        loop {
+            let batch = tokio::select! { _=extras_shutdown.changed()=>break,result=pinakes_core::catalogue::extras::run_due(&extras_pool,&extras_egress,EXTRAS_BATCH)=>result };
+            match batch {
+                Ok(n) if n as i64 == EXTRAS_BATCH => continue,
+                Err(error) => {
+                    tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"catalogue extras will retry")
+                }
+                _ => {}
+            }
+            tokio::select! {_=extras_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
         }
     });
     let group_pool = pool.clone();

@@ -20,7 +20,7 @@ use tokio::{
 /// deadlines below it (a card's enrichment, a relay's answer), and a job's lease is sized from it.
 pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[derive(Debug, FromRow)]
+#[derive(Clone, Debug, FromRow)]
 pub struct Job {
     pub id: String,
     pub uri: String,
@@ -602,6 +602,13 @@ async fn run_job_inner(
     cfg: &QueueConfig,
     job: &Job,
 ) -> Result<()> {
+    // A link a catalogue card holds is built from it, never fetched.
+    if crate::catalogue::join::before_fetch(pool, cfg, std::slice::from_ref(job))
+        .await
+        .is_empty()
+    {
+        return Ok(());
+    }
     let confirming = confirming(pool, std::slice::from_ref(job)).await?;
     let stored = crate::sources::stored(pool, std::slice::from_ref(job)).await?;
     let result = crate::sources::with_stored(stored, resolve(resolver, &job.uri, confirming)).await;
@@ -872,6 +879,32 @@ async fn finish_job(
                 .ttl_secs
                 .min(crate::resolver::cards::social_refresh_secs(&doc));
         }
+        // An undated card read from its link waits longer each time it answers the same, and a
+        // link found gone waits longest (`scheduler::Backoff`, applied by the save): not an
+        // event (dated or not), a calendar or feed, social content, a Pubky object (its author
+        // edits or deletes it), an OSM object, a point, or a card that names when it changes.
+        if matches!(
+            resolver.name(),
+            "web" | "media" | "isbn" | "doi" | "nostr" | "activitypub" | "official"
+        ) && matches!(doc.status, Status::Ok | Status::Missing)
+            // An event whose date is not known yet may announce one.
+            && !doc.type_path.iter().any(|t| t == "Event")
+            && doc.container.is_none()
+            && doc.start.is_none()
+            && doc.end.is_none()
+            && doc.refresh_by.is_none()
+            && !invalid_identifier
+            && !crate::resolver::cards::social(&doc)
+            // A podcast show's new episodes are no change to its card: it keeps its schedule.
+            && doc.episodes.is_none()
+            && !doc.type_path.iter().any(|t| t == "PodcastSeries")
+            && doc.ttl_secs > 0
+        {
+            doc.backoff = Some(crate::scheduler::Backoff {
+                base: doc.ttl_secs,
+                max: refresh.max_secs,
+            });
+        }
         let attrs = match resolver.name() {
             "web" | "official" => crate::sources::attributes(),
             // These routes fall back to the web fetch, whose page hooks may name a source.
@@ -1097,6 +1130,12 @@ async fn run_batch_within(
     jobs: &[Job],
     deadline: Duration,
 ) -> Result<()> {
+    // The links catalogue cards hold are built from them, never fetched.
+    let fetched = crate::catalogue::join::before_fetch(pool, cfg, jobs).await;
+    if fetched.is_empty() {
+        return Ok(());
+    }
+    let jobs = &fetched[..];
     let uris = jobs.iter().map(|j| j.uri.clone()).collect::<Vec<_>>();
     let confirming = confirming(pool, jobs).await?;
     let resolve = async {
@@ -1290,6 +1329,7 @@ pub fn spawn_with_egress(
     egress: Egress,
 ) -> Result<JoinSet<()>> {
     config.queue.groups = config.groups.clone();
+    config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
     let mut workers = JoinSet::new();
     let authors = Arc::new(AuthorBudget::default());
     let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];

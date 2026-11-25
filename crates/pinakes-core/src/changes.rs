@@ -22,6 +22,8 @@ pub fn normalize(doc: &ResourceMeta) -> Value {
     object.remove("fetched_at");
     object.remove("ttl_secs");
     object.remove("warnings");
+    // Which catalogue card (and version) a card is built from is bookkeeping, not a fact.
+    object.remove("catalogue");
     if let Some(attrs) = object.get_mut("attributes").and_then(Value::as_object_mut) {
         attrs.remove("content_length");
     }
@@ -381,6 +383,11 @@ pub async fn save(
     // Read before the document's copy below, which leaves out what is never stored.
     let withheld = doc.withheld;
     let shape_only = doc.shape_only;
+    let backoff = doc.backoff;
+    let backing = doc.backing;
+    // Gone for good: a 404 or 410 (not a 451, a not-found without a status, or an object kept
+    // without a card).
+    let gone = !doc.withheld && matches!(doc.http_status, Some(404 | 410));
     let (episodes, episodes_older, episodes_cut, episodes_oldest_first, episodes_channel) = (
         doc.episodes.clone(),
         doc.episodes_older,
@@ -689,6 +696,26 @@ pub async fn save(
         doc.ttl_secs = crate::queue::wall_backoff(streak as u32);
     }
     let after = normalize(&doc);
+    let changed = diff(before.as_ref(), Some(&after));
+    // The backoff rule's wait: the longest for a link found gone for good (two fresh reads agree,
+    // as here), twice the last for a reading that found the card the same (a 304 included), the
+    // base for one that changed it. Another missing answer keeps its wait, and a refused read
+    // keeps the refusals' wait.
+    if let Some(rule) = backoff.filter(|_| {
+        !social_missing && refusals.is_none() && (gone || doc.status != Status::Missing)
+    }) {
+        doc.ttl_secs = if doc.status == Status::Missing {
+            rule.gone()
+        } else {
+            let previous = row
+                .try_get::<Value, _>("doc")?
+                .get("ttl_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            rule.next(previous, before.is_some() && changed.is_none())
+        };
+    }
+    doc.backing = backing;
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
     if let Some(streak) = refusals {
         sqlx::query("UPDATE resource SET timeout_streak=$2,last_error='wall' WHERE id=$1")
@@ -700,8 +727,8 @@ pub async fn save(
     if social_missing {
         unqueue_also_on(&mut tx, id).await?;
     }
-    let diff = diff(before.as_ref(), Some(&after))
-        .filter(|_| !social_missing && (before.is_some() || doc.status != Status::Missing));
+    let diff =
+        changed.filter(|_| !social_missing && (before.is_some() || doc.status != Status::Missing));
     if let Some(plan) = prepared
         .as_ref()
         .filter(|p| p.exceeds_limit(usize::from(diff.is_some())))

@@ -126,8 +126,29 @@ its root's card ([Aliases](#aliases)).
 
 A spelling held neither as a card nor as an alias answers with its root by the static alias
 rules, when that root is stored. These rules need only the URI: tracking parameters dropped, a
-`doi.org` or ISBN link, a service's other URL forms. Otherwise the answer is 404, and nothing is
-fetched or stored. To have an unknown link read, use `POST /v1/resolve`.
+`doi.org` or ISBN link, a service's other URL forms. A link that is a catalogue card's own link
+answers with the card built from it ([Catalogue cards](#catalogue-cards)). Otherwise the answer is
+404, and nothing is fetched or stored. To have an unknown link read, use `POST /v1/resolve`.
+
+Opening a stored card whose refresh is due reads it again in the background; the answer is the
+stored card ([Refresh](#refresh)).
+
+### Catalogue cards
+
+A link a catalogue holds ([operations](operations.md#shared-links-a-catalogue-holds)) has the
+card built from the catalogue card, with `labels` and `from` naming the catalogue. It is never
+fetched and changes with its card.
+
+A catalogue card nobody shared opens like a shared card, by its own link
+(`GET /v1/resources/by-uri?uri=<its link>`) and by that link's resource ID
+(`GET /v1/resources/{id}`). The answer has `labels`, `refs: []`,
+`collections: 0`, the card's `keys` and `updated_at: null`. Its `group` and `also_on` are those of
+the stored links built from the card or related to it, when they share a group (`null` and `[]`
+otherwise), so a client shows their tags with it. Nothing is stored and no other service is
+asked, so the answer has no Also on links and no Wikipedia summary. A client that opens such a card
+for a person to read calls `POST /v1/resolve` with its link: that stores it, answers with the built
+card at once, and reads its Also on and its Wikipedia summary in the background; a read of the card
+a moment later shows them. With its catalogue off, the link is unknown again.
 
 ### Lookup
 
@@ -198,7 +219,7 @@ collapsed. Its `name` is the start of the text on one line.
 | `occurrence` | Occurrence cards only: `{feed_id, feed_uri, uid, recurrence_id, status}` ([Occurrence](#occurrence)) |
 | `maybe_same` | Other cards that are possibly the same thing, best first, each `{id, uri, site, start, score}`: for events ([Possibly the same event](#possibly-the-same-event)), app store cards ([Possibly the same app](#possibly-the-same-app)) and `MusicRecording` cards ([Possibly the same recording](#possibly-the-same-recording)). Up to 3 on a search, lookup or group card and up to 10 on a resource read; `[]` when there are none. Absent on other cards, and on a kind's cards when its hint is off. |
 | `because` | [Related](#related) search rows only: why the row is listed, `{shared, taggers}`. Absent on every other card. |
-| `labels` | Search rows only: the labels the card's catalogue gives it, as valid tag labels, kept apart from people's tags (which Nexus serves for `uri` and `refs`); a client may offer them as suggested tags. `[]` on every other search row ([Catalogue cards](#catalogue-cards-in-search)). Absent on other routes. |
+| `labels` | On a search row, and on a card built from a catalogue card ([Catalogue cards](#catalogue-cards)): the labels the catalogue gives it, valid tag labels, kept apart from people's tags (which Nexus serves for `uri` and `refs`); a client may offer them as suggested tags. `[]` on a search row without any ([Catalogue cards in search](#catalogue-cards-in-search)). Absent on every other card. |
 
 #### refs
 
@@ -595,7 +616,7 @@ the fields below beside the card's own, in one flat object (`api_shape: 2`; ther
 | `attendance` | `offline`, `online` or `mixed` |
 | `venue` | `{name, id}`: the venue's name and, when it resolved to a resource, its ID |
 | `organizer` | `{name, url}` |
-| `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, such as `federal_register` |
+| `from` | Where the card's metadata came from when it is not the page itself: the [source](#sources) whose official API answered, such as `federal_register`, or the catalogue a card is built from (`wikidata`, `musicbrainz`, `openalex`, `tranco`, `software`) |
 | `facts` | Named values about the object ([Facts](#facts)). `null` when there are none. Facts never join anything. |
 | `related` | The objects the card points at, each with its own card ([Related objects](#related-objects)); `[]` on cards that point at none |
 | `related_total` | How many entries of a `rel` there are when `related` lists fewer (`{"input": 400}`); `null` when it lists them all |
@@ -1419,7 +1440,8 @@ filters, together.
 | 503 | The instance's new previews for this hour are taken, with `Retry-After`; nothing was stored |
 
 Ingestion and every preview share one queue entry per normalized URI, with one TTL, retry
-schedule and dead-letter state. A resource that was only previewed, never referenced, is not a
+schedule and dead-letter state. A link a catalogue card holds is answered with the card built from
+it at once (200), without a fetch. A resource that was only previewed, never referenced, is not a
 search result, and expires after `limits.preview_grace_hours` (a day).
 
 ### Preview budgets
@@ -1521,9 +1543,16 @@ feed's own TTL takes the place of the first two and caps the third. Cursor feeds
 `limits.refresh_cursor_secs` (5 minutes). Every other interval is at least an hour. Adapter
 floors can lengthen these; OSM follows `limits.osm_ttl_secs`.
 
+An undated card that answers the same at a refresh waits twice as long the next time, up to
+`limits.refresh_max_secs` (90 days); a change starts it over at the interval above. Such a link
+whose page two fresh fetches found gone for good (404, 410) is read again every
+`limits.refresh_max_secs` until it answers again. Events, calendars, podcast shows, Pubky objects,
+dated and social cards keep the intervals above ([backoff](operations.md#refresh-backoff)). Opening
+a card whose refresh is due reads it again in the background.
+
 One fetch at the end plus 24 hours (the start plus 24 hours without an end) makes a resource
 final. A final resource stays frozen until a reference newer than its last resolution reopens
-it. `geo:` points stay final.
+it. `geo:` points stay final. A card built from a catalogue card is never fetched.
 
 ## Aliases
 

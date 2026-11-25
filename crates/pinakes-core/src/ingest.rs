@@ -153,7 +153,10 @@ pub async fn apply(
     limits: &IngestConfig,
     metrics: &Metrics,
 ) -> Result<bool> {
-    Ok(apply_page(pool, nexus, requested, feed, limits, metrics).await? == Applied::Batch)
+    Ok(apply_page(pool, nexus, requested, feed, limits, metrics)
+        .await?
+        .0
+        == Applied::Batch)
 }
 async fn apply_page(
     pool: &PgPool,
@@ -162,7 +165,7 @@ async fn apply_page(
     feed: &FeedPage,
     limits: &IngestConfig,
     metrics: &Metrics,
-) -> Result<Applied> {
+) -> Result<(Applied, Vec<String>)> {
     let key = feed_key(nexus);
     let mut tx = pool.begin().await?;
     // Reference state is a projection of one configured Nexus; serialize rebuilds with batches.
@@ -176,7 +179,7 @@ async fn apply_page(
             .fetch_one(&mut *tx)
             .await?;
     if saved.cursor != requested.cursor || saved.epoch != requested.epoch {
-        return Ok(Applied::Lost);
+        return Ok((Applied::Lost, vec![]));
     }
     let epoch = feed.epoch.as_ref().or(saved.epoch.as_ref());
     let reset = starts_over(&saved, feed);
@@ -206,7 +209,7 @@ async fn apply_page(
             nexus = %crate::resolver::log_host(nexus),
             "Nexus feed reset; rebuilding references"
         );
-        return Ok(Applied::Reset);
+        return Ok((Applied::Reset, vec![]));
     }
     // The page's lines, those skipped while parsing included: the cursor moves past them all.
     let read = feed.page.read();
@@ -276,7 +279,17 @@ async fn apply_page(
             .inc_by(count);
         tracing::warn!(reason, count, "rejected Nexus feed lines");
     }
-    Ok(Applied::Batch)
+    // The links the batch's new references name, for the catalogue join.
+    let referenced = feed
+        .page
+        .lines
+        .iter()
+        .filter(|line| matches!(line.op, Op::Put))
+        .filter_map(|line| crate::model::identity(&line.uri).ok().map(|(id, _, _)| id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok((Applied::Batch, referenced))
 }
 /// One line's work inside the batch's transaction: the reason when it is rejected.
 async fn apply_line(
@@ -533,6 +546,22 @@ pub async fn poll_once(
     metrics: &Metrics,
     resets: &mut Resets,
 ) -> Result<Poll> {
+    Ok(
+        poll_referenced(pool, nexus_url, nexus, limits, metrics, resets)
+            .await?
+            .0,
+    )
+}
+/// [`poll_once`], and the resource IDs of the links the committed batch's new references name
+/// (the line's spelling: an alias's own ID), for the catalogue join (`catalogue::join::referenced`).
+pub async fn poll_referenced(
+    pool: &PgPool,
+    nexus_url: &str,
+    nexus: &Nexus,
+    limits: &IngestConfig,
+    metrics: &Metrics,
+    resets: &mut Resets,
+) -> Result<(Poll, Vec<String>)> {
     let cursor = cursor(pool, nexus_url).await?;
     let page = nexus.changes(cursor.cursor).await?;
     if !starts_over(&cursor, &page) {
@@ -543,13 +572,18 @@ pub async fn poll_once(
             nexus = %crate::resolver::log_host(nexus_url),
             "the Nexus feed answered as if it started over; waiting for a confirming read"
         );
-        return Ok(Poll {
-            lines: 0,
-            again: false,
-        });
+        return Ok((
+            Poll {
+                lines: 0,
+                again: false,
+            },
+            vec![],
+        ));
     }
-    Ok(
-        match apply_page(pool, nexus_url, &cursor, &page, limits, metrics).await? {
+    let (applied, referenced) =
+        apply_page(pool, nexus_url, &cursor, &page, limits, metrics).await?;
+    Ok((
+        match applied {
             Applied::Batch => {
                 let lines = page.page.read();
                 Poll {
@@ -566,7 +600,8 @@ pub async fn poll_once(
                 again: false,
             },
         },
-    )
+        referenced,
+    ))
 }
 
 #[cfg(test)]

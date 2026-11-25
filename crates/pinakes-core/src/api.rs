@@ -95,7 +95,8 @@ pub struct AppState {
     pub search_index: Arc<crate::search_index::SearchIndex>,
 }
 impl AppState {
-    pub fn new(pool: PgPool, config: Config) -> anyhow::Result<Self> {
+    pub fn new(pool: PgPool, mut config: Config) -> anyhow::Result<Self> {
+        config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
         let config_catalogues = config.catalogues.enabled_names();
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
@@ -1026,11 +1027,16 @@ pub struct Card {
     /// On a `related` search row only: why it is listed, from what its rank counted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub because: Option<Because>,
-    /// On a search row: the labels the card's catalogue source gives it, as valid tag labels.
-    /// Kept apart from people's tags, which Nexus serves for the card's `uri` and `refs`; a client
-    /// may offer them as suggested tags. `[]` when the card has none. Absent on other routes.
+    /// On a search row, and on a card built from a catalogue card: the labels the catalogue gives
+    /// it, as valid tag labels. Kept apart from people's tags, which Nexus serves for the card's
+    /// `uri` and `refs`; a client may offer them as suggested tags. `[]` when the card has none.
+    /// Absent on other cards.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
+    /// The catalogue the card is built from (`labels` and `from` show only while it is on).
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub catalogue: Option<String>,
 }
 /// Why a `related` row is listed: the resource's taggers who also referenced it.
 #[derive(Clone, Serialize, ToSchema)]
@@ -1499,8 +1505,37 @@ pub(crate) fn card(row: &Value) -> Result<Card, ApiError> {
         occurrence,
         maybe_same: same_events(row).map(|all| all.into_iter().take(3).collect()),
         because: because(row),
-        labels: None,
+        labels: doc
+            .as_ref()
+            .filter(|d| d.catalogue.is_some())
+            .map(|d| d.labels.clone()),
+        catalogue: doc
+            .as_ref()
+            .and_then(|d| d.catalogue.as_ref())
+            .map(|c| c.catalogue.clone()),
     })
+}
+/// Cards built from a catalogue that is off now show nothing of it (no `labels`): the start's
+/// sweep gives their links back to fetching in the background, and until then they read as
+/// cards of their link.
+fn shown<'a>(cards: impl IntoIterator<Item = &'a mut Card>, config: &Config) {
+    let on = crate::catalogue::join::joinable(&config.catalogues);
+    for card in cards {
+        if card.catalogue.as_deref().is_some_and(|c| !on.contains(&c)) {
+            card.labels = None;
+        }
+    }
+}
+/// [`shown`] for a read, whose `from` names the catalogue too.
+fn shown_detail(detail: &mut ResourceDetail, config: &Config) {
+    if let Some(catalogue) = detail.card.catalogue.clone() {
+        shown(std::iter::once(&mut detail.card), config);
+        if detail.card.labels.is_none()
+            && detail.details.from.as_deref() == Some(catalogue.as_str())
+        {
+            detail.details.from = None;
+        }
+    }
 }
 /// A card's `embed` (docs/api.md, Embed): the player its link names (`embed::link`), else a
 /// Mastodon post's own frame, else an OpenStreetMap card's map (`osm`: the row is an OSM
@@ -1969,7 +2004,9 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
                 let (name, url) = (present(Some(&o.name)), present(o.url.as_deref()));
                 (name.is_some() || url.is_some()).then_some(OrganizerRef { name, url })
             }),
-            from: crate::sources::from(d).map(str::to_owned),
+            from: crate::sources::from(d)
+                .map(str::to_owned)
+                .or_else(|| d.catalogue.as_ref().map(|c| c.catalogue.clone())),
             facts: merge_facts(
                 crate::kinds::facts(
                     crate::sources::facts(d)
@@ -3678,15 +3715,23 @@ pub async fn search(
         let mut cards = items.iter().map(card).collect::<Result<Vec<_>, _>>()?;
         with_refs(&state.pool, cards.iter_mut()).await?;
         for (card, item) in cards.iter_mut().zip(&items) {
-            // A catalogue card's source labels; `[]` on every other row.
-            card.labels = Some(
-                item["labels"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|l| l.as_str().map(str::to_owned))
-                    .collect(),
-            );
+            // A catalogue card's source labels, a resource built from one its card's (from its
+            // stored card); `[]` on every other row.
+            let listed: Vec<String> = item["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l.as_str().map(str::to_owned))
+                .collect();
+            card.labels = Some(if listed.is_empty() {
+                card.labels.take().unwrap_or_default()
+            } else {
+                listed
+            });
+        }
+        shown(cards.iter_mut(), &state.config);
+        for card in cards.iter_mut().filter(|c| c.labels.is_none()) {
+            card.labels = Some(vec![]);
         }
         Json(SearchResponse {
             items: cards,
@@ -3731,6 +3776,7 @@ async fn read(
     };
     with_refs(pool, std::iter::once(&mut detail.card)).await?;
     crate::music_identity::keys(pool, &mut detail).await?;
+    shown_detail(&mut detail, config);
     Ok(Some(detail))
 }
 /// A read's JSON, cacheable for 30 seconds like a search page, with an ETag of its content; 304
@@ -3771,10 +3817,94 @@ pub async fn resource(
     if !model::valid_id(&id) {
         return Err(ApiError::bad("invalid resource ID"));
     }
-    let detail = read(&state.pool, &id, &state.config)
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))?;
+    let detail = match read(&state.pool, &id, &state.config).await? {
+        Some(detail) => {
+            opened(&state, &detail).await;
+            Some(detail)
+        }
+        None => read_unshared(&state.pool, &id, &state.config).await?,
+    }
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))?;
     tagged(&headers, &detail)
+}
+/// A card someone opens whose refresh is due is read again first (`store::opened`): the
+/// workers are woken for it. A card built from a
+/// catalogue card reads its extras again once they are old. Best effort: the read answers
+/// whatever these writes do.
+async fn opened(state: &AppState, detail: &ResourceDetail) {
+    match store::opened(&state.pool, &detail.card.id).await {
+        Ok(true) => state.wake.notify_waiters(),
+        Ok(false) => {}
+        Err(error) if open_warning_due() => {
+            tracing::warn!(resource_id = %detail.card.id, kind = crate::resolver::error_class(&error), "an opened card's refresh was not moved forward (logged at most once a minute)")
+        }
+        Err(_) => {}
+    }
+    if detail.card.labels.is_some() {
+        if let Err(error) = crate::catalogue::extras::opened(&state.pool, &detail.card.id).await {
+            if open_warning_due() {
+                tracing::warn!(resource_id = %detail.card.id, kind = crate::resolver::error_class(&error), "an opened catalogue card's extras were not marked (logged at most once a minute)");
+            }
+        }
+    }
+}
+/// Whether a failed write of an open is logged now: at most once a minute, so a database that
+/// refuses writes doesn't log every read.
+fn open_warning_due() -> bool {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let now = Utc::now().timestamp();
+    let last = LAST.load(Ordering::Relaxed);
+    now - last >= 60
+        && LAST
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+/// The card of a catalogue card nobody shared, by the resource ID of its own link
+/// (`catalogue::join::unshared`): built from the catalogue as a shared card is, with no tags,
+/// references or group. Nothing is stored.
+async fn read_unshared(
+    pool: &PgPool,
+    id: &str,
+    config: &Config,
+) -> Result<Option<ResourceDetail>, ApiError> {
+    let catalogues = crate::catalogue::join::joinable(&config.catalogues);
+    let Some(card) = crate::catalogue::join::unshared(pool, &catalogues, id).await? else {
+        return Ok(None);
+    };
+    let Some(doc) = crate::catalogue::join::document(&card, &card.uri) else {
+        return Ok(None);
+    };
+    let host = url::Url::parse(&card.uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned));
+    // The group of the links built from the card or related to it, when one is stored, and its
+    // members as `also_on` (that member first, as another member lists it): their tags show with
+    // the card.
+    let member = crate::catalogue::join::member(pool, &card).await?;
+    let value: Value = sqlx::query_scalar(&[
+        "SELECT jsonb_build_object('id',$1::text,'uri',$5::text,'host',$6::text,'type',$7::text,'type_path',to_jsonb($2::text[]),'name',$8::text,'category',NULL,'doc',$9::jsonb,'resolver',NULL,'resolved_at',NULL,'refresh_at',NULL,'status','ok','osm_type',NULL,'osm_id',NULL)||jsonb_build_object('group',CASE WHEN $12 AND $11::text IS NOT NULL THEN group_hint($11) END,'maybe_same',",
+        &maybe_same_sql("$1::text", "$2::text[]", 10, "$3", "$4"),
+        ",'also_on',CASE WHEN $11::text IS NULL OR NOT $12 THEN '[]'::jsonb ELSE coalesce((SELECT jsonb_agg(e) FROM jsonb_array_elements(also_on((SELECT u.unit_id FROM group_unit u JOIN group_unit me ON me.group_id=u.group_id WHERE me.unit_id=$11 AND u.unit_id<>$11 AND u.group_id IS NOT NULL ORDER BY u.unit_id LIMIT 1),'',256,true)) e WHERE e->>'id'=$11),'[]'::jsonb)||also_on($11,'',256,$12) END,'aliases','[]'::jsonb,'keys',to_jsonb($10::text[]),'facts',NULL)",
+    ]
+    .concat())
+    .bind(id)
+    .bind(&doc.type_path)
+    .bind(same_event(config))
+    .bind(same_recording(config))
+    .bind(&card.uri)
+    .bind(host)
+    .bind(&doc.type_name)
+    .bind(&card.name)
+    .bind(serde_json::to_value(&doc)?)
+    .bind(crate::catalogue::join::backed_keys(&card))
+    .bind(member)
+    .bind(config.groups.enabled)
+    .fetch_one(pool)
+    .await?;
+    let mut detail = detail(&value)?;
+    with_refs(pool, std::iter::once(&mut detail.card)).await?;
+    Ok(Some(detail))
 }
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
@@ -3794,9 +3924,22 @@ pub async fn by_uri(
         .map_err(|e| ApiError::bad(e.to_string()))?
         .0;
     let mut detail = read(&state.pool, &id, &state.config).await?;
+    let root = static_root_id(&q.uri);
     if detail.is_none() {
-        if let Some(root) = static_root_id(&q.uri) {
-            detail = read(&state.pool, &root, &state.config).await?;
+        if let Some(root) = &root {
+            detail = read(&state.pool, root, &state.config).await?;
+        }
+    }
+    match &detail {
+        Some(detail) => opened(&state, detail).await,
+        // A catalogue card nobody shared, by its own link or the link's root.
+        None => {
+            detail = read_unshared(&state.pool, &id, &state.config).await?;
+            if detail.is_none() {
+                if let Some(root) = &root {
+                    detail = read_unshared(&state.pool, root, &state.config).await?;
+                }
+            }
         }
     }
     let detail = detail.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
@@ -3865,6 +4008,7 @@ pub async fn lookup(
         .concat()).bind(ids).bind(state.config.groups.enabled).bind(same_event(&state.config)).bind(same_recording(&state.config)).fetch_all(&state.pool).await?;
     let mut cards = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
     with_refs(&state.pool, cards.iter_mut()).await?;
+    shown(cards.iter_mut(), &state.config);
     Ok(Json(cards))
 }
 #[utoipa::path(post,tag="Previews",path="/v1/resolve",request_body=ResolveRequest,responses((status=200,body=ResourceDetail),(status=202,body=ResourceDetail,description="Queued; poll resource by ID",headers(("Retry-After"=u64,description="Seconds until the next attempt, when it is put off (a missing answer waiting for the fetch that confirms it); absent while the job is queued or running"))),(status=400,description="Unsupported URI, disabled resolver, or a link that carries a credential"),(status=429,description="Preview rate limit"),(status=503,description="The instance's new previews for this hour are taken; nothing was stored",headers(("Retry-After"=u64,description="Seconds until a new preview can be taken")))))]
@@ -3931,6 +4075,9 @@ pub async fn resolve(
         slot.keep();
     }
     let id = crate::alias::resolve_id(&state.pool, &id).await?;
+    // A link a catalogue card holds gets its card from it at once: the wait below finds it.
+    crate::catalogue::join::referenced(&state.pool, &state.config.queue, std::slice::from_ref(&id))
+        .await;
     store::expedite(&state.pool, std::slice::from_ref(&id)).await?;
     state.wake.notify_waiters();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -4817,6 +4964,7 @@ pub async fn group(
         &state.pool,
         &id,
         (same_event(&state.config), same_recording(&state.config)),
+        &state.config,
     )
     .await?
     .map(Json)
@@ -4826,6 +4974,7 @@ async fn group_detail(
     pool: &PgPool,
     id: &str,
     hints: (bool, bool),
+    config: &Config,
 ) -> Result<Option<GroupDetail>, ApiError> {
     let curated: Option<bool> = sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1")
         .bind(id)
@@ -4854,6 +5003,7 @@ async fn group_detail(
     .await?;
     let mut members = rows.iter().map(card).collect::<Result<Vec<_>, _>>()?;
     with_refs(pool, members.iter_mut()).await?;
+    shown(members.iter_mut(), config);
     let mut types = BTreeMap::<&str, usize>::new();
     for t in members.iter().filter_map(|m| m.type_name.as_deref()) {
         *types.entry(t).or_default() += 1;
@@ -4898,6 +5048,7 @@ pub async fn curate_group(
         &state.pool,
         &id,
         (same_event(&state.config), same_recording(&state.config)),
+        &state.config,
     )
     .await?
     .map(Json)

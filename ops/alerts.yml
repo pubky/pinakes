@@ -112,6 +112,16 @@ groups:
         for: 6h
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue has waited six hours for the large-import turn while a large catalogue's import keeps failing: pinakesd catalogue status shows which; fix it, switch it off or drop it"}
+      - alert: CatalogueJoinsBehind
+        expr: pinakes_catalogue_backlog_age_seconds{queue="joins"} > 21600
+        for: 30m
+        labels: {severity: warning}
+        annotations: {summary: "The oldest catalogue join check has been due for over six hours: links wait for their catalogue card or to go back to fetching; pinakes_catalogue_join_errors_total says whether checks fail"}
+      - alert: CatalogueJoinErrors
+        expr: sum by (instance, job) (increase(pinakes_catalogue_join_errors_total{stage!="extras"}[1h])) > 10
+        for: 1h
+        labels: {severity: warning}
+        annotations: {summary: "Catalogue joins keep failing (more than ten an hour for an hour): the log line names each resource and the error's kind; links are fetched instead or checked again later"}
       - alert: CatalogueUpdateLag
         expr: (pinakes_catalogue_update_lag_seconds > on (instance, job, catalogue) pinakes_catalogue_max_update_lag_seconds) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0)
         for: 15m
