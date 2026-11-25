@@ -21,16 +21,17 @@ for the platform being built, then copies it into a `debian:bookworm-slim` runti
 | Health check | `pinakesd healthcheck` every 30 seconds (timeout 10 s, start period 60 s, 3 retries) |
 | Configuration and credentials | None; you mount them |
 
-The image sets three settings as environment variables:
+The image sets four settings as environment variables:
 
 | Variable | Value |
 | --- | --- |
 | `PINAKES__LISTEN` | `0.0.0.0:8090` |
 | `PINAKES__ADMIN_LISTEN` | `127.0.0.1:9090` |
 | `PINAKES__OSM__DUMP_DIR` | `/var/lib/pinakes/dumps` |
+| `PINAKES__CATALOGUES__DIR` | `/var/lib/pinakes/catalogues` |
 
-The environment wins over the TOML file, so `listen`, `admin_listen` and `osm.dump_dir` in a
-mounted TOML file have no effect. To change one, pass the variable, such as
+The environment wins over the TOML file, so `listen`, `admin_listen`, `osm.dump_dir` and
+`catalogues.dir` in a mounted TOML file have no effect. To change one, pass the variable, such as
 `--env PINAKES__LISTEN=…`.
 
 ### Build the image
@@ -106,6 +107,7 @@ To run a command, put it after the image name, with the same mounts and environm
 
 - `--config /etc/pinakes/pinakes.toml --migrate`
 - `--config /etc/pinakes/pinakes.toml reextract all`, with the daemon stopped
+- `--config /etc/pinakes/pinakes.toml catalogue status`, beside the daemon
 
 ## CI and image publishing
 
@@ -215,6 +217,7 @@ docker buildx imagetools inspect "registry-1.docker.io/synonymsoft/pinakes:$VERS
 | Nominatim | Venue geocoding and OpenStreetMap place details (`osm.nominatim_url`) | Self-hosted or hosted ([Nominatim](#nominatim)). For hardware, see [Nominatim's installation guide](https://nominatim.org/release-docs/5.2/admin/Installation/). |
 | Nexus | The reference feed and social and reach reads (`nexus_url`) | A Nexus that serves the `/v1` routes Pinakes reads ([README](../README.md)). It is a fixed, trusted upstream; optional authorization comes from the environment. |
 | Dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | Persistent and writable, with room for two copies of the file ([ODbL dump](operations.md#odbl-dump)). A CDN can cache the file by its `ETag`. |
+| Catalogue directory | `catalogues.dir`: downloads and temporary files of catalogue imports, one directory per catalogue | Writable by UID 10001, with room for the largest large catalogue's full import ([catalogues](#catalogues)). It need not be backed up. |
 | Prometheus and Alertmanager | Scraping the admin `/metrics` and evaluating the supplied alerts | A private scrape path. [ops/README.md](../ops/README.md) has the rules and a Grafana dashboard. |
 | MusicBrainz mirror (optional) | Music lookups, at `[also_on.sources.musicbrainz] base_url` | Optional. The mirror's host gets the shared per-host pace, and a mirror on a private address is refused ([operations](operations.md#also-on)). See the [MusicBrainz Server documentation](https://musicbrainz.org/doc/MusicBrainz_Server). |
 
@@ -300,11 +303,32 @@ FROM pg_stat_user_tables WHERE relname <> 'spatial_ref_sys';
 To count the graph again, count `MATCH ()-[t:TAGGED]->(x:Resource)` and return `count(t)` and
 `count(DISTINCT x)`. Don't count every tag in the network as a reference to an external resource.
 
+### Catalogue cards
+
+A catalogue card takes about 1 KB in PostgreSQL with its indexes (measured on 1.9 million cards).
+Every catalogue is on by default; switch off the ones you don't want
+([operations](operations.md#catalogue-sections)). A small instance takes a part:
+`catalogues.osm.region` for one region of OpenStreetMap, `catalogues.wikidata.limit` and
+`catalogues.musicbrainz.limit` for the first items of those.
+
 ### Backups
 
 Back up off-host and test your restores. Dump the whole database, not only `resource`: operator
 curation (`group_override`) and the change journal (`resource_change`) cannot be rebuilt from a
 Nexus replay. Budget backup retention apart from the database itself.
+
+## Catalogues
+
+- **Free disk.** Before a run starts or resumes, its importer compares the free disk under its
+  directory (`catalogues.dir/<name>`) with what the run still needs. While it is short, the run
+  waits, and `pinakesd catalogue status` and the log say why. Only that file system is checked;
+  size PostgreSQL's disk from the [storage model](#storage-model).
+- **One large import at a time.** Full imports of Wikidata, MusicBrainz, OpenStreetMap and
+  OpenAlex run one at a time, so their temporary files don't pile up: one cut off by a failure or
+  a restart keeps the turn until it has finished. Give `catalogues.dir` room for the largest of
+  them. A large catalogue switched off in the middle of its full import keeps its files there
+  until it is on again and finishes, or until `pinakesd catalogue drop <name>` deletes its
+  directory with its cards.
 
 ## Network and secrets
 

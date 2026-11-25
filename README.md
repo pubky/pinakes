@@ -141,6 +141,7 @@ its extensions, and the daemon connects as the database's owner
 | `pinakesd --config <path>` | Runs the daemon, and creates the schema on an empty database |
 | `pinakesd --config <path> --migrate` | Creates the schema on an empty database and exits |
 | `pinakesd --config <path> reextract <route…\|all\|also-on>` | Reads stored links again after a parser or routing change; run it with the daemon stopped ([operations](docs/operations.md#database)) |
+| `pinakesd --config <path> catalogue status\|drop <name>` | Shows each catalogue's state, or deletes a catalogue that is off ([operations](docs/operations.md#catalogues)) |
 | `pinakesd healthcheck` | Asks the admin listener's `GET /healthz`; exits non-zero unless it answers 200 |
 | `pinakesd --openapi` | Prints the OpenAPI document |
 
