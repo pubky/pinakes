@@ -208,6 +208,17 @@ async fn a_shared_link_built_from_a_card_stands_for_its_cards(pool: PgPool) {
             {"label": "science-fiction", "count": 1}
         ])
     );
+    // No card has the tag `books`: the plain read, whose facets count the link's labels too.
+    let page = common::get(&app, "/v1/search?tags=books&facet=tags").await;
+    assert_eq!(urls(&page), [SPOTIFY]);
+    assert_eq!(
+        page["facets"]["tags"],
+        json!([
+            {"label": "books", "count": 1},
+            {"label": "humourist", "count": 1},
+            {"label": "science-fiction", "count": 1}
+        ])
+    );
     // A social filter reads people's tags only.
     let page = common::get(&app, "/v1/search?tags=humourist&referenced=true").await;
     assert_eq!(urls(&page), Vec::<String>::new(), "{page}");

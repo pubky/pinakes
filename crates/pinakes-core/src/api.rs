@@ -2319,10 +2319,32 @@ fn push_tags(
     reach: &Option<crate::nexus::ReachSet>,
     tags: &[String],
 ) {
-    push_tags_or_labels(sql, unit, q, reach, tags, &[]);
+    if tags.is_empty() {
+        return;
+    }
+    if q.match_mode.as_deref() == Some("all") {
+        for tag in tags {
+            sql.push(format!(
+                " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label="
+            ))
+            .push_bind(tag.clone());
+            scope(sql, q, reach);
+            sql.push(")");
+        }
+    } else {
+        sql.push(format!(
+            " AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label=ANY("
+        ))
+        .push_bind(tags.to_vec())
+        .push(")");
+        scope(sql, q, reach);
+        sql.push(")");
+    }
 }
 /// [`push_tags`], where the labels a card built from a catalogue card of `labelled` shows count as
-/// its tags too (none: exactly [`push_tags`]).
+/// its tags too (none: exactly [`push_tags`]). Each condition is one set of IDs, so Postgres reads it
+/// as it reads people's tags alone: the links tagged so (in scope), and the few built from a card
+/// with such a label (`resource_catalogue_card_idx`).
 fn push_tags_or_labels(
     sql: &mut QueryBuilder<'_, Postgres>,
     unit: &str,
@@ -2334,40 +2356,30 @@ fn push_tags_or_labels(
     if tags.is_empty() {
         return;
     }
-    let labels = |sql: &mut QueryBuilder<'_, Postgres>, any: bool, value: Vec<String>| {
-        if labelled.is_empty() {
-            return;
-        }
-        sql.push(format!(" OR ({unit}.doc->'catalogue'->>'catalogue'=ANY("))
+    if labelled.is_empty() {
+        push_tags(sql, unit, q, reach, tags);
+        return;
+    }
+    let one = |sql: &mut QueryBuilder<'_, Postgres>, value: Vec<String>, any: bool| {
+        sql.push(format!(
+            " AND {unit}.id IN (SELECT f.resource_id FROM effective_reference f WHERE f.label=ANY("
+        ))
+        .push_bind(value.clone())
+        .push(")");
+        scope(sql, q, reach);
+        sql.push(" UNION SELECT x.id FROM resource x WHERE x.catalogue_card IS NOT NULL AND x.doc->'catalogue'->>'catalogue'=ANY(")
             .push_bind(labelled.to_vec())
-            .push(format!(") AND {unit}.doc->'labels'"))
+            .push(") AND x.doc->'labels'")
             .push(if any { " ?| " } else { " ?& " })
             .push_bind(value)
             .push("::text[])");
     };
-    let open = if labelled.is_empty() { "" } else { "(" };
-    let close = if labelled.is_empty() { "" } else { ")" };
     if q.match_mode.as_deref() == Some("all") {
         for tag in tags {
-            sql.push(format!(
-                " AND {open}EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label="
-            ))
-            .push_bind(tag.clone());
-            scope(sql, q, reach);
-            sql.push(")");
-            labels(sql, false, vec![tag.clone()]);
-            sql.push(close);
+            one(sql, vec![tag.clone()], false);
         }
     } else {
-        sql.push(format!(
-            " AND {open}EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id={unit}.id AND f.label=ANY("
-        ))
-        .push_bind(tags.to_vec())
-        .push(")");
-        scope(sql, q, reach);
-        sql.push(")");
-        labels(sql, true, tags.to_vec());
-        sql.push(close);
+        one(sql, tags.to_vec(), true);
     }
 }
 /// Whether a search may list catalogue cards nobody referenced: not with `referenced=true`, a
@@ -3286,9 +3298,9 @@ pub async fn search(
         }
         _ => CardUnits::default(),
     };
-    // Cards built from a catalogue card are listed with the labels they show, which count as
-    // tags as a card's do: read as the referenced branch beside the cards, even with no card
-    // listed.
+    // Cards built from a catalogue card are listed with the labels they show, which count as tags
+    // as a card's do (with cards listed, in the referenced branch beside them; else in the plain
+    // read, `backed`).
     let backed = cards_allowed
         && card_units.units.is_empty()
         && sqlx::query_scalar::<_, bool>(
@@ -3296,7 +3308,12 @@ pub async fn search(
         )
         .fetch_one(&state.pool)
         .await?;
-    let with_cards = !card_units.units.is_empty() || backed;
+    let with_cards = !card_units.units.is_empty();
+    let labelled: Vec<String> = crate::catalogue::join::joinable(&state.config.catalogues)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
     let mut sql = QueryBuilder::<Postgres>::new("WITH ");
     if with_cards {
         push_card_units(&mut sql, &card_units.units, &catalogues);
@@ -3465,10 +3482,6 @@ pub async fn search(
         // each branch with its own filters as plain conditions: references and people's tags (and
         // the labels a card built from a catalogue card shows) on the referenced units, labels
         // (their tags) on the cards.
-        let labelled: Vec<String> = crate::catalogue::join::joinable(&state.config.catalogues)
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
         sql.push(" FROM (SELECT su.*,CASE WHEN su.doc->'catalogue'->>'catalogue'=ANY(")
             .push_bind(labelled.clone())
             .push(") AND jsonb_typeof(su.doc->'labels')='array' THEN ARRAY(SELECT jsonb_array_elements_text(su.doc->'labels')) ELSE '{}'::text[] END AS labels,NULL::real AS fame,NULL::text[] AS hidden_by FROM search_unit su WHERE true");
@@ -3648,7 +3661,9 @@ pub async fn search(
         push_referenced(&mut sql, "r", &q, &reach);
     }
     if !with_cards {
-        push_tags(&mut sql, "r", &q, &reach, &tags);
+        // People's tags, and the labels of the cards built from a catalogue card when there are any.
+        let labelled: &[String] = if backed { &labelled } else { &[] };
+        push_tags_or_labels(&mut sql, "r", &q, &reach, &tags, labelled);
     }
     if let (true, Some(since)) = (related_groups, since) {
         // Each row's group (or the row alone) over the rows that pass: its members' taggers
@@ -3758,6 +3773,19 @@ pub async fn search(
             .push(" r CROSS JOIN unnest(r.labels) x(label)) l GROUP BY l.label ORDER BY count DESC,l.label LIMIT ")
             .push_bind(FACET_LIST_CAP)
             .push(") t),'[]')");
+    } else if asked.tags && backed {
+        // People's tags and the labels of the cards built from a catalogue card together.
+        sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT l.label,count(DISTINCT l.unit_id) AS count FROM (SELECT r.unit_id,f.label FROM ")
+            .push(counted)
+            .push(" r JOIN effective_reference f ON r.id=f.resource_id WHERE f.label IS NOT NULL");
+        scope(&mut sql, &q, &reach);
+        sql.push(" UNION ALL SELECT r.unit_id,x.label FROM ")
+            .push(counted)
+            .push(" r CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN r.doc->'catalogue'->>'catalogue'=ANY(")
+            .push_bind(labelled.clone())
+            .push(") AND jsonb_typeof(r.doc->'labels')='array' THEN r.doc->'labels' ELSE '[]'::jsonb END) x(label) WHERE r.id IN (SELECT x.id FROM resource x WHERE x.catalogue_card IS NOT NULL)) l GROUP BY l.label ORDER BY count DESC,l.label LIMIT ")
+            .push_bind(FACET_LIST_CAP)
+            .push(") t),'[]')");
     } else if asked.tags {
         sql.push("coalesce((SELECT jsonb_agg(to_jsonb(t) ORDER BY count DESC,label) FROM (SELECT f.label,count(DISTINCT r.unit_id) AS count FROM ")
             .push(counted)
@@ -3799,11 +3827,26 @@ pub async fn search(
     sql.push(format!(") AS facets, {REVISION} AS revision"));
     // A related page is planned for its own parameters every time: a cached generic plan
     // guesses its sets hold a row or two and nests loops over thousands.
-    let row = sql
-        .build()
-        .persistent(related.is_none())
-        .fetch_one(&state.pool)
-        .await?;
+    // A search through the catalogue paths (cards listed, or a link built from a card about) is
+    // planned near Postgres' JIT threshold, where compiling its expressions (about 85 ms on
+    // stable's data) costs several times the query: read without JIT, in its own transaction.
+    // Without catalogues the search reads as before.
+    let row = if with_cards || backed {
+        let mut tx = state.pool.begin().await?;
+        sqlx::query("SET LOCAL jit = off").execute(&mut *tx).await?;
+        let row = sql
+            .build()
+            .persistent(related.is_none())
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        row
+    } else {
+        sql.build()
+            .persistent(related.is_none())
+            .fetch_one(&state.pool)
+            .await?
+    };
     let mut items: Vec<Value> = serde_json::from_value(row.try_get("items")?)?;
     let has_more = items.len() > q.limit.unwrap_or(50);
     items.truncate(q.limit.unwrap_or(50));
