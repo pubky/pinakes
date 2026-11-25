@@ -607,6 +607,8 @@ struct Open {
     reread: std::sync::Mutex<Option<Reread>>,
     /// Merges after a removal ([`purge`]), for tests.
     purges: AtomicU64,
+    /// Searches that read the proposals (the text inside names, similar names), for tests.
+    proposed: AtomicU64,
 }
 /// A catalogue read again after a full import, a part per pass ([`SearchIndex::sync_catalogues`]):
 /// its documents are rewritten in place, card by card, marked with the import read (`marker`);
@@ -658,6 +660,7 @@ impl Open {
             database,
             reread: std::sync::Mutex::new(None),
             purges: AtomicU64::new(0),
+            proposed: AtomicU64::new(0),
         })
     }
     /// What the next commit records, with `boundary`.
@@ -737,6 +740,12 @@ impl SearchIndex {
     pub fn purges(&self) -> u64 {
         self.current()
             .map_or(0, |open| open.purges.load(Ordering::SeqCst))
+    }
+    /// How many searches read the proposals (tests).
+    #[doc(hidden)]
+    pub fn proposed(&self) -> u64 {
+        self.current()
+            .map_or(0, |open| open.proposed.load(Ordering::SeqCst))
     }
     /// [`SearchIndex::on_disk`] reading the queue `batch` rows at a time (tests).
     #[doc(hidden)]
@@ -1896,6 +1905,7 @@ impl Open {
         };
         if (q.inside_words && few) || words.is_none() {
             if let Some(query) = self.proposals(&searcher, &q.text, &filters) {
+                self.proposed.fetch_add(1, Ordering::SeqCst);
                 let seen: HashSet<String> = out.iter().map(|c| c.unit_id.clone()).collect();
                 out.extend(
                     found(query.as_ref(), false)?
