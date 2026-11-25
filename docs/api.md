@@ -1089,8 +1089,9 @@ distance. `q` matches like this:
   `over` finds `Sovereign`) and a name similar to the text (`pg_trgm`'s `%`, similarity 0.3 or
   more: `kraftwerg` finds `Kraftwerk`, `daft punk` finds `Daft`). The index proposes the names
   that hold the text's three-letter pieces (at least 30% of them) and Postgres keeps those it
-  matches, so a typo finds only near names. It proposes them only while fewer than 50 cards hold
-  every word of the text in their name (with that many, those fill the first page), and leaves
+  matches, so a typo finds only near names. It proposes them only while fewer cards than its
+  candidates (`limits.search_text_candidates`, 500) hold every word of the text in their name
+  (with that many, the candidates are those cards), and leaves
   out a piece more than 10,000 names and 5% of the index hold, asking one piece fewer for each
   (one at least): a typo made of common pieces alone finds nothing this way.
 - A short `q` (letters and digits only, at most three characters, counting one space between

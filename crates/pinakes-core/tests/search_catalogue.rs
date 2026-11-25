@@ -378,10 +378,15 @@ async fn a_referenced_card_is_listed_once(pool: PgPool) {
         "/v1/search?q=matterhorn",
         "/v1/search?type=WebPage,Mountain",
         "/v1/search",
+        "/v1/search?q=matterhorn&collapse=group",
+        "/v1/search?type=WebPage,Mountain&collapse=group",
+        "/v1/search?collapse=group",
     ] {
         let page = common::get(&app, path).await;
         assert_eq!(items(&page).len(), 1, "{path}: {page}");
         assert_eq!(items(&page)[0]["labels"], serde_json::json!([]), "{path}");
+        assert_eq!(items(&page)[0]["name"], "Matterhorn", "{path}");
+        assert_eq!(items(&page)[0]["type"], "WebPage", "{path}");
     }
 }
 
@@ -534,6 +539,67 @@ async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
             "Peak guide"
         ]
     );
+}
+
+/// The catalogue queue is read a batch per pass: an update run that writes faster than the index
+/// reads holds back neither the resource queue nor a re-read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_catalogue_queue_is_read_a_batch_per_pass(pool: PgPool) {
+    let cards: Vec<Card> = (1..=5)
+        .map(|n| card(n, &format!("Peak {n}"), "Mountain", &[], None, 0.5))
+        .collect();
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    let index = search_index::SearchIndex::in_memory_with_batch(2);
+    index.set_catalogues(&["wikidata"]);
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        items(&common::get(&app, "/v1/search?q=peak").await).len(),
+        5
+    );
+    sqlx::query("UPDATE catalogue_state SET run='update' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let renamed: Vec<Card> = (1..=5)
+        .map(|n| card(n, &format!("Summit {n}"), "Mountain", &[], None, 0.5))
+        .collect();
+    store::upsert(&pool, Catalogue::Wikidata, 1, &renamed, None)
+        .await
+        .unwrap();
+    // Each pass (one before each search here) reads two of the five changes.
+    for found in [2, 4, 5] {
+        assert_eq!(
+            items(&common::get(&app, "/v1/search?q=summit&limit=20").await).len(),
+            found
+        );
+    }
+}
+
+/// A catalogue switched off during its first re-read (documents written, no import recorded
+/// yet) leaves the index files at the next pass.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_catalogue_switched_off_during_its_reread_leaves_the_index(pool: PgPool) {
+    let cards: Vec<Card> = (1..=6)
+        .map(|n| card(n, &format!("Peak {n}"), "Mountain", &[], None, 0.5))
+        .collect();
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    let index = search_index::SearchIndex::in_memory_with_reread_part(2);
+    index.set_catalogues(&[]);
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    common::get(&app, "/v1/search?q=peak").await;
+    assert!(!index.holds_word("peak"));
+    // Switched on: the first part of its re-read.
+    index.set_catalogues(&["wikidata"]);
+    common::get(&app, "/v1/search?q=peak").await;
+    assert!(index.holds_word("peak"));
+    // Switched off before the re-read ends.
+    index.set_catalogues(&[]);
+    common::get(&app, "/v1/search?q=peak").await;
+    assert!(!index.holds_word("peak"));
 }
 
 /// A card whose link a resource has that search does not list (a link referenced but not read

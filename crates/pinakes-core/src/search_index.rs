@@ -69,10 +69,6 @@ const SUBSTRING_SCORE: Score = 8.0;
 /// Each three-letter piece a name shares with the text (Postgres' trigram similarity, `pg_trgm`),
 /// proposed to Postgres.
 const SIMILAR_PIECE_SCORE: Score = 0.5;
-/// The proposals (the text inside a name, similar names) run only while fewer matches than this
-/// hold every word of the text in their name: Postgres' own text search ranks those first, so with
-/// this many (a default page) no other reaches the first page.
-pub const TYPO_BELOW: usize = 50;
 /// The share of documents above which a three-letter piece is too common to ask for, once it is
 /// in at least [`COMMON_PIECE_DOCS`] documents.
 const COMMON_PIECE: f64 = 0.05;
@@ -442,6 +438,7 @@ struct CardRow {
     id: i64,
     catalogue: String,
     source: String,
+    source_id: String,
     uri: String,
     type_name: String,
     name: String,
@@ -452,8 +449,20 @@ struct CardRow {
     lon: Option<f64>,
     fame: f32,
 }
+/// A catalogue card as the index reads it ([`CardRow`]).
+macro_rules! card_columns {
+    () => {
+        "SELECT c.id, c.catalogue, c.source, c.source_id, c.uri, c.type AS type_name, c.name, c.other_names, c.description, c.labels, ST_Y(c.point) AS lat, ST_X(c.point) AS lon, c.fame FROM catalogue_card c"
+    };
+}
 /// The cards of the catalogues given.
-const CARDS: &str = "SELECT c.id, c.catalogue, c.source, c.uri, c.type AS type_name, c.name, c.other_names, c.description, c.labels, ST_Y(c.point) AS lat, ST_X(c.point) AS lon, c.fame FROM catalogue_card c WHERE c.catalogue=ANY($1)";
+const CARDS: &str = concat!(card_columns!(), " WHERE c.catalogue=ANY($1)");
+/// The next part of one catalogue's cards after a source ID, in the order of its unique
+/// `(catalogue, source_id)` index, so each part reads only its own rows.
+const CARDS_PART: &str = concat!(
+    card_columns!(),
+    " WHERE c.catalogue=$1 AND c.source_id>$2 ORDER BY c.source_id LIMIT $3"
+);
 /// The index's ID of a catalogue card's document (its unit ID is the resource ID its link would
 /// have, [`card_unit`]).
 fn card_key(id: i64) -> String {
@@ -606,8 +615,8 @@ struct Open {
 struct Reread {
     catalogue: String,
     marker: String,
-    /// The last card rewritten (`catalogue_card.id`).
-    after: i64,
+    /// The source ID of the last card rewritten (empty before the first part).
+    after: String,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -1050,17 +1059,30 @@ impl SearchIndex {
     async fn sync_catalogues(&self, pool: &PgPool, open: &Arc<Open>) -> Result<()> {
         let enabled = self.catalogues();
         let recorded = open.catalogues.lock().expect("markers").clone();
-        let off: Vec<String> = recorded
-            .keys()
-            .filter(|c| !enabled.contains(c))
-            .cloned()
-            .collect();
+        // The catalogues that are off and still have documents: those recorded, and one switched
+        // off during its first re-read (documents, no marker yet), even across a restart.
+        let off: Vec<String> = {
+            let searcher = open.reader.searcher();
+            crate::catalogue::Catalogue::ALL
+                .iter()
+                .map(|c| c.name().to_owned())
+                .filter(|c| !enabled.contains(c))
+                .filter(|c| {
+                    recorded.contains_key(c)
+                        || searcher
+                            .doc_freq(&Term::from_field_text(open.fields.catalogue, c))
+                            .is_ok_and(|n| n > 0)
+                })
+                .collect()
+        };
         if !off.is_empty() {
             let removing = open.clone();
             tokio::task::spawn_blocking(move || removing.remove_catalogues(&off)).await??;
             self.revision.fetch_add(1, Ordering::SeqCst);
         }
-        loop {
+        // One batch of the catalogue queue per pass: an import or update run that writes faster
+        // than the index reads holds back neither the resource queue nor the re-read.
+        'drain: {
             let after = match self.home {
                 Home::Disk(_) => 0,
                 Home::Memory => open.catalogue_seq.load(Ordering::SeqCst) as i64,
@@ -1073,9 +1095,8 @@ impl SearchIndex {
             .fetch_all(pool)
             .await?;
             let Some(&(last, _)) = rows.last() else {
-                break;
+                break 'drain;
             };
-            let full = rows.len() as i64 >= self.batch;
             let mut ids: Vec<i64> = rows.iter().map(|(_, id)| *id).collect();
             ids.sort();
             ids.dedup();
@@ -1099,9 +1120,6 @@ impl SearchIndex {
                 }
                 Home::Memory => open.catalogue_seq.store(last as u64, Ordering::SeqCst),
             }
-            if !full {
-                break;
-            }
         }
         // One part of a re-read: the one under way, else a catalogue with a newer import.
         let current = open.reread.lock().expect("reread").clone();
@@ -1115,7 +1133,7 @@ impl SearchIndex {
                     .map(|c| Reread {
                         catalogue: c.clone(),
                         marker: markers.get(c).cloned().unwrap_or_default(),
-                        after: 0,
+                        after: String::new(),
                     })
             }
         };
@@ -1123,15 +1141,16 @@ impl SearchIndex {
         let Some(reread) = reread else {
             return Ok(());
         };
-        let cards: Vec<CardRow> =
-            sqlx::query_as(&format!("{CARDS} AND c.id>$2 ORDER BY c.id LIMIT $3"))
-                .bind(std::slice::from_ref(&reread.catalogue))
-                .bind(reread.after)
-                .bind(self.reread_part)
-                .fetch_all(pool)
-                .await?;
+        let cards: Vec<CardRow> = sqlx::query_as(CARDS_PART)
+            .bind(&reread.catalogue)
+            .bind(&reread.after)
+            .bind(self.reread_part)
+            .fetch_all(pool)
+            .await?;
         let done = (cards.len() as i64) < self.reread_part;
-        let after = cards.last().map_or(reread.after, |c| c.id);
+        let after = cards
+            .last()
+            .map_or(reread.after.clone(), |c| c.source_id.clone());
         let rewriting = open.clone();
         let part = reread.clone();
         tokio::task::spawn_blocking(move || rewriting.reread_part(&part, &cards, done)).await??;
@@ -1868,13 +1887,11 @@ impl Open {
             None => vec![],
         };
         // The text inside a name and similar names, as Postgres finds them, for a text that is
-        // not short: proposed, and checked there; only while fewer than [`TYPO_BELOW`] matches
-        // hold every word in their name (Postgres ranks those first, so with that many no other
-        // reaches a page).
+        // not short: proposed, and checked there; only while fewer matches than the candidates
+        // asked for (`cap`) hold every word in their name, in any order and on any page: with
+        // that many, the candidates are those names already.
         let few = match self.name_words_query(&items, &filters) {
-            Some(names) => {
-                searcher.search(names.as_ref(), &tantivy::collector::Count)? < TYPO_BELOW
-            }
+            Some(names) => searcher.search(names.as_ref(), &tantivy::collector::Count)? < cap,
             None => true,
         };
         if (q.inside_words && few) || words.is_none() {

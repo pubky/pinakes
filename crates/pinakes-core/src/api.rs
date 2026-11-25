@@ -3456,7 +3456,13 @@ pub async fn search(
             .push_bind(cap)
             .push(") AS refs FROM grouped_ids gi CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM reference f WHERE f.resource_id=gi.base AND f.kind<>'post' LIMIT ")
             .push_bind(cap)
-            .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,e.id,e.unit_id");
+            .push(") x) c GROUP BY gi.root), filtered AS (SELECT DISTINCT ON(coalesce(u.group_id,e.unit_id)) e.* FROM eligible e LEFT JOIN group_unit u ON u.unit_id=e.unit_id AND u.group_id IS NOT NULL LEFT JOIN grouped_refs c ON c.resource_id=e.id ORDER BY coalesce(u.group_id,e.unit_id),coalesce(c.refs,0) DESC,");
+        if with_cards {
+            // A card and the listed resource of its link share the ID, the group and the
+            // references: the resource is the row.
+            sql.push("e.fame IS NOT NULL,");
+        }
+        sql.push("e.id,e.unit_id");
     }
     if with_cards {
         // A catalogue card whose link a listed resource has is that resource: one row per unit,

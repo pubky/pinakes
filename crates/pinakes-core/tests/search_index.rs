@@ -222,7 +222,11 @@ async fn typos_match_names_as_similar_as_postgres(pool: PgPool) {
     let seat = card(&pool, 4, "Seat belt stories", "Safety.", "cars", 1).await;
     card(&pool, 5, "Lolita", "A novel.", "books", 1).await;
     card(&pool, 6, "Don Quixote", "A novel.", "books", 1).await;
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    // The fewest candidates the configuration allows, so the proposals' limit is reached below.
+    let mut config = Config::default();
+    config.search.text_candidates = 50;
+    let cap = config.search.text_candidates;
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     for q in ["kraftwerg", "kraftwrek"] {
         assert_eq!(
             ids_of(&common::get(&app, &format!("/v1/search?q={q}")).await),
@@ -242,16 +246,16 @@ async fn typos_match_names_as_similar_as_postgres(pool: PgPool) {
             "{q}"
         );
     }
-    // A similar name is listed while fewer than TYPO_BELOW names hold the words; with that many,
-    // Postgres ranks them first, and the proposals are not read.
-    for n in 7..7 + search_index::TYPO_BELOW - 1 {
+    // A similar name is listed while fewer names than the candidates hold the words; with that
+    // many, the candidates are those names, and the proposals are not read.
+    for n in 7..7 + cap - 1 {
         card(&pool, n, &format!("Music {n}"), "Sound.", "music", 1).await;
     }
     let page = ids_of(&common::get(&app, "/v1/search?q=music&limit=200").await);
     assert!(page.contains(&musik), "{} cards", page.len());
     card(&pool, 500, "Music 500", "Sound.", "music", 1).await;
     let page = ids_of(&common::get(&app, "/v1/search?q=music&limit=200").await);
-    assert_eq!(page.len(), search_index::TYPO_BELOW);
+    assert_eq!(page.len(), cap);
     assert!(!page.contains(&musik));
 }
 

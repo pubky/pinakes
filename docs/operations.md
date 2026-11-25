@@ -1631,21 +1631,24 @@ The index is derived data, rebuilt from the database when it is missing.
   rows it read; a row of a transaction still running is read by a later pass. A card that is
   deleted, scrubbed or loses its last reference leaves every search at once (Postgres no longer
   lists it, or finds it without text) and the index within a pass. A pass that removed a card's
-  text (a post found gone, emptied or opted out, a catalogue card no longer listed) merges the
-  segments that hold the card's documents, current or deleted, so its words leave the index files
-  too; any other pass merges nothing, and segments with 5% deleted documents merge on their own.
-- **Catalogue cards.** A catalogue's full import queues only the cards whose texts it changes;
-  the cards it adds or removes are not queued: once it has finished
-  (`catalogue_state.last_import_at`), the daemon reads all the catalogue's cards again, 20,000 per
-  pass after the pass's queues, and when it has read the last one removes the documents of
-  earlier imports, so millions of imported cards never pass through a queue and referenced links
-  keep their 2 s meanwhile. Until then a removed card stays in the index, and Postgres, which
-  checks every candidate, leaves it out. An update run queues the cards it adds, changes or
-  removes (`search_index_catalogue_queue`, by triggers on `catalogue_card`), read a batch at a
-  time as above. A catalogue switched off leaves every search
-  at once (searches read only the catalogues that are on) and the index at the daemon's next pass,
-  which removes its documents; `pinakesd catalogue drop` then deletes its cards. A
-  catalogue turned back on is read again at the next pass.
+  text (a post found gone, emptied or opted out) merges the segments that hold the card's
+  documents, current or deleted, so its words leave the index files too; any other pass merges
+  nothing, and segments with 5% deleted documents merge on their own (as a changed or removed
+  catalogue card's old words do).
+- **Catalogue cards.** A catalogue's full import queues only the cards whose texts it changes; the
+  cards it adds or removes are not queued: once it has finished (`catalogue_state.last_import_at`),
+  the daemon reads all the catalogue's cards again, 20,000 per pass (in source-ID order) after the
+  pass's queues, and when it has read the last one removes the documents of earlier imports, so
+  millions of imported cards never pass through a queue and referenced links keep their 2 s
+  meanwhile. Until then a removed card stays in the index, and Postgres, which checks every
+  candidate, leaves it out. An update run queues the cards it adds, changes or removes
+  (`search_index_catalogue_queue`, by triggers on `catalogue_card`), 20,000 rows per pass, so a run
+  that writes faster than the index reads holds back neither referenced links nor the re-read. A
+  daemon restarted during a re-read starts it again from the catalogue's first card. A catalogue
+  switched off leaves every search at once (searches read only the catalogues that are on) and the
+  index at the daemon's next pass, which removes its documents (also those of a re-read under way);
+  `pinakesd catalogue drop` then deletes its cards. A catalogue turned back on is read again at the
+  next pass.
 - **Start.** The daemon opens the index. When the directory or its generation is missing,
   unreadable, of another format, or built from another database (each database has its own
   identity: a token in `search_index_database` and the database's Postgres ID, so a restored copy
