@@ -427,18 +427,12 @@ async fn start(
         pool.clone(),
         std::sync::Arc::new(config.clone()),
     );
-    for importer in pinakes_core::catalogue::run::importers(&config) {
-        let catalogue = importer.catalogue();
-        if config.catalogues.enabled(catalogue) {
-            tasks.spawn(
-                catalogue.task_name(),
-                pinakes_core::catalogue::run::run(
-                    importer,
-                    catalogues.clone(),
-                    shutdown_rx.clone(),
-                ),
-            );
-        }
+    let importers = pinakes_core::catalogue::run::importers(&config);
+    for importer in pinakes_core::catalogue::run::to_start(importers, &config) {
+        tasks.spawn(
+            importer.catalogue().task_name(),
+            pinakes_core::catalogue::run::run(importer, catalogues.clone(), shutdown_rx.clone()),
+        );
     }
     warn_admin_listener(admin_address);
     warn_admin_without_token(admin_address, config.admin_token.is_some());
@@ -509,25 +503,38 @@ async fn catalogue_command(
             let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
                 bail!("an importer of catalogue {catalogue} is running (a pinakesd started with it enabled): switch it off and restart that daemon, then drop");
             };
-            // A line per million cards, so a long drop shows it is moving.
-            let mut shown = 0;
-            let dropped = store::drop_catalogue(pool, catalogue, |n| {
-                if n >= shown + 1_000_000 {
-                    shown = n;
-                    println!("dropped {n} cards of catalogue {catalogue} so far");
-                }
-            })
-            .await;
+            // The lock is held until the cards, the state row and the files are gone.
+            let dropped = drop_held(config, pool, catalogue).await;
             lock.release().await;
-            println!(
-                "dropped {} cards of catalogue {catalogue}; its state is reset",
-                dropped?
-            );
+            dropped?;
         }
     }
     Ok(())
 }
 
+/// The drop, under the catalogue's lock: its cards and state row, then its directory of
+/// downloads and temporary files (`catalogues.dir/<name>`).
+async fn drop_held(config: &Config, pool: &sqlx::PgPool, catalogue: Catalogue) -> Result<()> {
+    // A line per million cards, so a long drop shows it is moving.
+    let mut shown = 0;
+    let dropped = pinakes_core::catalogue::store::drop_catalogue(pool, catalogue, |n| {
+        if n >= shown + 1_000_000 {
+            shown = n;
+            println!("dropped {n} cards of catalogue {catalogue} so far");
+        }
+    })
+    .await?;
+    println!("dropped {dropped} cards of catalogue {catalogue}; its state is reset");
+    let dir = config.catalogues.work_dir(catalogue);
+    match tokio::fs::remove_dir_all(&dir).await {
+        Ok(()) => println!("removed {}", dir.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("remove {}", dir.display()));
+        }
+    }
+    Ok(())
+}
 /// A `nexus_authorization` sent to an `http://` Nexus on another machine crosses the network in
 /// clear.
 fn warn_plain_nexus(config: &Config) {

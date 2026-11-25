@@ -64,7 +64,7 @@ impl Importer for Fixture {
     fn catalogue(&self) -> Catalogue {
         self.catalogue
     }
-    fn disk_need(&self, _run: Run) -> u64 {
+    fn disk_need(&self, _run: Run, _state: &State) -> u64 {
         self.need
     }
     async fn plan(&self, _state: &State) -> Result<Plan> {
@@ -108,6 +108,12 @@ impl Importer for Fixture {
         let (changed, removed) = std::mem::take(&mut *self.changes.lock().unwrap());
         job.write(&changed, json!({ "step": "written" })).await?;
         job.remove(&removed, json!({ "step": "removed" })).await?;
+        // The next update starts one sequence on.
+        let sequence = job
+            .position()
+            .and_then(|p| p["sequence"].as_u64())
+            .unwrap_or(0);
+        job.set_position(json!({ "sequence": sequence + 1 }));
         Ok(())
     }
 }
@@ -259,6 +265,20 @@ async fn imports_rewrite_only_changed_cards_and_remove_unseen_ones(pool: PgPool)
         // An update writes no row but the changed one, not even a stamp.
         assert_eq!(xmin != was, id == "Q8", "{id}");
     }
+    // The position the update left is kept for the next, which starts from it.
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(s.position, Some(json!({"sequence": 1})));
+    *fixture.next.lock().unwrap() = Some(Run::Update);
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(s.position, Some(json!({"sequence": 2})));
+    // A full import keeps it too.
+    *fixture.next.lock().unwrap() = Some(Run::Import);
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(
+        state(&pool, Catalogue::Wikidata).await.position,
+        Some(json!({"sequence": 2}))
+    );
     // Nothing is due: the task waits.
     assert!(matches!(
         run::step(&fixture, &ctx).await.unwrap(),
@@ -740,17 +760,124 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     assert_eq!(get(&metrics2.catalogue_lag, "osm"), 0);
 }
 
-/// The registered importers start only for the catalogues that are on; with every catalogue
-/// off, none starts.
+/// `pinakesd` starts the importers of the catalogues that are on, and none with every catalogue
+/// off.
 #[test]
-fn no_importer_runs_for_a_catalogue_that_is_off() {
+fn only_the_importers_of_catalogues_that_are_on_start() {
+    let all = || -> Vec<Arc<dyn Importer>> {
+        Catalogue::ALL
+            .into_iter()
+            .map(|c| Arc::new(Fixture::new(c, vec![])) as Arc<dyn Importer>)
+            .collect()
+    };
+    let names = |config: &Config| -> Vec<&str> {
+        run::to_start(all(), config)
+            .iter()
+            .map(|i| i.catalogue().name())
+            .collect()
+    };
     let mut config = Config::default();
+    assert_eq!(names(&config).len(), 7);
+    config.catalogues.osm.enabled = false;
+    config.catalogues.software.enabled = false;
+    assert_eq!(
+        names(&config),
+        [
+            "wikidata",
+            "musicbrainz",
+            "openalex",
+            "podcastindex",
+            "tranco"
+        ]
+    );
     config.catalogues.enabled = false;
-    let started = AtomicUsize::new(0);
-    for importer in run::importers(&config) {
-        if config.catalogues.enabled(importer.catalogue()) {
-            started.fetch_add(1, Ordering::SeqCst);
-        }
-    }
+    assert!(names(&config).is_empty());
+    let started = AtomicUsize::new(names(&config).len());
     assert_eq!(started.load(Ordering::SeqCst), 0);
+}
+
+/// A large catalogue's full import cut off by a failure keeps the large-import turn until it
+/// finishes: another large import waits though no import runs, unless the cut-off catalogue is
+/// switched off.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cut_off_large_import_keeps_its_turn(pool: PgPool) {
+    let ctx = context(&pool, plenty());
+    let wikidata = Fixture::new(Catalogue::Wikidata, cards(25));
+    *wikidata.fail_after.lock().unwrap() = Some(1);
+    assert!(run::step(&wikidata, &ctx).await.is_err());
+    assert_eq!(
+        state(&pool, Catalogue::Wikidata).await.run.as_deref(),
+        Some("import")
+    );
+    let place = |c: Card| Card {
+        uri: format!("https://www.openstreetmap.org/node/{}", &c.source_id[1..]),
+        r#type: "Place".into(),
+        ..c
+    };
+    let osm = Fixture::new(Catalogue::Osm, cards(3).into_iter().map(place).collect());
+    assert_eq!(
+        run::step(&osm, &ctx).await.unwrap(),
+        Next::Wait(ctx.pace.turn)
+    );
+    let s = state(&pool, Catalogue::Osm).await;
+    assert!(
+        s.waiting
+            .as_deref()
+            .unwrap()
+            .starts_with("wikidata's full import is under way"),
+        "{:?}",
+        s.waiting
+    );
+    assert_eq!((s.run, s.generation), (None, 0));
+    // The large-import lock is free again: nothing holds the turn but the state row.
+    let large = SessionLock::try_take(&pool, pinakes_core::locks::CATALOGUE_LARGE_IMPORT)
+        .await
+        .unwrap()
+        .unwrap();
+    large.release().await;
+    // Wikidata switched off: its cut-off import no longer holds the turn.
+    let mut config = CataloguesConfig::default();
+    config.wikidata.enabled = false;
+    store::sync_switches(&pool, &config).await.unwrap();
+    *osm.next.lock().unwrap() = Some(Run::Import);
+    assert_eq!(run::step(&osm, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(count(&pool, Catalogue::Osm).await, 3);
+    // On again, Wikidata resumes and finishes.
+    store::sync_switches(&pool, &CataloguesConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(run::step(&wikidata, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(state(&pool, Catalogue::Wikidata).await.cards, 25);
+}
+
+/// A row the table's checks refuse is left out alone: the rest of its part is written.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_the_table_refuses_does_not_stop_its_part(pool: PgPool) {
+    // Checked as the table checks it, a card over the details cap never reaches it.
+    let mut big = card(3);
+    for n in 0..800 {
+        big.details.insert(format!("k{n:03}"), json!(1));
+    }
+    let mut part = cards(5);
+    part[3] = big;
+    let report = store::upsert(&pool, Catalogue::Wikidata, 1, &part, None)
+        .await
+        .unwrap();
+    assert_eq!((report.inserted, report.rejected), (4, 1));
+    // The measure agrees with PostgreSQL's own.
+    for value in [
+        json!({"a": 1, "b": [1, 2.5, -3], "c": {"d": null, "e": "x\"y\u{e9}\n"}}),
+        json!({"big": 1e30, "small": 1.5e-7, "neg": -12345678901234i64}),
+    ] {
+        let printed: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
+            .bind(&value)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            pinakes_core::catalogue::jsonb_text_len(&value),
+            printed as usize,
+            "{value}"
+        );
+    }
 }

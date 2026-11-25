@@ -56,6 +56,9 @@ pub struct State {
     pub generation: i64,
     /// Where the run under way resumes, as its importer wrote it.
     pub cursor: Option<serde_json::Value>,
+    /// Where the next update starts (a replication sequence, a time), as the last finished run
+    /// left it; kept from run to run.
+    pub position: Option<serde_json::Value>,
     pub cards: i64,
     pub upstream_version: Option<String>,
     pub last_import_at: Option<DateTime<Utc>>,
@@ -214,24 +217,36 @@ async fn write_part(
             })
         })
         .collect();
-    let (inserted, changed): (i64, i64) = sqlx::query_as(
+    // `fit` keeps the rows the table's checks take, as PostgreSQL measures them: `Card::checked`
+    // already holds a card to them, and a row it misjudged is refused here alone, never with
+    // its whole part (which would stop the run at the same part on every retry).
+    let (inserted, changed, refused): (i64, i64, Vec<String>) = sqlx::query_as(
         "WITH input AS (SELECT * FROM jsonb_to_recordset($3::jsonb) AS x(source text,source_id text,uri text,type text,name text,other_names text[],description text,labels text[],keys text[],related_uris text[],lon float8,lat float8,fame real,details jsonb,content_hash text)),\
+         fit AS (SELECT * FROM input WHERE octet_length(uri) BETWEEN 1 AND 2048 AND octet_length(source_id) BETWEEN 1 AND 512 AND jsonb_typeof(details)='object' AND octet_length(details::text)<=8192),\
          written AS (INSERT INTO catalogue_card AS c(catalogue,source,source_id,uri,type,name,other_names,description,labels,keys,related_uris,point,fame,details,content_hash,seen_generation) \
           SELECT $1,source,source_id,uri,type,name,other_names,description,labels,keys,related_uris,\
-           CASE WHEN lon IS NULL OR lat IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint(lon,lat),4326) END,fame,details,decode(content_hash,'hex'),$2 FROM input \
+           CASE WHEN lon IS NULL OR lat IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint(lon,lat),4326) END,fame,details,decode(content_hash,'hex'),$2 FROM fit \
           ON CONFLICT (catalogue,source_id) DO UPDATE SET source=excluded.source,uri=excluded.uri,type=excluded.type,name=excluded.name,other_names=excluded.other_names,\
            description=excluded.description,labels=excluded.labels,keys=excluded.keys,related_uris=excluded.related_uris,point=excluded.point,fame=excluded.fame,\
            details=excluded.details,content_hash=excluded.content_hash,seen_generation=greatest(c.seen_generation,excluded.seen_generation),updated_at=now() \
           WHERE c.content_hash<>excluded.content_hash \
           RETURNING (c.xmax::text='0') AS inserted) \
-         SELECT count(*) FILTER (WHERE inserted),count(*) FILTER (WHERE NOT inserted) FROM written",
+         SELECT count(*) FILTER (WHERE inserted),count(*) FILTER (WHERE NOT inserted),\
+          array(SELECT source_id FROM input EXCEPT SELECT source_id FROM fit) FROM written",
     )
     .bind(catalogue.name())
     .bind(generation)
     .bind(serde_json::Value::Array(input))
     .fetch_one(&mut **tx)
     .await?;
-    let ids: Vec<&str> = part.iter().map(|r| r.source_id.as_str()).collect();
+    for id in &refused {
+        tracing::debug!(catalogue = catalogue.name(), source_id = %id, "catalogue card refused by the table's checks");
+    }
+    let ids: Vec<&str> = part
+        .iter()
+        .map(|r| r.source_id.as_str())
+        .filter(|id| !refused.iter().any(|r| r == id))
+        .collect();
     sqlx::query("UPDATE catalogue_card SET seen_generation=$2 WHERE catalogue=$1 AND source_id=ANY($3) AND seen_generation<$2")
         .bind(catalogue.name())
         .bind(generation)
@@ -246,7 +261,8 @@ async fn write_part(
     Ok(WriteReport {
         inserted: inserted as u64,
         changed: changed as u64,
-        unchanged: (part.len() as i64 - inserted - changed) as u64,
+        unchanged: (ids.len() as i64 - inserted - changed) as u64,
+        rejected: refused.len() as u64,
         ..WriteReport::default()
     })
 }
@@ -356,6 +372,19 @@ async fn sweep(
     }
 }
 
+/// A text on one line of the table: its control characters and line breaks as spaces.
+fn one_line(text: Option<&str>) -> String {
+    match text {
+        Some(text) if !text.trim().is_empty() => text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => "-".into(),
+    }
+}
 /// `pinakesd catalogue status`: one line per catalogue with its switch, phase, cards, the last
 /// full import and update, why it waits and its last error.
 pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
@@ -388,12 +417,8 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             state.map_or(0, |s| s.cards).to_string(),
             at(state.and_then(|s| s.last_import_at)),
             at(state.and_then(|s| s.last_update_at)),
-            state
-                .and_then(|s| s.waiting.clone())
-                .unwrap_or_else(|| "-".into()),
-            state
-                .and_then(|s| s.last_error.clone())
-                .unwrap_or_else(|| "-".into()),
+            one_line(state.and_then(|s| s.waiting.as_deref())),
+            one_line(state.and_then(|s| s.last_error.as_deref())),
         ]);
     }
     let widths: Vec<usize> = (0..8)
@@ -433,12 +458,13 @@ mod tests {
             run: None,
             generation: 2,
             cursor: None,
+            position: None,
             cards: 1234,
             upstream_version: Some("2026-11-24".into()),
             last_import_at: Some("2026-11-24T10:00:00Z".parse().unwrap()),
             last_update_at: None,
             waiting: None,
-            last_error: Some("timeout".into()),
+            last_error: Some("timed\nout".into()),
             error_count: 1,
             updated_at: Utc::now(),
         };
@@ -458,7 +484,8 @@ mod tests {
                 "10:00:00Z",
                 "-",
                 "-",
-                "timeout"
+                "timed",
+                "out"
             ]
         );
         let wikidata: Vec<_> = lines[1].split_whitespace().collect();

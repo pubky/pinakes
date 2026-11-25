@@ -915,7 +915,10 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
     for (alert, reads) in [
         (
             "CatalogueImportFailed",
-            &["pinakes_catalogue_import_errors_total", "pinakes_catalogue_enabled == 1"][..],
+            &[
+                "pinakes_catalogue_import_errors_total",
+                "pinakes_catalogue_enabled == 1",
+            ][..],
         ),
         (
             "CatalogueUpdateLag",
@@ -931,7 +934,10 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
             .find(|r| r["alert"].as_str() == Some(alert))
             .unwrap_or_else(|| panic!("{alert}"));
         for read in reads {
-            assert!(rule["expr"].as_str().unwrap().contains(read), "{alert}: {read}");
+            assert!(
+                rule["expr"].as_str().unwrap().contains(read),
+                "{alert}: {read}"
+            );
         }
     }
     let dashboard: Value =

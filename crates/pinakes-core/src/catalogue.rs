@@ -248,6 +248,11 @@ impl CataloguesConfig {
             .map(Catalogue::name)
             .collect()
     }
+    /// The directory of one catalogue's downloads and temporary files: `dir/<name>`.
+    /// `pinakesd catalogue drop` deletes it with the catalogue.
+    pub fn work_dir(&self, catalogue: Catalogue) -> std::path::PathBuf {
+        std::path::Path::new(&self.dir).join(catalogue.name())
+    }
     /// `limit` of Wikidata or MusicBrainz; none for the others.
     pub fn limit(&self, catalogue: Catalogue) -> Option<u64> {
         match catalogue {
@@ -309,7 +314,8 @@ const LABEL_INVALID: [char; 6] = [',', ':', ' ', '\t', '\n', '\r'];
 pub fn label(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
     let mut gap = false;
-    for c in raw.chars().flat_map(char::to_lowercase) {
+    // The whole text at once, as a client lower-cases a tag (a final Σ becomes ς).
+    for c in raw.to_lowercase().chars() {
         if c.is_whitespace() || LABEL_INVALID.contains(&c) || c == '_' || c == '-' {
             gap = true;
         } else if c.is_control() {
@@ -371,6 +377,59 @@ pub fn valid_key(key: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         && !value.is_empty()
         && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// A key as it is stored: [`valid_key`], with a DOI lower case and an ISBN as its ISBN-13, the
+/// forms a resource's keys take, and a `url:` key a resource ID; `None` for one that is not valid.
+pub fn stored_key(key: &str) -> Option<String> {
+    let key = key.trim();
+    if !valid_key(key) {
+        return None;
+    }
+    let (kind, value) = key.split_once(':')?;
+    match kind {
+        "doi" => crate::resolver::cards::doi(key).map(|doi| format!("doi:{doi}")),
+        "isbn" => crate::resolver::cards::isbn(key)
+            .map(|isbn| format!("isbn:{}", crate::resolver::cards::isbn13(&isbn))),
+        "url" => model::valid_id(value).then(|| key.to_owned()),
+        _ => Some(key.to_owned()),
+    }
+}
+/// The length of a JSON value as PostgreSQL prints a `jsonb` (`details::text`, which the table's
+/// check measures): `": "` and `", "` between entries, numbers written out in full.
+pub fn jsonb_text_len(value: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    let string = |s: &str| serde_json::to_string(s).map_or(usize::MAX / 4, |s| s.len());
+    match value {
+        Value::Null => 4,
+        Value::Bool(b) => {
+            if *b {
+                4
+            } else {
+                5
+            }
+        }
+        Value::Number(n) => match n.as_i64().map(|i| i.to_string()) {
+            Some(text) => text.len(),
+            // Rust prints a float in full, as PostgreSQL's numeric does.
+            None => n
+                .as_u64()
+                .map(|u| u.to_string())
+                .or_else(|| n.as_f64().map(|f| f.to_string()))
+                .map_or(usize::MAX / 4, |text| text.len()),
+        },
+        Value::String(s) => string(s),
+        Value::Array(items) => {
+            2 + items.iter().map(jsonb_text_len).sum::<usize>() + 2 * items.len().saturating_sub(1)
+        }
+        Value::Object(map) => {
+            2 + map
+                .iter()
+                .map(|(k, v)| string(k) + 2 + jsonb_text_len(v))
+                .sum::<usize>()
+                + 2 * map.len().saturating_sub(1)
+        }
+    }
 }
 
 /// One item as an importer reads it. [`Card::checked`] makes the stored row of it.
@@ -466,6 +525,10 @@ impl Card {
             return Err(Reject::SourceId);
         }
         let (_, uri, _) = model::identity(&self.uri).map_err(|_| Reject::Uri)?;
+        // Normalizing may lengthen a link (percent-encoding); the table holds 2048 bytes.
+        if uri.len() > 2048 {
+            return Err(Reject::Uri);
+        }
         if model::type_path(&self.r#type).is_empty() {
             return Err(Reject::Type);
         }
@@ -490,17 +553,16 @@ impl Card {
         let keys = self
             .keys
             .iter()
-            .map(|k| k.trim())
-            .filter(|k| valid_key(k) && seen.insert(k.to_string()))
+            .filter_map(|k| stored_key(k))
+            .filter(|k| seen.insert(k.clone()))
             .take(KEYS_CAP)
-            .map(str::to_owned)
             .collect();
         let mut seen = BTreeSet::from([uri.clone()]);
         let related_uris = self
             .related_uris
             .iter()
             .filter_map(|u| model::identity(u).ok().map(|(_, u, _)| u))
-            .filter(|u| seen.insert(u.clone()))
+            .filter(|u| u.len() <= 2048 && seen.insert(u.clone()))
             .take(RELATED_CAP)
             .collect();
         let (lon, lat) = match &self.point {
@@ -516,10 +578,10 @@ impl Card {
             Some(_) => return Err(Reject::Point),
         };
         let details = self.details.clone();
-        let size = serde_json::to_string(&details).map_or(usize::MAX, |s| s.len());
-        // PostgreSQL stores no NUL in jsonb text.
-        if size > DETAILS_CAP
-            || serde_json::to_string(&details).is_ok_and(|s| s.contains("\\u0000"))
+        let value = serde_json::Value::Object(details.clone());
+        // Measured as the table's check measures it; PostgreSQL stores no NUL in jsonb text.
+        if jsonb_text_len(&value) > DETAILS_CAP
+            || serde_json::to_string(&value).is_ok_and(|s| s.contains("\\u0000"))
         {
             return Err(Reject::Details);
         }
@@ -578,6 +640,7 @@ mod tests {
             ("bell\u{7}", Some("bell")),
             ("k-pop", Some("k-pop")),
             ("東京", Some("東京")),
+            ("ΟΔΟΣ", Some("\u{3bf}\u{3b4}\u{3bf}\u{3c2}")),
             ("a".repeat(20).as_str(), Some("aaaaaaaaaaaaaaaaaaaa")),
             ("a".repeat(21).as_str(), None),
             ("progressive electronic music", None),
@@ -721,6 +784,35 @@ mod tests {
             ),
             Reject::Details
         );
+        // 7.2 KB as compact JSON, 8.8 KB as PostgreSQL prints it: over the table's cap.
+        assert_eq!(
+            rejected(
+                |c| {
+                    for n in 0..800 {
+                        c.details.insert(format!("k{n:03}"), serde_json::json!(1));
+                    }
+                },
+                Catalogue::Wikidata
+            ),
+            Reject::Details
+        );
+    }
+    #[test]
+    fn details_are_measured_as_postgresql_prints_them() {
+        for (value, printed) in [
+            (serde_json::json!({}), "{}"),
+            (
+                serde_json::json!({"a": 1, "b": [1, 2]}),
+                r#"{"a": 1, "b": [1, 2]}"#,
+            ),
+            (
+                serde_json::json!({"x": null, "y": true, "z": "é\n"}),
+                r#"{"x": null, "y": true, "z": "é\n"}"#,
+            ),
+            (serde_json::json!([1.5, -2, 0.25]), "[1.5, -2, 0.25]"),
+        ] {
+            assert_eq!(jsonb_text_len(&value), printed.len(), "{value}");
+        }
     }
     #[test]
     fn keys_have_the_stored_form() {
@@ -736,6 +828,22 @@ mod tests {
         for key in ["Q42", "WIKIDATA:Q42", ":x", "x:", "isrc:US 123", "1x:y"] {
             assert!(!valid_key(key), "{key}");
         }
+        // DOIs and ISBNs take the form a resource's keys have; a `url:` key is a resource ID.
+        assert_eq!(
+            stored_key("doi:10.1038/Nature12373").as_deref(),
+            Some("doi:10.1038/nature12373")
+        );
+        assert_eq!(
+            stored_key("isbn:0-14-032872-6").as_deref(),
+            Some("isbn:9780140328721")
+        );
+        assert_eq!(stored_key("isbn:123"), None);
+        assert_eq!(stored_key("doi:nonsense"), None);
+        assert_eq!(stored_key("url:https://example.org/"), None);
+        assert_eq!(
+            stored_key(" wikidata:Q42 ").as_deref(),
+            Some("wikidata:Q42")
+        );
         assert_eq!(link_key("nostr:note1abc"), None);
         assert_eq!(
             link_key("HTTPS://Example.org/a#b"),

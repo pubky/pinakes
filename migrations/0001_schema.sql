@@ -1208,14 +1208,16 @@ CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (fame DESC);
 CREATE INDEX catalogue_card_keys_idx ON catalogue_card USING gin (keys);
 CREATE INDEX catalogue_card_labels_idx ON catalogue_card USING gin (labels);
 CREATE INDEX catalogue_card_point_idx ON catalogue_card USING gist (point);
+CREATE INDEX catalogue_card_related_uris_idx ON catalogue_card USING gin (related_uris);
 CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (type, fame DESC);
 CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 
 -- Each catalogue's import: what it does now (`phase`: idle, import (a full import, the first or
 -- a re-import), update, failed, disabled), the run its `cursor` belongs to (`run`; NULL when none
--- is under way), so a restart resumes it, the generation of the last full import begun, the cards
--- it holds, the upstream version read (a dump's date), when the last full import and the last
--- update finished, why it waits (`waiting`: free disk, another large import) and its errors.
+-- is under way), so a restart resumes it, the generation of the last full import begun, where
+-- the next update starts (`position`: a replication sequence, a time; kept from run to run), the
+-- cards it holds, the upstream version read (a dump's date), when the last full import and the
+-- last update finished, why it waits (`waiting`: free disk, another large import) and its errors.
 -- `pinakesd catalogue drop` deletes the row with the cards.
 CREATE TABLE catalogue_state (
     catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
@@ -1223,6 +1225,7 @@ CREATE TABLE catalogue_state (
     run text CONSTRAINT catalogue_state_run_check CHECK (run IN ('import', 'update')),
     generation bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_generation_check CHECK (generation >= 0),
     cursor jsonb,
+    position jsonb,
     cards bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_cards_check CHECK (cards >= 0),
     upstream_version text CONSTRAINT catalogue_state_upstream_version_check CHECK (octet_length(upstream_version) <= 256),
     last_import_at timestamp with time zone,

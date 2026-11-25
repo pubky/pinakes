@@ -72,11 +72,14 @@ pub trait Importer: Send + Sync + 'static {
     fn large(&self) -> bool {
         self.catalogue().large()
     }
-    /// The free bytes under `catalogues.dir` a run needs (its downloads and temporary files),
-    /// checked before the run starts or resumes.
-    fn disk_need(&self, run: Run) -> u64;
+    /// The free bytes a run still needs in its directory (`catalogues.dir/<name>`: downloads and
+    /// temporary files), checked before the run starts or resumes. `state` says whether the run
+    /// resumes (`run`, `cursor`), so a resumed run asks only for what its files do not hold yet.
+    fn disk_need(&self, run: Run, state: &State) -> u64;
     /// How long after the last finished import or update the next update is due (the default
-    /// [`Importer::plan`]'s pace). A day: the update lag alert fires after two.
+    /// [`Importer::plan`]'s pace). A day: the update lag alert fires after two, so an importer
+    /// whose source publishes less often still runs an update daily, and an update that finds
+    /// nothing new finishes as one (that is what keeps the lag down).
     fn update_every(&self) -> Duration {
         Duration::from_secs(86400)
     }
@@ -101,23 +104,31 @@ pub trait Importer: Send + Sync + 'static {
     /// removed when it returns `Ok`.
     async fn import(&self, job: &mut Job<'_>) -> Result<()>;
     /// An update: write the cards that changed and remove the items removed upstream
-    /// ([`Job::remove`]), from [`Job::cursor`] when it resumes.
+    /// ([`Job::remove`]), from [`Job::cursor`] when it resumes. It starts from
+    /// [`Job::position`], where the last finished run left off (a replication sequence, a time),
+    /// and leaves the next one with [`Job::set_position`]. Finding nothing new is a finished
+    /// update.
     async fn update(&self, job: &mut Job<'_>) -> Result<()>;
 }
 
-/// The registered importers. Each is started only when its catalogue is on.
+/// The registered importers. `pinakesd` starts those of the catalogues that are on
+/// ([`to_start`]).
 pub fn importers(_config: &Config) -> Vec<Arc<dyn Importer>> {
     Vec::new()
 }
 
-/// What a run writes through: its catalogue, generation, resume point, work directory and the
-/// configuration.
+/// What a run writes through: its catalogue, generation, resume point, position, work directory
+/// and the configuration.
 pub struct Job<'a> {
     pool: &'a PgPool,
     catalogue: Catalogue,
     run: Run,
     generation: i64,
     cursor: Option<serde_json::Value>,
+    /// The position to keep when the run finishes ([`Job::set_position`]).
+    position: Option<serde_json::Value>,
+    /// The state row as the run started.
+    state: State,
     dir: &'a Path,
     config: &'a Config,
     report: WriteReport,
@@ -138,9 +149,24 @@ impl Job<'_> {
     pub fn cursor(&self) -> Option<&serde_json::Value> {
         self.cursor.as_ref()
     }
-    /// `catalogues.dir`, which exists: downloads and temporary files go here.
+    /// `catalogues.dir/<name>`, which exists: the catalogue's downloads and temporary files go
+    /// here, and nowhere else (`pinakesd catalogue drop` deletes it).
     pub fn dir(&self) -> &Path {
         self.dir
+    }
+    /// The state row as the run started: its last finished import and update, the upstream
+    /// version.
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+    /// Where the last finished run left the next update to start; none before the first.
+    pub fn position(&self) -> Option<&serde_json::Value> {
+        self.state.position.as_ref()
+    }
+    /// Where the next update starts: kept when this run finishes, in the transaction that ends
+    /// it (a run cut off keeps the old position and resumes from its cursor).
+    pub fn set_position(&mut self, position: serde_json::Value) {
+        self.position = Some(position);
     }
     pub fn config(&self) -> &Config {
         self.config
@@ -272,6 +298,17 @@ impl SessionLock {
             Ok(None)
         }
     }
+    /// Ends once the lock is lost: its session has not answered two checks in a row, one every
+    /// `locks::LOCK_CHECK` (an idle connection a database restart, an administrator or a
+    /// timeout ended). Never otherwise.
+    pub async fn lost(&mut self) {
+        loop {
+            tokio::time::sleep(crate::locks::LOCK_CHECK).await;
+            if !self.held().await && !self.held().await {
+                return;
+            }
+        }
+    }
     /// Whether the lock's session still answers (a database restart ends it, and the lock).
     pub async fn held(&mut self) -> bool {
         let answer = sqlx::query("SELECT 1").execute(&mut self.connection);
@@ -298,9 +335,20 @@ pub enum Next {
     Wait(Duration),
 }
 
+/// The importers `pinakesd` starts: those of the catalogues that are on. With every catalogue
+/// off, none.
+pub fn to_start(importers: Vec<Arc<dyn Importer>>, config: &Config) -> Vec<Arc<dyn Importer>> {
+    importers
+        .into_iter()
+        .filter(|i| config.catalogues.enabled(i.catalogue()))
+        .collect()
+}
+
 /// Run `importer` until `shutdown`: take its catalogue's lock (waiting while another process
-/// holds it), then step ([`step`]) and wait as each step says. A step cut off by the shutdown
-/// leaves its run and cursor in the state row, and the next start resumes it.
+/// holds it), then step ([`step`]) and wait as each step says. The lock is held from step to
+/// step and watched while a step runs: a step whose lock is lost is cut off, as a failure. A
+/// step cut off (a shutdown, a lost lock) leaves its run and cursor in the state row, and the
+/// next step resumes it.
 pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch::Receiver<bool>) {
     let catalogue = importer.catalogue();
     let mut lock: Option<SessionLock> = None;
@@ -315,16 +363,17 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             };
             if !held {
                 lock = SessionLock::try_take(&ctx.pool, catalogue.lock_key()).await?;
-                if lock.is_none() {
-                    let why = "another process imports this catalogue (its lock is held)";
-                    set_waiting(&ctx.pool, catalogue, why).await?;
-                    return Ok(Next::Wait(ctx.pace.turn));
-                }
             }
-            std::panic::AssertUnwindSafe(step(&*importer, &ctx))
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("the importer panicked")))
+            let Some(held) = lock.as_mut() else {
+                let why = "another process imports this catalogue (its lock is held)";
+                set_waiting(&ctx.pool, catalogue, why).await?;
+                return Ok(Next::Wait(ctx.pace.turn));
+            };
+            let stepped = std::panic::AssertUnwindSafe(step(&*importer, &ctx)).catch_unwind();
+            tokio::select! {
+                stepped = stepped => stepped.unwrap_or_else(|_| Err(anyhow::anyhow!("the importer panicked"))),
+                _ = held.lost() => Err(anyhow::anyhow!("the catalogue's lock was lost")),
+            }
         };
         let next = tokio::select! {
             _ = shutdown.changed() => return,
@@ -333,11 +382,11 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
         let wait = match next {
             Ok(Next::Again) => continue,
             Ok(Next::Wait(wait)) => wait,
-            Err(error) => {
-                let error = crate::resolver::log_error(&error);
-                tracing::warn!(catalogue = catalogue.name(), %error, "catalogue import failed; it resumes from its cursor");
-                if let Err(error) = record_failure(&ctx.pool, catalogue, &error).await {
-                    tracing::warn!(catalogue = catalogue.name(), error = %crate::resolver::log_error(&error), "catalogue failure not recorded");
+            Err(failure) => {
+                let shown = crate::resolver::log_error(&failure);
+                tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue import failed; it resumes from its cursor");
+                if let Err(failure) = record_failure(&ctx.pool, catalogue, &shown).await {
+                    tracing::warn!(catalogue = catalogue.name(), error = %crate::resolver::log_error(&failure), "catalogue failure not recorded");
                 }
                 ctx.pace.retry
             }
@@ -347,6 +396,23 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             _ = tokio::time::sleep(wait) => {}
         }
     }
+}
+
+/// The large catalogue, other than `catalogue`, whose full import is under way or was cut off
+/// (a failure, a restart) and is not switched off: it keeps the large-import turn until it
+/// finishes, since its temporary files stay on the disk meanwhile.
+async fn large_import_under_way(pool: &PgPool, catalogue: Catalogue) -> Result<Option<String>> {
+    let large: Vec<&str> = Catalogue::ALL
+        .into_iter()
+        .filter(|c| c.large() && *c != catalogue)
+        .map(Catalogue::name)
+        .collect();
+    Ok(sqlx::query_scalar(
+        "SELECT catalogue FROM catalogue_state WHERE catalogue=ANY($1) AND run='import' AND phase<>'disabled' ORDER BY catalogue LIMIT 1",
+    )
+    .bind(&large)
+    .fetch_optional(pool)
+    .await?)
 }
 
 /// One step of an importer's task, which holds the catalogue's lock: resume the run under way or
@@ -367,24 +433,32 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
             }
         },
     };
-    let large = if run == Run::Import && importer.large() {
-        match SessionLock::try_take(pool, crate::locks::CATALOGUE_LARGE_IMPORT).await? {
-            Some(lock) => Some(lock),
-            None => {
-                let why = "another large catalogue's full import runs; one runs at a time";
-                set_waiting(pool, catalogue, why).await?;
-                return Ok(Next::Wait(ctx.pace.turn));
-            }
+    // One large full import at a time: the lock while one runs, and the state rows for one that
+    // was cut off and has not finished.
+    let mut large = None;
+    if run == Run::Import && importer.large() {
+        let Some(lock) = SessionLock::try_take(pool, crate::locks::CATALOGUE_LARGE_IMPORT).await?
+        else {
+            let why = "another large catalogue's full import runs; one runs at a time";
+            set_waiting(pool, catalogue, why).await?;
+            return Ok(Next::Wait(ctx.pace.turn));
+        };
+        if let Some(other) = large_import_under_way(pool, catalogue).await? {
+            lock.release().await;
+            let why = format!(
+                "{other}'s full import is under way and has not finished; one large import runs at a time"
+            );
+            set_waiting(pool, catalogue, &why).await?;
+            return Ok(Next::Wait(ctx.pace.turn));
         }
-    } else {
-        None
-    };
-    let dir = Path::new(&ctx.config.catalogues.dir);
-    tokio::fs::create_dir_all(dir)
+        large = Some(lock);
+    }
+    let dir = ctx.config.catalogues.work_dir(catalogue);
+    tokio::fs::create_dir_all(&dir)
         .await
-        .with_context(|| format!("create catalogues.dir {}", dir.display()))?;
-    let need = importer.disk_need(run);
-    let free = (ctx.free_disk)(dir).with_context(|| format!("free disk at {}", dir.display()))?;
+        .with_context(|| format!("create {}", dir.display()))?;
+    let need = importer.disk_need(run, &state);
+    let free = (ctx.free_disk)(&dir).with_context(|| format!("free disk at {}", dir.display()))?;
     if free < need {
         let why = format!(
             "free disk: the {} needs {} under {}, {} free",
@@ -408,7 +482,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         .bind(run.name())
         .execute(pool)
         .await?;
-        (state.generation, state.cursor)
+        (state.generation, state.cursor.clone())
     } else {
         let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(catalogue.name())
@@ -430,25 +504,43 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         run,
         generation,
         cursor,
-        dir,
+        position: None,
+        state,
+        dir: &dir,
         config: &ctx.config,
         report: WriteReport::default(),
     };
-    match run {
-        Run::Import => importer.import(&mut job).await?,
-        Run::Update => importer.update(&mut job).await?,
+    // The large-import lock is watched while the run goes on: lost, the run stops as a failure
+    // and resumes from its cursor once the turn is its own again.
+    let ran = async {
+        match run {
+            Run::Import => importer.import(&mut job).await,
+            Run::Update => importer.update(&mut job).await,
+        }
+    };
+    let watched = async {
+        match large.as_mut() {
+            Some(lock) => lock.lost().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        ran = ran => ran?,
+        _ = watched => anyhow::bail!("the large-import lock was lost"),
     }
     let mut report = job.report;
+    let position = job.position.take();
     if run == Run::Import {
         report.removed += store::finish_import(pool, catalogue, generation).await?;
     }
     sqlx::query(
-        "UPDATE catalogue_state SET run=NULL,cursor=NULL,phase='idle',waiting=NULL,\
+        "UPDATE catalogue_state SET run=NULL,cursor=NULL,phase='idle',waiting=NULL,position=coalesce($3,position),\
          last_import_at=CASE WHEN $2='import' THEN now() ELSE last_import_at END,\
          last_update_at=CASE WHEN $2='update' THEN now() ELSE last_update_at END,updated_at=now() WHERE catalogue=$1",
     )
     .bind(catalogue.name())
     .bind(run.name())
+    .bind(position)
     .execute(pool)
     .await?;
     if let Some(lock) = large {
