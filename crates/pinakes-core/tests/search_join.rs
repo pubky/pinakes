@@ -519,3 +519,124 @@ async fn a_link_of_a_catalogue_switched_off_stands_for_no_other_card(pool: PgPoo
     found.sort();
     assert_eq!(found, [SPOTIFY.to_owned(), mb_adams().uri], "both listed");
 }
+
+/// `POST path` with a JSON body, as the client at 127.0.0.2:1234: the status and the JSON body.
+async fn post(app: &axum::Router, path: &str, body: Value) -> (u16, Value) {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A card whose own link is stored, built from it, but not listed (resolved and never shared,
+/// shared and its last tag removed, or turned an alias) is still listed, as the card: the row of
+/// its own link, which is the same unit, never hides it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_whose_own_link_is_stored_but_not_listed_stays_listed(pool: PgPool) {
+    import(&pool, Catalogue::Wikidata, 1, &[adams()]).await;
+    let (app, _) = app(&pool);
+    // Resolved, never shared: a stored row built from the card, with no reference.
+    let (status, resolved) = post(&app, "/v1/resolve", json!({"uri": ARTICLE})).await;
+    assert_eq!(status, 200, "{resolved}");
+    let backed: Option<i64> =
+        sqlx::query_scalar("SELECT catalogue_card FROM resource WHERE uri=$1")
+            .bind(ARTICLE)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(backed.is_some(), "the resolve built the row from the card");
+    for path in ["/v1/search?type=Person", "/v1/search?q=adams", "/v1/search"] {
+        assert_eq!(
+            urls(&common::get(&app, path).await),
+            [ARTICLE],
+            "resolved: {path}"
+        );
+    }
+    // Shared: the row is listed (one row, the resource's).
+    let id = tagged(&pool, ARTICLE, "books", 1).await;
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?type=Person").await),
+        [ARTICLE]
+    );
+    let listed = common::get(&app, "/v1/search?type=Person").await;
+    assert_eq!(
+        items(&listed)[0]["refs"],
+        json!([ARTICLE]),
+        "the resource's row"
+    );
+    // Its last tag removed: the card again.
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?type=Person").await),
+        [ARTICLE],
+        "last tag removed"
+    );
+    // Shared again, then an alias of another link: the card again.
+    tagged(&pool, ARTICLE, "books", 1).await;
+    let root = tagged(&pool, "https://example.org/adams-root", "books", 1).await;
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&id)
+        .bind(&root)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?type=Person").await),
+        [ARTICLE],
+        "an alias"
+    );
+}
+
+/// The ETag of `GET path`.
+async fn etag(app: &axum::Router, path: &str) -> String {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .uri(path)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    response.headers()["etag"].to_str().unwrap().to_owned()
+}
+
+/// A search that lists no catalogue card but reads links built from one depends on the catalogues
+/// that are on (their labels match `tags` and show): its ETag changes when one is switched off.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_etag_of_a_search_over_links_built_from_cards_names_the_catalogues(pool: PgPool) {
+    import(&pool, Catalogue::Wikidata, 1, &[adams()]).await;
+    let id = tagged(&pool, SPOTIFY, "books", 1).await;
+    assert_eq!(
+        join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await,
+        1
+    );
+    // No card has the label `books`: none is listed.
+    let path = "/v1/search?tags=books";
+    let on = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    assert_eq!(urls(&common::get(&on, path).await), [SPOTIFY]);
+    let mut config = Config::default();
+    config.catalogues.musicbrainz.enabled = false;
+    let fewer = api::router(AppState::new(pool.clone(), config).unwrap());
+    assert_ne!(etag(&on, path).await, etag(&fewer, path).await);
+    assert_eq!(etag(&on, path).await, etag(&on, path).await);
+}

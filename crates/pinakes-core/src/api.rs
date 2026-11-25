@@ -2462,7 +2462,14 @@ async fn with_replacers(
         .fetch_all(pool)
         .await?;
     for (card, resource) in pairs {
-        if let Some(unit) = units.units.iter_mut().find(|u| u.card == card) {
+        // The row of the card's own link is the card's own unit (`card_unit`): where it is listed
+        // the page lists it once already (`DISTINCT ON (unit_id)`, the resource first), and where
+        // it is not (resolved but never shared, its last tag removed, an alias) the card is the row.
+        if let Some(unit) = units
+            .units
+            .iter_mut()
+            .find(|u| u.card == card && u.unit_id != resource)
+        {
             unit.hidden_by.push(resource);
         }
     }
@@ -3938,7 +3945,7 @@ pub async fn search(
             // The text index lags the database by a pass: its own revision.
             candidates.as_ref().map(|c| c.revision),
             // The catalogues that are on: switching one off changes what is listed.
-            with_cards.then_some(&catalogues),
+            (with_cards || backed).then_some(&catalogues),
         ))?)
         .to_hex()
     );
