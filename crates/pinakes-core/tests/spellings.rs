@@ -131,8 +131,8 @@ fn every_root_is_its_own_root() {
     }
 }
 
-/// The family of an `alias::Named` rule (a new family fails to compile here until
-/// `every_rule_has_vectors` asks for its vectors).
+/// The family of an `alias::Named` rule. A new family fails to compile here: give it vectors in
+/// `every_rule_has_vectors`.
 fn family(named: alias::Named) -> &'static str {
     match named {
         alias::Named::Core(_) => "core",
@@ -208,15 +208,13 @@ fn every_rule_has_vectors() {
         .map(|r| r.name().to_owned())
         .collect();
     rules.extend(["identity", "none"].map(String::from));
-    // A music service whose links an official source of its name spells first (Discogs) has that
-    // source's vectors while the source is in the build; without it, music.rs roots the same
-    // links to the same root, and a source's removal hands its vectors over (check-removals).
+    // Discogs links are mostly the discogs source's (music.rs roots them the same way, and a
+    // removal of the source hands its vectors over), but music.rs reads some the source does not
+    // (a port), so every service has vectors of its own.
     rules.extend(
         services()
             .into_iter()
-            .map(|s| s.token())
-            .filter(|t| sources::by_name(t).is_none())
-            .map(|t| format!("music/{t}")),
+            .map(|s| format!("music/{}", s.token())),
     );
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sources");
     for entry in std::fs::read_dir(&dir).unwrap() {
