@@ -1156,15 +1156,19 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
     resource the search leaves out (not referenced any more, or not yet read) is listed as the
     card;
   - a referenced card built from a catalogue card ([Catalogue cards](#catalogue-cards)) stands for
-    that catalogue card, and for every card of another catalogue sharing one of its keys: those
-    are not listed. The row is the referenced card. People's tags and the catalogue's labels both
-    match `tags` and count in `facet=tags`, its `labels` are the catalogue's, and the text index
-    finds and ranks it by its card's other names and `fame` as it would the card;
+    that catalogue card, and for every card of another catalogue that is on and shares one of its
+    keys. Where the referenced card is listed (it passes every filter of the search), those cards
+    are not; where it is not (a label, a type or a host only the other card has), the card is
+    listed. It stands for a card only while it has a reference that counts and is not an alias.
+    People's tags and the catalogue's labels both match `tags` and count in `facet=tags`, its
+    `labels` are the catalogue's, and the text index finds and ranks it by its card's other names
+    and `fame` as it would the card;
   - cards of several catalogues sharing a key (`wikidata:Q42` on a MusicBrainz card and on the
     Wikidata item) are one row, the card of the first catalogue in `wikidata`, `musicbrainz`,
-    `osm`, `openalex`, `podcastindex`, `tranco`, `software` order among those the search found.
-    Its relevance is the better of theirs. A card the search finds alone (its words, its label)
-    is listed as itself. Two cards of one catalogue are always two things;
+    `osm`, `openalex`, `podcastindex`, `tranco`, `software` order among those the search found,
+    at the better relevance of theirs, wherever that card is listed. Where it is not (a filter
+    only the other card passes, such as its label or its exact distance), the other card is
+    listed. Two cards of one catalogue are always two things;
 - never listed with `referenced=true`, a social filter (`author`, `reach`, `related`,
   `in_collection`), `key`, `venue`, `category`, `remote`, `ingredient`, `from` or `to`, nor with
   `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;

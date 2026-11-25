@@ -1635,10 +1635,9 @@ impl Open {
                 return Err(error.into());
             }
         };
-        if let Some(earlier) = self.merging.lock().expect("merging").replace(waiting) {
-            // Done: only one merge runs at a time.
-            let _ = earlier.join();
-        }
+        // The earlier thread is done (`running` was clear, which its last action does): its handle
+        // is let go, never joined here, under the writer lock.
+        *self.merging.lock().expect("merging") = Some(waiting);
         Ok(())
     }
     /// Start merging the committed segments that hold the documents of `resources` (or, with
@@ -1689,11 +1688,10 @@ impl Open {
                 Err(error) => break Some(error),
             }
         };
-        let mut purging = self.purging.lock().expect("purges");
-        purging.running = false;
+        // `running` stays set: the thread's guard clears it as its very last action, so no second
+        // merge starts while this one still reloads or re-owes.
         match failed {
             None => {
-                drop(purging);
                 if let Err(error) = self.reader.reload() {
                     tracing::debug!(error = %crate::resolver::log_error(&error), "the text index read after a merge failed");
                 }
@@ -1701,6 +1699,7 @@ impl Open {
             }
             Some(error) => {
                 tracing::debug!(error = %crate::resolver::log_error(&error), "a text index merge after a removal failed; it is tried again at the next pass");
+                let mut purging = self.purging.lock().expect("purges");
                 purging.resources.extend(resources);
                 purging.catalogues |= catalogues;
             }
@@ -2770,6 +2769,44 @@ mod tests {
         let term = Term::from_field_text(open.fields.catalogue, "wikidata");
         assert!(searcher.doc_freq(&term).unwrap() > 0, "still in the files");
         assert!(!open.has_documents(&searcher, "wikidata").unwrap());
+    }
+
+    /// The flag that a merge runs is cleared only when its thread ends, never by the wait itself:
+    /// a pass in between owes its merge instead of starting a second one beside it (which a later
+    /// pass would then join under the writer lock).
+    #[test]
+    fn a_merge_stays_running_until_its_thread_ends() {
+        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
+        docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
+        open.reader.reload().unwrap();
+        open.purging.lock().unwrap().running = true;
+        let merged = {
+            let mut writer = open.writer.lock().unwrap();
+            writer.delete_term(Term::from_field_text(open.fields.resource_id, "a"));
+            commit(&mut writer, &open.stamp(0)).unwrap();
+            open.reader.reload().unwrap();
+            open.start_merge(&mut writer, &["a".into()], false)
+                .unwrap()
+                .expect("a merge")
+        };
+        open.wait_merge(merged, vec!["a".into()], false);
+        assert_eq!(open.purges.load(Ordering::SeqCst), 1);
+        assert!(
+            open.purging.lock().unwrap().running,
+            "still running until the thread ends"
+        );
+        {
+            let mut writer = open.writer.lock().unwrap();
+            open.purge(&mut writer, vec!["b".into()], false).unwrap();
+        }
+        assert!(
+            open.merging.lock().unwrap().is_none(),
+            "no second merge started"
+        );
+        assert_eq!(open.purging.lock().unwrap().resources, ["b"]);
+        drop(Running(&open.purging));
+        assert!(open.purge_owed());
     }
 
     /// A merge after a removal while another runs is owed, not lost: the next pass starts it, and

@@ -188,15 +188,13 @@ async fn a_shared_link_built_from_a_card_stands_for_its_cards(pool: PgPool) {
             "{path}"
         );
     }
-    for path in [
-        "/v1/search?tags=writer",
-        "/v1/search?tags=books,writer&match=all",
-    ] {
-        assert!(
-            items(&common::get(&app, path).await).is_empty(),
-            "{path}: the MusicBrainz card is the shared link's thing"
-        );
-    }
+    // Only the MusicBrainz card has the label `writer`: the shared link fails that filter, so it
+    // stands for nothing there and the card is the row. Nothing has both `books` and `writer`.
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?tags=writer").await),
+        [mb_adams().uri]
+    );
+    assert!(items(&common::get(&app, "/v1/search?tags=books,writer&match=all").await).is_empty());
     let page = common::get(&app, "/v1/search?q=adams&facet=type,tags").await;
     assert_eq!(
         page["facets"]["type"],
@@ -356,4 +354,157 @@ async fn a_link_built_from_a_card_leaves_other_items_of_its_catalogue_listed(poo
         want.sort();
         assert_eq!(found, want, "{path}");
     }
+}
+
+/// A link built from a card stands for another catalogue's card only where the link itself is
+/// listed: a type only the other card has lists that card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_is_left_out_only_where_the_link_that_stands_for_it_is_listed(pool: PgPool) {
+    let mut band = mb_adams();
+    band.r#type = "MusicGroup".into();
+    import(&pool, Catalogue::Wikidata, 1, &[adams()]).await;
+    import(
+        &pool,
+        Catalogue::Musicbrainz,
+        1,
+        std::slice::from_ref(&band),
+    )
+    .await;
+    let id = tagged(&pool, SPOTIFY, "books", 1).await;
+    assert_eq!(
+        join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await,
+        1
+    );
+    let (app, _) = app(&pool);
+    for (path, want) in [
+        ("/v1/search?type=MusicGroup", vec![band.uri.clone()]),
+        ("/v1/search?q=adams&type=MusicGroup", vec![band.uri.clone()]),
+        ("/v1/search?type=Person", vec![SPOTIFY.to_owned()]),
+        ("/v1/search", vec![SPOTIFY.to_owned()]),
+        ("/v1/search?q=adams", vec![SPOTIFY.to_owned()]),
+    ] {
+        assert_eq!(urls(&common::get(&app, path).await), want, "{path}");
+    }
+    let page = common::get(&app, "/v1/search?facet=type").await;
+    assert_eq!(
+        page["facets"]["type"],
+        json!([{"type": "Person", "count": 1, "type_path": ["Thing", "Person"]}])
+    );
+}
+
+/// A link stands for its card only while it is a unit of its own: once it loses its last
+/// reference, or becomes another link's alias, its card is listed again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_link_without_a_reference_or_turned_alias_stands_for_no_card(pool: PgPool) {
+    import(&pool, Catalogue::Wikidata, 1, &[adams()]).await;
+    import(&pool, Catalogue::Musicbrainz, 1, &[mb_adams()]).await;
+    let id = tagged(&pool, SPOTIFY, "books", 1).await;
+    assert_eq!(
+        join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await,
+        1
+    );
+    let (app, _) = app(&pool);
+    assert_eq!(urls(&common::get(&app, "/v1/search").await), [SPOTIFY]);
+    // An alias of another link: the cards again (the Wikidata card the main one).
+    let root = tagged(&pool, "https://example.org/adams-root", "books", 1).await;
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&id)
+        .bind(&root)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let found = urls(&common::get(&app, "/v1/search?type=Person").await);
+    assert_eq!(found, [ARTICLE], "the alias stands for nothing");
+    sqlx::query("DELETE FROM resource_alias WHERE alias_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?type=Person").await),
+        [SPOTIFY]
+    );
+    // No reference left: the cards again.
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?type=Person").await),
+        [ARTICLE]
+    );
+}
+
+/// A card merged into another catalogue's card is listed where that card fails a filter the
+/// index only approximates: an OpenStreetMap place inside a `near` circle whose Wikidata card's
+/// point lies just outside it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_merged_card_is_listed_where_its_main_card_fails_the_exact_distance(pool: PgPool) {
+    let item = Card {
+        source_id: "Q1374".into(),
+        uri: "https://en.wikipedia.org/wiki/Matterhorn_(test)".into(),
+        r#type: "Mountain".into(),
+        name: "Matterhorn".into(),
+        keys: vec!["wikidata:Q1374".into()],
+        // About 1,040 m north of the place.
+        point: Some(pinakes_core::model::Point {
+            lat: 46.0094,
+            lon: 7.0,
+        }),
+        fame: 0.9,
+        ..Default::default()
+    };
+    let place = Card {
+        source_id: "node/1374".into(),
+        uri: "https://www.openstreetmap.org/node/1374".into(),
+        r#type: "Mountain".into(),
+        name: "Matterhorn".into(),
+        keys: vec!["wikidata:Q1374".into()],
+        point: Some(pinakes_core::model::Point {
+            lat: 46.0,
+            lon: 7.0,
+        }),
+        fame: 0.5,
+        ..Default::default()
+    };
+    import(&pool, Catalogue::Wikidata, 1, std::slice::from_ref(&item)).await;
+    import(&pool, Catalogue::Osm, 1, std::slice::from_ref(&place)).await;
+    let (app, _) = app(&pool);
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?q=matterhorn").await),
+        [item.uri.as_str()],
+        "one thing, the Wikidata card"
+    );
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?q=matterhorn&near=46.0,7.0&radius=1000").await),
+        [place.uri.as_str()]
+    );
+    assert_eq!(
+        urls(&common::get(&app, "/v1/search?q=matterhorn&near=46.0,7.0&radius=5000").await),
+        [item.uri.as_str()]
+    );
+}
+
+/// A link built from a card of a catalogue switched off (before its sweep gives the link back to
+/// fetching) stands for no other catalogue's card: that card is listed beside it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_link_of_a_catalogue_switched_off_stands_for_no_other_card(pool: PgPool) {
+    import(&pool, Catalogue::Wikidata, 1, &[adams()]).await;
+    import(&pool, Catalogue::Musicbrainz, 1, &[mb_adams()]).await;
+    let id = tagged(&pool, SPOTIFY, "books", 1).await;
+    assert_eq!(
+        join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await,
+        1
+    );
+    let mut config = Config::default();
+    config.catalogues.wikidata.enabled = false;
+    let index = SearchIndex::in_memory();
+    index.set_catalogues(&config.catalogues.enabled_names());
+    let mut state = AppState::new(pool.clone(), config).unwrap();
+    state.search_index = index;
+    let app = api::router(state);
+    let mut found = urls(&common::get(&app, "/v1/search?type=Person").await);
+    found.sort();
+    assert_eq!(found, [SPOTIFY.to_owned(), mb_adams().uri], "both listed");
 }

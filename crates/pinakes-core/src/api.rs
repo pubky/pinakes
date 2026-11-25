@@ -2396,6 +2396,10 @@ struct CardUnit {
     unit_id: String,
     type_path: String,
     host: Option<String>,
+    /// The units that stand for this card when the search lists them too (`hidden_by`): the
+    /// referenced cards built from it or from another catalogue's card sharing its keys, and the
+    /// card it is merged into. The page leaves the card out only when one of them is listed.
+    hidden_by: Vec<String>,
 }
 /// The resources of the referenced candidates.
 fn candidate_resources(units: &[crate::search_index::Candidate]) -> Vec<String> {
@@ -2411,27 +2415,51 @@ fn candidate_resources(units: &[crate::search_index::Candidate]) -> Vec<String> 
 /// A catalogue card as [`card_units`] and [`best_known_cards`] read it: ID, link, type,
 /// catalogue and keys.
 type CardRow = (i64, String, String, String, Vec<String>);
-/// The catalogue cards a search lists, each thing once: the cards whose thing a listed resource is
-/// already left out (`NOT_REPLACED`), and cards of several catalogues sharing a key merged into one
-/// unit (`merged`: the card left out, the card that is the unit).
+/// The catalogue cards a search may list, each with the units that stand for it (`hidden_by`), and
+/// the cards merged into another (`merged`: the card, the card that is the main one).
 #[derive(Default)]
 struct CardUnits {
     units: Vec<CardUnit>,
     merged: std::collections::HashMap<i64, i64>,
 }
-/// A catalogue card a referenced card built from a catalogue card (`resource.catalogue_card`)
-/// stands for: its own, or one of another catalogue sharing one of its keys (`resource_key` from
-/// the catalogue; a card of the same catalogue is another thing there). Left out of a search: the
-/// thing is that resource, once, with people's tags and the card's labels. Only a resource that is
-/// a unit of its own (not an alias, with a reference that counts) stands for a card.
-const NOT_REPLACED: &str = " AND NOT EXISTS (SELECT 1 FROM resource x WHERE x.catalogue_card=c.id AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id) AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=x.id)) AND NOT EXISTS (SELECT 1 FROM resource_key k JOIN resource x ON x.id=k.resource_id JOIN catalogue_card y ON y.id=x.catalogue_card WHERE k.source='catalogue' AND k.key=ANY(c.keys) AND y.catalogue<>c.catalogue AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=x.id) AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=x.id))";
-/// How many times `cap` cards [`best_known_cards`] reads before it leaves out the replaced ones
-/// (`NOT_REPLACED`), so the read keeps the plan its order's index gives and the replaced ones are
-/// checked for those cards only.
-const BEST_KNOWN_OVERREAD: usize = 3;
-/// The cards `rows` names as units, in their order, each thing once: a card that shares a key
-/// naming the thing (not a `url:` key) with a card of a catalogue listed earlier in
-/// [`crate::catalogue::Catalogue::ALL`] (Wikidata first) among `rows` is merged into it. Cards of
+/// For catalogue cards `$1`, the referenced cards built from a catalogue card
+/// (`resource.catalogue_card`) that stand for each: built from it, or from a card of another
+/// catalogue that is on (`$2`) sharing one of its keys (`resource_key` from the catalogue; a card
+/// of the same catalogue is another thing there). Their unit IDs are their IDs. Whether one stands
+/// for the card on a page is decided there: only a resource listed on it (a unit of its own, with a
+/// reference that counts, through every filter) leaves the card out ([`not_hidden`]).
+const REPLACERS: &str = "SELECT c.id,x.id FROM catalogue_card c JOIN resource x ON x.catalogue_card=c.id WHERE c.id=ANY($1) UNION SELECT c.id,x.id FROM catalogue_card c JOIN resource_key k ON k.source='catalogue' AND k.key=ANY(c.keys) JOIN resource x ON x.id=k.resource_id JOIN catalogue_card y ON y.id=x.catalogue_card WHERE c.id=ANY($1) AND y.catalogue<>c.catalogue AND y.catalogue=ANY($2)";
+/// `units` with the resources that stand for each card ([`REPLACERS`]) added to its `hidden_by`.
+async fn with_replacers(
+    pool: &PgPool,
+    catalogues: &[String],
+    mut units: CardUnits,
+) -> Result<CardUnits, ApiError> {
+    if units.units.is_empty() {
+        return Ok(units);
+    }
+    let ids: Vec<i64> = units.units.iter().map(|u| u.card).collect();
+    let joinable: Vec<String> = catalogues
+        .iter()
+        .filter(|c| c.as_str() != crate::catalogue::Catalogue::Osm.name())
+        .cloned()
+        .collect();
+    let pairs: Vec<(i64, String)> = sqlx::query_as(REPLACERS)
+        .bind(&ids)
+        .bind(&joinable)
+        .fetch_all(pool)
+        .await?;
+    for (card, resource) in pairs {
+        if let Some(unit) = units.units.iter_mut().find(|u| u.card == card) {
+            unit.hidden_by.push(resource);
+        }
+    }
+    Ok(units)
+}
+/// The cards `rows` names as units, in their order: a card that shares a key naming the thing (not
+/// a `url:` key) with a card of a catalogue listed earlier in [`crate::catalogue::Catalogue::ALL`]
+/// (Wikidata first) among `rows` is merged into it (it stays a unit, hidden when the card it is
+/// merged into is listed, so a filter only the merged card passes still lists the thing). Cards of
 /// one catalogue never merge (each is its own thing there), and a merge does not chain.
 fn units_of(rows: Vec<CardRow>) -> CardUnits {
     let rank = |catalogue: &str| {
@@ -2460,17 +2488,26 @@ fn units_of(rows: Vec<CardRow>) -> CardUnits {
                 .or_insert((*id, catalogue.as_str()));
         }
     }
+    let unit_of: std::collections::HashMap<i64, String> = rows
+        .iter()
+        .filter_map(|(id, uri, ..)| Some((*id, crate::search_index::card_unit(uri)?)))
+        .collect();
     let units = rows
         .iter()
-        .filter(|(id, ..)| !merged.contains_key(id))
         .filter_map(|(card, uri, type_name, _, _)| {
             Some(CardUnit {
                 card: *card,
-                unit_id: crate::search_index::card_unit(uri)?,
+                unit_id: unit_of.get(card)?.clone(),
                 type_path: model::type_path(type_name).join(","),
                 host: url::Url::parse(uri)
                     .ok()
                     .and_then(|u| u.host_str().map(str::to_owned)),
+                hidden_by: merged
+                    .get(card)
+                    .and_then(|main| unit_of.get(main))
+                    .cloned()
+                    .into_iter()
+                    .collect(),
             })
         })
         .collect();
@@ -2486,9 +2523,9 @@ async fn card_units(
         return Ok(CardUnits::default());
     }
     let ids: Vec<i64> = found.iter().filter_map(|c| c.card).collect();
-    let mut rows: Vec<CardRow> = sqlx::query_as(&format!(
-        "SELECT c.id,c.uri,c.type,c.catalogue,c.keys FROM catalogue_card c WHERE c.id=ANY($1) AND c.catalogue=ANY($2){NOT_REPLACED}"
-    ))
+    let mut rows: Vec<CardRow> = sqlx::query_as(
+        "SELECT c.id,c.uri,c.type,c.catalogue,c.keys FROM catalogue_card c WHERE c.id=ANY($1) AND c.catalogue=ANY($2)",
+    )
     .bind(&ids)
     .bind(catalogues)
     .fetch_all(pool)
@@ -2497,7 +2534,7 @@ async fn card_units(
     let at: std::collections::HashMap<i64, usize> =
         ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
     rows.sort_by_key(|row| at.get(&row.0).copied().unwrap_or(usize::MAX));
-    Ok(units_of(rows))
+    with_replacers(pool, catalogues, units_of(rows)).await
 }
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
 /// the filters let in, at most `cap`, through the `(type, fame)`, `fame`, `labels` and `point`
@@ -2584,21 +2621,9 @@ async fn best_known_cards(
             sql.push(" ORDER BY c.fame DESC,c.id");
         }
     }
-    sql.push(" LIMIT ")
-        .push_bind((cap * BEST_KNOWN_OVERREAD) as i64);
-    let mut rows: Vec<CardRow> = sql.build_query_as().fetch_all(pool).await?;
-    let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
-    let kept: std::collections::HashSet<i64> = sqlx::query_scalar::<_, i64>(&format!(
-        "SELECT c.id FROM catalogue_card c WHERE c.id=ANY($1){NOT_REPLACED}"
-    ))
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .collect();
-    rows.retain(|r| kept.contains(&r.0));
-    rows.truncate(cap);
-    Ok(units_of(rows))
+    sql.push(" LIMIT ").push_bind(cap as i64);
+    let rows: Vec<CardRow> = sql.build_query_as().fetch_all(pool).await?;
+    with_replacers(pool, catalogues, units_of(rows)).await
 }
 /// `card_unit`: the catalogue cards `units` as rows of `search_unit`'s columns, with their
 /// `labels` and `fame` (a referenced unit has `'{}'` and NULL), of a catalogue that is on. Its
@@ -2616,7 +2641,7 @@ fn push_card_units(
     .expect("a document");
     sql.push("card_unit AS (SELECT x.unit_id AS id,c.uri,x.host,c.type,string_to_array(x.path,',') AS type_path,c.name,NULL::text AS category,c.point,NULL::timestamptz AS start_at,NULL::timestamptz AS end_at,NULL::text AS venue_id,")
         .push_bind(template)
-        .push("::jsonb||jsonb_build_object('type',c.type,'type_path',to_jsonb(string_to_array(x.path,',')),'name',c.name,'description',c.description,'url',c.uri,'source',c.source,'status','ok')||CASE WHEN c.point IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('location',jsonb_build_object('lat',ST_Y(c.point),'lon',ST_X(c.point))) END||CASE WHEN c.catalogue='osm' THEN jsonb_build_object('attribution','© OpenStreetMap contributors (ODbL)') ELSE '{}'::jsonb END AS doc,to_tsvector('simple',c.name||' '||coalesce(c.description,'')) AS search_text,NULL::text AS resolver,c.updated_at AS resolved_at,NULL::timestamptz AS refresh_at,'ok'::text AS status,NULL::text AS osm_type,NULL::bigint AS osm_id,x.unit_id,NULL::jsonb AS occurrence,c.labels,c.fame FROM unnest(")
+        .push("::jsonb||jsonb_build_object('type',c.type,'type_path',to_jsonb(string_to_array(x.path,',')),'name',c.name,'description',c.description,'url',c.uri,'source',c.source,'status','ok')||CASE WHEN c.point IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('location',jsonb_build_object('lat',ST_Y(c.point),'lon',ST_X(c.point))) END||CASE WHEN c.catalogue='osm' THEN jsonb_build_object('attribution','© OpenStreetMap contributors (ODbL)') ELSE '{}'::jsonb END AS doc,to_tsvector('simple',c.name||' '||coalesce(c.description,'')) AS search_text,NULL::text AS resolver,c.updated_at AS resolved_at,NULL::timestamptz AS refresh_at,'ok'::text AS status,NULL::text AS osm_type,NULL::bigint AS osm_id,x.unit_id,NULL::jsonb AS occurrence,c.labels,c.fame,string_to_array(x.hidden,',') AS hidden_by FROM unnest(")
         .push_bind(units.iter().map(|u| u.card).collect::<Vec<_>>())
         .push("::bigint[],")
         .push_bind(units.iter().map(|u| u.unit_id.clone()).collect::<Vec<_>>())
@@ -2624,9 +2649,24 @@ fn push_card_units(
         .push_bind(units.iter().map(|u| u.type_path.clone()).collect::<Vec<_>>())
         .push("::text[],")
         .push_bind(units.iter().map(|u| u.host.clone()).collect::<Vec<_>>())
-        .push("::text[]) AS x(card,unit_id,path,host) JOIN catalogue_card c ON c.id=x.card WHERE c.catalogue=ANY(")
+        .push("::text[],")
+        .push_bind(
+            units
+                .iter()
+                .map(|u| (!u.hidden_by.is_empty()).then(|| u.hidden_by.join(",")))
+                .collect::<Vec<_>>(),
+        )
+        .push("::text[]) AS x(card,unit_id,path,host,hidden) JOIN catalogue_card c ON c.id=x.card WHERE c.catalogue=ANY(")
         .push_bind(catalogues.to_vec())
         .push(")), ");
+}
+/// The rows of `set` but the catalogue cards one of whose `hidden_by` units is in `present` (the
+/// rows that passed every filter): the units that stand for them are listed instead. The units
+/// named by any card are read once, then each card checked against those present.
+fn not_hidden(set: &str, present: &str) -> String {
+    format!(
+        "SELECT * FROM {set} x WHERE x.hidden_by IS NULL OR NOT x.hidden_by && ARRAY(SELECT h.unit FROM (SELECT DISTINCT unnest(y.hidden_by) AS unit FROM {set} y WHERE y.hidden_by IS NOT NULL) h WHERE h.unit IN (SELECT z.unit_id FROM {present} z))"
+    )
 }
 /// How many times `limits.search_text_candidates` a trending text search reads from the index.
 pub const TRENDING_CANDIDATES: usize = 20;
@@ -3431,7 +3471,7 @@ pub async fn search(
             .collect();
         sql.push(" FROM (SELECT su.*,CASE WHEN su.doc->'catalogue'->>'catalogue'=ANY(")
             .push_bind(labelled.clone())
-            .push(") AND jsonb_typeof(su.doc->'labels')='array' THEN ARRAY(SELECT jsonb_array_elements_text(su.doc->'labels')) ELSE '{}'::text[] END AS labels,NULL::real AS fame FROM search_unit su WHERE true");
+            .push(") AND jsonb_typeof(su.doc->'labels')='array' THEN ARRAY(SELECT jsonb_array_elements_text(su.doc->'labels')) ELSE '{}'::text[] END AS labels,NULL::real AS fame,NULL::text[] AS hidden_by FROM search_unit su WHERE true");
         if let Some(found) = &candidates {
             sql.push(" AND su.id=ANY(")
                 .push_bind(candidate_resources(&found.units))
@@ -3465,11 +3505,18 @@ pub async fn search(
         // candidates was (a merged unit's cards each matched in their own way).
         let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         let mut joined: Vec<(&str, f64, bool)> = vec![];
-        for (unit, relevance, words) in found.units.iter().filter_map(|c| match c.card {
-            None => Some((c.unit_id.as_str(), c.relevance, c.words)),
+        // A merged card is its own unit too (listed when the card it is merged into is not), and
+        // lends the main card its relevance.
+        for (unit, relevance, words) in found.units.iter().flat_map(|c| match c.card {
+            None => vec![(c.unit_id.as_str(), c.relevance, c.words)],
             Some(card) => {
-                let unit = card_units.merged.get(&card).unwrap_or(&card);
-                listed.get(unit).map(|u| (*u, c.relevance, c.words))
+                let own = listed.get(&card).map(|u| (*u, c.relevance, c.words));
+                let main = card_units
+                    .merged
+                    .get(&card)
+                    .and_then(|main| listed.get(main))
+                    .map(|u| (*u, c.relevance, c.words));
+                main.into_iter().chain(own).collect()
             }
         }) {
             match at.get(unit) {
@@ -3635,8 +3682,17 @@ pub async fn search(
     }
     if with_cards {
         // A catalogue card whose link a listed resource has is that resource: one row per unit,
-        // the resource's.
-        sql.push("), page AS (SELECT * FROM (SELECT DISTINCT ON (unit_id) * FROM filtered ORDER BY unit_id,fame IS NOT NULL) d");
+        // the resource's. A card that another listed unit stands for (`hidden_by`: a referenced
+        // card built from it or from its thing's card in another catalogue, the card it is merged
+        // into) is left out, once every filter has passed: a unit that fails them hides nothing.
+        let present = if q.collapse.is_some() {
+            "eligible"
+        } else {
+            "filtered"
+        };
+        sql.push("), page AS (SELECT * FROM (SELECT DISTINCT ON (unit_id) * FROM (")
+            .push(not_hidden("filtered", present))
+            .push(") v ORDER BY unit_id,fame IS NOT NULL) d");
     } else {
         sql.push("), page AS (SELECT * FROM filtered");
     }
@@ -3656,9 +3712,10 @@ pub async fn search(
         (true, false) => "eligible",
         (false, false) => "filtered",
         (collapsed, true) => {
-            sql.push(", counted AS (SELECT DISTINCT ON (unit_id) * FROM ")
-                .push(if collapsed { "eligible" } else { "filtered" })
-                .push(" ORDER BY unit_id,fame IS NOT NULL)");
+            let set = if collapsed { "eligible" } else { "filtered" };
+            sql.push(", counted AS (SELECT DISTINCT ON (unit_id) * FROM (")
+                .push(not_hidden(set, set))
+                .push(") v ORDER BY unit_id,fame IS NOT NULL)");
             "counted"
         }
     };

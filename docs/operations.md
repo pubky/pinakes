@@ -1669,7 +1669,7 @@ The index is derived data, rebuilt from the database when it is missing.
   documents, current or deleted, so its words leave the index files too. The merge runs in the
   background: the pass, later commits and searches don't wait for it. One merge runs at a time;
   a removal meanwhile, or a merge that failed (a merge of Tantivy's own took a segment first,
-  tried again up to 5 times), is merged at a later pass. Any other pass merges nothing, and
+  started up to 5 times in all), is merged at a later pass. Any other pass merges nothing, and
   segments with 5% deleted documents merge on their own (as a changed or removed catalogue card's
   old words do). A card built from a catalogue card is read again when its card changes: the
   join rebuilds it (its document holds the card's content hash), so its other names and fame
