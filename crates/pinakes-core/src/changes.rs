@@ -466,16 +466,21 @@ pub async fn save(
     }
     // A social site's wall on a refresh (its placeholder card, marked `blocked`) keeps the last
     // good card, as a wall on the web route does: a wall never replaces what was read. The card
-    // stays as it is and is asked again at the social pace, never counted toward dead letter, so
-    // it keeps refreshing (and is purged once its object is gone). The placeholder is only for a
-    // link never read, or one whose stored card says no more than its shape.
+    // stays as it is and is asked again after the refusals' backoff (`queue::refused`), never
+    // counted toward dead letter, so it keeps refreshing (and is purged once its object is gone).
+    // The placeholder is only for a link never read, or one whose stored card says no more than
+    // its shape. A link found gone stays gone, also one never read whole (two 404s from the
+    // start): a refusal says nothing about the object.
+    let row_missing = row.try_get::<String, _>("status")? == Status::Missing.as_str();
     if doc.status == Status::Ok
         && doc.attributes.get("blocked").is_some_and(|b| b == "true")
-        && before.as_ref().is_some_and(|old| {
-            old["status"] == "ok"
-                && old["attributes"]["blocked"] != "true"
-                && says_more_than(old, doc)
-        })
+        && (row_missing
+            || before.as_ref().is_some_and(|old| {
+                old["status"] == "missing"
+                    || (old["status"] == "ok"
+                        && old["attributes"]["blocked"] != "true"
+                        && says_more_than(old, doc))
+            }))
     {
         crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
         return Err(crate::resolver::RetryLater {
@@ -665,8 +670,33 @@ pub async fn save(
     // The last step before the write: nothing stored names a credential but the resource's own
     // link, whatever put it in (this reading, a kept card, a preserved venue).
     crate::capability::strip_document(&mut doc, &own)?;
+    // A social site's refusal stored as the card (`blocked`: a link never read, or one whose
+    // stored card says no more than its shape) is read again after the refusals' backoff
+    // (`queue::wall_backoff`), its streak kept in `timeout_streak` as a refusal that keeps a
+    // stored card keeps it.
+    let refusals = (doc.status == Status::Ok
+        && doc.attributes.get("blocked").is_some_and(|b| b == "true"))
+    .then(|| {
+        let streak = if row.try_get::<Option<String>, _>("last_error")?.as_deref() == Some("wall") {
+            row.try_get::<i32, _>("timeout_streak")?
+        } else {
+            0
+        };
+        anyhow::Ok(streak.saturating_add(1))
+    })
+    .transpose()?;
+    if let Some(streak) = refusals {
+        doc.ttl_secs = crate::queue::wall_backoff(streak as u32);
+    }
     let after = normalize(&doc);
     crate::store::write_document(&mut tx, id, generation, &doc).await?;
+    if let Some(streak) = refusals {
+        sqlx::query("UPDATE resource SET timeout_streak=$2,last_error='wall' WHERE id=$1")
+            .bind(id)
+            .bind(streak)
+            .execute(&mut *tx)
+            .await?;
+    }
     if social_missing {
         unqueue_also_on(&mut tx, id).await?;
     }

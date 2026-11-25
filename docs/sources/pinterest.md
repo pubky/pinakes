@@ -10,7 +10,7 @@ Graph tags and JSON-LD. No key or account is needed. Pins and profiles are socia
 | Fetches | `GET https://www.pinterest.com/oembed.json?url={pin}` for a pin, `GET https://www.pinterest.com/{name}/` for a profile |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.pinterest.com` |
-| Refresh | Within the hour (social content) |
+| Refresh | Within the hour (social content). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `SocialMediaPosting` (pin), `Person` (profile) |
 | Keys | None (facts only) |
 | Social content | Yes: 120 characters of a pin's title, 200 of a bio, purged when deleted ([social content](../design.md#social-content)) |
@@ -63,8 +63,10 @@ A 429 to either request waits at least the time its `Retry-After` header names (
 Pinterest refuses a request with a sign-in redirect, a challenge page, or a 401 or 403; for a
 profile's page, a 451 counts too. A link never read before then gets the card of its shape alone,
 "Post on pinterest.com" or "Profile on pinterest.com", with the description "Blocked by the site."
-and the `blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps
-the card read before, and the link is asked again in an hour.
+and the `blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the
+card read before. After a refusal the link is asked again after a day, then after 2, 4 and 7 more
+days, and every 7 days while one refusal follows another
+([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

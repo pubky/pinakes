@@ -913,6 +913,10 @@ pub struct Egress {
     dns: Arc<dyn Dns>,
     transport: Arc<dyn Transport>,
     hosts: Arc<Mutex<HashMap<String, HostBudget>>>,
+    /// The sites (registrable domains) that refused this address as a whole
+    /// (`interstitial::refuses_address`): how many times in a row, and until when no request
+    /// goes to any of their hosts (`queue::wall_backoff` of that count). Kept in memory only.
+    refusals: Arc<std::sync::Mutex<HashMap<String, (u32, Instant)>>>,
     discovered: DiscoveryCache,
     discoveries: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
@@ -1037,6 +1041,7 @@ impl Egress {
             dns,
             transport,
             hosts: Arc::default(),
+            refusals: Arc::default(),
             discovered: Arc::default(),
             discoveries: Arc::default(),
         }
@@ -1344,6 +1349,15 @@ impl Egress {
                 return Err(anyhow::Error::new(super::ErrorClass("policy"))
                     .context("host denied by operator/OSM policy"));
             }
+            // A site that refused this address as a whole is not asked until its pause ends: the
+            // daemon's own wait, as a far slot is.
+            if let Some(wait) = self.site_pause(&host) {
+                return Err(super::RetryLater {
+                    class: "rate_limited",
+                    seconds: wait.as_secs() + 1,
+                }
+                .into());
+            }
             // Amazon is never fetched, also where another link redirects to it.
             if crate::kinds::products::on_amazon(&url) {
                 return Err(refused("Amazon is never fetched"));
@@ -1414,6 +1428,21 @@ impl Egress {
                     permit = Some((host.clone(), guard, at_address));
                 }
             }
+            // The site may have refused this address while this request waited for its slot:
+            // the slot goes back unused and nothing is sent.
+            if let Some(wait) = self.site_pause(&host) {
+                if let Some((_, guard, at_address)) = permit.as_mut() {
+                    **guard = Instant::now();
+                    if let Some((_, at)) = at_address.as_mut() {
+                        **at = Instant::now();
+                    }
+                }
+                return Err(super::RetryLater {
+                    class: "rate_limited",
+                    seconds: wait.as_secs() + 1,
+                }
+                .into());
+            }
             let mut observation = crate::telemetry::FetchGuard::start();
             let with_agent = FetchOptions {
                 user_agent: Some(user_agent(&self.cfg.contact)),
@@ -1431,9 +1460,36 @@ impl Egress {
             };
             observation.status(response.status);
             drop(observation);
+            // A sign-in redirect that says the site refuses this address for a while, not this
+            // page (`interstitial::refuses_address`) pauses the whole site, longer with each such
+            // refusal in a row (`site_refused`), and the sign-in page is not asked for. A final
+            // answer from the site, or a redirect away from it, ends the streak; a hop within the
+            // site (`instagram.com` to `www.instagram.com`) says nothing yet.
+            let redirect = matches!(response.status, 301 | 302 | 303 | 307 | 308);
+            let target = response
+                .location
+                .as_deref()
+                .filter(|_| redirect)
+                .and_then(|l| url.join(l).ok());
+            let refuses = target
+                .as_ref()
+                .is_some_and(|target| super::interstitial::refuses_address(&url, target));
+            if refuses {
+                self.site_refused(&host);
+            } else if !redirect
+                || target
+                    .as_ref()
+                    .is_none_or(|t| t.host_str().map(Self::site_of) != Some(Self::site_of(&host)))
+            {
+                self.site_answered(&host);
+            }
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 if options.keep_redirect {
                     return Ok(response);
+                }
+                if refuses {
+                    crate::telemetry::set_outcome(crate::telemetry::last_fetch(), "blocked");
+                    return Err(super::interstitial::Blocked.into());
                 }
                 if options.sensitive
                     || options.json_body.is_some()
@@ -1586,6 +1642,43 @@ impl Egress {
         tokio::time::sleep_until(*guard).await;
         *guard = Instant::now() + interval;
         Ok(guard)
+    }
+}
+impl Egress {
+    /// The site a refusal pause is kept by: `host`'s registrable domain (`www.instagram.com` and
+    /// `instagram.com` are one), else the host itself.
+    fn site_of(host: &str) -> String {
+        psl::domain_str(host).unwrap_or(host).to_owned()
+    }
+    /// How long requests to `host` still wait because its site refused this address as a whole.
+    fn site_pause(&self, host: &str) -> Option<Duration> {
+        let refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        if refusals.is_empty() {
+            return None;
+        }
+        refusals
+            .get(&Self::site_of(host))
+            .map(|(_, until)| until.saturating_duration_since(Instant::now()))
+            .filter(|wait| !wait.is_zero())
+    }
+    /// `host`'s site refused this address as a whole once more: no request goes to it for
+    /// `queue::wall_backoff` of the refusals in a row (1, 2, 4, then 7 days). A refusal while a
+    /// pause still runs (a request sent before it began) is the same refusal: it adds nothing.
+    fn site_refused(&self, host: &str) {
+        let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let entry = refusals.entry(Self::site_of(host)).or_insert((0, now));
+        if entry.1 <= now {
+            entry.0 = entry.0.saturating_add(1);
+            entry.1 = now + Duration::from_secs(crate::queue::wall_backoff(entry.0));
+        }
+    }
+    /// `host` answered with anything but such a refusal: its site's streak ends.
+    fn site_answered(&self, host: &str) {
+        let mut refusals = self.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        if !refusals.is_empty() {
+            refusals.remove(&Self::site_of(host));
+        }
     }
 }
 /// The pacing slot of an address, apart from every host name's.
@@ -1887,6 +1980,268 @@ mod tests {
         let start = Instant::now();
         assert!(egress.fetch("https://host.example/after").await.is_ok());
         assert!(Instant::now() - start <= Duration::from_secs(2));
+    }
+    /// A sign-in redirect that says the site refuses the whole address (Instagram's `is_from_rle`)
+    /// is a wall at once, without asking for the sign-in page, and pauses every host of the site
+    /// (`www.instagram.com` and `instagram.com`): 1 day, then 2 for the next such refusal in a
+    /// row; a final answer from the site ends the streak. A sign-in redirect without the mark is
+    /// a wall of that page alone, and other sites are asked as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_site_that_refuses_the_address_is_paused_longer_each_time() {
+        struct Walls {
+            asked: std::sync::Mutex<Vec<String>>,
+            flagged: std::sync::atomic::AtomicBool,
+        }
+        #[async_trait]
+        impl Transport for Walls {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                self.asked.lock().unwrap().push(url.to_string());
+                let flagged = self.flagged.load(Ordering::SeqCst);
+                let location = match (url.host_str(), url.path()) {
+                    (_, "/accounts/login/") => None,
+                    (Some("www.instagram.com"), path) if flagged => Some(format!(
+                        "/accounts/login/?next=https%3A%2F%2Fwww.instagram.com{path}&is_from_rle"
+                    )),
+                    (Some("www.facebook.com"), _) => Some("/accounts/login/?next=%2F".to_owned()),
+                    _ => None,
+                };
+                Ok(Fetched {
+                    location: location.clone(),
+                    ..Fetched::answer(
+                        url.clone(),
+                        if location.is_some() { 302 } else { 200 },
+                        "text/html".into(),
+                        b"<html><head><title>Page</title></head><body>Words.</body></html>"
+                            .to_vec(),
+                    )
+                })
+            }
+        }
+        let walls = Arc::new(Walls {
+            asked: Default::default(),
+            flagged: true.into(),
+        });
+        let egress = Egress::with_backends(Default::default(), Arc::new(FakeDns), walls.clone());
+        let asked = || std::mem::take(&mut *walls.asked.lock().unwrap());
+        let day = 86_400;
+        // The wait a paused request names: about `days`.
+        let paused = |error: anyhow::Error, days: u64| {
+            let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+            assert_eq!(retry.class, "rate_limited");
+            assert!(
+                (days * day - 10..=days * day + 1).contains(&retry.seconds),
+                "{} for {days} days",
+                retry.seconds
+            );
+        };
+        let refused = |result: Result<Fetched>| {
+            let error = result.unwrap_err();
+            assert!(
+                error.is::<super::super::interstitial::Blocked>(),
+                "{error:#}"
+            );
+        };
+        refused(
+            egress
+                .fetch("https://www.instagram.com/p/DgB34vHhlaT/")
+                .await,
+        );
+        assert_eq!(asked(), ["https://www.instagram.com/p/DgB34vHhlaT/"]);
+        // Paused for a day, the site's other host too: nothing is asked.
+        for uri in [
+            "https://www.instagram.com/p/Df_H64Tul-0/",
+            "https://instagram.com/p/Df_H64Tul-0/",
+        ] {
+            paused(egress.fetch(uri).await.unwrap_err(), 1);
+        }
+        assert!(asked().is_empty());
+        // Another site's sign-in redirect without the mark is that page's wall, read to its end.
+        refused(egress.fetch("https://www.facebook.com/a").await);
+        assert_eq!(
+            asked(),
+            [
+                "https://www.facebook.com/a",
+                "https://www.facebook.com/accounts/login/?next=%2F"
+            ]
+        );
+        tokio::time::advance(Duration::from_secs(10)).await;
+        refused(egress.fetch("https://www.facebook.com/a").await);
+        assert_eq!(asked().len(), 2);
+        assert!(egress.fetch("https://example.com/").await.is_ok());
+        assert_eq!(asked(), ["https://example.com/"]);
+        // A day later the site is asked again; a second refusal in a row pauses it two days.
+        tokio::time::advance(Duration::from_secs(day)).await;
+        refused(
+            egress
+                .fetch("https://www.instagram.com/p/Df_H64Tul-0/")
+                .await,
+        );
+        assert_eq!(asked(), ["https://www.instagram.com/p/Df_H64Tul-0/"]);
+        paused(
+            egress
+                .fetch("https://www.instagram.com/p/x1/")
+                .await
+                .unwrap_err(),
+            2,
+        );
+        tokio::time::advance(Duration::from_secs(day)).await;
+        paused(
+            egress
+                .fetch("https://www.instagram.com/p/x1/")
+                .await
+                .unwrap_err(),
+            1,
+        );
+        assert!(asked().is_empty());
+        // Once it answers, the streak is over: the next refusal pauses one day again.
+        tokio::time::advance(Duration::from_secs(day)).await;
+        walls.flagged.store(false, Ordering::SeqCst);
+        assert!(egress
+            .fetch("https://www.instagram.com/p/Df_H64Tul-0/")
+            .await
+            .is_ok());
+        walls.flagged.store(true, Ordering::SeqCst);
+        refused(
+            egress
+                .fetch("https://www.instagram.com/p/Df_H64Tul-0/")
+                .await,
+        );
+        assert_eq!(asked().len(), 2);
+        paused(
+            egress
+                .fetch("https://www.instagram.com/p/x1/")
+                .await
+                .unwrap_err(),
+            1,
+        );
+    }
+    /// Instagram as these tests see it: `instagram.com` redirects to `www.instagram.com`, which
+    /// answers every page with the rate-limit sign-in redirect while `flagged`, else the page.
+    struct Flagged {
+        asked: std::sync::Mutex<Vec<String>>,
+        flagged: std::sync::atomic::AtomicBool,
+    }
+    impl Flagged {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                asked: Default::default(),
+                flagged: true.into(),
+            })
+        }
+        fn asked(&self) -> Vec<String> {
+            std::mem::take(&mut *self.asked.lock().unwrap())
+        }
+    }
+    #[async_trait]
+    impl Transport for Flagged {
+        async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+            self.asked.lock().unwrap().push(url.to_string());
+            // An answer takes a moment, as a real one does: a second request meanwhile has
+            // passed the pause check and waits for the host's slot.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let location = match url.host_str() {
+                Some("instagram.com") => Some(format!("https://www.instagram.com{}", url.path())),
+                _ if self.flagged.load(Ordering::SeqCst) => Some(format!(
+                    "/accounts/login/?next=https%3A%2F%2Fwww.instagram.com{}&is_from_rle",
+                    url.path()
+                )),
+                _ => None,
+            };
+            Ok(Fetched {
+                location: location.clone(),
+                ..Fetched::answer(
+                    url.clone(),
+                    if location.is_some() { 301 } else { 200 },
+                    "text/html".into(),
+                    b"<html><head><title>Page</title></head><body>Words.</body></html>".to_vec(),
+                )
+            })
+        }
+    }
+    /// The seconds a paused request is told to wait.
+    fn pause_of(error: anyhow::Error) -> u64 {
+        let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+        assert_eq!(retry.class, "rate_limited");
+        retry.seconds
+    }
+
+    /// Two requests to a site at once: the one that waited for the host's slot while the first
+    /// was refused sends nothing. One refusal, one step: the pause is a day, and the next
+    /// refusal makes it two.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_waiting_for_the_slot_sends_nothing_once_the_site_refuses() {
+        let site = Flagged::new();
+        let egress = Egress::with_backends(Default::default(), Arc::new(FakeDns), site.clone());
+        let (a, b) = tokio::join!(
+            egress.fetch("https://www.instagram.com/p/AAAAAAAAAA1/"),
+            egress.fetch("https://www.instagram.com/p/AAAAAAAAAA2/"),
+        );
+        let blocked = |r: &Result<Fetched>| {
+            r.as_ref()
+                .is_err_and(|e| e.is::<super::super::interstitial::Blocked>())
+        };
+        let (refused, paused) = if blocked(&a) { (a, b) } else { (b, a) };
+        assert!(refused
+            .unwrap_err()
+            .is::<super::super::interstitial::Blocked>());
+        let wait = pause_of(paused.unwrap_err());
+        assert!((86_390..=86_401).contains(&wait), "{wait}");
+        assert_eq!(site.asked().len(), 1, "exactly one request is sent");
+        tokio::time::advance(Duration::from_secs(86_400)).await;
+        assert!(egress
+            .fetch("https://www.instagram.com/p/AAAAAAAAAA1/")
+            .await
+            .is_err());
+        let wait = pause_of(
+            egress
+                .fetch("https://www.instagram.com/p/AAAAAAAAAA2/")
+                .await
+                .unwrap_err(),
+        );
+        assert!((172_790..=172_801).contains(&wait), "{wait}");
+        // A refusal while the pause runs (to a request sent before it began) adds no step.
+        egress.site_refused("instagram.com");
+        let wait = pause_of(
+            egress
+                .fetch("https://www.instagram.com/p/AAAAAAAAAA2/")
+                .await
+                .unwrap_err(),
+        );
+        assert!((172_790..=172_801).contains(&wait), "{wait}");
+    }
+
+    /// A redirect within the site (`instagram.com` to `www.instagram.com`) is no answer that ends
+    /// the streak: a refusal behind it is the next in a row.
+    #[tokio::test(start_paused = true)]
+    async fn a_redirect_within_the_site_keeps_the_refusal_streak() {
+        let site = Flagged::new();
+        let egress = Egress::with_backends(Default::default(), Arc::new(FakeDns), site.clone());
+        assert!(egress
+            .fetch("https://www.instagram.com/p/AAAAAAAAAA1/")
+            .await
+            .unwrap_err()
+            .is::<super::super::interstitial::Blocked>());
+        tokio::time::advance(Duration::from_secs(86_400)).await;
+        assert!(egress
+            .fetch("https://instagram.com/p/AAAAAAAAAA1/")
+            .await
+            .unwrap_err()
+            .is::<super::super::interstitial::Blocked>());
+        assert_eq!(
+            site.asked(),
+            [
+                "https://www.instagram.com/p/AAAAAAAAAA1/",
+                "https://instagram.com/p/AAAAAAAAAA1/",
+                "https://www.instagram.com/p/AAAAAAAAAA1/"
+            ]
+        );
+        let wait = pause_of(
+            egress
+                .fetch("https://www.instagram.com/p/AAAAAAAAAA2/")
+                .await
+                .unwrap_err(),
+        );
+        assert!((172_790..=172_801).contains(&wait), "{wait}");
     }
     #[tokio::test(start_paused = true)]
     async fn a_redirect_within_a_slow_host_keeps_its_slot() {

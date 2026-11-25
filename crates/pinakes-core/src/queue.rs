@@ -421,6 +421,44 @@ async fn off_origin(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
 /// (`sources::retry`, `event::adapters::service::upstream_status`, the egress's 429, a card
 /// reader's or Nominatim's). The daemon's own waits (`OWN_WAITS`) are not among them.
 const UPSTREAM_WAITS: [&str; 3] = ["upstream", "http_4xx", "http_5xx"];
+/// The first wait after a social site refused a link (its sign-in wall, a challenge, a 401, 403
+/// or 451: the `blocked` card, or a stored card kept through a refusal): a day, doubling with each
+/// refusal in a row up to `WALL_BACKOFF_MAX_SECS` ([`wall_backoff`]). Asking a site that refuses
+/// the request again soon only makes it refuse longer.
+pub const WALL_BACKOFF_SECS: u64 = 86400;
+/// The longest wait between two reads of a link its social site keeps refusing: a week.
+pub const WALL_BACKOFF_MAX_SECS: u64 = 7 * 86400;
+/// The wait after the `streak`-th refusal in a row (1 is the first): `WALL_BACKOFF_SECS`, doubled
+/// for each refusal before it, at most `WALL_BACKOFF_MAX_SECS` (1, 2, 4, 7, 7, … days).
+pub fn wall_backoff(streak: u32) -> u64 {
+    WALL_BACKOFF_SECS
+        .saturating_mul(
+            1u64.checked_shl(streak.saturating_sub(1))
+                .unwrap_or(u64::MAX),
+        )
+        .min(WALL_BACKOFF_MAX_SECS)
+}
+/// A social site refused the refresh of a stored card that says more, or of one found gone
+/// (`changes::save` kept it): the card and its status stay, nothing is charged, and the link is
+/// read again (`refresh_at` and `next_attempt_at`, so it is no overdue refresh) after
+/// [`wall_backoff`] of the refusals in a row (the streak is kept in `timeout_streak` while
+/// `last_error` is `wall`; a saved `blocked` card continues it, `changes::save`).
+async fn refused(pool: &PgPool, job: &Job) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='wall' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+        .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
+    if let Some(streak) = streak {
+        let streak = streak.saturating_add(1);
+        sqlx::query("UPDATE resource SET timeout_streak=$2,lease_until=NULL,priority_at=NULL,last_error='wall',refresh_at=now()+$3*interval '1 second',next_attempt_at=now()+$3*interval '1 second' WHERE id=$1")
+            .bind(&job.id)
+            .bind(streak)
+            .bind(wall_backoff(streak as u32) as f64)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
 /// The daemon's own waits, which say nothing about the link and charge nothing: its host budget
 /// (`rate_limited`), a cached failure replayed (`discovery_cached`) and the operator's own quota
 /// at a service (`quota`: GitHub's token rate limit, Nominatim's 429).
@@ -830,7 +868,9 @@ async fn finish_job(
             doc.ttl_secs = 0;
         }
         if crate::resolver::cards::social(&doc) {
-            doc.ttl_secs = doc.ttl_secs.min(3600);
+            doc.ttl_secs = doc
+                .ttl_secs
+                .min(crate::resolver::cards::social_refresh_secs(&doc));
         }
         let attrs = match resolver.name() {
             "web" | "official" => crate::sources::attributes(),
@@ -864,8 +904,10 @@ async fn finish_job(
             // than `max_backoff_secs` from now and no earlier than it was due anyway. Once an
             // hour at most, so a step that fails every time costs one fetch an hour; no attempt
             // is charged. When this cannot be written either, the step waits for the card's
-            // own next full read.
-            if doc.status == Status::Ok {
+            // own next full read. A refused read's card (`blocked`) keeps its refusals' wait.
+            if doc.status == Status::Ok
+                && doc.attributes.get("blocked").is_none_or(|b| b != "true")
+            {
                 let again = async {
                     sqlx::query("UPDATE event_fetch SET validators='{}' WHERE resource_id=$1 AND validators<>'{}' AND EXISTS(SELECT 1 FROM resource WHERE id=$1 AND generation=$2)")
                         .bind(&job.id).bind(job.generation).execute(pool).await?;
@@ -905,14 +947,16 @@ async fn finish_job(
                 denied(pool, job, cfg, retry).await?;
             } else if retry.class == "off_origin" {
                 off_origin(pool, job, cfg).await?;
+            } else if retry.class == "wall" {
+                refused(pool, job).await?;
             } else if UPSTREAM_WAITS.contains(&retry.class) {
                 upstream_wait(pool, job, cfg, retry).await?;
             } else {
                 // The daemon's own waits (`OWN_WAITS`) say nothing new about the link and charge
-                // nothing: a refused-connection or upstream-wait streak stays, so its backoff
-                // keeps growing.
+                // nothing: a refused-connection, upstream-wait or refusal (`wall`) streak stays,
+                // so its backoff keeps growing.
                 let own = OWN_WAITS.contains(&retry.class);
-                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND (last_error='connect' OR last_error=ANY($6)) THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
+                sqlx::query("UPDATE resource SET timeout_streak=CASE WHEN $5 AND (last_error IN ('connect','wall') OR last_error=ANY($6)) THEN timeout_streak ELSE 0 END,lease_until=NULL,priority_at=NULL,next_attempt_at=now()+$3*interval '1 second',last_error=CASE WHEN $5 AND (last_error IN ('connect','wall') OR last_error=ANY($6)) THEN last_error ELSE $4 END WHERE id=$1 AND generation=$2")
                     .bind(&job.id).bind(job.generation).bind(retry.seconds.clamp(1,3600) as f64).bind(retry.class).bind(own).bind(&UPSTREAM_WAITS[..]).execute(pool).await?;
             }
         } else if crate::resolver::unreached(&error) {
@@ -1590,6 +1634,27 @@ mod tests {
         Ok(())
     }
 
+    /// A web resolver whose site refuses the read: the link's `blocked` card.
+    struct Refused;
+    #[async_trait::async_trait]
+    impl Resolver for Refused {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+            Ok(crate::sources::social::blocked(
+                ResourceMeta::new(uri, "web", 100),
+                crate::sources::social::Shape::Post,
+                "after-save.example.org",
+            ))
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(100)
+        }
+    }
     /// A web resolver that answers a page after `0` (never, within a test, when it is long).
     struct After(Duration);
     #[async_trait::async_trait]
@@ -1762,6 +1827,34 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// A refused read's card (`blocked`) whose step after the save fails keeps its refusals' wait
+    /// (a day): it is not read again within the hour as an accepted card is.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_blocked_card_keeps_its_wait_after_a_failed_step(pool: PgPool) {
+        // The `blocked` fact is a social source's; a build without one has no such card.
+        if !crate::sources::attributes().contains(&"blocked") {
+            return;
+        }
+        let uri = "https://after-save.example.org/refused";
+        let job = claimed(&pool, uri).await;
+        FAILS_AFTER_SAVE.lock().unwrap().push(uri.into());
+        let failures = crate::telemetry::after_save_failures("web");
+        run_batch(
+            &pool,
+            &Refused,
+            &QueueConfig::default(),
+            std::slice::from_ref(&job),
+        )
+        .await
+        .unwrap();
+        assert!(crate::telemetry::after_save_failures("web") > failures);
+        let (_, is_final, again, refresh) = schedule(&pool, &job.id).await;
+        assert!(!is_final);
+        let day = 86_340.0..=86_460.0;
+        assert!(again.is_some_and(|s| day.contains(&s)), "{again:?}");
+        assert!(refresh.is_some_and(|s| day.contains(&s)), "{refresh:?}");
     }
 
     /// A failure in what follows the save (the alias a page names) leaves the saved card as it

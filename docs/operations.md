@@ -674,7 +674,8 @@ and its address rules don't merge new links. Links it merged before stay merged.
   5xx. Each one counts in `pinakes_source_token_refusals_total{source}`, which the `ProviderKeyRefused`
   alert reads for every keyed provider.
 - **Refresh.** An official card is read again after `limits.resolver_ttl_secs`, sooner where its source
-  asks, and social content within the hour. A card with a date (an earthquake, a finished trial, a
+  asks, and social content within the hour (Instagram's within the day). A link a social site refuses
+  is read again after a day, doubling to a week ([failures](#failures-and-retries)). A card with a date (an earthquake, a finished trial, a
   Bitcoin block or confirmed transaction) is final a day after its start or end has passed.
 - **A build with more sources.** Run `pinakesd reextract web official`, so links already known get
   their source's card.
@@ -1019,7 +1020,7 @@ class (`last_error`) decides what a failure costs:
 | `relay_outage`, `inconclusive`, `indexer_unavailable`, `disabled` and other waits a source names | PKARR relays are down; Nostr indexers couldn't settle; a setting is missing (SEC EDGAR without a contact) | No | Never |
 | `missing_unconfirmed` | One missing answer, not yet confirmed | No | Never |
 | `wall` | A [challenge page](#access-walls); status `unreachable` | Yes | After `limits.max_failures` |
-| `wall` on a social card | A social site's wall on a refresh of a stored card that says more; the card and its status stay | No; read again in an hour | Never |
+| `wall` on a social card | A social site refused a read: a stored card that says more, or one found gone, stays with its status; else the link gets the `blocked` card | No; read again after 1, 2, 4, then every 7 days | Never |
 | `policy` | Refused by the egress policy | Yes | At the first attempt |
 | `unsupported` | An OSM-host page that is no object or location link | Final | No |
 | `too_complex` | A [parse](#html-parsing) past its limits | Final | No |
@@ -1036,7 +1037,13 @@ Details:
   card yet shows `error` after `limits.max_failures` in a row.
 - **Never answered.** The streak is kept in `timeout_streak` while `last_error` is `connect`. A link
   with no card yet turns `error` after `limits.max_failures` in a row and is still retried.
-- **Own waits** keep the streak of a refused connection or an upstream wait.
+- **Refusals.** A link a social site refuses (its sign-in redirect, a challenge page, a 401, 403 or
+  451, or a status of its own such as LinkedIn's 999) is read again after a day, then after 2, 4 and 7
+  more days, and every 7 days while one refusal follows another. The streak is kept in
+  `timeout_streak` while `last_error` is `wall`, both for a kept card and for a `blocked` card; a read
+  that answers ends it, and another failure in between starts it again. A card found gone stays gone: a refusal says nothing
+  about the object. Asking a site that refuses the request again soon only makes it refuse longer.
+- **Own waits** keep the streak of a refused connection, an upstream wait or a refusal.
 
 ### Missing results
 
@@ -1074,7 +1081,7 @@ and the third when shorter. A feed follows its nearest date. Cursor feeds use
 | --- | --- |
 | Web, media and other undated cards | The first tier |
 | Official cards | `limits.resolver_ttl_secs`, or sooner where the source asks |
-| Social content | Within the hour |
+| Social content | Within the hour; Instagram's within the day. While the site refuses the read, the [refusals' backoff](#failures-and-retries) |
 | A dated card | One fetch 24 hours after its end (or start) makes it final |
 | A job posting | Its posting date doesn't end its refreshes |
 | OSM places | `limits.osm_ttl_secs`. A confirmed missing object stays cached as missing for as long. |
@@ -1151,6 +1158,17 @@ A challenge page (a bot wall, captcha or sign-in redirect) is a failed fetch. Th
 `unreachable`, is retried with the normal backoff and dead-letters after `limits.max_failures`. Its last
 accepted document, event dates and occurrences stay. A wall never counts toward a disappearance, and its
 title never becomes a card's name. `pinakes_fetch_total` counts it as outcome `blocked`.
+
+A sign-in redirect whose query says the site refuses the whole address for a while, not the page
+(Instagram's `is_from_rle`), is a wall at once: the sign-in page is not asked for, and no request
+goes to any host of that site (its registrable domain: `instagram.com` and `www.instagram.com`
+alike) for a day, then for 2, 4 and 7 days after each such refusal in a row. A request already
+waiting for its host's turn when the refusal comes sends nothing, and a refusal to a request sent
+before the pause began adds no step. Any other final answer from the site, or a redirect away from
+it, ends the streak; a redirect within the site does not. Every link of the site waits meanwhile
+(`rate_limited`, charged nothing, asked again each hour without a request), and those due count in
+`pinakes_refresh_overdue` until the pause ends. The pause and its streak are kept in memory and a
+restart forgets them; each link's own wait is stored.
 
 A wall hook may answer in its place, also for plain 401 and 403 answers, within six seconds. The site's
 own feed lists the exact link (`feed`), or a source's record names it (an IMDb title by its Wikidata item,

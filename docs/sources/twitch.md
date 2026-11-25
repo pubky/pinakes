@@ -11,7 +11,7 @@ browser. No key or account is needed. Channels, videos and clips are social cont
 | Fetches | `GET https://www.twitch.tv/{login}` for a channel, `GET https://www.twitch.tv/videos/{id}` for a video; nothing for a clip |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.twitch.tv` |
-| Refresh | Within the hour (social content); a clip's refresh makes no request |
+| Refresh | Within the hour (social content); a clip's refresh makes no request. A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `Person` (channel), `VideoObject` (video, clip) |
 | Keys | None (facts only) |
 | Social content | Yes: 120 characters of a video's title, 200 of a bio; a channel or video is purged when Twitch answers 404 or 410 ([social content](../design.md#social-content)) |
@@ -59,8 +59,9 @@ A clip makes no request.
 Twitch refuses a request with a sign-in redirect, a challenge page, or a 401, 403 or 451. A link
 never read before then gets the card of its shape alone, "Profile on twitch.tv" or "Video on
 twitch.tv", with the description "Blocked by the site." and the `blocked` fact. The link still
-resolves, groups and counts. A refusal on a refresh keeps the card read before, and the link is
-asked again in an hour.
+resolves, groups and counts. A refusal on a refresh keeps the card read before. After a refusal the
+link is asked again after a day, then after 2, 4 and 7 more days, and every 7 days while one refusal
+follows another ([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

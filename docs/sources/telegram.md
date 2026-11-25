@@ -10,7 +10,7 @@ is needed. Channels and posts are social content.
 | Fetches | `GET https://t.me/{name}/{n}?embed=1` for a post, `GET https://t.me/{name}` for a channel |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `t.me` |
-| Refresh | Within the hour (social content) |
+| Refresh | Within the hour (social content). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `SocialMediaPosting` (post), `Person` (channel) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |
@@ -57,7 +57,9 @@ none. A 408 or a server error waits at least a minute.
 t.me refuses a request with a sign-in redirect, a challenge page, or a 401, 403 or 451. A link never
 read before then gets the card of its shape alone, "Post on t.me" or "Profile on t.me", with the
 description "Blocked by the site." and the `blocked` fact. The link still resolves, groups and
-counts. A refusal on a refresh keeps the card read before, and the link is asked again in an hour.
+counts. A refusal on a refresh keeps the card read before. After a refusal the link is asked again
+after a day, then after 2, 4 and 7 more days, and every 7 days while one refusal follows another
+([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

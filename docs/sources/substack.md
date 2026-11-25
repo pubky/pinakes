@@ -11,7 +11,7 @@ publication and a post are not.
 | Fetches | `GET https://{name}.substack.com/`, `GET https://{name}.substack.com/p/{slug}` or `GET https://substack.com/@{handle}` |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) |
-| Refresh | Daily, as every official card ([refresh](../design.md#refresh)); a profile, and a publication's card while Substack refuses the request, within the hour (social content) |
+| Refresh | Daily, as every official card ([refresh](../design.md#refresh)); a profile within the hour (social content); a link Substack refuses, after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `Blog`, `BlogPosting` or the article type the page declares (such as `NewsArticle`), `Person` |
 | Keys | None (facts only) |
 | Social content | Profiles, and a publication's card while Substack refuses the request (a `Person`): 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |
@@ -66,8 +66,10 @@ The answers mean:
 When Substack refuses the request, the card is the link's shape alone, marked with the fact
 `blocked`. A post's card is then a `SocialMediaPosting` named "Post on substack.com"; a
 publication's or a profile's is a `Person` named "Profile on substack.com". Its description is
-"Blocked by the site." The link still resolves, groups and counts. On a refresh, a refusal keeps
-the card read before, as an access wall on a web page does.
+"Blocked by the site." The link still resolves, groups and counts. On a refresh, a refusal keeps the
+card read before, as an access wall on a web page does. After a refusal the link is asked again
+after a day, then after 2, 4 and 7 more days, and every 7 days while one refusal follows another
+([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

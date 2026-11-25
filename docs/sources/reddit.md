@@ -11,7 +11,7 @@ gets a plain card. Posts and users are social content.
 | Fetches | `GET https://www.reddit.com/comments/{id}.json?raw_json=1`, `GET https://www.reddit.com/r/{name}/about.json?raw_json=1` or `GET https://www.reddit.com/user/{name}/about.json?raw_json=1` |
 | Credentials | None |
 | Rate | 0.17 requests per second on `www.reddit.com` (Reddit's limit of 10 a minute without an account) |
-| Refresh | Posts and users: within the hour (social content). Subreddits: daily, as every official card ([refresh](../design.md#refresh)) |
+| Refresh | Posts and users: within the hour (social content). Subreddits: daily, as every official card ([refresh](../design.md#refresh)). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `DiscussionForumPosting` (post), `Organization` (subreddit), `Person` (user) |
 | Keys | None (facts only) |
 | Social content | Posts and users: 200-character excerpt, purged when deleted ([social content](../design.md#social-content)). Subreddits: no |
@@ -64,12 +64,13 @@ server error waits at least a minute.
 
 ### Refused requests
 
-Reddit refuses a request with its network-security page (403), another challenge, a sign-in
-redirect or a 401. A link never read before then gets the card of its shape alone, "Post on
-reddit.com" or "Profile on reddit.com" (for a subreddit or user), with the description "Blocked by
-the site." and the `blocked` fact. It keeps the type its readable card has, so a refused post is
-still social content. The link still resolves, groups and counts. A refusal on a refresh keeps the
-card read before, and the link is asked again in an hour.
+Reddit refuses a request with its network-security page (403), another challenge, a sign-in redirect
+or a 401. A link never read before then gets the card of its shape alone, "Post on reddit.com" or
+"Profile on reddit.com" (for a subreddit or user), with the description "Blocked by the site." and
+the `blocked` fact. It keeps the type its readable card has, so a refused post is still social
+content. The link still resolves, groups and counts. A refusal on a refresh keeps the card read
+before. After a refusal the link is asked again after a day, then after 2, 4 and 7 more days, and
+every 7 days while one refusal follows another ([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

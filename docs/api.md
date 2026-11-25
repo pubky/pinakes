@@ -383,7 +383,7 @@ client needs no list of services to build one.
 
 | Field | Meaning |
 | --- | --- |
-| `provider` | Who serves the frame: `youtube`, `vimeo`, `spotify`, `soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`, `mastodon` or `openstreetmap`; else the oEmbed provider's name in lower case with hyphens (`speaker-deck`); else the frame's host |
+| `provider` | Who serves the frame: `youtube`, `vimeo`, `spotify`, `soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`, `instagram`, `mastodon` or `openstreetmap`; else the oEmbed provider's name in lower case with hyphens (`speaker-deck`); else the frame's host |
 | `kind` | `audio` or `video` (a player), `post` (a social post), `map`, or `rich` (anything else: slides, a document, code, a chart) |
 | `src` | The frame's address. The frame never starts playing by itself. |
 | `height` | In CSS pixels (at most 2,000), for a frame of fixed height (a player strip, a post, a document); `null` when the frame scales with its width or the provider gives no height |
@@ -400,6 +400,9 @@ Pinakes takes the frame from the first of these that has one:
    - a TIDAL track, album, video or playlist, a Deezer track, album, playlist or artist;
    - an Apple Music song, album or playlist, an Apple Podcasts show or episode;
    - an X post;
+   - an Instagram post or reel: Instagram's captioned frame of its root,
+     `https://www.instagram.com/p/{code}/embed/captioned/` or `…/reel/{code}/embed/captioned/`, from
+     any spelling of the link, whether Pinakes could read the post or not;
    - a Mastodon post on the server it was posted on (`/@{account}/{id}/embed`), when Mastodon's
      own API answered for it;
    - an OpenStreetMap card's map (its bounding box, or the streets around its point, with a

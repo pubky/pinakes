@@ -747,7 +747,7 @@
             "$ref": "#/components/schemas/EmbedKind"
           },
           "provider": {
-            "description": "Who serves the frame: a service Pinakes knows (`youtube`, `vimeo`, `spotify`,\n`soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`,\n`mastodon`, `openstreetmap`), else the oEmbed provider's name in lower case with hyphens\n(`speaker-deck`), else the frame's host.",
+            "description": "Who serves the frame: a service Pinakes knows (`youtube`, `vimeo`, `spotify`,\n`soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`,\n`instagram`, `mastodon`, `openstreetmap`), else the oEmbed provider's name in lower case\nwith hyphens (`speaker-deck`), else the frame's host.",
             "type": "string"
           },
           "src": {

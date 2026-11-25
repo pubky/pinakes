@@ -10,7 +10,7 @@ needed. Posts and profiles are social content.
 | Fetches | `GET https://www.threads.com/@{handle}`, `GET https://www.threads.com/@{handle}/post/{code}` or `GET https://www.threads.com/t/{code}` |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.threads.com` |
-| Refresh | Within the hour (social content) |
+| Refresh | Within the hour (social content). A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `SocialMediaPosting` (post), `Person` (profile) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt, purged when deleted ([social content](../design.md#social-content)) |
@@ -55,10 +55,11 @@ Threads refuses a request with a sign-in redirect, a challenge page, or a 401, 4
 profile that does not exist redirects to the sign-in page too, so it reads as refused and not as
 `missing`.
 
-A link never read before then gets the card of its shape alone, "Post on threads.com" or "Profile
-on threads.com", with the description "Blocked by the site." and the `blocked` fact. The link still
-resolves, groups and counts. A refusal on a refresh keeps the card read before, and the link is
-asked again in an hour.
+A link never read before then gets the card of its shape alone, "Post on threads.com" or "Profile on
+threads.com", with the description "Blocked by the site." and the `blocked` fact. The link still
+resolves, groups and counts. A refusal on a refresh keeps the card read before. After a refusal the
+link is asked again after a day, then after 2, 4 and 7 more days, and every 7 days while one refusal
+follows another ([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

@@ -12,7 +12,7 @@ gets a plain card. Profiles, company pages and posts are social content.
 | Fetches | `GET https://www.linkedin.com/in/{slug}` or `GET https://www.linkedin.com/company/{slug}`; nothing for a post |
 | Credentials | None |
 | Rate | Shared per-host default (`limits.host_requests_per_second`) on `www.linkedin.com` |
-| Refresh | Within the hour (social content); a post's refresh makes no request |
+| Refresh | Within the hour (social content); a post's refresh makes no request. A link the site refuses: after 1 day, doubling to every 7 days ([refusals](../operations.md#failures-and-retries)) |
 | Card types | `Person` (profile), `Organization` (company or school), `SocialMediaPosting` (post) |
 | Keys | None (facts only) |
 | Social content | Yes: 200-character excerpt of the about text; a profile or company page is purged when deleted ([social content](../design.md#social-content)) |
@@ -57,9 +57,11 @@ A post makes no request.
 
 LinkedIn refuses a request with its own status 999, a sign-in redirect, a challenge page, or a 401,
 403 or 451. A link never read before then gets the card of its shape alone, "Profile on
-linkedin.com" (an `Organization` for a company), with the description "Blocked by the site." and
-the `blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the
-card read before, and the link is asked again in an hour.
+linkedin.com" (an `Organization` for a company), with the description "Blocked by the site." and the
+`blocked` fact. The link still resolves, groups and counts. A refusal on a refresh keeps the card
+read before. After a refusal the link is asked again after a day, then after 2, 4 and 7 more days,
+and every 7 days while one refusal follows another
+([refusals](../operations.md#failures-and-retries)).
 
 ## Card
 

@@ -241,6 +241,11 @@ impl Source for Instagram {
             "SocialMediaPosting" | "VideoObject" | "Person"
         )
     }
+    /// A day: Instagram refuses a whole address that asks often, and a post's caption rarely
+    /// changes. A removed post is still found at its next read.
+    fn social_refresh_secs(&self) -> u64 {
+        86400
+    }
     fn examples(&self) -> &'static [Example] {
         &[
             Example {

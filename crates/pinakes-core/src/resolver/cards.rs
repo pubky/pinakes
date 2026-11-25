@@ -1368,8 +1368,8 @@ fn csl_date(v: &Value) -> Option<String> {
 }
 /// Social content: a note or post whose card quotes its text (Nostr, ActivityPub, a Pubky
 /// object described by its content, an official-API source's posts and comments). Its excerpt
-/// is short, refreshes within the hour and is purged, with its change history, once the object
-/// is confirmed gone.
+/// is short, refreshes within `social_refresh_secs` (an hour by default) and is purged, with its
+/// change history, once the object is confirmed gone.
 pub fn social(doc: &ResourceMeta) -> bool {
     match doc.source.as_str() {
         "nostr" | "activitypub" => matches!(
@@ -1379,6 +1379,11 @@ pub fn social(doc: &ResourceMeta) -> bool {
         "pubky" => doc.type_name == "SocialMediaPosting",
         name => crate::sources::by_name(name).is_some_and(|s| s.social(doc)),
     }
+}
+/// The longest a social card (`social`) goes before it is read again: an hour, or its official
+/// source's own (`Source::social_refresh_secs`).
+pub fn social_refresh_secs(doc: &ResourceMeta) -> u64 {
+    crate::sources::by_name(&doc.source).map_or(3600, |s| s.social_refresh_secs())
 }
 impl CardResolver {
     async fn fetch_embed(

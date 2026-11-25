@@ -5,8 +5,9 @@
 //!
 //! Three sources, the first that answers wins:
 //! 1. [`link`]: the services whose player address follows from the link alone (YouTube, Vimeo,
-//!    Spotify, SoundCloud, Mixcloud, TIDAL, Deezer, Apple Music, Apple Podcasts) and X posts; read
-//!    when a card is served, so every stored card has it. [`mastodon`] and [`map`] are the same for
+//!    Spotify, SoundCloud, Mixcloud, TIDAL, Deezer, Apple Music, Apple Podcasts), X posts and
+//!    Instagram posts and reels; read when a card is served, so every stored card has it, whatever
+//!    its route read (a refused read's card too). [`mastodon`] and [`map`] are the same for
 //!    a Mastodon post's card and an OpenStreetMap card.
 //! 2. [`from_oembed`]: the `<iframe>` of a provider's oEmbed answer, stored with the card.
 //! 3. [`from_meta`]: the page's own player (`twitter:player`, an HTML `og:video`), stored with the
@@ -40,8 +41,8 @@ pub enum EmbedKind {
 pub struct Embed {
     /// Who serves the frame: a service Pinakes knows (`youtube`, `vimeo`, `spotify`,
     /// `soundcloud`, `mixcloud`, `tidal`, `deezer`, `apple-music`, `apple-podcasts`, `x`,
-    /// `mastodon`, `openstreetmap`), else the oEmbed provider's name in lower case with hyphens
-    /// (`speaker-deck`), else the frame's host.
+    /// `instagram`, `mastodon`, `openstreetmap`), else the oEmbed provider's name in lower case
+    /// with hyphens (`speaker-deck`), else the frame's host.
     pub provider: String,
     pub kind: EmbedKind,
     /// The frame's address: `https`, on a public host name, without a credential. It never starts
@@ -295,7 +296,8 @@ fn component(link: &str) -> String {
     percent_encoding::utf8_percent_encode(link, KEEP).to_string()
 }
 
-/// The embed of a link on a service whose player follows from the link alone, or of an X post.
+/// The embed of a link on a service whose player follows from the link alone, or of an X or
+/// Instagram post.
 pub fn link(uri: &str) -> Option<Embed> {
     [
         youtube,
@@ -308,6 +310,7 @@ pub fn link(uri: &str) -> Option<Embed> {
         apple_music,
         apple_podcasts,
         x_post,
+        instagram,
     ]
     .iter()
     .find_map(|adapter| adapter(uri))
@@ -773,6 +776,54 @@ fn x_post(uri: &str) -> Option<Embed> {
     })
 }
 
+/// Hosts whose post and reel links Instagram's own frame shows.
+const INSTAGRAM_HOSTS: &[&str] = &[
+    "instagram.com",
+    "www.instagram.com",
+    "instagr.am",
+    "www.instagr.am",
+];
+/// An Instagram post (`/p/{code}/`) or reel (`/reel/{code}/`, also `/tv/{code}/`), with or without
+/// its author's name first (`/{name}/p/{code}/`), on instagram.com, instagr.am and their www.
+/// hosts, `https` or `http`: Instagram's own captioned frame for the post's or reel's address, as
+/// its embed script builds it (`https://www.instagram.com/p/{code}/embed/captioned/`). A profile
+/// has none.
+fn instagram(uri: &str) -> Option<Embed> {
+    let url = Url::parse(uri.trim()).ok()?;
+    if !matches!(url.scheme(), "https" | "http")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || !INSTAGRAM_HOSTS.contains(&url.host_str()?)
+    {
+        return None;
+    }
+    let code = |s: &str| {
+        chars_in(s, 6..=40, |b| {
+            b.is_ascii_alphanumeric() || b"_-".contains(&b)
+        })
+    };
+    let name = |s: &str| {
+        chars_in(s, 1..=30, |b| {
+            b.is_ascii_alphanumeric() || b"_.-".contains(&b)
+        }) && !["p", "reel", "reels", "tv", "stories", "explore"]
+            .contains(&s.to_ascii_lowercase().as_str())
+    };
+    let (kind, code) = match segments(&url).as_slice() {
+        ["p", c] if code(c) => ("p", *c),
+        ["reel" | "tv", c] if code(c) => ("reel", *c),
+        [n, "p", c] if name(n) && code(c) => ("p", *c),
+        [n, "reel", c] if name(n) && code(c) => ("reel", *c),
+        _ => return None,
+    };
+    Some(Embed::new(
+        "instagram",
+        EmbedKind::Post,
+        format!("https://www.instagram.com/{kind}/{code}/embed/captioned/"),
+        &[],
+    ))
+}
+
 /// A Mastodon post's own frame (`/@{account}/{id}/embed`) on the server it was posted on: for a
 /// card the `mastodon` or `activitypub` source read as a post at `https://{host}/@{account}/{id}`
 /// or `/users/{account}/statuses/{id}`. A post seen through another server
@@ -946,6 +997,7 @@ const KNOWN: &[(&str, &[&str])] = &[
     ("apple-music", &["embed.music.apple.com"]),
     ("apple-podcasts", &["embed.podcasts.apple.com"]),
     ("x", &["platform.twitter.com"]),
+    ("instagram", &["www.instagram.com"]),
     ("mastodon", &[]),
     ("openstreetmap", &["www.openstreetmap.org"]),
 ];
@@ -1519,6 +1571,66 @@ mod tests {
         );
         let long = format!("https://player.example.com/{}", "a".repeat(2100));
         assert_eq!(safe_src(&long), None);
+    }
+
+    /// An Instagram post or reel, in every spelling of its link, has Instagram's own captioned
+    /// frame for its root; a profile and Instagram's other pages have none.
+    #[test]
+    fn an_instagram_post_or_reel_has_instagrams_frame() {
+        let post = "https://www.instagram.com/p/DgB34vHhlaT/embed/captioned/";
+        for uri in [
+            "https://www.instagram.com/p/DgB34vHhlaT/",
+            "https://www.instagram.com/p/DgB34vHhlaT",
+            "https://instagram.com/p/DgB34vHhlaT/",
+            "http://www.instagram.com/p/DgB34vHhlaT/",
+            "https://WWW.Instagram.com/p/DgB34vHhlaT/",
+            "https://instagr.am/p/DgB34vHhlaT/",
+            "https://www.instagr.am/p/DgB34vHhlaT",
+            "https://www.instagram.com/p/DgB34vHhlaT/?utm_source=ig_web_copy_link&igsh=x",
+            "https://www.instagram.com/p/DgB34vHhlaT/#comments",
+            "https://www.instagram.com/motorsportcom/p/DgB34vHhlaT/",
+        ] {
+            let embed = link(uri).unwrap_or_else(|| panic!("{uri}"));
+            assert_eq!(embed.src, post, "{uri}");
+            assert_eq!(
+                (
+                    embed.provider.as_str(),
+                    embed.kind,
+                    embed.height,
+                    embed.aspect
+                ),
+                ("instagram", EmbedKind::Post, None, None),
+                "{uri}"
+            );
+            assert!(embed.allow.is_empty() && embed.autoplay_param.is_none());
+        }
+        let reel = "https://www.instagram.com/reel/Df_H64Tul-0/embed/captioned/";
+        for uri in [
+            "https://www.instagram.com/reel/Df_H64Tul-0/",
+            "https://instagram.com/reel/Df_H64Tul-0?igsh=x",
+            "https://instagr.am/tv/Df_H64Tul-0",
+            "http://www.instagram.com/tv/Df_H64Tul-0/",
+            "https://www.instagram.com/motorsportcom/reel/Df_H64Tul-0/",
+        ] {
+            assert_eq!(src(uri).as_deref(), Some(reel), "{uri}");
+        }
+        for uri in [
+            "https://www.instagram.com/instagram/",
+            "https://www.instagram.com/instagram/reels/",
+            "https://www.instagram.com/explore/tags/x/",
+            "https://www.instagram.com/stories/instagram/1/",
+            "https://www.instagram.com/accounts/login/",
+            "https://www.instagram.com/p/x/",
+            "https://www.instagram.com/p/p/DgB34vHhlaT/",
+            "https://www.instagram.com/p/DgB34vHhlaT/embed/",
+            "https://www.instagram.com:8443/p/DgB34vHhlaT/",
+            "https://user@www.instagram.com/p/DgB34vHhlaT/",
+            "ftp://www.instagram.com/p/DgB34vHhlaT/",
+            "https://m.instagram.com.example/p/DgB34vHhlaT/",
+            "https://example.com/p/DgB34vHhlaT/",
+        ] {
+            assert_eq!(src(uri), None, "{uri}");
+        }
     }
 
     #[test]
