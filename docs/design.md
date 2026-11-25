@@ -339,6 +339,7 @@ main tables:
 | `resource_key`, `resource_fact`, `derived_link` | What the also-on sources found |
 | `resource_change` | The change journal |
 | `osm_place` | OpenStreetMap-derived facts (published as the ODbL dump) |
+| `catalogue_card`, `catalogue_state` | Items of the open catalogues, one card each, and each catalogue's import state ([catalogues](operations.md#catalogues)) |
 
 The index is derived data: replaying the Nexus feed and reading every link again rebuilds it.
 Operator curation (`group_override`) and the change journal (`resource_change`) are not derived,

@@ -3,6 +3,8 @@
 /pinakes-dev.toml
 # The ODbL dump file a local daemon writes (osm.dump_dir).
 /dumps/
+# A local daemon's catalogue downloads and temporary files (catalogues.dir).
+/catalogues/
 .env
 *.bundle
 

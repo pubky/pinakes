@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use futures_util::FutureExt;
 use pinakes_core::{
     api::{self, AppState},
+    catalogue::Catalogue,
     config::Config,
     ingest, migrate, queue,
 };
@@ -34,10 +35,11 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "pinakes=info,pinakes_core=info,sqlx=warn".into());
     tracing_subscriber::util::SubscriberInitExt::try_init(subscriber(filter, std::io::stdout))?;
-    let (migrate_only, reextract) = match command {
-        Command::Serve => (false, None),
-        Command::Migrate => (true, None),
-        Command::Reextract(routes) => (false, Some(routes)),
+    let (migrate_only, reextract, catalogue) = match command {
+        Command::Serve => (false, None, None),
+        Command::Migrate => (true, None, None),
+        Command::Reextract(routes) => (false, Some(routes), None),
+        Command::Catalogue(command) => (false, None, Some(command)),
         Command::Print(text) => {
             println!("{text}");
             return Ok(());
@@ -54,7 +56,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
         tokio::select! { _=terminate.recv()=>{}, _=interrupt.recv()=>{} }
     };
     tokio::pin!(stop);
-    let one_shot = migrate_only || reextract.is_some();
+    let one_shot = migrate_only || reextract.is_some() || catalogue.is_some();
     let daemon = tokio::select! {
         // Each step so far is a transaction of its own: one cut off is rolled back.
         _ = &mut stop => {
@@ -62,7 +64,7 @@ async fn serve(config: Option<PathBuf>, command: Command) -> Result<()> {
             tracing::info!("stopped by a signal during startup");
             return Ok(());
         }
-        daemon = start(config, migrate_only, reextract) => daemon?,
+        daemon = start(config, migrate_only, reextract, catalogue) => daemon?,
     };
     match daemon {
         Some(daemon) => daemon.run(stop).await,
@@ -236,11 +238,12 @@ async fn supervise(
 }
 
 /// Everything up to the listeners: `None` for a command that has finished (`--migrate`,
-/// `reextract`).
+/// `reextract`, `catalogue`).
 async fn start(
     config: Option<PathBuf>,
     migrate_only: bool,
     reextract: Option<Vec<String>>,
+    catalogue: Option<CatalogueCommand>,
 ) -> Result<Option<Daemon>> {
     // Every HTML parse runs in a child `pinakesd parse-worker`, killed at its limits; a daemon
     // that cannot run one does not serve.
@@ -252,12 +255,20 @@ async fn start(
         tracing::warn!(key, "config key ignored: this build no longer reads it");
     }
     pinakes_core::configure_sources(&config);
+    // A drop refuses before it touches the database.
+    if let Some(CatalogueCommand::Drop(name)) = catalogue {
+        refuse_enabled_drop(&config, name)?;
+    }
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(POOL_CONNECTIONS)
         .connect(&config.database_url)
         .await?;
     migrate(&pool).await?;
     if migrate_only {
+        return Ok(None);
+    }
+    if let Some(command) = catalogue {
+        catalogue_command(&pool, &config, command, &mut std::io::stdout()).await?;
         return Ok(None);
     }
     // Build the public document now, so a malformed recipe file stops startup before workers,
@@ -275,6 +286,7 @@ async fn start(
     ingest::check_feed(&pool, &config.nexus_url).await?;
     pinakes_core::groups::configure(&pool, &config.groups).await?;
     pinakes_core::also_on::configure(&pool, &config).await?;
+    pinakes_core::catalogue::store::sync_switches(&pool, &config.catalogues).await?;
     let api_pool = api::pool_options().connect(&config.database_url).await?;
     let state = AppState::new(api_pool, config.clone())?;
     // Both listeners are bound before any task or worker starts: from here on nothing waits,
@@ -410,6 +422,18 @@ async fn start(
             shutdown_rx.clone(),
         ),
     );
+    // One task per catalogue that is on and has an importer; a catalogue that is off starts none.
+    let catalogues = pinakes_core::catalogue::run::Context::new(
+        pool.clone(),
+        std::sync::Arc::new(config.clone()),
+    );
+    let importers = pinakes_core::catalogue::run::importers(&config);
+    for importer in pinakes_core::catalogue::run::to_start(importers, &config) {
+        tasks.spawn(
+            importer.catalogue().task_name(),
+            pinakes_core::catalogue::run::run(importer, catalogues.clone(), shutdown_rx.clone()),
+        );
+    }
     warn_admin_listener(admin_address);
     warn_admin_without_token(admin_address, config.admin_token.is_some());
     let admin_app = api::admin_router(state.clone());
@@ -452,6 +476,77 @@ async fn start(
     }))
 }
 
+/// `pinakesd catalogue drop NAME` refuses a catalogue that is on in its configuration: a daemon
+/// started with it would import it again.
+fn refuse_enabled_drop(config: &Config, catalogue: Catalogue) -> Result<()> {
+    if config.catalogues.enabled(catalogue) {
+        bail!(
+            "catalogue {catalogue} is enabled in this configuration, so its importer would fill it again: set [catalogues.{catalogue}] enabled = false (or [catalogues] enabled = false), restart pinakesd with it, then drop"
+        );
+    }
+    Ok(())
+}
+/// `catalogue status` prints each catalogue's state; `catalogue drop NAME` deletes a catalogue's
+/// cards and state while holding its lock, so no importer writes meanwhile. Both print to `out`.
+async fn catalogue_command(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    command: CatalogueCommand,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
+    use pinakes_core::catalogue::{run::SessionLock, store};
+    match command {
+        CatalogueCommand::Status => {
+            let states = store::states(pool).await?;
+            writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
+        }
+        CatalogueCommand::Drop(catalogue) => {
+            let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
+                bail!("an importer of catalogue {catalogue} is running (a pinakesd started with it enabled): switch it off and restart that daemon, then drop");
+            };
+            // The lock is held until the cards, the state row and the files are gone.
+            let dropped = drop_held(config, pool, catalogue, out).await;
+            lock.release().await;
+            dropped?;
+        }
+    }
+    Ok(())
+}
+
+/// The drop, under the catalogue's lock: its cards and state row, then its directory of
+/// downloads and temporary files (`catalogues.dir/<name>`).
+async fn drop_held(
+    config: &Config,
+    pool: &sqlx::PgPool,
+    catalogue: Catalogue,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
+    // A line per million cards, so a long drop shows it is moving.
+    let mut shown = 0;
+    let dropped = pinakes_core::catalogue::store::drop_catalogue(pool, catalogue, |n| {
+        if n >= shown + 1_000_000 {
+            shown = n;
+            let _ = writeln!(out, "dropped {n} cards of catalogue {catalogue} so far");
+        }
+    })
+    .await?;
+    writeln!(
+        out,
+        "dropped {dropped} cards of catalogue {catalogue}; its state is reset"
+    )?;
+    // Named in full: a relative `catalogues.dir` is relative to this command's working directory.
+    let dir = std::path::absolute(config.catalogues.work_dir(catalogue))?;
+    match tokio::fs::remove_dir_all(&dir).await {
+        Ok(()) => writeln!(out, "removed {}", dir.display())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(out, "no directory {} to remove", dir.display())?
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("remove {}", dir.display()));
+        }
+    }
+    Ok(())
+}
 /// A `nexus_authorization` sent to an `http://` Nexus on another machine crosses the network in
 /// clear.
 fn warn_plain_nexus(config: &Config) {
@@ -505,12 +600,19 @@ enum Command {
     Serve,
     Migrate,
     Reextract(Vec<String>),
+    /// `catalogue status` or `catalogue drop NAME`.
+    Catalogue(CatalogueCommand),
     Print(String),
     /// `parse-worker <cpu seconds>`: the HTML parse worker the daemon runs itself in.
     ParseWorker(u64),
     /// `healthcheck`: `GET /healthz` on the configured admin listener (the image's
     /// `HEALTHCHECK`, which has no HTTP client of its own).
     Healthcheck,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CatalogueCommand {
+    Status,
+    Drop(Catalogue),
 }
 /// How long `pinakesd healthcheck` waits for the admin listener's answer, all of it.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -563,8 +665,25 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
     let mut args = args.into_iter();
     let (mut config, mut command) = (None, Command::Serve);
     let mut routes: Option<Vec<String>> = None;
+    let mut catalogue = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "catalogue" if routes.is_none() => {
+                let what = args.next().unwrap_or_default();
+                catalogue = Some(match what.as_str() {
+                    "status" => CatalogueCommand::Status,
+                    "drop" => {
+                        let name = args.next().context("catalogue drop requires a catalogue name")?;
+                        CatalogueCommand::Drop(Catalogue::parse(&name).with_context(|| {
+                            format!(
+                                "unknown catalogue {name:?}: one of {}",
+                                Catalogue::ALL.map(Catalogue::name).join(", ")
+                            )
+                        })?)
+                    }
+                    _ => bail!("catalogue takes status or drop NAME"),
+                });
+            }
             "--config" => {
                 config = Some(PathBuf::from(
                     args.next().context("--config requires a TOML path")?,
@@ -587,7 +706,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reextract ROUTE…|all|also-on | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -598,6 +717,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 None => bail!("unknown argument {arg}"),
             },
         }
+    }
+    if let Some(catalogue) = catalogue {
+        anyhow::ensure!(
+            matches!(command, Command::Serve) && routes.is_none(),
+            "catalogue runs alone, not with --migrate, healthcheck or reextract"
+        );
+        command = Command::Catalogue(catalogue);
     }
     if let Some(routes) = routes {
         anyhow::ensure!(
@@ -640,12 +766,31 @@ mod tests {
         assert!(matches!(command, Command::Reextract(routes) if routes == ["also-on"]));
         let (_, command) = parse(&["reextract", "web", "--config", "x.toml", "osm"]).unwrap();
         assert!(matches!(command, super::Command::Reextract(r) if r == ["web", "osm"]));
+        let (config, command) = parse(&["catalogue", "drop", "osm", "--config", "x.toml"]).unwrap();
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("x.toml")));
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::Drop(Catalogue::Osm))
+        ));
+        let (_, command) = parse(&["--config", "x.toml", "catalogue", "status"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::Status)
+        ));
         for bad in [
             &["reextract"][..],
             &["reextract", "nonsense"],
             &["reextract", "all", "--migrate"],
             &["stray"],
             &["--bogus"],
+            &["catalogue"],
+            &["catalogue", "drop"],
+            &["catalogue", "drop", "wikipedia"],
+            &["catalogue", "list"],
+            &["catalogue", "status", "--migrate"],
+            &["catalogue", "status", "reextract", "all"],
+            &["reextract", "all", "catalogue", "status"],
+            &["healthcheck", "catalogue", "status"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
@@ -883,6 +1028,102 @@ mod tests {
             waited >= after + lost && waited < after + lost + Duration::from_millis(1500),
             "{waited:?}"
         );
+    }
+    /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
+    /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
+    /// prints the table.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn the_drop_command_takes_the_lock_and_removes_the_directory(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{run::SessionLock, store, Card};
+        let root = std::env::temp_dir().join(format!("pinakesd-drop-test-{}", std::process::id()));
+        let mut config = Config::default();
+        config.catalogues.dir = root.to_string_lossy().into_owned();
+        config.catalogues.wikidata.enabled = false;
+        let card = Card {
+            source_id: "Q1".into(),
+            uri: "https://en.wikipedia.org/wiki/One".into(),
+            r#type: "Thing".into(),
+            name: "One".into(),
+            ..Card::default()
+        };
+        store::upsert(&pool, Catalogue::Wikidata, 1, &[card], None)
+            .await
+            .unwrap();
+        let dir = config.catalogues.work_dir(Catalogue::Wikidata);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dump.part"), b"x").unwrap();
+        let drop = CatalogueCommand::Drop(Catalogue::Wikidata);
+        // An importer holds the lock: refused, nothing deleted.
+        let importer = SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut out = Vec::new();
+        let refused = catalogue_command(&pool, &config, drop, &mut out)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("is running"), "{refused}");
+        assert!(dir.join("dump.part").exists());
+        assert!(store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_some());
+        importer.release().await;
+        // Free: the cards, the state row and the directory go, and the output says so.
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, drop, &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        let absolute = std::path::absolute(&dir).unwrap();
+        assert!(
+            printed.contains("dropped 1 cards of catalogue wikidata"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(&format!("removed {}", absolute.display())),
+            "{printed}"
+        );
+        assert!(!dir.exists());
+        assert!(store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_none());
+        // Again: nothing left, and no directory to remove.
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, drop, &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("dropped 0 cards"), "{printed}");
+        assert!(printed.contains("no directory"), "{printed}");
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, CatalogueCommand::Status, &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert_eq!(printed.lines().count(), 8);
+        let wikidata: Vec<_> = printed.lines().nth(1).unwrap().split_whitespace().collect();
+        assert_eq!(wikidata[..2], ["wikidata", "no"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// A drop refuses a catalogue its configuration has on, and says how to switch it off.
+    #[test]
+    fn a_drop_refuses_a_catalogue_that_is_on() {
+        let mut config = Config::default();
+        let refused = refuse_enabled_drop(&config, Catalogue::Osm)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("[catalogues.osm] enabled = false"),
+            "{refused}"
+        );
+        config.catalogues.osm.enabled = false;
+        refuse_enabled_drop(&config, Catalogue::Osm).unwrap();
+        assert!(refuse_enabled_drop(&config, Catalogue::Wikidata).is_err());
+        config.catalogues.enabled = false;
+        refuse_enabled_drop(&config, Catalogue::Wikidata).unwrap();
     }
     #[test]
     fn warns_when_the_admin_listener_has_no_token() {
