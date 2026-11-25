@@ -582,7 +582,7 @@ async fn large_full_imports_run_one_at_a_time(pool: PgPool) {
         Next::Wait(ctx.pace.turn)
     );
     let s = state(&pool, Catalogue::Osm).await;
-    assert!(s.waiting.unwrap().contains("one runs at a time"));
+    assert!(s.waiting.unwrap().ends_with(run::TURN));
     assert_eq!((s.run, s.generation), (None, 0));
     // A small catalogue does not wait.
     let tranco = Fixture::new(
