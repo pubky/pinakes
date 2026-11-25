@@ -100,6 +100,7 @@ impl Default for Config {
     fn default() -> Self {
         let mut config = Self::base();
         config.limits = Limits::of(&config);
+        config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
         config.share_contact();
         config
     }
@@ -764,6 +765,9 @@ impl Default for EgressConfig {
 #[derive(Clone, Debug)]
 pub struct QueueConfig {
     pub groups: crate::groups::GroupConfig,
+    /// The catalogues a link is joined with before it is fetched (`catalogue::join::joinable`);
+    /// none when every catalogue is off.
+    pub catalogues: Vec<&'static str>,
     pub max_failures: u32,
     pub timeout_grace: u32,
     pub backoff_secs: u64,
@@ -776,6 +780,7 @@ impl Default for QueueConfig {
     fn default() -> Self {
         Self {
             groups: Default::default(),
+            catalogues: vec![],
             max_failures: 5,
             timeout_grace: 3,
             backoff_secs: 30,
@@ -990,6 +995,10 @@ pub struct RefreshConfig {
     pub container_secs: [u64; 4],
     pub cursor_secs: u64,
     pub retention_days: u32,
+    /// The longest wait between two reads of an undated card that keeps answering the same, and
+    /// the wait of a link found gone (`scheduler::Backoff`); a first `resource_secs` tier above it
+    /// is the longest instead.
+    pub max_secs: u64,
 }
 impl Default for RefreshConfig {
     fn default() -> Self {
@@ -998,6 +1007,7 @@ impl Default for RefreshConfig {
             container_secs: [86400, 12 * 3600, 6 * 3600, 3600],
             cursor_secs: 300,
             retention_days: 90,
+            max_secs: 90 * 86400,
         }
     }
 }
@@ -1095,6 +1105,7 @@ impl Config {
         let limits = cfg.limits.clone();
         limits.apply(&mut cfg);
         cfg.queue.groups = cfg.groups.clone();
+        cfg.queue.catalogues = crate::catalogue::join::joinable(&cfg.catalogues);
         cfg.share_contact();
         cfg.validate()?;
         Ok(cfg)
@@ -1357,6 +1368,7 @@ impl Config {
                 .chain(self.refresh.container_secs.iter())
                 .any(|s| *s == 0 || *s > 31536000)
             || !(1..=86400).contains(&self.refresh.cursor_secs)
+            || !(3600..=31536000).contains(&self.refresh.max_secs)
             || !(1..=3650).contains(&self.refresh.retention_days)
             || !(3600..=604800).contains(&self.canary.interval_secs)
         {
@@ -2841,6 +2853,8 @@ limits! {
     refresh_container_secs: [u64; 4] = |c| c.refresh.container_secs => [|c, v| c.refresh.container_secs = v],
     /// Cursor feed refresh interval (seconds).
     refresh_cursor_secs: u64 = |c| c.refresh.cursor_secs => [|c, v| c.refresh.cursor_secs = v],
+    /// Longest wait between reads of an undated card that keeps answering the same, and the wait of a link found gone (seconds).
+    refresh_max_secs: u64 = |c| c.refresh.max_secs => [|c, v| c.refresh.max_secs = v],
     /// Days change lines are retained.
     change_retention_days: u32 = |c| c.refresh.retention_days => [|c, v| c.refresh.retention_days = v],
     /// Adapter canary interval (seconds).

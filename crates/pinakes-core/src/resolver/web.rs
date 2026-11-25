@@ -566,6 +566,8 @@ pub fn extract(uri: &str, fetched: &Fetched, ttl: u64) -> anyhow::Result<Extract
     match fetched.status {
         404 | 410 | 451 => {
             out.doc.status = Status::Missing;
+            // Which: a link gone for good (404, 410) waits longest (`scheduler::Backoff::gone`).
+            out.doc.http_status = Some(fetched.status);
             return Ok(out);
         }
         401 | 403 => {

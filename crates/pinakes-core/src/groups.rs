@@ -162,7 +162,8 @@ fn evidence(row: &Value) -> Vec<String> {
 }
 /// The hub key namespaces that name one object, so a group holds at most one of their values: a
 /// MusicBrainz recording, release, release group or artist, a Wikidata item, an IMDb title, an
-/// Open Library edition or work, a podcast's GUID or Apple Podcasts ID, an OSM object, a DOI; and
+/// Open Library edition or work, a podcast's GUID or Apple Podcasts ID, an OSM object, a DOI, a
+/// catalogue card; and
 /// those each also-on source declares (`also_on::Source::single_namespaces`: a Discogs object, an
 /// arXiv paper, a package, a game…). ISRCs, UPCs and ISBNs may be several (one recording has many
 /// ISRCs, one book several ISBNs). `configure` writes them all to `single_object_namespace`, so
@@ -181,6 +182,15 @@ const SINGLE_OBJECT: &[&str] = &[
     "podcast:apple",
     "osm",
     "doi",
+    // One catalogue card each (`catalogue::join::card_key`): a link related to two cards of one
+    // catalogue never chains their groups.
+    "catalogue:wikidata",
+    "catalogue:musicbrainz",
+    "catalogue:osm",
+    "catalogue:openalex",
+    "catalogue:podcastindex",
+    "catalogue:tranco",
+    "catalogue:software",
 ];
 /// [`SINGLE_OBJECT`] and every also-on source's own.
 fn single_object_namespaces() -> &'static [&'static str] {
@@ -1359,6 +1369,13 @@ async fn remember_namespaces(pool: &PgPool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_catalogue_card_key_names_one_object() {
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            let key = crate::catalogue::join::card_key(catalogue.name(), "x").unwrap();
+            assert!(single_object(&format!("hub:{key}")).is_some(), "{key}");
+        }
+    }
     fn run(
         units: usize,
         keys: &[(&str, &[usize])],

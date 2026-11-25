@@ -121,8 +121,9 @@ the start:
 
 | Card | Read again |
 | --- | --- |
-| Official-API cards | Every day (`limits.resolver_ttl_secs`) |
-| Web and other cards without a date, or starting in more than 30 days | Every 7 days |
+| Official-API cards | Every day (`limits.resolver_ttl_secs`), twice as long after each read that finds the card the same, up to 90 days |
+| Web and other cards without a date (not an event, a podcast show or a Pubky object) | Every 7 days, twice as long after each read that finds the card the same, up to 90 days; a change starts over |
+| Starting in more than 30 days | Every 7 days |
 | Starting in 7 to 30 days | Every 2 days |
 | Starting in 24 hours to 7 days | Every 6 hours |
 | Starting within 24 hours, or running | Every hour |
@@ -136,6 +137,11 @@ No interval is shorter than an hour, except cursor feeds and a card that names w
 a dated resource final: it is not read again until a new reference reopens it. `geo:` points never
 change and are final at once. The tier values are `limits.refresh_resource_secs` and
 `limits.refresh_container_secs` ([operations](operations.md#queue-and-refresh)).
+
+Such a link found gone for good (two fresh reads agree on a 404 or 410) is read again every 90
+days until it answers again or nothing references it. A card someone opens while its refresh is
+due is read again in the background.
+A card built from a catalogue card is never fetched ([catalogues](#catalogues)).
 
 A failed read keeps the last accepted card's content, though its `status` can show `error` while the
 failures last. A link is `missing` only after two fresh reads agree;
@@ -309,6 +315,24 @@ address may download it 6 times an hour (`limits.osm_dump_downloads_per_hour`). 
 - `credits` and `attribution` name what a licence requires: a Wikimedia Commons file's author and
   licence, an OpenStreetMap notice, a Zenodo record's creators ([Credits](api.md#credits)).
 
+## Catalogues
+
+Pinakes imports open catalogues (Wikidata, MusicBrainz, OpenAlex, Podcast Index, Tranco, software
+registries) as catalogue cards ([operations](operations.md#catalogues)). A shared link that a card
+holds takes its card from the catalogue instead of a fetch: by the card's own link, by a link the
+catalogue lists for the item, or by an exact identifier the link names by itself (a MusicBrainz
+ID in a musicbrainz.org link, a DOI, a crate's name). A name or a title never joins, for the same
+reason a key never comes from a page's own claims.
+
+Such a link is catalogue-backed. It is built at once when it is referenced, never fetched, and
+built again when its card changes. Every link built from one card, and the card's related links
+(an official website, which keeps its own card), share the card's group, so a client shows their
+tags together. A podcast's feed is not built from its card, since a fetch reads its episodes; it
+joins the card's group. When the card goes upstream or its catalogue is switched off, the link
+goes back to fetching; the references stay on the link people wrote, so nothing is lost and a wrong join is
+undone by the next import. OpenStreetMap cards back no link: OSM-derived values stay in
+`osm_place`.
+
 ## What is never indexed
 
 - **Pubky's own social data.** `pubky://` objects under `/pub/pubky.app/` and `/pub/social/` are
@@ -340,6 +364,7 @@ main tables:
 | `resource_change` | The change journal |
 | `osm_place` | OpenStreetMap-derived facts (published as the ODbL dump) |
 | `catalogue_card`, `catalogue_state` | Items of the open catalogues, one card each, and each catalogue's import state ([catalogues](operations.md#catalogues)) |
+| `catalogue_join_due`, `catalogue_extras` | Links whose join with the catalogues is to be checked again, and the background extras (a Wikipedia summary) of cards built from catalogue cards ([shared links](operations.md#shared-links-a-catalogue-holds)) |
 
 The index is derived data: replaying the Nexus feed and reading every link again rebuilds it.
 Operator curation (`group_override`) and the change journal (`resource_change`) are not derived,

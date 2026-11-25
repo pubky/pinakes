@@ -334,10 +334,14 @@ pub async fn cleanup(pool: &PgPool, grace_days: u32, preview_grace_hours: u32) -
     crate::changes::delete_orphans_within(pool, grace_days, preview_grace_hours, || false).await
 }
 /// Move the overdue resources among `ids` to the front of the queue. One already there keeps its
-/// place and its row is not written again.
-pub async fn expedite(pool: &PgPool, ids: &[String]) -> Result<()> {
-    sqlx::query("UPDATE resource SET priority_at=now() WHERE id=ANY($1) AND priority_at IS NULL AND (refresh_at IS NULL OR refresh_at<=now()) AND NOT final AND NOT dead_letter AND (lease_until IS NULL OR lease_until<now())").bind(ids).execute(pool).await?;
-    Ok(())
+/// place and its row is not written again. The rows moved.
+pub async fn expedite(pool: &PgPool, ids: &[String]) -> Result<u64> {
+    Ok(sqlx::query("UPDATE resource SET priority_at=now() WHERE id=ANY($1) AND priority_at IS NULL AND (refresh_at IS NULL OR refresh_at<=now()) AND NOT final AND NOT dead_letter AND (lease_until IS NULL OR lease_until<now())").bind(ids).execute(pool).await?.rows_affected())
+}
+/// Someone opened `id`: a card whose refresh is due moves to the front of the queue
+/// ([`expedite`]). A card the backoff put off keeps its wait. Whether it was moved.
+pub async fn opened(pool: &PgPool, id: &str) -> Result<bool> {
+    Ok(expedite(pool, &[id.to_owned()]).await? > 0)
 }
 /// The `osm_place` rows one maintenance pass deletes at most ([`prune_osm_places`]).
 pub const OSM_PLACE_PRUNE_BATCH: i64 = 1000;
@@ -403,11 +407,13 @@ pub(crate) async fn write_document(
         point=CASE WHEN $7::double precision IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($8,$7),4326) END,
         start_at=$9, end_at=$10, venue_id=$14, doc=$11, status=$12, ever_existed=ever_existed OR $12='ok', resolved_at=now(),
         refresh_at=now()+NULLIF($13,0)*interval '1 second', next_attempt_at=coalesce(now()+NULLIF($13,0)*interval '1 second','infinity'::timestamptz), final=($13=0),
-        attempts=0, timeout_streak=0, dead_letter=false, last_error=NULL, lease_until=NULL, priority_at=NULL
+        attempts=0, timeout_streak=0, dead_letter=false, last_error=NULL, lease_until=NULL, priority_at=NULL,
+        catalogue_card=$15
         WHERE id=$1 AND generation=$2"#)
         .bind(id).bind(generation).bind(&doc.type_name).bind(&doc.type_path).bind(&doc.name).bind(&doc.category)
         .bind(doc.location.as_ref().map(|p| p.lat)).bind(doc.location.as_ref().map(|p| p.lon))
         .bind(doc.start).bind(doc.end).bind(serde_json::to_value(doc)?).bind(doc.status.as_str()).bind(doc.ttl_secs as f64).bind(doc.event.venue.as_ref().and_then(|v|v.resource_id.as_deref()))
+        .bind(doc.backing)
         .execute(&mut **tx).await?;
     // A show's episodes follow its document: kept, replaced or cleared with it.
     crate::episodes::store(tx, id, doc, stored_show.as_ref()).await?;

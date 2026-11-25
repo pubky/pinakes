@@ -47,7 +47,7 @@ use tantivy::{
 
 /// The version of the index's fields and analyzers, kept in each commit: an index written with
 /// another is rebuilt.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 /// How much a match in each field weighs (BM25 times this): the name most, then people's tags,
 /// other names and source labels, then the description.
 const NAME_BOOST: Score = 3.0;
@@ -426,11 +426,20 @@ struct Unit {
     scored_at: Option<DateTime<Utc>>,
     newest_at: Option<DateTime<Utc>>,
     tags: Vec<String>,
+    /// A card built from a catalogue card: the labels it shows, its card's other names and its
+    /// card's fame (`fame`: `None` for any other card).
+    labels: Vec<String>,
+    other_names: Vec<String>,
+    fame: Option<f32>,
 }
 /// The units search can find by text: those with a reference that counts, and never a post whose
 /// author has not opted in to search (it is never found by its text). An OSM place's address
-/// line counts as its description, as its Postgres text does.
-const UNITS: &str = "SELECT r.unit_id, r.id AS resource_id, r.name, r.doc->>'description' AS description, p.display_name AS other, r.type AS type_name, r.type_path, r.host, r.category, r.venue_id, r.resolver, ST_Y(r.point) AS lat, ST_X(r.point) AS lon, r.start_at, r.end_at, s.score, s.updated_at AS scored_at, s.newest_at, ARRAY(SELECT DISTINCT f.label FROM effective_reference f WHERE f.resource_id=r.id AND f.label IS NOT NULL ORDER BY f.label) AS tags FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id LEFT JOIN osm_place p ON p.osm_type=r.osm_type AND p.osm_id=r.osm_id WHERE coalesce(r.doc->'attributes'->>'opted_out','')<>'true' AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id)";
+/// line counts as its description, as its Postgres text does. A card built from a catalogue card
+/// (`resource.catalogue_card`) also has the labels its document shows, and its card's other names
+/// and fame: the one unit of that thing, found and ranked as its card would be. Its document holds
+/// the card's content hash (`catalogue.hash`), so any change of the card rewrites the document and
+/// queues the unit again.
+const UNITS: &str = "SELECT r.unit_id, r.id AS resource_id, r.name, r.doc->>'description' AS description, p.display_name AS other, r.type AS type_name, r.type_path, r.host, r.category, r.venue_id, r.resolver, ST_Y(r.point) AS lat, ST_X(r.point) AS lon, r.start_at, r.end_at, s.score, s.updated_at AS scored_at, s.newest_at, ARRAY(SELECT DISTINCT f.label FROM effective_reference f WHERE f.resource_id=r.id AND f.label IS NOT NULL ORDER BY f.label) AS tags, CASE WHEN b.fame IS NULL OR jsonb_typeof(r.doc->'labels')<>'array' THEN '{}'::text[] ELSE ARRAY(SELECT jsonb_array_elements_text(r.doc->'labels')) END AS labels, coalesce(b.other_names,'{}') AS other_names, b.fame FROM search_unit r LEFT JOIN resource_score s ON s.resource_id=r.id LEFT JOIN osm_place p ON p.osm_type=r.osm_type AND p.osm_id=r.osm_id LEFT JOIN LATERAL (SELECT c.fame, c.other_names FROM resource x JOIN catalogue_card c ON c.id=x.catalogue_card WHERE x.id=r.id AND r.occurrence IS NULL) b ON true WHERE coalesce(r.doc->'attributes'->>'opted_out','')<>'true' AND EXISTS (SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id)";
 
 /// One catalogue card as the index keeps it.
 #[derive(sqlx::FromRow)]
@@ -546,6 +555,13 @@ fn document(f: &Fields, unit: &Unit) -> TantivyDocument {
         doc.add_text(f.tag, tag);
         doc.add_text(f.tags_text, tag);
     }
+    for other in &unit.other_names {
+        doc.add_text(f.other_names, other);
+    }
+    for label in &unit.labels {
+        doc.add_text(f.label, label);
+        doc.add_text(f.labels_text, label);
+    }
     if let Some(type_name) = present(&unit.type_name) {
         doc.add_text(f.type_name, type_name);
     }
@@ -566,7 +582,11 @@ fn document(f: &Fields, unit: &Unit) -> TantivyDocument {
     if has_text(unit) {
         doc.add_u64(f.has_text, 1);
     }
-    doc.add_f64(f.fame, 0.0);
+    doc.add_f64(
+        f.fame,
+        unit.fame
+            .map_or(0.0, |fame| f64::from(fame).clamp(0.0, 1.0)),
+    );
     doc.add_f64(f.activity, unit.score.unwrap_or(0.0));
     doc.add_i64(f.activity_at, unit.scored_at.map_or(0, |t| t.timestamp()));
     if let Some(newest) = unit.newest_at {
@@ -605,10 +625,43 @@ struct Open {
     database: String,
     /// The catalogue being read again, in parts ([`Reread`]).
     reread: std::sync::Mutex<Option<Reread>>,
-    /// Merges after a removal ([`purge`]), for tests.
+    /// Merges after a removal ([`Open::purge`]) that finished, for tests.
     purges: AtomicU64,
+    /// The merge after a removal under way, and the removals still owed one ([`Purges`]).
+    purging: std::sync::Mutex<Purges>,
+    /// The thread waiting for the merge under way ([`SearchIndex::settle`]).
+    merging: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Searches that read the proposals (the text inside names, similar names), for tests.
     proposed: AtomicU64,
+    /// Searches that counted the names holding every word (whether to read the proposals), for
+    /// tests.
+    counted: AtomicU64,
+}
+/// Sets [`Purges::running`] back to false when dropped.
+struct Running<'a>(&'a std::sync::Mutex<Purges>);
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut purging) = self.0.lock() {
+            purging.running = false;
+        }
+    }
+}
+/// How many times a merge after a removal is started before it is owed to the next pass.
+const PURGE_ATTEMPTS: u32 = 5;
+/// Removals whose words must still leave the index files ([`Open::purge`]): the resources whose
+/// documents lost their text, and whether a catalogue was switched off (every segment with deleted
+/// documents then merges). One merge runs at a time; a removal while it runs, or one whose merge
+/// failed, waits for the next pass.
+#[derive(Default)]
+struct Purges {
+    running: bool,
+    resources: Vec<String>,
+    catalogues: bool,
+}
+impl Purges {
+    fn owed(&self) -> bool {
+        !self.resources.is_empty() || self.catalogues
+    }
 }
 /// A catalogue read again after a full import, a part per pass ([`SearchIndex::sync_catalogues`]):
 /// its documents are rewritten in place, card by card, marked with the import read (`marker`);
@@ -660,7 +713,10 @@ impl Open {
             database,
             reread: std::sync::Mutex::new(None),
             purges: AtomicU64::new(0),
+            purging: std::sync::Mutex::new(Purges::default()),
+            merging: std::sync::Mutex::new(None),
             proposed: AtomicU64::new(0),
+            counted: AtomicU64::new(0),
         })
     }
     /// What the next commit records, with `boundary`.
@@ -740,6 +796,73 @@ impl SearchIndex {
     pub fn purges(&self) -> u64 {
         self.current()
             .map_or(0, |open| open.purges.load(Ordering::SeqCst))
+    }
+    /// The IDs of the documents the index holds now (`catalogue:<id>` for a catalogue card), in
+    /// order (tests).
+    #[doc(hidden)]
+    pub fn documents(&self) -> Vec<String> {
+        let Some(open) = self.current() else {
+            return vec![];
+        };
+        let searcher = open.reader.searcher();
+        let mut out: Vec<String> = searcher
+            .search(
+                &tantivy::query::AllQuery,
+                &tantivy::collector::DocSetCollector,
+            )
+            .map(|found| {
+                found
+                    .into_iter()
+                    .filter_map(|address| {
+                        let doc: TantivyDocument = searcher.doc(address).ok()?;
+                        doc.get_first(open.fields.resource_id)
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+    /// How many searches counted the names holding every word (tests).
+    #[doc(hidden)]
+    pub fn counted(&self) -> u64 {
+        self.current()
+            .map_or(0, |open| open.counted.load(Ordering::SeqCst))
+    }
+    /// Merge every segment into one and wait for it (benchmarks: the largest segment a merge after a
+    /// removal may have to rewrite).
+    #[doc(hidden)]
+    pub fn merge_all(&self) -> Result<()> {
+        let Some(open) = self.current() else {
+            return Ok(());
+        };
+        let segments = open.index.searchable_segment_ids()?;
+        if segments.len() > 1 {
+            open.writer
+                .lock()
+                .expect("writer lock")
+                .merge(&segments)
+                .wait()?;
+        }
+        open.reader.reload()?;
+        Ok(())
+    }
+    /// The number of segments the index reads (benchmarks).
+    #[doc(hidden)]
+    pub fn segments(&self) -> usize {
+        self.current()
+            .map_or(0, |open| open.reader.searcher().segment_readers().len())
+    }
+    /// Wait for the merge after a removal under way, if any ([`Open::purge`]; tests).
+    #[doc(hidden)]
+    pub fn settle(&self) {
+        if let Some(open) = self.current() {
+            let waiting = open.merging.lock().expect("merging").take();
+            if let Some(waiting) = waiting {
+                let _ = waiting.join();
+            }
+        }
     }
     /// How many searches read the proposals (tests).
     #[doc(hidden)]
@@ -1066,6 +1189,15 @@ impl SearchIndex {
     /// full import finished since the index read it ([`Reread`]), so a long re-read never holds
     /// the queues back for more than a part.
     async fn sync_catalogues(&self, pool: &PgPool, open: &Arc<Open>) -> Result<()> {
+        // A merge after a removal that failed, or was owed while another ran.
+        if open.purge_owed() {
+            let owing = open.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut writer = owing.writer.lock().expect("writer lock");
+                owing.purge(&mut writer, vec![], false)
+            })
+            .await??;
+        }
         let enabled = self.catalogues();
         let recorded = open.catalogues.lock().expect("markers").clone();
         // The catalogues that are off and still have documents: those recorded, and one switched
@@ -1077,10 +1209,7 @@ impl SearchIndex {
                 .map(|c| c.name().to_owned())
                 .filter(|c| !enabled.contains(c))
                 .filter(|c| {
-                    recorded.contains_key(c)
-                        || searcher
-                            .doc_freq(&Term::from_field_text(open.fields.catalogue, c))
-                            .is_ok_and(|n| n > 0)
+                    recorded.contains_key(c) || open.has_documents(&searcher, c).unwrap_or(true)
                 })
                 .collect()
         };
@@ -1240,7 +1369,12 @@ fn committed_boundary(index: &Index) -> Option<u64> {
 }
 impl Open {
     /// Replace the documents of `resources` with `units` and commit, recording `boundary`.
-    fn replace(&self, resources: &[String], units: &[Unit], boundary: u64) -> Result<()> {
+    fn replace(
+        self: &Arc<Self>,
+        resources: &[String],
+        units: &[Unit],
+        boundary: u64,
+    ) -> Result<()> {
         // The segments holding a document with text of these resources, before they are
         // replaced: if one loses its text, only those segments are merged.
         let texts = self.text_documents(resources)?;
@@ -1265,42 +1399,12 @@ impl Open {
         // out, a card no longer searchable): merge the segments that held its document now, so its
         // words leave the index files, not only its searches. A pass that only adds or changes
         // documents merges nothing.
-        let lost: Vec<&String> = texts
+        let lost: Vec<String> = texts
             .iter()
             .filter(|(id, _)| !units.iter().any(|u| &u.resource_id == id && has_text(u)))
-            .map(|(id, _)| id)
+            .map(|(id, _)| id.clone())
             .collect();
-        // Every segment that holds one of its documents, the current and earlier ones (deleted,
-        // their words still in the files).
-        let lost: Vec<tantivy::index::SegmentId> = if lost.is_empty() {
-            vec![]
-        } else {
-            let searcher = self.reader.searcher();
-            searcher
-                .segment_readers()
-                .iter()
-                .filter(|segment| {
-                    segment
-                        .inverted_index(self.fields.resource_id)
-                        .ok()
-                        .is_some_and(|inverted| {
-                            lost.iter().any(|id| {
-                                inverted
-                                    .terms()
-                                    .get(str::as_bytes(id))
-                                    .ok()
-                                    .flatten()
-                                    .is_some()
-                            })
-                        })
-                })
-                .map(|segment| segment.segment_id())
-                .collect()
-        };
-        if !lost.is_empty() {
-            merge(&self.index, &mut writer, &self.reader, &lost)?;
-            self.purges.fetch_add(1, Ordering::SeqCst);
-        }
+        self.purge(&mut writer, lost, false)?;
         Ok(())
     }
     /// Of `resources`, those with a document that has text, each with its segment.
@@ -1346,9 +1450,14 @@ impl Open {
 impl Open {
     /// Delete the documents of the catalogues `off`, stop recording them, commit, and merge their
     /// words out of the files (a catalogue switched off is rare; its segments may be large).
-    fn remove_catalogues(&self, off: &[String]) -> Result<()> {
+    fn remove_catalogues(self: &Arc<Self>, off: &[String]) -> Result<()> {
         let mut writer = self.writer.lock().expect("writer lock");
         let boundary = committed_boundary(&self.index).unwrap_or(0);
+        let had_documents = {
+            let searcher = self.reader.searcher();
+            off.iter()
+                .any(|c| self.has_documents(&searcher, c).unwrap_or(true))
+        };
         let before = self.catalogues.lock().expect("markers").clone();
         for catalogue in off {
             writer.delete_term(Term::from_field_text(self.fields.catalogue, catalogue));
@@ -1361,9 +1470,8 @@ impl Open {
             return Err(error);
         }
         self.reader.reload()?;
-        let segments = segments_with_deletes(&self.index)?;
-        merge(&self.index, &mut writer, &self.reader, &segments)?;
-        self.purges.fetch_add(1, Ordering::SeqCst);
+        // A catalogue that had no documents (never read, or read empty) leaves nothing to merge.
+        self.purge(&mut writer, vec![], had_documents)?;
         Ok(())
     }
     /// One part of `reread`: rewrite the documents of `cards`, marked with its import; when it is
@@ -1468,35 +1576,196 @@ fn segments_with_deletes(index: &Index) -> Result<Vec<tantivy::index::SegmentId>
         .map(|m| m.id())
         .collect())
 }
-/// Merge `segments` (those still committed), so the deleted documents' words leave the index
-/// files. A background merge may take one of them meanwhile: then the segments are read again,
-/// up to three times.
-fn merge(
-    index: &Index,
-    writer: &mut IndexWriter,
-    reader: &IndexReader,
-    segments: &[tantivy::index::SegmentId],
-) -> Result<()> {
-    let mut wanted: Vec<tantivy::index::SegmentId> = segments.to_vec();
-    for attempt in 1..=3 {
-        let committed: HashSet<tantivy::index::SegmentId> =
-            index.searchable_segment_ids()?.into_iter().collect();
-        wanted.retain(|s| committed.contains(s));
-        if wanted.is_empty() {
-            break;
-        }
-        match writer.merge(&wanted).wait() {
-            Ok(_) => break,
-            Err(error) if attempt < 3 => {
-                tracing::debug!(error = %crate::resolver::log_error(&error), "a text index merge raced another; reading the segments again");
-                // A segment merged meanwhile left: what took its documents still holds them.
-                wanted = segments_with_deletes(index)?;
+impl Open {
+    /// Owe a merge for the removed documents of `resources` (and of the catalogues switched off,
+    /// `catalogues`), so their words leave the index files, not only its searches; then start the
+    /// merge owed, unless one runs. It starts under the writer lock (`writer`) but runs and is
+    /// waited for outside it: commits and searches go on meanwhile. One that fails is owed again,
+    /// for the next pass ([`Open::purge_owed`]).
+    fn purge(
+        self: &Arc<Self>,
+        writer: &mut IndexWriter,
+        resources: Vec<String>,
+        catalogues: bool,
+    ) -> Result<()> {
+        let (resources, catalogues) = {
+            let mut purging = self.purging.lock().expect("purges");
+            purging.resources.extend(resources);
+            purging.catalogues |= catalogues;
+            if purging.running || !purging.owed() {
+                return Ok(());
             }
-            Err(error) => return Err(error.into()),
+            purging.running = true;
+            (
+                std::mem::take(&mut purging.resources),
+                std::mem::take(&mut purging.catalogues),
+            )
+        };
+        let merged = match self.start_merge(writer, &resources, catalogues) {
+            Ok(Some(merged)) => merged,
+            done => {
+                // Nothing left to merge (the merge policy, or a merge before, took them), or the
+                // segments did not read: owed again then.
+                let mut purging = self.purging.lock().expect("purges");
+                purging.running = false;
+                if done.is_err() {
+                    purging.resources.extend(resources);
+                    purging.catalogues |= catalogues;
+                }
+                return done.map(|_| ());
+            }
+        };
+        let open = self.clone();
+        let (owed, owed_catalogues) = (resources.clone(), catalogues);
+        let spawned = std::thread::Builder::new()
+            .name("text-index-purge".into())
+            .spawn(move || {
+                // `running` goes back to false however the wait ends (a panic included), so a later
+                // pass can merge again.
+                let _running = Running(&open.purging);
+                open.wait_merge(merged, resources, catalogues)
+            });
+        let waiting = match spawned {
+            Ok(waiting) => waiting,
+            Err(error) => {
+                let mut purging = self.purging.lock().expect("purges");
+                purging.running = false;
+                purging.resources.extend(owed);
+                purging.catalogues |= owed_catalogues;
+                return Err(error.into());
+            }
+        };
+        // The earlier thread is done (`running` was clear, which its last action does): its handle
+        // is let go, never joined here, under the writer lock.
+        *self.merging.lock().expect("merging") = Some(waiting);
+        Ok(())
+    }
+    /// Start merging the committed segments that hold the documents of `resources` (or, with
+    /// `catalogues`, every one with deleted documents); `None` when there are none.
+    fn start_merge(
+        &self,
+        writer: &mut IndexWriter,
+        resources: &[String],
+        catalogues: bool,
+    ) -> Result<Option<tantivy::FutureResult<Option<tantivy::index::SegmentMeta>>>> {
+        let segments = self.purged_segments(resources, catalogues)?;
+        Ok((!segments.is_empty()).then(|| writer.merge(&segments)))
+    }
+    /// Wait, outside the writer lock, for the merge `merged` that [`Open::purge`] started. The
+    /// merge policy may have taken one of its segments meanwhile: then, after a short wait for that
+    /// merge, the segments are read again and merged, up to [`PURGE_ATTEMPTS`] times (the writer
+    /// lock only to start each); after that the merge is owed to the next pass.
+    fn wait_merge(
+        &self,
+        mut merged: tantivy::FutureResult<Option<tantivy::index::SegmentMeta>>,
+        resources: Vec<String>,
+        catalogues: bool,
+    ) {
+        let mut attempt = 1;
+        let failed = loop {
+            let error = match merged.wait() {
+                Ok(_) => break None,
+                Err(error) => anyhow::Error::from(error),
+            };
+            if attempt == PURGE_ATTEMPTS {
+                break Some(error);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50 << attempt));
+            attempt += 1;
+            tracing::debug!(error = %crate::resolver::log_error(&error), "a text index merge raced another; reading the segments again");
+            let again = self
+                .reader
+                .reload()
+                .map_err(anyhow::Error::from)
+                .and_then(|()| {
+                    let mut writer = self.writer.lock().expect("writer lock");
+                    self.start_merge(&mut writer, &resources, catalogues)
+                });
+            match again {
+                Ok(Some(next)) => merged = next,
+                // What took the segments holds the documents no more.
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
+        };
+        // `running` stays set: the thread's guard clears it as its very last action, so no second
+        // merge starts while this one still reloads or re-owes.
+        match failed {
+            None => {
+                if let Err(error) = self.reader.reload() {
+                    tracing::debug!(error = %crate::resolver::log_error(&error), "the text index read after a merge failed");
+                }
+                self.purges.fetch_add(1, Ordering::SeqCst);
+            }
+            Some(error) => {
+                tracing::debug!(error = %crate::resolver::log_error(&error), "a text index merge after a removal failed; it is tried again at the next pass");
+                let mut purging = self.purging.lock().expect("purges");
+                purging.resources.extend(resources);
+                purging.catalogues |= catalogues;
+            }
         }
     }
-    reader.reload()?;
-    Ok(())
+    /// Whether the index holds a live document of `catalogue` (deleted ones, still in the files until
+    /// a merge, do not count: a catalogue switched off whose merge runs in the background is not
+    /// removed again).
+    fn has_documents(&self, searcher: &tantivy::Searcher, catalogue: &str) -> Result<bool> {
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.catalogue, catalogue),
+            IndexRecordOption::Basic,
+        );
+        Ok(searcher.search(&query, &tantivy::collector::Count)? > 0)
+    }
+    /// Whether a merge is owed and none runs: the pass then starts it ([`Open::purge`]).
+    fn purge_owed(&self) -> bool {
+        let purging = self.purging.lock().expect("purges");
+        !purging.running && purging.owed()
+    }
+    /// The committed segments that hold a document of `resources`, deleted ones included (their
+    /// words are still in the files), or with `catalogues` every segment with deleted documents.
+    fn purged_segments(
+        &self,
+        resources: &[String],
+        catalogues: bool,
+    ) -> Result<Vec<tantivy::index::SegmentId>> {
+        // Read the segments as they are now: one a merge of Tantivy's own replaced since the last
+        // read still holds a deleted document's words, under its new ID.
+        self.reader.reload()?;
+        let committed: HashSet<tantivy::index::SegmentId> =
+            self.index.searchable_segment_ids()?.into_iter().collect();
+        let mut wanted: Vec<tantivy::index::SegmentId> = if catalogues {
+            segments_with_deletes(&self.index)?
+        } else {
+            vec![]
+        };
+        if !resources.is_empty() {
+            let searcher = self.reader.searcher();
+            wanted.extend(
+                searcher
+                    .segment_readers()
+                    .iter()
+                    .filter(|segment| {
+                        segment
+                            .inverted_index(self.fields.resource_id)
+                            .ok()
+                            .is_some_and(|inverted| {
+                                resources.iter().any(|id| {
+                                    inverted
+                                        .terms()
+                                        .get(str::as_bytes(id))
+                                        .ok()
+                                        .flatten()
+                                        .is_some()
+                                })
+                            })
+                    })
+                    .map(|segment| segment.segment_id()),
+            );
+        }
+        wanted.retain(|s| committed.contains(s));
+        wanted.sort_by_key(|s| s.uuid_string());
+        wanted.dedup();
+        Ok(wanted)
+    }
 }
 /// Whether a unit has words a text search finds it by.
 fn has_text(unit: &Unit) -> bool {
@@ -1899,11 +2168,18 @@ impl Open {
         // not short: proposed, and checked there; only while fewer matches than the candidates
         // asked for (`cap`) hold every word in their name, in any order and on any page: with
         // that many, the candidates are those names already.
-        let few = match self.name_words_query(&items, &filters) {
-            Some(names) => searcher.search(names.as_ref(), &tantivy::collector::Count)? < cap,
-            None => true,
-        };
-        if (q.inside_words && few) || words.is_none() {
+        // Counted only when the proposals may be read: without words they always are, and a text
+        // that matches only where words start never needs them.
+        let propose = words.is_none()
+            || (q.inside_words
+                && match self.name_words_query(&items, &filters) {
+                    Some(names) => {
+                        self.counted.fetch_add(1, Ordering::SeqCst);
+                        searcher.search(names.as_ref(), &tantivy::collector::Count)? < cap
+                    }
+                    None => true,
+                });
+        if propose {
             if let Some(query) = self.proposals(&searcher, &q.text, &filters) {
                 self.proposed.fetch_add(1, Ordering::SeqCst);
                 let seen: HashSet<String> = out.iter().map(|c| c.unit_id.clone()).collect();
@@ -2410,6 +2686,187 @@ mod tests {
     }
     fn words(list: &[&str]) -> Vec<String> {
         list.iter().map(|w| w.to_string()).collect()
+    }
+
+    fn docs(open: &Open, docs: &[(&str, &str, &str)]) {
+        let f = open.fields;
+        let mut writer = open.writer.lock().unwrap();
+        for (id, name, catalogue) in docs {
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.resource_id, *id);
+            doc.add_text(f.name, *name);
+            if !catalogue.is_empty() {
+                doc.add_text(f.catalogue, *catalogue);
+            }
+            doc.add_u64(f.has_text, 1);
+            writer.add_document(doc).unwrap();
+        }
+        commit(&mut writer, &open.stamp(0)).unwrap();
+    }
+    fn holds(open: &Open, word: &str) -> bool {
+        let searcher = open.reader.searcher();
+        searcher.segment_readers().iter().any(|segment| {
+            segment
+                .inverted_index(open.fields.name)
+                .unwrap()
+                .terms()
+                .get(word.as_bytes())
+                .unwrap()
+                .is_some()
+        })
+    }
+
+    /// A merge of Tantivy's own that replaced the segment since the reader last read it: the merge
+    /// after a removal finds the document's words in the new segment, not nothing.
+    #[test]
+    fn a_merge_after_a_removal_reads_the_segments_as_they_are_now() {
+        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
+        docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
+        open.reader.reload().unwrap();
+        {
+            // Merged behind the reader's back, then the removal committed: the reader still knows
+            // only the two old segments.
+            let mut writer = open.writer.lock().unwrap();
+            let segments = open.index.searchable_segment_ids().unwrap();
+            writer.merge(&segments).wait().unwrap();
+            writer.delete_term(Term::from_field_text(open.fields.resource_id, "a"));
+            commit(&mut writer, &open.stamp(0)).unwrap();
+            open.purge(&mut writer, vec!["a".into()], false).unwrap();
+        }
+        if let Some(waiting) = open.merging.lock().unwrap().take() {
+            waiting.join().unwrap();
+        }
+        open.reader.reload().unwrap();
+        assert!(
+            !holds(&open, "aurora"),
+            "the deleted document's words left the files"
+        );
+        assert!(holds(&open, "cosmos"));
+        assert!(!open.purge_owed());
+    }
+
+    /// A catalogue's deleted documents, still in the files until a merge, are no documents of it:
+    /// a switch-off whose merge runs is not removed again at the next pass.
+    #[test]
+    fn deleted_documents_of_a_catalogue_are_not_documents() {
+        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        docs(
+            &open,
+            &[("catalogue:1", "peak", "wikidata"), ("r", "page", "")],
+        );
+        open.reader.reload().unwrap();
+        assert!(open
+            .has_documents(&open.reader.searcher(), "wikidata")
+            .unwrap());
+        {
+            let mut writer = open.writer.lock().unwrap();
+            writer.delete_term(Term::from_field_text(open.fields.catalogue, "wikidata"));
+            commit(&mut writer, &open.stamp(0)).unwrap();
+        }
+        open.reader.reload().unwrap();
+        let searcher = open.reader.searcher();
+        let term = Term::from_field_text(open.fields.catalogue, "wikidata");
+        assert!(searcher.doc_freq(&term).unwrap() > 0, "still in the files");
+        assert!(!open.has_documents(&searcher, "wikidata").unwrap());
+    }
+
+    /// The flag that a merge runs is cleared only when its thread ends, never by the wait itself:
+    /// a pass in between owes its merge instead of starting a second one beside it (which a later
+    /// pass would then join under the writer lock).
+    #[test]
+    fn a_merge_stays_running_until_its_thread_ends() {
+        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
+        docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
+        open.reader.reload().unwrap();
+        open.purging.lock().unwrap().running = true;
+        let merged = {
+            let mut writer = open.writer.lock().unwrap();
+            writer.delete_term(Term::from_field_text(open.fields.resource_id, "a"));
+            commit(&mut writer, &open.stamp(0)).unwrap();
+            open.reader.reload().unwrap();
+            open.start_merge(&mut writer, &["a".into()], false)
+                .unwrap()
+                .expect("a merge")
+        };
+        open.wait_merge(merged, vec!["a".into()], false);
+        assert_eq!(open.purges.load(Ordering::SeqCst), 1);
+        assert!(
+            open.purging.lock().unwrap().running,
+            "still running until the thread ends"
+        );
+        {
+            let mut writer = open.writer.lock().unwrap();
+            open.purge(&mut writer, vec!["b".into()], false).unwrap();
+        }
+        assert!(
+            open.merging.lock().unwrap().is_none(),
+            "no second merge started"
+        );
+        assert_eq!(open.purging.lock().unwrap().resources, ["b"]);
+        drop(Running(&open.purging));
+        assert!(open.purge_owed());
+    }
+
+    /// A merge after a removal while another runs is owed, not lost: the next pass starts it, and
+    /// the removed document's words leave the files.
+    #[test]
+    fn a_removal_while_a_merge_runs_is_merged_at_the_next_pass() {
+        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        let f = open.fields;
+        {
+            let mut writer = open.writer.lock().unwrap();
+            // Two segments; a segment whose every document is deleted leaves at the commit.
+            for segment in [
+                [("a", "aurora"), ("c", "cosmos")],
+                [("b", "borealis"), ("d", "dawn")],
+            ] {
+                for (id, name) in segment {
+                    let mut doc = TantivyDocument::default();
+                    doc.add_text(f.resource_id, id);
+                    doc.add_text(f.name, name);
+                    doc.add_u64(f.has_text, 1);
+                    writer.add_document(doc).unwrap();
+                }
+                commit(&mut writer, &open.stamp(0)).unwrap();
+            }
+        }
+        open.reader.reload().unwrap();
+        let holds = |word: &str| {
+            let searcher = open.reader.searcher();
+            searcher.segment_readers().iter().any(|segment| {
+                segment
+                    .inverted_index(f.name)
+                    .unwrap()
+                    .terms()
+                    .get(word.as_bytes())
+                    .unwrap()
+                    .is_some()
+            })
+        };
+        open.purging.lock().unwrap().running = true;
+        {
+            let mut writer = open.writer.lock().unwrap();
+            writer.delete_term(Term::from_field_text(f.resource_id, "a"));
+            commit(&mut writer, &open.stamp(0)).unwrap();
+            open.reader.reload().unwrap();
+            open.purge(&mut writer, vec!["a".into()], false).unwrap();
+        }
+        assert!(!open.purge_owed(), "one runs");
+        assert!(holds("aurora"));
+        open.purging.lock().unwrap().running = false;
+        assert!(open.purge_owed());
+        {
+            let mut writer = open.writer.lock().unwrap();
+            open.purge(&mut writer, vec![], false).unwrap();
+        }
+        let waiting = open.merging.lock().unwrap().take().expect("a merge");
+        waiting.join().unwrap();
+        assert_eq!(open.purges.load(Ordering::SeqCst), 1);
+        assert!(!open.purge_owed());
+        assert!(!holds("aurora"));
+        assert!(holds("cosmos") && holds("borealis"));
     }
 
     #[test]

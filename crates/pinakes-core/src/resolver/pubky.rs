@@ -181,6 +181,8 @@ impl Resolver for PubkyResolver {
                 200..=299 => {}
                 404 | 410 => {
                     doc.status = Status::Missing;
+                    // Gone for good: the slowest refresh rate (`scheduler::Backoff::gone`).
+                    doc.http_status = Some(fetched.status);
                     return Ok(doc);
                 }
                 401 | 403 => {

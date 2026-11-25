@@ -65,3 +65,38 @@ tests:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: osm}
             exp_annotations:
               summary: "The osm catalogue has waited six hours for the large-import turn while a large catalogue's import keeps failing: pinakesd catalogue status shows which; fix it, switch it off or drop it"
+  # Join checks have waited seven hours on a and one on b; extras wait seven hours on both
+  # (Wikipedia's pace): only a's joins fire.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_backlog_age_seconds{instance="a",job="pinakes",queue="joins"}'
+        values: '25200+60x60'
+      - series: 'pinakes_catalogue_backlog_age_seconds{instance="b",job="pinakes",queue="joins"}'
+        values: '3600+60x60'
+      - series: 'pinakes_catalogue_backlog_age_seconds{instance="a",job="pinakes",queue="extras"}'
+        values: '25200+60x60'
+      - series: 'pinakes_catalogue_backlog_age_seconds{instance="b",job="pinakes",queue="extras"}'
+        values: '25200+60x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: CatalogueJoinsBehind
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, queue: joins}
+            exp_annotations:
+              summary: "The oldest catalogue join check has been due for over six hours: links wait for their catalogue card or to go back to fetching; pinakes_catalogue_join_errors_total says whether checks fail"
+  # Joins fail twenty times an hour on a, five on b; extras failures don't count.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_join_errors_total{instance="a",job="pinakes",stage="drain"}'
+        values: '0+0.34x150'
+      - series: 'pinakes_catalogue_join_errors_total{instance="b",job="pinakes",stage="drain"}'
+        values: '0+0.08x150'
+      - series: 'pinakes_catalogue_join_errors_total{instance="b",job="pinakes",stage="extras"}'
+        values: '0+5x150'
+    alert_rule_test:
+      - eval_time: 140m
+        alertname: CatalogueJoinErrors
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes}
+            exp_annotations:
+              summary: "Catalogue joins keep failing (more than ten an hour for an hour): the log line names each resource and the error's kind; links are fetched instead or checked again later"
