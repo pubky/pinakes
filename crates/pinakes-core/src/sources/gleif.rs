@@ -46,6 +46,13 @@ pub fn of_uri(uri: &str) -> Option<String> {
     }
 }
 
+/// The LEI's address on gleif.org, from the LEI alone. It redirects to the record's page on the
+/// search site (`page_url`), which names the LEI only in its fragment, so a link to that page
+/// keeps none of it.
+pub fn page(lei: &str) -> String {
+    format!("https://www.gleif.org/lei/{lei}")
+}
+
 pub fn api_url(lei: &str) -> String {
     format!("https://api.gleif.org/api/v1/lei-records/{lei}")
 }
@@ -152,6 +159,10 @@ impl Source for Gleif {
     fn alias_root(&self, uri: &str) -> Option<String> {
         let root = format!("lei:{}", of_uri(uri)?);
         (root != uri).then_some(root)
+    }
+    fn root_page(&self, root: &str) -> Option<String> {
+        let lei = lei(root.strip_prefix("lei:")?)?;
+        (format!("lei:{lei}") == root).then(|| page(&lei))
     }
     fn invalid(&self, uri: &str) -> bool {
         uri.strip_prefix("lei:")

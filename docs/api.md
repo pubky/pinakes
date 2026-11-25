@@ -1703,16 +1703,17 @@ Each entry is one identifier and what Pinakes answers for it:
   and a source's page are aliases of the card's root ([Aliases](#aliases)). The source's page may
   differ from the page the card's `open_in` names after a read (the Federal Register's dated page
   with its title, a Figshare portal's page, a Hugging Face repository in its own letter case);
-  both are aliases of the same root.
+  both are aliases of the same root. An LEI's page is its gleif.org address
+  (`https://www.gleif.org/lei/{LEI}`), which redirects to the record page `open_in` names: that
+  page names the LEI only in its fragment, which a link drops. A `%`, `?` or `#` in a DOI is
+  percent-encoded in its page.
 - No single page (`null`): an MBID without its entity (`mbid:`), an ISBN (an `isbn:` card has no
-  web page of its own), a barcode (`upc:`, `gtin:`), the podcast keys, and an LEI (`lei:`):
-  GLEIF's record page names the LEI in its fragment, which every link drops, so a tag on it would
-  not count for the card. The keys of the also-on lookups (`imdb:`, `crate:`, `arxiv:`,
+  web page of its own), a barcode (`upc:`, `gtin:`) and the podcast keys. The keys of the also-on lookups (`imdb:`, `crate:`, `arxiv:`,
   `steam:`, …) have none here either: their pages are the links those lookups list in
   [Also on](#also-on). A web link is its own page.
 - A test runs every entry through the code that builds the pages and checks that each page is an
   address of its card. Every source with roots of its own scheme has entries, and every such root
-  among the spelling vectors has its page, but GLEIF's. `spelling_rules` covers the pages as it covers the
+  among the spelling vectors has its page. `spelling_rules` covers the pages as it covers the
   vectors: a changed page changes it.
 - The pages are the same whichever sources an instance switches off. A source removed from the
   build takes its entries along.

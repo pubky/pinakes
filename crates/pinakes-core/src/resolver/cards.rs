@@ -288,9 +288,14 @@ pub fn isbn13(number: &str) -> String {
         .sum();
     format!("{body}{}", (10 - sum % 10) % 10)
 }
-/// A DOI's page on the DOI proxy, `https://doi.org/{DOI}`: an alias of the `doi:` card.
+/// A DOI's page on the DOI proxy, `https://doi.org/{DOI}`: an alias of the `doi:` card. A `%`,
+/// `?` or `#` in the DOI is percent-encoded, so the page's path reads back as the DOI ([`doi`]).
 pub fn doi_page(number: &str) -> String {
-    format!("{DOI_URL}{number}")
+    let path = number
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23");
+    format!("{DOI_URL}{path}")
 }
 pub fn doi(uri: &str) -> Option<String> {
     let raw = if let Some(s) = uri.strip_prefix("doi:") {

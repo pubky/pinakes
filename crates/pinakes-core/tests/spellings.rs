@@ -204,8 +204,8 @@ fn every_page_is_an_address_of_its_card() {
 }
 
 /// Every source whose module builds root pages (`fn root_page`) has page vectors, every source
-/// root of the spelling vectors that is no web link has its page (but GLEIF's), and the key
-/// rules and `none` have theirs.
+/// root of the spelling vectors that is no web link has its page, and the key rules and `none`
+/// have theirs.
 #[test]
 fn every_page_rule_has_vectors() {
     let file = file();
@@ -238,13 +238,9 @@ fn every_page_rule_has_vectors() {
         missing.is_empty(),
         "page rules without a vector: {missing:?}"
     );
-    // A source's root in a scheme of its own: the page a client links for its card. GLEIF's page
-    // names the LEI in its fragment, which every link drops, so it is no address of the card.
+    // A source's root in a scheme of its own: the page a client links for its card.
     for v in &file.vectors {
-        if v.rule.starts_with("source/")
-            && !v.root.starts_with("https:")
-            && v.rule != "source/gleif"
-        {
+        if v.rule.starts_with("source/") && !v.root.starts_with("https:") {
             let (_, rule) =
                 alias::web_page(&v.root).unwrap_or_else(|| panic!("no page for the root of {v:?}"));
             assert_eq!(rule.name(), v.rule, "{v:?}");

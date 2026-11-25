@@ -218,6 +218,22 @@ def own_vectors(wt, name, part="vectors"):
     return [(i, v) for i, v in enumerate(doc[part]) if v.get("rule") == "source/%s" % name]
 
 
+def scheme_nulls(wt, name):
+    """The identifier pages of `data/spellings.json` in the source's own schemes (its roots' and
+    its pages') that have no page (`null`, rule `none`), read before its removal: `remove` drops
+    them with its pages, and `verify` names any that is left."""
+    p = os.path.join(wt, SPELLINGS)
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8") as f:
+        doc = json.load(f)
+    own = "source/%s" % name
+    scheme = lambda uri: uri.split(":", 1)[0].lower()
+    schemes = {scheme(v["root"]) for v in doc["vectors"] if v.get("rule") == own and not v["root"].startswith(("http:", "https:"))}
+    schemes |= {scheme(v["id"]) for v in doc["pages"] if v.get("rule") == own}
+    return [v["id"] for v in doc["pages"] if v.get("rule") == "none" and scheme(v["id"]) in schemes]
+
+
 def remove(wt, kind, name):
     """Delete the source's own files and lines in the worktree `wt`, as the checklist says. The
     module and its registry lines must be there; the rest is deleted when present. A shared line
@@ -256,6 +272,7 @@ def remove(wt, kind, name):
     for rel, patterns in lines.items():
         for pattern in patterns:
             edit(rel, pattern)
+    nulls = set(scheme_nulls(wt, name))
     # Its spelling vectors: the build without it folds none of its links (but those shared code
     # roots the same way, `SPELLINGS_HANDOVER`), so they go, and the vectors of their roots that
     # no vector left names.
@@ -265,7 +282,6 @@ def remove(wt, kind, name):
         with open(p, encoding="utf-8") as f:
             doc = json.load(f)
         own = "source/%s" % name
-        doc_before = [dict(v) for v in doc["vectors"]]
         if name in SPELLINGS_HANDOVER:
             for v in doc["vectors"]:
                 if v.get("rule") == own:
@@ -276,9 +292,7 @@ def remove(wt, kind, name):
             named = {v["root"] for v in kept if v["root"] != v["link"]}
             doc["vectors"] = [v for v in kept if not (v["link"] in gone and v.get("rule") == "none" and v["link"] not in named)]
         # Its pages, and the identifiers of its schemes that have none (`null`, rule `none`).
-        schemes = {v["root"].split(":", 1)[0] for v in doc_before if v.get("rule") == own and not v["root"].startswith(("http:", "https:"))}
-        schemes |= {v["id"].split(":", 1)[0].lower() for v in doc["pages"] if v.get("rule") == own}
-        doc["pages"] = [v for v in doc["pages"] if v.get("rule") != own and not (v.get("rule") == "none" and v["id"].split(":", 1)[0].lower() in schemes)]
+        doc["pages"] = [v for v in doc["pages"] if v.get("rule") != own and v["id"] not in nulls]
         with open(p, "w", encoding="utf-8") as f:
             f.write(spellings_text(doc))
 
@@ -360,12 +374,12 @@ def page_links(rel, lines):
     return out
 
 
-def verify(wt, kind, name, title, kept=()):
+def verify(wt, kind, name, title, kept=(), nulls=()):
     """What the removal left of the source: (leftovers, mentions). Independent of `remove`: it
     looks for the source as an identifier (the module doc says where), not for what the
     deletion's patterns match, and checks the shared lines `kept` (`shared_lines`, before the
-    removal) are still there. The mentions are its id and display name as words elsewhere, for
-    a reader."""
+    removal) are still there, and that no `null` page of its schemes (`scheme_nulls`, before the
+    removal) is. The mentions are its id and display name as words elsewhere, for a reader."""
     q = re.escape(name)
     page = "docs/sources/%s.md" % name
     left = [rel for rel in own_paths(kind, name) if os.path.exists(os.path.join(wt, rel))]
@@ -432,6 +446,12 @@ def verify(wt, kind, name, title, kept=()):
         left.append(f"{SPELLINGS}: vector {i + 1} {v.get('link')!r} of rule {v.get('rule')!r}")
     for i, v in own_vectors(wt, name, "pages"):
         left.append(f"{SPELLINGS}: page {i + 1} {v.get('id')!r} of rule {v.get('rule')!r}")
+    p = os.path.join(wt, SPELLINGS)
+    if nulls and os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            for i, v in enumerate(json.load(f)["pages"]):
+                if v["id"] in nulls:
+                    left.append(f"{SPELLINGS}: page {i + 1} {v['id']!r} in a scheme of its own")
     # The e2e samples that stay: none is of its kind, and none that runs without the source joins
     # a sample that does not. A sample that `needs` the source is left out of a run without it,
     # by the mock and the live stack alike (e2e_stack's `by_needs`): it does not run, its joins do
@@ -497,8 +517,9 @@ def check(kind, name, tests):
     try:
         title = display_name(wt, name)
         kept = shared_lines(wt, name)
+        nulls = scheme_nulls(wt, name)
         remove(wt, kind, name)
-        left, mentions = verify(wt, kind, name, title, kept)
+        left, mentions = verify(wt, kind, name, title, kept, nulls)
         if left:
             return "the removal left:\n" + "\n".join(left), mentions
         env = dict(os.environ)
@@ -668,8 +689,9 @@ def self_test():
             shutil.copytree(tree, wt)
             title = display_name(wt, name)
             kept = shared_lines(wt, name)
+            nulls = scheme_nulls(wt, name)
             remove(wt, kind, name)
-            left, mentions = verify(wt, kind, name, title, kept)
+            left, mentions = verify(wt, kind, name, title, kept, nulls)
             assert not left, f"{name} removed: {left}"
             if name == "alpha_beta":
                 env = open(os.path.join(wt, ".env.example"), encoding="utf-8").read()
@@ -699,6 +721,8 @@ def self_test():
         assert [p["id"] for p in doc["pages"]] == ["gamma:2", "wikidata:Q1"] and open(p, encoding="utf-8").read() == spellings_text(doc), doc
         wt, name, title = os.path.join(base, "alpha_beta"), "alpha_beta", "Alpha Beta"
         kept = shared_lines(tree, name)
+        nulls = scheme_nulls(tree, name)
+        assert nulls == ["AB:x"], nulls
         cases = [
             # (file, text appended, or None to delete the file's line holding `drop`, what is named)
             ("docs/sources/alpha_beta.md", "# Alpha Beta\n", "docs/sources/alpha_beta.md"),
@@ -724,12 +748,14 @@ def self_test():
             ("e2e/samples/delta.json", "joins the left out", "'delta_child' group_with 'delta_join', which is gone"),
             (SPELLINGS, None, "vector 1 'https://alpha-beta.example/d/1' of rule 'source/alpha_beta'"),
             (SPELLINGS, "page", "page 1 'ab:1' of rule 'source/alpha_beta'"),
+            (SPELLINGS, "null page", "page 1 'AB:x' in a scheme of its own"),
         ]
         edits = {
             (".env.example", None): lambda t: t.replace("PINAKES__PODCAST_INDEX__KEY=\n", ""),
             (SPELLINGS, None): lambda t: t.replace(
                 '"vectors": [\n', '"vectors": [\n    {"link":"https://alpha-beta.example/d/1","root":"ab:1","basis":"identifier","rule":"source/alpha_beta"},\n'
             ),
+            (SPELLINGS, "null page"): lambda t: t.replace('"pages": [\n', '"pages": [\n    {"id":"AB:x","page":null,"rule":"none"},\n'),
             (SPELLINGS, "page"): lambda t: t.replace(
                 '"pages": [\n', '"pages": [\n    {"id":"ab:1","page":"https://alpha-beta.example/d/1","rule":"source/alpha_beta"},\n'
             ),
@@ -750,14 +776,14 @@ def self_test():
                 after = (before or "") + text
             with open(p, "w", encoding="utf-8") as f:
                 f.write(after)
-            left, _ = verify(wt, "sources", name, title, kept)
+            left, _ = verify(wt, "sources", name, title, kept, nulls)
             assert any(want in l and l.startswith(rel) for l in left), f"{rel}: {text!r} not named as {want!r}; left: {left}"
             if before is None:
                 os.remove(p)
             else:
                 with open(p, "w", encoding="utf-8") as f:
                     f.write(before)
-        left, _ = verify(wt, "sources", name, title, kept)
+        left, _ = verify(wt, "sources", name, title, kept, nulls)
         assert not left, f"after the cases: {left}"
         SPELLINGS_HANDOVER.pop("gamma")
         print("self-test ok (%d removals, %d leftovers named)" % (len(sources), len(cases)))

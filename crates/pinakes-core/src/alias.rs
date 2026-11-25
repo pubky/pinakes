@@ -142,7 +142,11 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
             .strip_prefix("doi:")
             .and_then(|_| crate::resolver::cards::doi(&written))
         {
-            return Some((crate::resolver::cards::doi_page(&number), Core(Rule::Doi)));
+            // Its page reads back as the DOI (`doi_page` encodes `%`, `?` and `#`); one that
+            // would not has no page.
+            let page = crate::resolver::cards::doi_page(&number);
+            return (crate::resolver::cards::doi(&page).as_deref() == Some(number.as_str()))
+                .then_some((page, Core(Rule::Doi)));
         }
         if let Some((source, page)) = crate::sources::root_page_by(&written) {
             return Some((page, Named::Source(source)));
@@ -156,8 +160,8 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
             Rule::Wikidata,
         ),
         "mb" => {
-            let (kind, mbid) = value.split_once(':')?;
-            let kind = crate::hubs::MbKind::parse(kind)?;
+            let (written, mbid) = value.split_once(':')?;
+            let kind = crate::hubs::MbKind::parse(written).filter(|k| k.as_str() == written)?;
             let mbid = crate::hubs::mbid(mbid)?;
             (
                 crate::hubs::musicbrainz::entity_page(kind, &mbid),
@@ -179,8 +183,8 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
     Some((page, Core(rule)))
 }
 /// The version of the URI-only spelling rules (`/v1/info` `spelling_rules`): the first 16 hex
-/// characters of the BLAKE3 hash of `data/spellings.json`, the rules' test vectors, which a
-/// test holds equal to what [`rooted`] answers.
+/// characters of the BLAKE3 hash of `data/spellings.json`, the rules' test vectors and the
+/// identifier pages, which a test holds equal to what [`rooted`] and [`web_page`] answer.
 pub fn spelling_rules() -> &'static str {
     static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         blake3::hash(include_bytes!("../../../data/spellings.json")).to_hex()[..16].to_owned()
