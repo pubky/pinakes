@@ -411,13 +411,17 @@ pub fn sha256_sums(text: &str) -> Vec<(String, String)> {
 /// a spliced stream; without a validator it is not asked for again). Each break may be retried
 /// [`Download::RETRIES`] times (a failed request again too), the count renewed after every
 /// [`Download::RENEW_BYTES`] read; every wait for a chunk is bounded, and so is the whole
-/// download ([`Download::DEADLINE`]).
+/// download ([`Download::DEADLINE`]). The file's length comes from its first answer: one with
+/// none is refused (a body that ends early could not be told from the whole), and a body that
+/// ends before it is a break too.
 pub struct Download {
     client: reqwest::Client,
     url: url::Url,
     handle: tokio::runtime::Handle,
     response: Option<reqwest::Response>,
     validator: Option<String>,
+    /// The file's length, from the first answer.
+    length: u64,
     chunk: bytes::Bytes,
     offset: u64,
     retries: u32,
@@ -455,6 +459,7 @@ impl Download {
             handle,
             response: None,
             validator: None,
+            length: 0,
             chunk: bytes::Bytes::new(),
             offset: 0,
             retries: 0,
@@ -502,22 +507,27 @@ impl Download {
                 self.validator = header(reqwest::header::ETAG)
                     .filter(|e| !e.starts_with("W/"))
                     .or_else(|| header(reqwest::header::LAST_MODIFIED));
-                if response
-                    .content_length()
-                    .is_some_and(|n| n > self.max_bytes)
-                {
+                let Some(length) = response.content_length() else {
+                    bail!(self.failure("download"));
+                };
+                if length > self.max_bytes {
                     bail!(self.failure("size"));
                 }
+                self.length = length;
             }
             (true, 206) => {
-                let starts = response
+                // `bytes <first>-<last>/<length>`: from the byte asked for, of the same file.
+                let range = response
                     .headers()
                     .get(reqwest::header::CONTENT_RANGE)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.strip_prefix("bytes "))
-                    .and_then(|v| v.split('-').next())
-                    .and_then(|v| v.parse::<u64>().ok());
-                if starts != Some(self.offset) {
+                    .and_then(|v| v.split_once('/'))
+                    .and_then(|(span, length)| {
+                        let first = span.split('-').next()?.parse::<u64>().ok()?;
+                        Some((first, length.parse::<u64>().ok()?))
+                    });
+                if range != Some((self.offset, self.length)) {
                     bail!(self.failure("download"));
                 }
             }
@@ -582,9 +592,15 @@ impl Read for Download {
                 .block_on(async { tokio::time::timeout(Self::CHUNK_WAIT, response.chunk()).await });
             match next {
                 Ok(Ok(Some(chunk))) => self.chunk = chunk,
-                Ok(Ok(None)) => {
+                Ok(Ok(None)) if self.offset >= self.length => {
                     self.response = None;
                     return Ok(0);
+                }
+                // A body that ended before the file did (an answer of part of the rest, or a
+                // connection closed early): ask for the rest.
+                Ok(Ok(None)) => {
+                    self.response = None;
+                    self.resume()?;
                 }
                 // A broken connection or a stall: ask for the rest.
                 _ => {

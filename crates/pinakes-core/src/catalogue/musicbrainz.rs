@@ -386,10 +386,7 @@ impl MusicBrainz {
         }
         // `LATEST` may name another dump than the one the run was planned on: a refused one is
         // read again only when a full import is asked for.
-        if resumed.is_none()
-            && job.state().import_requested.is_none()
-            && self.refused(job.state(), &version)
-        {
+        if resumed.is_none() && !job.asked() && self.refused(job.state(), &version) {
             bail!(super::run::Abandoned(
                 Failure::new("refused").at(format!("dump {version} was refused before"))
             ));
@@ -419,9 +416,7 @@ impl MusicBrainz {
         // A full import asked for (by hand, or by an update handing over for a changed limit)
         // removes what its dump no longer has, however much; one of the importer's own may
         // remove at most a tenth. Kept in the cursor: a resumed import is still the one asked for.
-        let forced = resumed
-            .as_ref()
-            .map_or(job.state().import_requested.is_some(), |c| c.forced);
+        let forced = resumed.as_ref().map_or(job.asked(), |c| c.forced);
         let cards_before = resumed
             .as_ref()
             .map_or(Some(job.state().cards.max(0) as u64), |c| c.cards_before);
@@ -479,9 +474,9 @@ impl MusicBrainz {
                 }
             }
             if mode == Run::Update && !removals.exists() {
-                let gone = self.count_gone(&removals, &done, &stop).await?;
-                if too_many(gone, cards, job.limit()) {
-                    let note = format!("{gone} of {cards} cards gone in dump {version}");
+                let tally = self.count_gone(&removals, &done, &stop).await?;
+                write_json(&Tally::path(&spill_dir), &tally)?;
+                if let Some(note) = tally.too_many(job.limit(), "gone", &version) {
                     return self
                         .refuse(job, mode, &version, "removals", &note, &spill_dir)
                         .await;
@@ -517,15 +512,21 @@ impl MusicBrainz {
             // held no card when the run began (a first import) there is nothing to remove, and
             // the count, a read of the whole table, is not made.
             if mode == Run::Import && !forced && job.limit().is_none() && cards_before != Some(0) {
-                let (gone, all): (i64, i64) = sqlx::query_as(
-                    "SELECT count(*) FILTER (WHERE seen_generation<$2),count(*) FROM catalogue_card WHERE catalogue=$1",
+                let counted: Vec<(String, i64, i64)> = sqlx::query_as(
+                    "SELECT split_part(source_id,'/',1),count(*) FILTER (WHERE seen_generation<$2),count(*) FROM catalogue_card WHERE catalogue=$1 GROUP BY 1",
                 )
                 .bind(Catalogue::Musicbrainz.name())
                 .bind(job.generation())
-                .fetch_one(job.pool())
+                .fetch_all(job.pool())
                 .await?;
-                if too_many(gone as u64, all as u64, None) {
-                    let note = format!("{gone} of {all} cards not in dump {version}");
+                let mut tally = Tally::default();
+                for (kind, gone, all) in counted {
+                    if let Some(k) = KINDS.iter().position(|n| *n == kind) {
+                        tally.gone[k] = gone.max(0) as u64;
+                        tally.stored[k] = all.max(0) as u64;
+                    }
+                }
+                if let Some(note) = tally.too_many(None, "not", &version) {
                     return self
                         .refuse(job, mode, &version, "removals", &note, &spill_dir)
                         .await;
@@ -537,13 +538,26 @@ impl MusicBrainz {
             // makes but that are refused. The new and changed cards are written by now.
             if phase != Some(Phase::Remove) {
                 let path = removals.clone();
-                let listed = tokio::task::spawn_blocking(move || count_lines(&path))
+                let listed = tokio::task::spawn_blocking(move || count_kinds(&path))
                     .await
                     .map_err(|_| Failure::new("panic"))??;
-                let cards = job.state().cards.max(0) as u64;
-                if too_many(listed, cards, job.limit()) {
-                    let note =
-                        format!("{listed} of {cards} cards gone or refused in dump {version}");
+                // By kind against the stored cards the first pass counted; a run that began
+                // before the tally was kept counts them all together.
+                let note = match read_json::<Tally>(&Tally::path(&spill_dir)) {
+                    Some(first) => Tally {
+                        gone: listed,
+                        ..first
+                    }
+                    .too_many(job.limit(), "gone or refused", &version),
+                    None => {
+                        let (listed, cards) =
+                            (listed.iter().sum::<u64>(), job.state().cards.max(0) as u64);
+                        too_many(listed, cards, job.limit()).then(|| {
+                            format!("{listed} of {cards} cards gone or refused in dump {version}")
+                        })
+                    }
+                };
+                if let Some(note) = note {
                     return self
                         .refuse(job, mode, &version, "removals", &note, &spill_dir)
                         .await;
@@ -647,7 +661,7 @@ impl MusicBrainz {
         let room = self.room();
         let mut stored = vec![];
         if mode == Run::Update {
-            stored = snapshot(job, &dir.join(format!("stored-{}", nonce())), room).await?;
+            stored = snapshot(job, &dir.join(format!("stored-{}", nonce())), room.clone()).await?;
         }
         let Some(sums) = self.sums(version).await? else {
             bail!(Failure::new("not_found").at(self.source.at()));
@@ -661,7 +675,7 @@ impl MusicBrainz {
             limit,
             threads: if limit.is_some() { 1 } else { self.threads },
             dir: dir.to_owned(),
-            room,
+            room: room.clone(),
             sort_memory: self.sort_memory,
             retry_wait: self.retry_wait,
             stop: stop.flag(),
@@ -710,19 +724,22 @@ impl MusicBrainz {
 
     /// An update's first pass: the stored cards the dump no longer has, listed in `removals`
     /// (written whole, then put in place). Their number.
-    async fn count_gone(&self, removals: &Path, done: &Done, stop: &Stop) -> Result<u64> {
+    async fn count_gone(&self, removals: &Path, done: &Done, stop: &Stop) -> Result<Tally> {
         let runs = done.runs.clone();
         let path = removals.to_owned();
         let flag = stop.flag();
-        let gone = tokio::task::spawn_blocking(move || list_gone(&runs, &path, &flag))
+        let tally = tokio::task::spawn_blocking(move || list_gone(&runs, &path, &flag))
             .await
             .map_err(|_| Failure::new("panic"))??;
         tracing::info!(
             catalogue = "musicbrainz",
-            gone,
+            gone = tally.gone(),
+            artists = tally.gone[0],
+            release_groups = tally.gone[1],
+            recordings = tally.gone[2],
             "musicbrainz update: stored cards the dump no longer has"
         );
-        Ok(gone)
+        Ok(tally)
     }
 
     /// The merge: each item's card, written when new or changed (every card for an import); for
@@ -1088,15 +1105,51 @@ fn entity_tag(key: &str) -> Option<usize> {
         _ => return None,
     })
 }
+/// The kinds of card, as their `source_id`s begin: the removal checks count each on its own, so
+/// a kind that is a small share of the cards (artists are about 6%) can't lose most of its cards
+/// under the tenth of all.
+const KINDS: [&str; 3] = ["artist", "release-group", "recording"];
+fn kind_of(key: &str) -> Option<usize> {
+    let entity = key.split_once('/')?.0;
+    KINDS.iter().position(|k| *k == entity)
+}
+/// An update's stored cards and those it removes, by kind ([`KINDS`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct Tally {
+    stored: [u64; 3],
+    gone: [u64; 3],
+}
+impl Tally {
+    fn gone(&self) -> u64 {
+        self.gone.iter().sum()
+    }
+    /// The first kind that would lose more than [`MAX_REMOVED_SHARE`] of its cards, said as a
+    /// refusal's note; none under a `limit` (its subset may move).
+    fn too_many(&self, limit: Option<u64>, what: &str, version: &str) -> Option<String> {
+        (0..KINDS.len())
+            .find(|&k| too_many(self.gone[k], self.stored[k], limit))
+            .map(|k| {
+                format!(
+                    "{} of {} {} cards {what} in dump {version}",
+                    self.gone[k], self.stored[k], KINDS[k]
+                )
+            })
+    }
+    /// Kept beside the run's sorted runs, so the check before the removals counts by kind
+    /// after a restart too.
+    fn path(spill_dir: &Path) -> PathBuf {
+        spill_dir.join("tally.json")
+    }
+}
 /// An update's first pass over the merge: each stored card under a key with no record that
-/// makes a card, written to `path` (in key order). Their number.
-fn list_gone(runs: &[PathBuf], path: &Path, stop: &AtomicBool) -> Result<u64> {
+/// makes a card, written to `path` (in key order). The stored cards and those gone, by kind.
+fn list_gone(runs: &[PathBuf], path: &Path, stop: &AtomicBool) -> Result<Tally> {
     let disk = || Failure::new("disk").at(path.display().to_string());
     // Written whole, then put in place: a list there is always a whole one.
     let tmp = path.with_extension("tmp");
     let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp).with_context(disk)?);
     let mut merged = spill::Merge::open(runs)?;
-    let (mut gone, mut seen) = (0u64, 0u64);
+    let (mut tally, mut gone, mut seen) = (Tally::default(), 0u64, 0u64);
     let mut said = Instant::now();
     while let Some((key, counts)) = merged.next_counts()? {
         seen += 1;
@@ -1113,12 +1166,16 @@ fn list_gone(runs: &[PathBuf], path: &Path, stop: &AtomicBool) -> Result<u64> {
             }
         }
         let key = String::from_utf8(key).map_err(|_| Failure::new("spill"))?;
-        let Some(entity) = entity_tag(&key) else {
+        let (Some(entity), Some(kind)) = (entity_tag(&key), kind_of(&key)) else {
             continue;
         };
-        if counts[tag::STORED] > 0 && counts[entity] == 0 {
-            writeln!(out, "{key}").with_context(disk)?;
-            gone += 1;
+        if counts[tag::STORED] > 0 {
+            tally.stored[kind] += 1;
+            if counts[entity] == 0 {
+                writeln!(out, "{key}").with_context(disk)?;
+                tally.gone[kind] += 1;
+                gone += 1;
+            }
         }
     }
     out.into_inner()
@@ -1127,7 +1184,7 @@ fn list_gone(runs: &[PathBuf], path: &Path, stop: &AtomicBool) -> Result<u64> {
         .sync_all()
         .with_context(disk)?;
     std::fs::rename(&tmp, path).with_context(disk)?;
-    Ok(gone)
+    Ok(tally)
 }
 
 /// Rows to write, stored cards to remove, the cards refused, and the last item they reach.
@@ -1291,19 +1348,20 @@ async fn remove_gone(
     }
     Ok(())
 }
-/// The lines of a file; none when there is no file.
-fn count_lines(path: &Path) -> Result<u64> {
+/// The keys a removals file lists, by kind ([`KINDS`]); none when there is no file.
+fn count_kinds(path: &Path) -> Result<[u64; 3]> {
     let disk = || Failure::new("disk").at(path.display().to_string());
     match std::fs::File::open(path) {
         Ok(file) => {
-            let mut n = 0;
+            let mut n = [0; 3];
             for line in BufReader::new(file).lines() {
-                line.with_context(disk)?;
-                n += 1;
+                if let Some(k) = kind_of(&line.with_context(disk)?) {
+                    n[k] += 1;
+                }
             }
             Ok(n)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok([0; 3]),
         Err(_) => bail!(disk()),
     }
 }
@@ -1429,23 +1487,54 @@ struct Chunk {
     ends: Vec<usize>,
 }
 const CHUNK_BYTES: usize = 4 << 20;
+/// How a file's lines go to the parsing threads: in chunks of about `chunk` bytes, at most
+/// `queued` bytes of them handed over and not yet parsed.
+#[derive(Clone, Copy)]
+struct Queue {
+    chunk: usize,
+    queued: usize,
+}
+impl Default for Queue {
+    fn default() -> Self {
+        Self {
+            chunk: CHUNK_BYTES,
+            queued: QUEUED_BYTES,
+        }
+    }
+}
 /// The most bytes of lines queued for and held by the parsing threads together: a chunk may hold
 /// a line of up to [`LINE_CAP`], and a few such chunks queued must not add up. One chunk is
 /// always let through, however long.
 const QUEUED_BYTES: usize = 64 << 20;
 
-/// The bytes of chunks handed to the parsing threads and not yet parsed.
-#[derive(Default)]
+/// The bytes of chunks handed to the parsing threads and not yet parsed, and how many of the
+/// threads still parse.
 struct InFlight {
-    held: std::sync::Mutex<(usize, bool)>,
+    held: std::sync::Mutex<Held>,
     freed: std::sync::Condvar,
 }
+struct Held {
+    bytes: usize,
+    /// The most bytes held at once (the tests read it).
+    peak: usize,
+    threads: usize,
+}
 impl InFlight {
-    /// Wait until `bytes` more fit under `cap` (or nothing is held, or the threads are gone), then
+    fn new(threads: usize) -> Self {
+        Self {
+            held: std::sync::Mutex::new(Held {
+                bytes: 0,
+                peak: 0,
+                threads,
+            }),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+    /// Wait until `bytes` more fit under `cap` (or nothing is held, or every thread is gone), then
     /// count them.
     fn take(&self, bytes: usize, cap: usize, stop: &AtomicBool) -> Result<()> {
         let mut held = self.held.lock().expect("the queued bytes");
-        while held.0 > 0 && held.0 + bytes > cap && !held.1 {
+        while held.bytes > 0 && held.bytes + bytes > cap && held.threads > 0 {
             stopped(stop)?;
             held = self
                 .freed
@@ -1453,19 +1542,26 @@ impl InFlight {
                 .expect("the queued bytes")
                 .0;
         }
-        held.0 += bytes;
+        held.bytes += bytes;
+        held.peak = held.peak.max(held.bytes);
         Ok(())
     }
-    /// `bytes` parsed: their room is free again.
+    /// `bytes` parsed (or dropped by a thread that ends): their room is free again.
     fn give(&self, bytes: usize) {
         let mut held = self.held.lock().expect("the queued bytes");
-        held.0 = held.0.saturating_sub(bytes);
+        held.bytes = held.bytes.saturating_sub(bytes);
         self.freed.notify_all();
     }
-    /// A parsing thread ended: the reader no longer waits for room.
-    fn close(&self) {
-        self.held.lock().expect("the queued bytes").1 = true;
+    /// A parsing thread ended, giving back the `bytes` of the chunk it held: when the last one
+    /// has, the reader no longer waits for room (its sends fail then).
+    fn leave(&self, bytes: usize) {
+        let mut held = self.held.lock().expect("the queued bytes");
+        held.bytes = held.bytes.saturating_sub(bytes);
+        held.threads = held.threads.saturating_sub(1);
         self.freed.notify_all();
+    }
+    fn peak(&self) -> usize {
+        self.held.lock().expect("the queued bytes").peak
     }
 }
 
@@ -1528,7 +1624,7 @@ fn read_file(
     let dir = plan.dir.join(format!("{file}-{}", nonce()));
     let threads = if subset.is_some() { 1 } else { plan.threads };
     let mut spills: Vec<Spill> = (0..threads)
-        .map(|i| Spill::new(&dir.join(format!("w{i}")), budget, plan.room))
+        .map(|i| Spill::new(&dir.join(format!("w{i}")), budget, plan.room.clone()))
         .collect::<Result<_>>()?;
     let mut hashed = bulk::Hashed::new(plan.open(&name)?);
     let mut out = FileDone {
@@ -1564,7 +1660,7 @@ fn read_file(
             let lines = Lines::new(BufReader::with_capacity(1 << 20, tar.data()), LINE_CAP);
             let read = match subset {
                 Some(subset) => read_limited(file, lines, subset, &mut spills[0], &at, &plan.stop)?,
-                None => read_parallel(file, lines, &mut spills, &at, &plan.stop)?,
+                None => read_parallel(file, lines, &mut spills, &at, &plan.stop, Queue::default())?,
             };
             out.lines = read.lines;
             out.cut = read.cut;
@@ -1644,6 +1740,8 @@ struct FileRead {
     records: u64,
     /// The read stopped before the file's end (a `limit`).
     stopped: bool,
+    /// The most bytes of lines queued for the parsing threads at once.
+    queued_peak: usize,
 }
 /// More bad lines than a file may hold so far: more than [`BAD_LINES`], and more than one in a
 /// thousand of the lines read.
@@ -1706,10 +1804,11 @@ fn read_parallel<R: BufRead>(
     spills: &mut [Spill],
     at: &str,
     stop: &AtomicBool,
+    queue: Queue,
 ) -> Result<FileRead> {
     let mut read = FileRead::default();
     let (tx, rx) = crossbeam_channel::bounded::<Chunk>(spills.len() * 2);
-    let in_flight = InFlight::default();
+    let in_flight = InFlight::new(spills.len());
     // Lines and bad lines over all threads, checked as the read goes.
     let counted = (
         std::sync::atomic::AtomicU64::new(0),
@@ -1724,16 +1823,18 @@ fn read_parallel<R: BufRead>(
                 let counted = &counted;
                 let in_flight = &in_flight;
                 scope.spawn(move || -> Result<u64> {
-                    struct Leaving<'a>(&'a InFlight);
+                    // The chunk in hand when the thread ends (a failure): its bytes go back.
+                    struct Leaving<'a>(&'a InFlight, std::cell::Cell<usize>);
                     impl Drop for Leaving<'_> {
                         fn drop(&mut self) {
-                            self.0.close();
+                            self.0.leave(self.1.get());
                         }
                     }
-                    let _leaving = Leaving(in_flight);
+                    let leaving = Leaving(in_flight, std::cell::Cell::new(0));
                     let mut records = 0;
                     while let Ok(chunk) = rx.recv() {
                         let size = chunk.data.len();
+                        leaving.1.set(size);
                         stopped(stop)?;
                         let mut start = 0;
                         let (mut lines, mut bad, mut cut) = (0, 0, 0);
@@ -1765,6 +1866,7 @@ fn read_parallel<R: BufRead>(
                             start = end;
                         }
                         in_flight.give(size);
+                        leaving.1.set(0);
                         let lines = counted.0.fetch_add(lines, Ordering::Relaxed) + lines;
                         let bad = counted.1.fetch_add(bad, Ordering::Relaxed) + bad;
                         counted.2.fetch_add(cut, Ordering::Relaxed);
@@ -1780,7 +1882,7 @@ fn read_parallel<R: BufRead>(
         let mut feed = || -> Result<()> {
             let mut line = vec![];
             let mut chunk = Chunk {
-                data: Vec::with_capacity(CHUNK_BYTES),
+                data: Vec::with_capacity(queue.chunk),
                 ends: vec![],
             };
             let mut fed = 0u64;
@@ -1802,22 +1904,22 @@ fn read_parallel<R: BufRead>(
                 }
                 chunk.data.extend_from_slice(&line);
                 chunk.ends.push(chunk.data.len());
-                if chunk.data.len() >= CHUNK_BYTES {
+                if chunk.data.len() >= queue.chunk {
                     let full = std::mem::replace(
                         &mut chunk,
                         Chunk {
-                            data: Vec::with_capacity(CHUNK_BYTES),
+                            data: Vec::with_capacity(queue.chunk),
                             ends: vec![],
                         },
                     );
-                    in_flight.take(full.data.len(), QUEUED_BYTES, stop)?;
+                    in_flight.take(full.data.len(), queue.queued, stop)?;
                     if tx.send(full).is_err() {
                         break;
                     }
                 }
             }
             if !chunk.ends.is_empty() {
-                in_flight.take(chunk.data.len(), QUEUED_BYTES, stop)?;
+                in_flight.take(chunk.data.len(), queue.queued, stop)?;
                 let _ = tx.send(chunk);
             }
             Ok(())
@@ -1851,6 +1953,13 @@ fn read_parallel<R: BufRead>(
         );
     }
     read.too_long = lines.too_long();
+    read.queued_peak = in_flight.peak();
+    tracing::debug!(
+        catalogue = "musicbrainz",
+        file,
+        bytes = read.queued_peak,
+        "musicbrainz parse queue: the most bytes held at once"
+    );
     Ok(read)
 }
 /// One file's lines in order on this thread, kept to `subset`: releases while their items fit,
@@ -2104,8 +2213,6 @@ impl Importer for MusicBrainz {
 /// The reason a full import asked for by hand is recorded under (`import_requested`).
 pub const REQUESTED: &str = "asked for by pinakesd catalogue import --request";
 
-/// The importer `pinakesd` runs: the official mirror; none without the operator's contact
-/// (`http.contact`), which every request to the mirror names.
 /// Whether the catalogue is on but its importer does not start: it needs `http.contact`.
 pub fn needs_contact(config: &crate::config::Config) -> bool {
     config.catalogues.enabled(Catalogue::Musicbrainz) && config.egress.contact.is_empty()
@@ -2113,6 +2220,8 @@ pub fn needs_contact(config: &crate::config::Config) -> bool {
 /// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
 pub const NEEDS_CONTACT: &str =
     "needs http.contact: the importer asks the mirror with the operator's contact";
+/// The importer `pinakesd` runs: the official mirror; none without the operator's contact
+/// (`http.contact`), which every request to the mirror names.
 pub fn importer(config: &crate::config::Config) -> Option<Arc<dyn Importer>> {
     if config.egress.contact.is_empty() {
         if !config.catalogues.enabled(Catalogue::Musicbrainz) {
@@ -2180,12 +2289,13 @@ mod tests {
     }
 
     /// The lines queued for the parsing threads hold at most the cap in bytes: past it the
-    /// reader waits until a thread has parsed some; one chunk passes alone however long; when the
-    /// threads are gone, or the run stops, the reader no longer waits.
+    /// reader waits until a thread has parsed some; one chunk passes alone however long; a
+    /// thread that ends gives back what it held, and the reader stops waiting only when the last
+    /// one has (or the run stops).
     #[test]
     fn queued_lines_wait_for_room() {
         let stop = AtomicBool::new(false);
-        let queue = InFlight::default();
+        let queue = InFlight::new(2);
         queue.take(100, 64, &stop).unwrap();
         std::thread::scope(|scope| {
             let waiting = scope.spawn(|| {
@@ -2202,8 +2312,66 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         assert!(queue.take(60, 64, &stop).is_err());
         stop.store(false, Ordering::SeqCst);
-        queue.close();
+        // One thread ends holding 50: they come back, and the other still parses, so the cap holds.
+        queue.leave(50);
+        queue.take(54, 64, &stop).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        assert!(queue.take(1, 64, &stop).is_err());
+        stop.store(false, Ordering::SeqCst);
+        // The last one ends: nothing waits any more.
+        queue.leave(0);
         queue.take(1 << 30, 64, &stop).unwrap();
+        assert_eq!(queue.peak(), (1 << 30) + 64);
+    }
+
+    /// Through the real read: many chunks of lines under a small cap are all parsed, the read
+    /// ends, and the lines queued at once never pass the cap.
+    #[test]
+    fn a_read_holds_its_queue_under_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let line =
+            |n: u32| format!(r#"{{"id":"5837d14e-4d18-49cf-a759-{n:012}","name":"Artist {n}"}}"#);
+        let text: String = (0..3000).map(|n| line(n) + "\n").collect();
+        let lines = Lines::new(
+            BufReader::new(std::io::Cursor::new(text.into_bytes())),
+            LINE_CAP,
+        );
+        let mut spills: Vec<Spill> = (0..2)
+            .map(|i| {
+                Spill::new(
+                    &dir.path().join(format!("w{i}")),
+                    1 << 20,
+                    Room::new(1 << 30, 0),
+                )
+                .unwrap()
+            })
+            .collect();
+        let queue = Queue {
+            chunk: 1024,
+            queued: 4096,
+        };
+        // On a thread of its own, so a read that never ends fails the test instead of hanging it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let read = read_parallel(
+                "artist",
+                lines,
+                &mut spills,
+                "test",
+                &AtomicBool::new(false),
+                queue,
+            );
+            let _ = tx.send(
+                read.map(|r| (r.records, r.bad, r.queued_peak))
+                    .map_err(|e| e.to_string()),
+            );
+        });
+        let read = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the read ends")
+            .unwrap();
+        assert_eq!((read.0, read.1), (3000, 0));
+        assert!(read.2 > 0 && read.2 <= queue.queued, "{}", read.2);
     }
 
     /// A line that parses but names no valid MBID makes no record: a bad line.

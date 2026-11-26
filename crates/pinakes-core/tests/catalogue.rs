@@ -785,7 +785,7 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     store::ensure_state(&pool, Catalogue::Wikidata)
         .await
         .unwrap();
-    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '1 hour',current_as_of=now()-interval '50 hours' WHERE catalogue='wikidata'")
+    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '1 hour',current_as_of=now()-interval '50 hours',position='{\"refused\":\"20261125\"}' WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
         .unwrap();
@@ -796,6 +796,9 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     assert_eq!(get(&metrics2.catalogue_cards, "wikidata"), 42);
     assert_eq!(get(&metrics2.catalogue_enabled, "wikidata"), 1);
     assert_eq!(get(&metrics2.catalogue_enabled, "tranco"), 0);
+    // A refusal standing in the position.
+    assert_eq!(get(&metrics2.catalogue_refused, "wikidata"), 1);
+    assert_eq!(get(&metrics2.catalogue_refused, "tranco"), 0);
     // The lag counts from how current the data is, not from the update that finished an hour
     // ago.
     let lag = get(&metrics2.catalogue_lag, "wikidata");

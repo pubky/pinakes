@@ -410,22 +410,30 @@ async fn a_dump_becomes_cards(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_update_writes_only_what_changed(pool: PgPool) {
     let s = setup(&pool, None);
-    let a = dump(s.root.path(), A, unchanged);
+    // Ten recordings more, so one gone is under a tenth of its kind (the removal check's).
+    let padded = |entity: &str, lines: &mut Vec<Value>| {
+        if entity == "recording" {
+            lines.extend(extra_recordings(10));
+        }
+    };
+    let gone = "recording/00000000-0000-4000-8000-000000000000";
+    let a = dump(s.root.path(), A, padded);
     run(&s, &a, Run::Import).await.unwrap();
     let before = rows(&pool).await;
     // The same dump: nothing to do.
     let state = run(&s, &a, Run::Update).await.unwrap();
     assert_eq!(rows(&pool).await, before);
     assert!(state.last_update_at.is_some());
-    // A new dump: one artist renamed, one release group gone, one recording more.
+    // A new dump: one artist renamed, one recording gone, one recording more.
     let b = dump(s.root.path(), B, |entity, lines| match entity {
         "artist" => {
             for l in lines.iter_mut().filter(|l| l["id"] == ARTIFACTS) {
                 l["name"] = json!("Artifacts (US)");
             }
         }
-        "release-group" => lines.retain(|l| l["id"] != TRITONIS),
         "recording" => {
+            padded(entity, lines);
+            lines.retain(|l| format!("recording/{}", l["id"].as_str().unwrap()) != gone);
             let mut more = lines[0].clone();
             more["id"] = json!("00000000-1111-4222-8333-444444444444");
             more["title"] = json!("A New Recording");
@@ -439,7 +447,7 @@ async fn an_update_writes_only_what_changed(pool: PgPool) {
         .await
         .unwrap();
     let after = rows(&pool).await;
-    assert_eq!(state.cards, CARDS as i64);
+    assert_eq!(state.cards, CARDS as i64 + 10);
     // Only the new card and the changed one were written; the unchanged ones were not sent at all.
     assert_eq!(
         (
@@ -454,18 +462,14 @@ async fn an_update_writes_only_what_changed(pool: PgPool) {
     assert_eq!(state.upstream_version.as_deref(), Some(B));
     let renamed = row(&after, &format!("artist/{ARTIFACTS}"));
     assert_eq!(renamed.name, "Artifacts (US)");
-    assert!(after
-        .iter()
-        .all(|r| r.source_id != format!("release-group/{TRITONIS}")));
+    assert!(after.iter().all(|r| r.source_id != gone));
     assert_eq!(
         row(&after, "recording/00000000-1111-4222-8333-444444444444").name,
         "A New Recording"
     );
     // Every other card is the same row version: not written at all (no stamp either).
     for old in &before {
-        if old.source_id == format!("artist/{ARTIFACTS}")
-            || old.source_id == format!("release-group/{TRITONIS}")
-        {
+        if old.source_id == format!("artist/{ARTIFACTS}") || old.source_id == gone {
             continue;
         }
         assert_eq!(row(&after, &old.source_id), old, "{}", old.source_id);
@@ -768,7 +772,9 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     let b = dump(s.root.path(), B, shrunk);
     let failed = run(&s, &b, Run::Update).await.unwrap_err();
     assert!(
-        failed.to_string().contains("removals (6 of 17 cards gone"),
+        failed
+            .to_string()
+            .contains("removals (3 of 4 artist cards gone in dump"),
         "{failed}"
     );
     let state = store::state(&pool, Catalogue::Musicbrainz)
@@ -783,7 +789,7 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     assert!(state
         .last_error
         .unwrap()
-        .starts_with("removals (6 of 17 cards gone"));
+        .starts_with("removals (3 of 4 artist cards gone in dump"));
     let position = state.position.unwrap();
     assert_eq!(
         (position["refused"].as_str(), position["version"].as_str()),
@@ -888,6 +894,29 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     assert_eq!((state.import_requested, state.generation), (None, 2));
 }
 
+/// The removal check counts each kind of card on its own: one artist of four gone is under the
+/// tenth of all cards (1 of 17) but a quarter of the artists: refused.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_kind_losing_more_than_a_tenth_is_refused(pool: PgPool) {
+    let s = setup(&pool, None);
+    let a = dump(s.root.path(), A, unchanged);
+    run(&s, &a, Run::Import).await.unwrap();
+    let before = rows(&pool).await;
+    let b = dump(s.root.path(), B, |entity, lines| {
+        if entity == "artist" {
+            lines.retain(|l| l["id"] != AMC);
+        }
+    });
+    let failed = run(&s, &b, Run::Update).await.unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains(&format!("removals (1 of 4 artist cards gone in dump {B}")),
+        "{failed}"
+    );
+    assert_eq!(rows(&pool).await, before);
+}
+
 /// Cards the new dump makes but that are refused count as removals too: an update of a dump
 /// whose artists lost their names is refused; so is a full import of the importer's own that would
 /// remove them (one cut off and resumed); one asked for by hand applies it.
@@ -909,7 +938,7 @@ async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
     assert!(
         failed
             .to_string()
-            .contains("removals (4 of 17 cards gone or refused"),
+            .contains("removals (4 of 4 artist cards gone or refused"),
         "{failed}"
     );
     assert_eq!(rows(&pool).await, before);
@@ -924,7 +953,7 @@ async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
     assert!(
         failed
             .to_string()
-            .contains("removals (4 of 17 cards not in dump"),
+            .contains("removals (4 of 4 artist cards not in dump"),
         "{failed}"
     );
     let names = |rows: Vec<Row>| -> Vec<(String, String)> {
@@ -1111,6 +1140,51 @@ async fn a_broken_file_is_refused_as_an_archive(pool: PgPool) {
             "{damage}"
         );
     }
+}
+
+/// A full import by hand cut off before its run began (here while it waits for the disk, as a
+/// Ctrl-C would), or that fails, leaves no request behind: the daemon's next run is its own, with
+/// its removal check (an update of a dump that would remove too much is refused, not handed over
+/// to a full import that would apply it).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_by_hand_import_that_fails_leaves_no_request(pool: PgPool) {
+    let s = setup(&pool, None);
+    let a = dump(s.root.path(), A, unchanged);
+    run(&s, &a, Run::Import).await.unwrap();
+    let before = rows(&pool).await;
+    let broken = dump(s.root.path(), "20261126-001001", unchanged);
+    let tight = Context {
+        free_disk: Arc::new(|_| Ok(0)),
+        ..s.ctx.clone()
+    };
+    let cut = tokio::time::timeout(
+        Duration::from_secs(2),
+        run::run_once(
+            Arc::new(importer(&s, Source::Dir(broken.clone()))),
+            &tight,
+            Run::Import,
+            |_| {},
+        ),
+    )
+    .await;
+    assert!(cut.is_err(), "the run waits for the disk");
+    std::fs::write(broken.join("artist.tar.xz"), b"not xz").unwrap();
+    assert!(run(&s, &broken, Run::Import).await.is_err());
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.import_requested, None);
+    let shrunk = dump(s.root.path(), B, |entity, lines| {
+        if matches!(entity, "artist" | "release-group") {
+            lines.truncate(1);
+        }
+    });
+    let failed = run::step(&importer(&s, Source::Dir(shrunk)), &s.ctx)
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert_eq!(rows(&pool).await, before);
 }
 
 /// A dump named after a day after tomorrow is no dump: nothing is read.
@@ -1398,6 +1472,11 @@ enum Breaks {
     WrongRange,
     /// The artist file answers 503 once.
     ArtistBusyOnce,
+    /// It breaks once, and the first answer for the rest gives only part of it (as its
+    /// `Content-Range` says), its body ending cleanly.
+    ShortRange,
+    /// The release file comes with no length, its body ending cleanly.
+    NoLength,
     Never,
 }
 #[derive(Clone)]
@@ -1405,6 +1484,8 @@ struct Served {
     files: Arc<BTreeMap<String, Vec<u8>>>,
     requests: Arc<Mutex<Vec<Request>>>,
     broke: Arc<Mutex<bool>>,
+    /// The short answer of [`Breaks::ShortRange`] was given.
+    shortened: Arc<Mutex<bool>>,
     latest: String,
     breaks: Breaks,
 }
@@ -1471,20 +1552,36 @@ async fn serve(
         } else {
             from
         };
+        // Part of the rest, once: up to half way between the byte asked for and the end.
+        let short = s.breaks == Breaks::ShortRange && {
+            let mut shortened = s.shortened.lock().unwrap();
+            let first = !*shortened;
+            *shortened = true;
+            first
+        };
+        let end = if short {
+            from + (body.len() - from) / 2
+        } else {
+            body.len()
+        };
         return Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header("etag", etag)
             .header(
                 "content-range",
-                format!("bytes {from}-{}/{}", body.len() - 1, body.len()),
+                format!("bytes {from}-{}/{}", end - 1, body.len()),
             )
-            .body(Body::from(body[from..].to_vec()))
+            .body(Body::from(body[from..end].to_vec()))
             .unwrap();
     }
     let break_now = path.ends_with("/release.tar.xz")
         && matches!(
             s.breaks,
-            Breaks::Once | Breaks::Replaced | Breaks::NoValidator | Breaks::WrongRange
+            Breaks::Once
+                | Breaks::Replaced
+                | Breaks::NoValidator
+                | Breaks::WrongRange
+                | Breaks::ShortRange
         )
         && {
             let mut broke = s.broke.lock().unwrap();
@@ -1497,6 +1594,11 @@ async fn serve(
     } else {
         Response::builder().header("etag", etag)
     };
+    if s.breaks == Breaks::NoLength && path.ends_with("/release.tar.xz") {
+        let whole = bytes::Bytes::from(body);
+        let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(whole)]);
+        return response.body(Body::from_stream(stream)).unwrap();
+    }
     if break_now {
         // Half the body, then (once the client has it) the connection breaks.
         let half = bytes::Bytes::from(body[..body.len() / 2].to_vec());
@@ -1526,6 +1628,7 @@ async fn mirror(files: BTreeMap<String, Vec<u8>>, latest: &str, breaks: Breaks) 
         files: Arc::new(files),
         requests: requests.clone(),
         broke: Arc::new(Mutex::new(false)),
+        shortened: Arc::new(Mutex::new(false)),
         latest: latest.to_owned(),
         breaks,
     };
@@ -1664,6 +1767,44 @@ async fn a_download_is_picked_up_only_where_it_safely_can_be(pool: PgPool) {
         failed.to_string().contains("not_found (127.0.0.1)"),
         "{failed}"
     );
+}
+
+/// A body that ends cleanly before the file does (an answer of part of the rest) is a break:
+/// the rest is asked for again and the dump read whole; an answer naming no length is refused
+/// (`download`), as its early end could not be told from the whole.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_body_that_ends_early_is_asked_for_again(pool: PgPool) {
+    let s = setup(&pool, None);
+    let dir = dump(s.root.path(), B, unchanged);
+    let m = mirror(served(&dir, B), B, Breaks::ShortRange).await;
+    let state = run_with(
+        &s,
+        importer(&s, Source::parse(&m.url).unwrap()),
+        Run::Import,
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.cards, CARDS as i64);
+    let release: Vec<_> = m
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.0.ends_with("/release.tar.xz"))
+        .cloned()
+        .collect();
+    assert_eq!(release.len(), 3, "{release:?}");
+    reset(&pool).await;
+    let m = mirror(served(&dir, B), B, Breaks::NoLength).await;
+    let failed = run_with(
+        &s,
+        importer(&s, Source::parse(&m.url).unwrap()),
+        Run::Import,
+    )
+    .await
+    .unwrap_err();
+    assert!(failed.to_string().contains("download"), "{failed}");
+    assert!(rows(&pool).await.is_empty());
 }
 
 /// A read cut off by a busy mirror keeps the files it read whole (their manifests): the next

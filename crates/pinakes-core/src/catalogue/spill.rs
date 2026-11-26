@@ -26,13 +26,15 @@ pub const FAN_IN: usize = 256;
 /// last).
 pub const TAGS: usize = 16;
 
-/// What the disk may take: at most `max_bytes` written in all, and `floor` bytes left free on the
-/// file system.
-#[derive(Clone, Copy)]
+/// What the disk may take: at most `max_bytes` held in all by every sorter and merge pass that
+/// shares this room (its clones: one run's), and `floor` bytes left free on the file system.
+#[derive(Clone)]
 pub struct Room {
     pub max_bytes: u64,
     pub floor: u64,
     pub free_disk: fn(&Path) -> io::Result<u64>,
+    /// The bytes the runs written within it hold now.
+    held: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 impl Room {
     pub fn new(max_bytes: u64, floor: u64) -> Self {
@@ -40,11 +42,28 @@ impl Room {
             max_bytes,
             floor,
             free_disk: super::run::free_bytes,
+            held: Default::default(),
         }
     }
-    fn check(&self, dir: &Path, written: u64) -> Result<()> {
+    /// The bytes held by the runs written within it.
+    pub fn held(&self) -> u64 {
+        self.held.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn add(&self, bytes: u64) {
+        self.held
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn free(&self, bytes: u64) {
+        let _ = self.held.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |held| Some(held.saturating_sub(bytes)),
+        );
+    }
+    /// Whether `writing` bytes more fit, besides what the room's runs hold.
+    fn check(&self, dir: &Path, writing: u64) -> Result<()> {
         let disk = || Failure::new("disk").at(dir.display().to_string());
-        if written > self.max_bytes {
+        if self.held().saturating_add(writing) > self.max_bytes {
             bail!(disk());
         }
         let free = (self.free_disk)(dir).with_context(disk)?;
@@ -121,7 +140,6 @@ impl Spill {
                 .drain(..)
                 .map(|(k, p)| (k.into_vec(), p.into_vec())),
             &self.room,
-            self.written,
         )?;
         self.buffered = 0;
         self.runs.push(path);
@@ -135,13 +153,12 @@ impl Spill {
         Ok(self.runs)
     }
 }
-/// Write `records` (in key order) as a run at `path`, checking `room` every 64 MiB with the bytes
-/// `before` it counted against it. The run's size on disk.
+/// Write `records` (in key order) as a run at `path`, checking `room` every 64 MiB, and count it
+/// in the room. The run's size on disk.
 fn write_run(
     path: &Path,
     records: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
     room: &Room,
-    before: u64,
 ) -> Result<u64> {
     let disk = || Failure::new("disk").at(path.display().to_string());
     let dir = path.parent().unwrap_or(path);
@@ -155,7 +172,7 @@ fn write_run(
         since_check += n;
         if since_check > 64 << 20 {
             // A run takes less than its raw records: half of them bounds what it took so far.
-            room.check(dir, before + raw / 2)?;
+            room.check(dir, raw / 2)?;
             since_check = 0;
         }
     }
@@ -168,7 +185,11 @@ fn write_run(
         .with_context(disk)?;
     file.sync_all().with_context(disk)?;
     let bytes = file.metadata().with_context(disk)?.len();
-    room.check(dir, before + bytes)?;
+    if let Err(full) = room.check(dir, bytes) {
+        let _ = std::fs::remove_file(path);
+        return Err(full);
+    }
+    room.add(bytes);
     Ok(bytes)
 }
 fn write_record(out: &mut impl Write, key: &[u8], payload: &[u8]) -> io::Result<()> {
@@ -220,7 +241,6 @@ pub fn reduce(
     std::fs::create_dir_all(dir)
         .with_context(|| Failure::new("disk").at(dir.display().to_string()))?;
     let mut pass = 0;
-    let mut written = 0u64;
     while runs.len() > fan_in {
         if stop() {
             bail!(Failure::new("stopped"));
@@ -246,18 +266,26 @@ pub fn reduce(
                 }
             }
         });
-        let bytes = write_run(&path, records, room, written);
-        if let Some(e) = failed {
+        let written = write_run(&path, records, room);
+        // A pass that does not end keeps its inputs, not its output.
+        let discard = |bytes: u64| {
             let _ = std::fs::remove_file(&path);
+            room.free(bytes);
+        };
+        if let Some(e) = failed {
+            discard(*written.as_ref().unwrap_or(&0));
             return Err(e);
         }
-        written += bytes?;
+        let bytes = written?;
         if stop() {
-            let _ = std::fs::remove_file(&path);
+            discard(bytes);
             bail!(Failure::new("stopped"));
         }
         for old in &group {
-            let _ = std::fs::remove_file(old);
+            let size = std::fs::metadata(old).map_or(0, |m| m.len());
+            if std::fs::remove_file(old).is_ok() {
+                room.free(size);
+            }
         }
         runs.push(path);
         pass += 1;
@@ -516,7 +544,7 @@ mod tests {
             free_disk: |_| Ok(10),
             ..Room::new(1 << 30, 1 << 20)
         };
-        let mut spill = Spill::new(&dir.path().join("t"), 10, full).unwrap();
+        let mut spill = Spill::new(&dir.path().join("t"), 10, full.clone()).unwrap();
         assert!(spill.push(b"k", b"v").is_err());
         // Passes stop when asked to, and check their room too.
         let mut spill = Spill::new(&dir.path().join("u"), 1, room()).unwrap();
@@ -526,6 +554,48 @@ mod tests {
         let runs = spill.finish().unwrap();
         assert!(reduce(&dir.path().join("p"), runs.clone(), 2, &room(), &|| true).is_err());
         assert!(reduce(&dir.path().join("q"), runs, 2, &full, &|| false).is_err());
+    }
+
+    /// One room's cap counts every sorter that shares it (one run's): two that each fit alone
+    /// don't together; after a merge pass it holds what is left, not the inputs it removed.
+    #[test]
+    fn a_room_counts_every_sorter_that_shares_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let fill = |spill: &mut Spill| {
+            for k in 0..2000u32 {
+                spill.push(&k.to_be_bytes(), &[7; 100]).unwrap();
+            }
+        };
+        let alone = Room::new(1 << 30, 0);
+        let mut one = Spill::new(&dir.path().join("a"), 1 << 20, alone.clone()).unwrap();
+        fill(&mut one);
+        one.finish().unwrap();
+        let size = alone.held();
+        assert!(size > 0);
+        let shared = Room::new(size * 3 / 2, 0);
+        let mut first = Spill::new(&dir.path().join("b"), 1 << 20, shared.clone()).unwrap();
+        let mut second = Spill::new(&dir.path().join("c"), 1 << 20, shared.clone()).unwrap();
+        fill(&mut first);
+        fill(&mut second);
+        assert!(first.finish().is_ok());
+        let failed = second.finish().unwrap_err();
+        assert_eq!(
+            failed.downcast_ref::<Failure>().map(|f| f.class),
+            Some("disk")
+        );
+        assert_eq!(shared.held(), size);
+        // Many small runs merged in passes: the room holds the runs left.
+        let room = Room::new(1 << 30, 0);
+        let mut many = Spill::new(&dir.path().join("d"), 4096, room.clone()).unwrap();
+        fill(&mut many);
+        let runs = many.finish().unwrap();
+        assert!(runs.len() > 4);
+        let left = reduce(&dir.path().join("e"), runs, 2, &room, &|| false).unwrap();
+        let on_disk: u64 = left
+            .iter()
+            .map(|r| std::fs::metadata(r).unwrap().len())
+            .sum();
+        assert_eq!(room.held(), on_disk);
     }
 
     /// A pass merges only as many runs as it takes to get down to the fan-in, the smallest

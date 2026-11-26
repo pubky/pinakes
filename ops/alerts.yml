@@ -107,6 +107,11 @@ groups:
         expr: (increase(pinakes_catalogue_import_errors_total[1h]) > 0) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1)
         labels: {severity: warning}
         annotations: {summary: "A {{ $labels.catalogue }} catalogue import or update failed in the last hour; pinakesd catalogue status shows the error; the run resumes from its cursor, or, abandoned for its dump, waits for another"}
+      - alert: CatalogueDumpRefused
+        expr: (pinakes_catalogue_refused == 1) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1)
+        for: 1h
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's importer refused the newest dump it read and waits for another: pinakesd catalogue status shows which and why; if the dump is right, ask for a full import of it"}
       - alert: CatalogueTurnBlocked
         expr: (pinakes_catalogue_waiting_for_turn == 1) and on (instance, job) (sum by (instance, job) (increase(pinakes_catalogue_import_errors_total{catalogue=~"wikidata|musicbrainz|osm|openalex"}[1h])) > 0)
         for: 6h

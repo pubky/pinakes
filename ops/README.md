@@ -65,6 +65,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_catalogue_join_errors_total{stage}` | Failed catalogue joins and extras reads, by where they ran (`referenced`, `before_fetch`, `drain`, `extras`, which also counts a summary Wikipedia didn't answer); each series at 0 from the start. Each is tried again: a fetch, a later check. Alert `CatalogueJoinErrors` past ten joins an hour for an hour |
 | `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Catalogue join checks (`joins`, `catalogue_join_due`) and extras reads (`extras`, `catalogue_extras`) due now, and how long the oldest has been due. Alert `CatalogueJoinsBehind` past six hours of joins; extras follow Wikipedia's pace and lag after a first import by design |
 | `pinakes_catalogue_enabled{catalogue}` | Whether the catalogue is on (1) or off (0) in the configuration the daemon started with |
+| `pinakes_catalogue_refused{catalogue}` | Whether the catalogue's importer refused the newest dump it read and waits for another (1) or not (0): `refused` in its state row's position, until a dump is applied. Alert `CatalogueDumpRefused` after an hour |
 | `pinakes_catalogue_needs_contact{catalogue}` | Whether the catalogue is on but its importer does not start for want of `http.contact` (1; MusicBrainz only) or not (0) |
 | `pinakes_catalogue_last_import_timestamp_seconds{catalogue}` | When its last full import finished; 0 before the first |
 | `pinakes_catalogue_last_update_timestamp_seconds{catalogue}` | When its last update finished; 0 before the first |
@@ -136,7 +137,9 @@ reason, and `CatalogueUpdateLag` follows if no good dump comes in time
 fires when a catalogue's cards are further behind upstream than its source's publication rhythm
 allows (`pinakes_catalogue_max_update_lag_seconds`). Both read only catalogues that are on; a
 catalogue that is off raises neither. `CatalogueImportFailed` also fires for a first import that
-fails or is refused; `CatalogueUpdateLag` waits for a first finished import. A catalogue that is on
+fails or is refused; `CatalogueUpdateLag` waits for a first finished import. `CatalogueDumpRefused`
+(warning) fires once a refusal has stood for an hour and holds until a dump is applied, so a
+refused first import, which no lag alert covers, keeps alerting. A catalogue that is on
 but whose importer can't start (MusicBrainz without `http.contact`) raises neither: its `waiting`
 in `catalogue status` and `pinakes_catalogue_needs_contact` say so. `CatalogueTurnBlocked` (warning) covers the one
 stall that leaves: a large catalogue's full import that keeps failing keeps the large-import turn,

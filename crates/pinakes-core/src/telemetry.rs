@@ -97,6 +97,9 @@ pub struct Metrics {
     pub catalogue_lag: IntGaugeVec,
     pub catalogue_errors: IntCounterVec,
     pub catalogue_turn: IntGaugeVec,
+    /// Whether the catalogue's importer refused the dump it waits behind (`refused` in its
+    /// position: until a dump is applied).
+    pub catalogue_refused: IntGaugeVec,
     /// How far behind upstream each catalogue may fall before the lag alert fires
     /// (`Catalogue::max_update_lag`), fixed per catalogue.
     pub catalogue_max_lag: IntGaugeVec,
@@ -382,6 +385,12 @@ impl Metrics {
                 "Whether each catalogue's full import waits for another large catalogue's (1) or not (0)",
                 &["catalogue"]
             ),
+            catalogue_refused: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_refused",
+                "Whether each catalogue's importer refused the newest dump it read and waits for another (1) or not (0)",
+                &["catalogue"]
+            ),
             search_index_pass,
             search_index_open,
             registry,
@@ -417,6 +426,7 @@ impl Metrics {
             out.catalogue_lag.with_label_values(&name);
             out.catalogue_errors.with_label_values(&name);
             out.catalogue_turn.with_label_values(&name);
+            out.catalogue_refused.with_label_values(&name);
             out.catalogue_max_lag
                 .with_label_values(&name)
                 .set(catalogue.max_update_lag().as_secs() as i64);
@@ -481,7 +491,7 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce((position ? 'refused')::int,0)::bigint AS refused FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
@@ -580,6 +590,9 @@ impl Metrics {
             self.catalogue_turn
                 .with_label_values(&[name])
                 .set(value("turn")?);
+            self.catalogue_refused
+                .with_label_values(&[name])
+                .set(value("refused")?);
         }
         self.group_key_conflicts.set(groups.try_get("conflicts")?);
         self.preview_backlog.set(previews);

@@ -31,7 +31,9 @@ order and keeps only what a card needs:
 
 What belongs to one item (a recording on 200 releases) comes together in sorted runs under
 `catalogues.dir/musicbrainz`, so the dump is never held in memory. The runs are merged down to at
-most 256 before any card is written.
+most 256 before any card is written. All the runs of one read together (the stored cards' hashes
+of an update included) hold at most the disk the read waited for, and the disk keeps 1 GiB free:
+past either, the read stops (`disk`).
 
 - **Checksums.** Each file read to its end is checked against the dump's `SHA256SUMS` before any
   card is written: a file whose SHA-256 differs, or one the list leaves out, stops the run
@@ -49,7 +51,9 @@ most 256 before any card is written.
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range`
   with `If-Range`, so a file replaced meanwhile is refused, never spliced), up to five times in a
   row (renewed after every 64 MiB read), and not at all when the mirror names no ETag or
-  Last-Modified. A file may take 12 hours.
+  Last-Modified. A body that ends cleanly before the file's length (its first answer's
+  `Content-Length`) is a break too; an answer that names no length is refused (`download`), as its
+  early end could not be told from the whole. A file may take 12 hours.
 
 ## Cards
 
@@ -116,11 +120,13 @@ cards fall up to about 4 days and 17 hours behind before the next update lands;
 
 A dump is refused, and no card is removed for it, when:
 
-- an update would remove more than a tenth of the cards (counted after the first pass, before any
-  card is written, and again before the removals, counting the refused cards too; the new and
-  changed cards are written by then);
+- an update would remove more than a tenth of one kind of card (artists, release groups or
+  recordings, each counted on its own: artists are about 6% of all cards), counted after the first
+  pass, before any card is written, and again before the removals, counting the refused cards too
+  (the new and changed cards are written by then);
 - a full import of the importer's own (not asked for by hand, nor by an update handing over for a
-  changed `limit`) would remove more than a tenth of the cards (one whose cards are mostly refused);
+  changed `limit`) would remove more than a tenth of one kind of card (one whose cards are mostly
+  refused);
 - a run (an update or a full import, even one asked for, with or without a `limit`) reads no
   record at all, or none from one file whose kind of card is stored (artists, release groups,
   recordings), while cards are stored (`empty`; `catalogue drop` empties a catalogue): one kind is
@@ -129,8 +135,9 @@ A dump is refused, and no card is removed for it, when:
   `parse`, `archive`, `size`, `record_size`, `isrc_shared`).
 
 The run then ends as a failure: `catalogue status` shows the phase `failed` and the reason with its
-counts and the dump (`last_error`), `waiting` shows `dump <version> refused`, and
-`CatalogueImportFailed` fires. The run is abandoned rather than resumed: its cursor and its sorted
+counts and the dump (`last_error`), `waiting` shows `dump <version> refused`,
+`CatalogueImportFailed` fires for the hour after it, and `CatalogueDumpRefused` (from
+`pinakes_catalogue_refused`) as long as the refusal stands, an hour on. The run is abandoned rather than resumed: its cursor and its sorted
 runs go. The refused dump is not read again from the same source with the same `limit` (`refused`,
 `refused_source` and `refused_limit` in the state's position): the importer waits for `LATEST` to
 name another dump, which it reads after the usual disk check; another `limit` reads it again, as a

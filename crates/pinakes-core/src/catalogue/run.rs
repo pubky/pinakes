@@ -146,6 +146,12 @@ pub trait Importer: Send + Sync + 'static {
     /// is a finished update that moves nothing. [`UpdateEnd::NeedsImport`] hands over to a full
     /// import.
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd>;
+    /// Whether the full imports this importer runs are asked for by hand (`pinakesd catalogue
+    /// import`'s, [`run_once`]): [`Job::asked`]. Kept with the run, never in the state row, so a
+    /// by-hand run that fails or is cut off leaves no standing request behind.
+    fn asked(&self) -> bool {
+        false
+    }
 }
 
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
@@ -168,6 +174,8 @@ pub struct Job<'a> {
     current_as_of: Option<chrono::DateTime<chrono::Utc>>,
     /// The state row as the run started.
     state: State,
+    /// A full import asked for ([`Job::asked`]).
+    asked: bool,
     dir: &'a Path,
     config: &'a Config,
     report: WriteReport,
@@ -201,6 +209,11 @@ impl Job<'_> {
     /// version.
     pub fn state(&self) -> &State {
         &self.state
+    }
+    /// Whether this is a full import asked for: by `--request` or an update's hand-over
+    /// (`import_requested` as it started), or by hand ([`Importer::asked`]).
+    pub fn asked(&self) -> bool {
+        self.asked
     }
     /// Where the last finished run left the next update to start; none before the first.
     pub fn position(&self) -> Option<&serde_json::Value> {
@@ -426,22 +439,24 @@ pub enum Next {
     Wait(Duration),
 }
 
-/// The importers `pinakesd` starts: those of the catalogues that are on. With every catalogue
-/// off, none.
 /// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz without
-/// `http.contact` ([`super::musicbrainz::NEEDS_CONTACT`] in `waiting`). A task that starts
-/// clears it at its first step.
+/// `http.contact` ([`super::musicbrainz::NEEDS_CONTACT`] in `waiting`). Started with its contact,
+/// or with the catalogue off, the text goes (a task that starts clears any at its first step).
 pub async fn note_unstarted(pool: &PgPool, config: &Config) -> Result<()> {
+    let note = super::musicbrainz::NEEDS_CONTACT;
     if super::musicbrainz::needs_contact(config) {
-        set_waiting(
-            pool,
-            Catalogue::Musicbrainz,
-            super::musicbrainz::NEEDS_CONTACT,
-        )
-        .await?;
+        set_waiting(pool, Catalogue::Musicbrainz, note).await?;
+    } else {
+        sqlx::query("UPDATE catalogue_state SET waiting=NULL,updated_at=now() WHERE catalogue=$1 AND waiting=$2")
+            .bind(Catalogue::Musicbrainz.name())
+            .bind(note)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
+/// The importers `pinakesd` starts: those of the catalogues that are on. With every catalogue
+/// off, none.
 pub fn to_start(importers: Vec<Arc<dyn Importer>>, config: &Config) -> Vec<Arc<dyn Importer>> {
     importers
         .into_iter()
@@ -655,6 +670,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         resumed = resumed.is_some(),
         "catalogue run starts"
     );
+    let asked = run == Run::Import && (importer.asked() || state.import_requested.is_some());
     let mut job = Job {
         pool,
         catalogue,
@@ -663,6 +679,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         cursor,
         position: None,
         current_as_of: None,
+        asked,
         state,
         dir: &dir,
         config: &ctx.config,
@@ -775,6 +792,9 @@ impl Importer for Forced {
     async fn plan(&self, _state: &State) -> Result<Plan> {
         Ok(Plan::Run(self.run))
     }
+    fn asked(&self) -> bool {
+        self.run == Run::Import
+    }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         let ran = self.inner.import(job).await;
         *self.written.lock().expect("the report") += job.report();
@@ -809,10 +829,11 @@ pub async fn run_once(
     let ran = async {
         let state = store::ensure_state(&ctx.pool, catalogue).await?;
         match run {
+            // A new full import (an update under way is dropped); asked for through the run
+            // itself ([`Importer::asked`]), never as a request left in the state row.
             Run::Import if state.run.as_deref() != Some("import") => {
-                sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,import_requested=$2,updated_at=now() WHERE catalogue=$1")
+                sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,updated_at=now() WHERE catalogue=$1")
                     .bind(catalogue.name())
-                    .bind("pinakesd catalogue import")
                     .execute(&ctx.pool)
                     .await?;
             }
