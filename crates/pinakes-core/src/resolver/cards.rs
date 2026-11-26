@@ -307,10 +307,12 @@ pub fn isbn_of_page(uri: &str) -> Option<String> {
     {
         return None;
     }
-    let segments: Vec<&str> = u.path_segments()?.filter(|s| !s.is_empty()).collect();
-    let ["isbn", number] = segments.as_slice() else {
+    // `/isbn/{ISBN}`, with one trailing slash at most.
+    let path = u.path().strip_prefix("/isbn/")?;
+    let number = path.strip_suffix('/').unwrap_or(path);
+    if number.is_empty() || number.contains('/') {
         return None;
-    };
+    }
     let number = percent_encoding::percent_decode_str(number)
         .decode_utf8()
         .ok()?;

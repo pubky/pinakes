@@ -726,6 +726,8 @@ mod tests {
             "https://openlibrary.org/isbn/9780140328722",
             "https://openlibrary.org/isbn/9780140328721/x",
             "https://openlibrary.example/isbn/9780140328721",
+            "https://openlibrary.org//isbn//9780140328721",
+            "https://openlibrary.org/isbn/9780140328721//",
         ] {
             assert_ne!(
                 r(uri).map(|a| a.0),
