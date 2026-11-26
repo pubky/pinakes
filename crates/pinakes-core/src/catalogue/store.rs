@@ -689,6 +689,9 @@ mod tests {
             last_error: Some("removals (8 of 17 cards gone)".into()),
             error_count: 1,
             updated_at: Utc::now(),
+            scope: None,
+            generation_cards: 0,
+            shrink_allowed: false,
         };
         let row = |state: &State| {
             status_table(&CataloguesConfig::default(), std::slice::from_ref(state))

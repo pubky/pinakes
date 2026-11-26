@@ -2065,6 +2065,9 @@ async fn the_plan_polls_latest_hourly(pool: PgPool) {
         last_error: None,
         error_count: 0,
         updated_at: chrono::Utc::now(),
+        scope: None,
+        generation_cards: 0,
+        shrink_allowed: false,
     };
     let m = mirror(BTreeMap::new(), B, Breaks::Never).await;
     let at_b = state(json!({"version": B, "limit": null}));
