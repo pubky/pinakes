@@ -2647,17 +2647,13 @@ async fn read_cards(
     build: impl Fn(&mut QueryBuilder<'static, Postgres>),
 ) -> Result<Vec<FamedCard>, ApiError> {
     let mut tx = pool.begin().await?;
-    let settings: &[&str] = match plan {
-        Plan::Ordered => &["SET LOCAL max_parallel_workers_per_gather = 0"],
-        Plan::Nearest => &[
-            "SET LOCAL max_parallel_workers_per_gather = 0",
-            "SET LOCAL enable_bitmapscan = off",
-            "SET LOCAL enable_seqscan = off",
-        ],
-    };
-    for setting in settings {
-        sqlx::query(setting).execute(&mut *tx).await?;
-    }
+    // The settings in one statement, local to the transaction.
+    sqlx::query(match plan {
+        Plan::Ordered => "SELECT set_config('max_parallel_workers_per_gather','0',true)",
+        Plan::Nearest => "SELECT set_config('max_parallel_workers_per_gather','0',true),set_config('enable_bitmapscan','off',true),set_config('enable_seqscan','off',true)",
+    })
+    .execute(&mut *tx)
+    .await?;
     if CARD_READ_PLANS.with(|p| p.borrow().is_some()) {
         let mut sql = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
         build(&mut sql);
@@ -2723,7 +2719,13 @@ fn by_fame(
 ///   id)` index's order.
 /// - Else each catalogue in the `(catalogue, fame, id)` index's order.
 ///
-/// The branches of one read are merged in their order, so it stops after `cap` rows.
+/// The branches of one read are merged in their order, so it stops after `cap` rows. The nearest
+/// reads go one branch per catalogue in its own `point` index (partial, `WHERE catalogue=…`).
+///
+/// With `inside` (a text of one character found inside names, which the text index leaves to
+/// Postgres): only the [`FAMOUS_PROBE`] times `cap` best known cards of each catalogue are read,
+/// in fame order, and those whose name holds the text kept (with every filter and the place).
+#[allow(clippy::too_many_arguments)]
 async fn best_known_cards(
     pool: &PgPool,
     q: &SearchQuery,
@@ -2732,6 +2734,7 @@ async fn best_known_cards(
     catalogues: &[String],
     sort: Option<&str>,
     cap: usize,
+    inside: Option<&str>,
 ) -> Result<CardUnits, ApiError> {
     let types = q
         .type_name
@@ -2784,55 +2787,94 @@ async fn best_known_cards(
             .push_bind(radius)
             .push(")");
     };
-    let any_catalogue = |sql: &mut QueryBuilder<'static, Postgres>| {
-        sql.push("SELECT ")
-            .push(CARD_READ_COLUMNS)
-            .push(" FROM catalogue_card c WHERE c.catalogue=ANY(")
-            .push_bind(catalogues.to_vec())
-            .push(")");
-    };
+    // Each catalogue's name as a literal: the planner matches it to that catalogue's partial
+    // `point` indexes, which a bound value (a generic plan) would not.
+    let literals: Vec<String> = catalogues
+        .iter()
+        .filter_map(|c| crate::catalogue::Catalogue::parse(c))
+        .map(|c| format!("'{}'", c.name()))
+        .collect();
+    // One branch per catalogue (and box), each its `limit` nearest to the centre in its own index.
+    let nearest_branches =
+        |sql: &mut QueryBuilder<'static, Postgres>, columns: &str, limit: i64| {
+            let mut first = true;
+            for literal in &literals {
+                let boxes: Vec<Option<[f64; 4]>> = match (&spatial.near, &spatial.bbox) {
+                    (None, Some(bbox)) => bbox.split().into_iter().map(Some).collect(),
+                    _ => vec![None],
+                };
+                for b in boxes {
+                    if !first {
+                        sql.push(" UNION ALL ");
+                    }
+                    first = false;
+                    sql.push("(SELECT ")
+                        .push(columns)
+                        .push(" FROM catalogue_card c WHERE c.catalogue=")
+                        .push(literal.as_str());
+                    filters(sql, false, false);
+                    match (spatial.near, b) {
+                        (Some(near), _) => {
+                            circle(sql, near);
+                            if let Some(bbox) = &spatial.bbox {
+                                push_boxes(sql, &bbox.split());
+                            }
+                            sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
+                                .push_bind(near.1)
+                                .push(",")
+                                .push_bind(near.0)
+                                .push("),4326)::geography");
+                        }
+                        (None, Some(b)) => {
+                            push_boxes(sql, std::slice::from_ref(&b));
+                            sql.push(" ORDER BY c.point<->ST_SetSRID(ST_MakePoint(")
+                                .push_bind((b[0] + b[2]) / 2.0)
+                                .push(",")
+                                .push_bind((b[1] + b[3]) / 2.0)
+                                .push("),4326)");
+                        }
+                        (None, None) => {}
+                    }
+                    sql.push(" LIMIT ").push_bind(limit).push(")");
+                }
+            }
+        };
     let each: Vec<Branch> = catalogues.iter().map(|c| (c.clone(), None)).collect();
-    let rows = if let (Some("distance"), Some(near)) = (sort, spatial.near) {
-        // The nearest in the circle (the geography index serves the distance and the order), then
-        // in that order with the card ID for equal distances.
-        let centre = |sql: &mut QueryBuilder<'static, Postgres>| {
-            sql.push("ST_SetSRID(ST_MakePoint(")
+    let rows = if let (Some("distance"), Some(near), None) = (sort, spatial.near, inside) {
+        // The nearest in the circle, each catalogue's in its own geography index, then in that
+        // order with the card ID for equal distances.
+        read_cards(pool, Plan::Nearest, |sql| {
+            sql.push("SELECT c.id,c.uri,c.type,c.catalogue,c.keys,c.fame FROM (");
+            nearest_branches(
+                sql,
+                "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point",
+                cap as i64,
+            );
+            sql.push(") c ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
                 .push_bind(near.1)
                 .push(",")
                 .push_bind(near.0)
-                .push("),4326)::geography");
-        };
-        read_cards(pool, Plan::Nearest, |sql| {
-            sql.push("SELECT c.id,c.uri,c.type,c.catalogue,c.keys,c.fame FROM (SELECT c.*");
-            sql.push(" FROM catalogue_card c WHERE c.catalogue=ANY(")
-                .push_bind(catalogues.to_vec())
-                .push(")");
-            filters(sql, false, false);
-            circle(sql, near);
-            if let Some(bbox) = &spatial.bbox {
-                push_boxes(sql, &bbox.split());
-            }
-            sql.push(" ORDER BY c.point::geography<->");
-            centre(sql);
-            sql.push(" LIMIT ").push_bind(cap as i64);
-            sql.push(") c ORDER BY c.point::geography<->");
-            centre(sql);
-            sql.push(",c.id");
+                .push("),4326)::geography,c.id LIMIT ")
+                .push_bind(cap as i64);
         })
         .await?
-    } else if spatial.near.is_some() || spatial.bbox.is_some() {
+    } else if spatial.near.is_some() || spatial.bbox.is_some() || inside.is_some() {
         // The best known first, kept when in the place and through every filter.
         let mut rows = read_cards(pool, Plan::Ordered, |sql| {
             sql.push("SELECT ").push(CARD_READ_COLUMNS).push(" FROM (");
             by_fame(
                 sql,
-                "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point,c.labels",
+                "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point,c.labels,c.name",
                 &each,
                 &|_| {},
                 FAMOUS_PROBE * cap,
             );
             sql.push(") c WHERE true");
             filters(sql, false, false);
+            if let Some(text) = inside {
+                sql.push(" AND c.name ILIKE ")
+                    .push_bind(like_anywhere(text));
+            }
             if let Some(near) = spatial.near {
                 circle(sql, near);
             }
@@ -2843,42 +2885,14 @@ async fn best_known_cards(
                 .push_bind(cap as i64);
         })
         .await?;
-        if rows.len() < cap {
+        if rows.len() < cap && inside.is_none() {
             // Fewer: the nearest to the circle's centre, or to each box's, in it too (in the index's
             // nearest-first order: at equal distances at the end, either may be read).
             let nearest = (NEAREST_CARDS * cap) as i64;
             let near = read_cards(pool, Plan::Nearest, |sql| {
-                if let Some(near) = spatial.near {
-                    any_catalogue(sql);
-                    filters(sql, false, false);
-                    circle(sql, near);
-                    if let Some(bbox) = &spatial.bbox {
-                        push_boxes(sql, &bbox.split());
-                    }
-                    sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
-                        .push_bind(near.1)
-                        .push(",")
-                        .push_bind(near.0)
-                        .push("),4326)::geography LIMIT ")
-                        .push_bind(nearest);
-                } else if let Some(bbox) = &spatial.bbox {
-                    for (i, b) in bbox.split().iter().enumerate() {
-                        if i > 0 {
-                            sql.push(" UNION ALL ");
-                        }
-                        sql.push("(");
-                        any_catalogue(sql);
-                        filters(sql, false, false);
-                        push_boxes(sql, std::slice::from_ref(b));
-                        sql.push(" ORDER BY c.point<->ST_SetSRID(ST_MakePoint(")
-                            .push_bind((b[0] + b[2]) / 2.0)
-                            .push(",")
-                            .push_bind((b[1] + b[3]) / 2.0)
-                            .push("),4326) LIMIT ")
-                            .push_bind(nearest)
-                            .push(")");
-                    }
-                }
+                sql.push("SELECT * FROM (");
+                nearest_branches(sql, CARD_READ_COLUMNS, nearest);
+                sql.push(") b");
             })
             .await?;
             rows.extend(near);
@@ -3653,6 +3667,22 @@ pub async fn search(
                 &catalogues,
                 sort,
                 state.config.search.text_candidates,
+                None,
+            )
+            .await?
+        }
+        // One character found inside names, which the text index leaves to Postgres: the best
+        // known cards that hold it.
+        (None, true) if _postgres_turn.is_some() && related.is_none() => {
+            best_known_cards(
+                &state.pool,
+                &q,
+                &tags,
+                &spatial,
+                &catalogues,
+                sort,
+                state.config.search.text_candidates,
+                query_text(&q),
             )
             .await?
         }

@@ -424,23 +424,19 @@ async fn start(
                 }
             }
             let batch = tokio::select! { _=join_shutdown.changed()=>break,result=pinakes_core::catalogue::join::drain(&join_pool,&join_config,JOIN_BATCH)=>result };
-            match batch {
-                Ok(n) if n as i64 == JOIN_BATCH => {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
+            let drained = match batch {
+                Ok(n) => n as i64,
                 Err(error) => {
-                    tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"catalogue join checks will retry")
+                    tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"catalogue join checks will retry");
+                    0
                 }
-                // No catalogue is on: nothing joins any more, and a check only gives back what the
-                // sweep gave back already.
-                Ok(_) if join_config.catalogues.is_empty() => {
-                    let _ = join_shutdown.changed().await;
-                    break;
+            };
+            match join_pause(drained, join_config.catalogues.is_empty()) {
+                None => tokio::task::yield_now().await,
+                Some(pause) => {
+                    tokio::select! {_=join_shutdown.changed()=>break,_=tokio::time::sleep(pause)=>{}}
                 }
-                _ => {}
             }
-            tokio::select! {_=join_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
         }
     });
     // The extras of cards built from catalogue cards (their Wikipedia summary), as they come due.
@@ -722,10 +718,12 @@ async fn import(
     } else {
         run::Run::Import
     };
-    let (state, written) = run::run_once(std::sync::Arc::new(importer), &ctx, kind, |why| {
-        let _ = writeln!(out, "waiting: {why}");
-    })
-    .await?;
+    // `--force` says the drop is expected: the shrink floor lets the run remove the rest.
+    let (state, written) =
+        run::run_once_with(std::sync::Arc::new(importer), &ctx, kind, force, |why| {
+            let _ = writeln!(out, "waiting: {why}");
+        })
+        .await?;
     // An update can have handed over to a full import (a limit changed, one asked for).
     let ran = if state.last_import_at != before.as_ref().and_then(|s| s.last_import_at) {
         run::Run::Import
@@ -897,6 +895,20 @@ enum CatalogueCommand {
     },
     /// `catalogue allow-shrink NAME`: the next full import may remove what it did not read.
     AllowShrink(Catalogue),
+}
+/// How long the joins task waits before its next drain after one that checked `drained` rows:
+/// none after a full batch; a second while a catalogue is joined; ten minutes with none to join
+/// (every catalogue off, or OpenStreetMap alone, which is never joined), so the checks a drop, a
+/// failed check or an OSM write marks are still made, a few at a time.
+fn join_pause(drained: i64, nothing_joined: bool) -> Option<Duration> {
+    if drained == JOIN_BATCH {
+        return None;
+    }
+    Some(if nothing_joined {
+        Duration::from_secs(600)
+    } else {
+        Duration::from_secs(1)
+    })
 }
 /// How long `pinakesd healthcheck` waits for the admin listener's answer, all of it.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1079,6 +1091,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
 
 #[cfg(test)]
 mod tests {
+    /// The joins task never stops draining: a full batch goes on at once, a short one waits a
+    /// second while a catalogue is joined and ten minutes while none is.
+    #[test]
+    fn the_joins_task_keeps_draining_with_nothing_to_join() {
+        use std::time::Duration;
+        assert_eq!(super::join_pause(super::JOIN_BATCH, true), None);
+        assert_eq!(super::join_pause(3, false), Some(Duration::from_secs(1)));
+        assert_eq!(super::join_pause(0, true), Some(Duration::from_secs(600)));
+    }
+
     /// `parse-worker SECS` is the parse worker, whatever else is on the line.
     #[test]
     fn parse_worker_takes_its_cpu_seconds() {

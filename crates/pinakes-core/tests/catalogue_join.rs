@@ -2445,3 +2445,25 @@ async fn a_card_s_host_is_the_same_in_postgres_and_in_the_code(pool: PgPool) {
         assert_eq!(sql, code, "{uri}");
     }
 }
+
+/// Whether a link is social content is decided by what it names, as its source parses it: a
+/// Reddit post or user and a Substack profile are, a subreddit, a Substack publication and its
+/// posts (articles) are not, so these are built from a card that names them.
+#[test]
+fn a_link_is_social_by_what_it_names() {
+    for (uri, social) in [
+        (
+            "https://www.reddit.com/r/rust/comments/abc123/a_post/",
+            true,
+        ),
+        ("https://www.reddit.com/user/someone", true),
+        ("https://www.reddit.com/r/rust", false),
+        ("https://substack.com/@someone", true),
+        ("https://example.substack.com/", false),
+        ("https://example.substack.com/p/a-post", false),
+        ("https://bsky.app/profile/someone.bsky.social", true),
+        ("https://en.wikipedia.org/wiki/Rust", false),
+    ] {
+        assert_eq!(join::social_link(uri), social, "{uri}");
+    }
+}

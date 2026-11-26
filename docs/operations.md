@@ -1735,8 +1735,9 @@ another client's search waited, for the whole budget), alert `TextSearchBusy`. A
 (an IPv6 address by its /64) runs at most half the turns (at least one) while other clients wait;
 alone it takes every free turn, and a waiting search holds nothing. Every word, phrase and filter
 of a search checks the budget between its posting steps (a phrase at every step), so a part that
-matches nothing for long stops too; a word set (a word's start) reads its words' lists in one go,
-and is checked before it starts. A word's start expands to at most 1,000 words in all (those the
+matches nothing for long stops too. A word set (a word's start) and a filter's set of values (`type`,
+`tags`, `from`, `exclude_type`) read their words' lists in one go: the budget is checked before
+they start, not while they read. A word's start expands to at most 1,000 words in all (those the
 most names hold of the first 20,000 per segment in dictionary order, while they are in 500,000
 names in all), a text to 32 items, a phrase to its first 8 words (all of its words when every one
 is common or its rarest is in more than 50,000 names), and 64 three-letter pieces. A text of one
@@ -1771,6 +1772,11 @@ upstream version, when the last full import and update finished, how current its
 (`current_as_of`: the upstream time of the data the last finished run left), why it waits, its
 errors, the last finished full import's scope (`scope`), the cards the full import under way has
 read (`generation_cards`) and an operator's allowance to shrink (`shrink_allowed`).
+
+`catalogue_card` leaves a fifth of each page free (`fillfactor = 80`), so a full import's stamp of an
+unchanged card can stay on its page: its heap is about a quarter larger than a packed table's (at
+about 1.3 KB per card, 1M cards take about 1.6 GB of heap, not 1.3 GB). About one stamp in four is
+heap-only on a full re-import.
 
 ### Turn a catalogue off
 
@@ -1856,7 +1862,8 @@ arxiv.org abstract and PDF, openalex.org, crates.io, docs.rs, lib.rs (a crate's 
 (English) and Flathub pages, and a homepage with or without `www.`) and its related links. The card table's triggers
 mark those links' rows in
 `catalogue_join_due`, so a link shared before the import joins then; a background task checks
-them, a hundred at a time. Another spelling of a key's link joins at its next fetch. A card never
+them, a hundred at a time, every second (every ten minutes while no catalogue is joined: every
+catalogue off, or OpenStreetMap alone). Another spelling of a key's link joins at its next fetch. A card never
 names a link that carries a credential, or a Pubky object: the importer refuses it. With every
 catalogue off nothing is looked up.
 
@@ -1928,7 +1935,7 @@ is on (in this version: `musicbrainz`), and follows these rules:
 | Abandoned runs | An importer may abandon a run whose data can't be applied (MusicBrainz: a refused dump). The run is recorded as failed, but its cursor goes and no card is removed for it; what the importer keeps about the refusal stays in its position, and the task waits for something new rather than trying again. |
 | Requests | A finished full import clears `import_requested`, also one asked for while it ran. |
 | Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `shrunk`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
-| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, the operator allows it (`catalogue allow-shrink`, [below](#a-full-import-that-shrinks-the-catalogue)), or the import's scope is narrower than the last finished one's (a lower `limit`, a higher `min_citations`, another `region`; kept in `catalogue_state.scope`). |
+| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, the operator allows it (`catalogue allow-shrink`, [below](#a-full-import-that-shrinks-the-catalogue)), or the import's scope is narrower than the last finished one's (a lower `limit`, a higher `min_citations`; kept in `catalogue_state.scope`, else the limit the state's position records). `catalogue import --force` says the drop is expected. Another `region` is no narrower scope: it may be larger, so it needs the allowance. |
 
 ### Allowed update lag
 
@@ -1954,11 +1961,12 @@ nothing and is tried again every ten minutes from its last cursor (`CatalogueImp
 1. Check upstream: a cut-off or empty download, or a filter that let too little through, shows
    in the importer's log lines.
 2. If upstream really holds that few items, run `pinakesd --config <path> catalogue allow-shrink
-   <name>`. It is refused unless the catalogue's last run failed as `shrunk`. The next try removes
-   the cards it did not read, and the allowance is used up; a run that fails for any reason first
-   takes it back.
-3. A narrower scope (a lower `limit`, a higher `min_citations`, another `region`) needs no
-   allowance: its first full import removes the rest on its own.
+   <name>`. It is refused unless the full import under way has failed and its last error is
+   `shrunk`. The next try removes the cards it did not read, and the allowance is used up; a run
+   that fails for any reason first takes it back.
+3. A narrower scope (a lower `limit`, a higher `min_citations`) needs no allowance: its first full
+   import removes the rest on its own. `catalogue import NAME --limit N --force` runs one such
+   import by hand. Another `region` needs the allowance, as it may be larger.
 
 ### A large import that keeps failing
 

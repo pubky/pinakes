@@ -1351,11 +1351,12 @@ fn card_rows_read(plans: &[Value]) -> u64 {
 /// Reads without text go catalogue by catalogue, each in its `(catalogue, …)` index's order: the
 /// cards of a catalogue switched off but not dropped are never read, and by type only each type's
 /// best known are (not the better known cards of other types). A host is read in its index's
-/// order too.
+/// order too, and a place in each catalogue's own `point` index, nearest first.
 #[sqlx::test(migrations = "../../migrations")]
 async fn card_reads_without_text_skip_a_catalogue_that_is_off(pool: PgPool) {
     // On: 2,000 people and 30 lesser known mountains. Off: 2,000 mountains better known than
-    // anything on, so an index not led by the catalogue would read them all first.
+    // anything on, and nearer to 46,7 than any of them, so an index not led by the catalogue
+    // would read them all first, in fame order or nearest first.
     let mut on: Vec<Card> = (0..2000)
         .map(|n| {
             card(
@@ -1374,7 +1375,7 @@ async fn card_reads_without_text_skip_a_catalogue_that_is_off(pool: PgPool) {
             &format!("Hill {n}"),
             "Mountain",
             &[],
-            None,
+            Some((46.0 + 0.01 * n as f64, 7.0)),
             n as f32 / 100.0,
         )
     }));
@@ -1386,7 +1387,7 @@ async fn card_reads_without_text_skip_a_catalogue_that_is_off(pool: PgPool) {
                 &format!("Alp {n}"),
                 "Mountain",
                 &[],
-                None,
+                Some((46.0 + 0.0001 * n as f64, 7.0)),
                 0.6 + n as f32 / 10_000.0,
             );
             c.source_id = format!("place/{n}");
@@ -1406,6 +1407,12 @@ async fn card_reads_without_text_skip_a_catalogue_that_is_off(pool: PgPool) {
         ("/v1/search?type=Mountain&limit=20", "Hill 29"),
         ("/v1/search?limit=20", "Person 1999"),
         ("/v1/search?host=en.wikipedia.org&limit=20", "Person 1999"),
+        ("/v1/search?near=46.0,7.0&radius=100000&limit=20", "Hill 29"),
+        (
+            "/v1/search?near=46.0,7.0&radius=100000&sort=distance&limit=20",
+            "Hill 0",
+        ),
+        ("/v1/search?bbox=6.9,45.9,7.1,46.4&limit=20", "Hill 29"),
     ] {
         api::record_card_read_plans();
         let page = names(&common::get(&app, path).await);
@@ -1413,5 +1420,70 @@ async fn card_reads_without_text_skip_a_catalogue_that_is_off(pool: PgPool) {
         assert_eq!(page.first().map(String::as_str), Some(first), "{path}");
         assert!(!page.iter().any(|n| n.starts_with("Alp")), "{path}");
         assert!(read > 0 && read <= 100, "{path}: {read} card rows read");
+    }
+}
+
+/// One character found inside names (a CJK character here), which the index leaves to Postgres,
+/// still lists the catalogue cards that hold it: the best known of each catalogue's best known
+/// (twice the candidates), read in fame order, with the character in their name.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_character_inside_names_finds_catalogue_cards(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[
+            card(
+                1,
+                "東京タワー",
+                "LandmarksOrHistoricalBuildings",
+                &[],
+                None,
+                0.9,
+            ),
+            card(2, "京都", "City", &[], None, 0.8),
+            card(3, "Mount Fuji", "Mountain", &[], None, 0.7),
+        ],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    // 東
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=%E6%9D%B1").await),
+        ["東京タワー"]
+    );
+    // 京
+    let mut both = names(&common::get(&app, "/v1/search?q=%E4%BA%AC").await);
+    both.sort();
+    assert_eq!(both, ["京都", "東京タワー"]);
+    // With a type, those of it.
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=%E4%BA%AC&type=City").await),
+        ["京都"]
+    );
+}
+
+/// Each catalogue has its own two `point` indexes (geometry and geography, partial on it), which
+/// the reads near a place use one catalogue at a time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_catalogue_has_its_own_point_indexes(pool: PgPool) {
+    for catalogue in Catalogue::ALL {
+        for kind in ["point", "geography"] {
+            let name = format!("catalogue_card_{kind}_{}_idx", catalogue.name());
+            let definition: Option<String> =
+                sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE indexname=$1")
+                    .bind(&name)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            let definition = definition.unwrap_or_else(|| panic!("{name} is missing"));
+            assert!(
+                definition.contains(&format!("catalogue = '{}'", catalogue.name())),
+                "{definition}"
+            );
+        }
     }
 }

@@ -1581,6 +1581,16 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
     let s = state(&pool, Catalogue::Wikidata).await;
     assert!(!s.shrink_allowed, "cleared by the import it let through");
     assert_eq!(allow().await.unwrap(), store::Allowance::NotShrunk);
+    // Its `shrunk` stays the last error shown; a later full import under way has not failed, so
+    // nothing is allowed to it.
+    assert_eq!(s.last_error.as_deref(), Some("shrunk"));
+    sqlx::query(
+        "UPDATE catalogue_state SET run='import',phase='import' WHERE catalogue='wikidata'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(allow().await.unwrap(), store::Allowance::NotShrunk);
     assert_eq!(
         store::allow_shrink(&pool, Catalogue::Openalex)
             .await
@@ -1609,6 +1619,39 @@ async fn a_full_import_that_starts_over_counts_its_own_cards_for_the_floor(pool:
     assert_eq!(pinakes_core::catalogue::failure::shown(&failed), "shrunk");
     assert_eq!(count(&pool, Catalogue::Wikidata).await, 25);
     assert_eq!(state(&pool, Catalogue::Wikidata).await.generation_cards, 10);
+}
+
+/// A full import the operator forces (`catalogue import --force`: `run_once_with` expecting the
+/// drop) removes what it did not read, however few it read. A state row from before scopes were
+/// kept takes its scope from the limit its position records: a lower limit is narrower.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_forced_import_and_a_lower_limit_go_through_the_floor(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(25)));
+    assert_eq!(run::step(&*fixture, &ctx).await.unwrap(), Next::Again);
+    fixture.items.lock().unwrap().truncate(3);
+    let (state, _) = run::run_once_with(fixture.clone(), &ctx, Run::Import, true, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        (state.cards, count(&pool, Catalogue::Wikidata).await),
+        (3, 3)
+    );
+    // No scope recorded, the position's limit none: a limit of 1 now is narrower.
+    sqlx::query("UPDATE catalogue_state SET scope=NULL,position='{\"limit\": null}' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = (*ctx.config).clone();
+    config.catalogues.wikidata.limit = Some(1);
+    let limited = Context {
+        config: Arc::new(config),
+        ..ctx.clone()
+    };
+    fixture.items.lock().unwrap().truncate(1);
+    *fixture.next.lock().unwrap() = Some(Run::Import);
+    assert_eq!(run::step(&*fixture, &limited).await.unwrap(), Next::Again);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 1);
 }
 
 /// No scope recorded (a state row from before scopes were kept) counts as the same scope: the

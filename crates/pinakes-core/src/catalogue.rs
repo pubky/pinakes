@@ -561,7 +561,29 @@ pub fn stored_key(key: &str) -> Option<String> {
             .map(|osm| crate::lookups::places::key(&osm).to_string()),
         _ => Some(key.to_owned()),
     }?;
-    valid_key(&stored).then_some(stored)
+    // A key never carries a credential, whatever its kind (a later importer's `feed:…`).
+    (valid_key(&stored) && !crate::capability::contains_credential(&stored)).then_some(stored)
+}
+/// `value` without the strings that carry a credential: an object's entry or an array's element
+/// that does is left out, at any depth.
+fn without_credentials(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| {
+                !v.as_str()
+                    .is_some_and(crate::capability::contains_credential)
+            });
+            map.values_mut().for_each(without_credentials);
+        }
+        serde_json::Value::Array(items) => {
+            items.retain(|v| {
+                !v.as_str()
+                    .is_some_and(crate::capability::contains_credential)
+            });
+            items.iter_mut().for_each(without_credentials);
+        }
+        _ => {}
+    }
 }
 /// The length of a JSON value as PostgreSQL prints a `jsonb` (`details::text`, which the table's
 /// check measures): `": "` and `", "` between entries, numbers written out in full.
@@ -790,8 +812,13 @@ impl Card {
             }
             Some(_) => return Err(Reject::Point),
         };
-        let details = self.details.clone();
-        let value = serde_json::Value::Object(details.clone());
+        // `details` is shown as a card's fields: a string that carries a credential is left out.
+        let mut value = serde_json::Value::Object(self.details.clone());
+        without_credentials(&mut value);
+        let details = match &value {
+            serde_json::Value::Object(map) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
         // Measured as the table's check measures it; PostgreSQL stores no NUL in jsonb text.
         if jsonb_text_len(&value) > DETAILS_CAP
             || serde_json::to_string(&value).is_ok_and(|s| s.contains("\\u0000"))
@@ -1724,6 +1751,33 @@ mod tests {
     /// and dropped from its related links), never one that carries a credential as written
     /// (normalizing cuts a password); a link whose spelling rules name a root is stored as the
     /// root (`https://doi.org/…` as `doi:…`), with that root's own key.
+    /// A key of any kind whose value carries a credential is refused, and a `details` string that
+    /// carries one is left out (an object's entry, an array's element), as names, descriptions and
+    /// links are checked.
+    #[test]
+    fn keys_and_details_never_carry_a_credential() {
+        assert_eq!(stored_key("feed:https://user:pw@example.org/feed"), None);
+        assert_eq!(
+            stored_key("feed:https://example.org/feed").as_deref(),
+            Some("feed:https://example.org/feed")
+        );
+        let mut c = card();
+        c.details = serde_json::json!({
+            "site": "https://example.org/?access_token=abc",
+            "kept": "plain text",
+            "list": ["https://user:pw@example.org/x", "y"],
+            "nested": {"feed": "https://user:pw@example.org/feed", "n": 3}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let row = c.checked(Catalogue::Wikidata).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(row.details),
+            serde_json::json!({"kept": "plain text", "list": ["y"], "nested": {"n": 3}})
+        );
+    }
+
     #[test]
     fn a_cards_links_are_web_links_without_credentials_stored_by_their_root() {
         let with = |uri: &str, related: &[&str]| {

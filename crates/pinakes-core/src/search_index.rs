@@ -2582,6 +2582,19 @@ fn items(index: &Index, text: &str) -> Vec<Item> {
             });
         }
     }
+    // Cut inside an `or` chain (the next item is `or`): the whole chain leaves the index's query,
+    // which would otherwise require its part before the cut.
+    let next_is_or = rest
+        .split_whitespace()
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case("or"));
+    if out.len() == MAX_ITEMS && next_is_or {
+        out.pop();
+        while matches!(out.last(), Some(Item::Or)) {
+            out.pop();
+            out.pop();
+        }
+    }
     while matches!(out.last(), Some(Item::Or)) {
         out.pop();
     }
@@ -3865,7 +3878,8 @@ mod tests {
     /// candidates, or `None` (Postgres reads it alone); never a panic, never more than the
     /// candidates asked for from each part. Each text holds at most MAX_ITEMS items, and each of
     /// its words' starts expands to at most PREFIX_TERMS words holding at most PREFIX_POSTINGS
-    /// postings. The budget is generous (a loaded host is slow): no wall-clock bound is checked.
+    /// postings, and does at most a ceiling of posting steps. The index has four segments. The
+    /// budget is generous (a loaded host is slow): no wall-clock bound is checked.
     #[test]
     fn any_text_of_256_bytes_is_searched_within_its_budget() {
         let mut gen =
@@ -3893,8 +3907,14 @@ mod tests {
                     .join(" ")
             })
             .collect();
-        named(&open, &names);
+        // In four commits: four segments, so the per-segment scans and the sums across segments
+        // are what each search meets.
+        for part in names.chunks(names.len() / 4) {
+            named(&open, part);
+        }
         let mut served = 0;
+        let mut most_steps = 0;
+        const STEP_CEILING: u64 = 1_000_000;
         let pieces = [
             "or",
             "OR",
@@ -3964,7 +3984,14 @@ mod tests {
             }
             let budget =
                 Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(600));
-            match open.search(&q, 500, &budget) {
+            let before = STEPS.with(|n| n.get());
+            let searched = open.search(&q, 500, &budget);
+            // The work, counted in posting steps of the budgeted leaves (no clock): far below what
+            // reading every posting of the texts' parts would take.
+            let steps = STEPS.with(|n| n.get()) - before;
+            most_steps = most_steps.max(steps);
+            assert!(steps <= STEP_CEILING, "{round}: {text:?}: {steps} steps");
+            match searched {
                 Ok(Some(found)) => {
                     served += 1;
                     assert!(found.len() <= 1000, "{round}: {text:?}")
@@ -3974,6 +4001,7 @@ mod tests {
             }
         }
         assert!(served >= 250, "{served} of 300 answered");
+        eprintln!("most posting steps of one search: {most_steps}");
     }
 
     /// A part of a query that matches nothing for long (every name holds `the`, `of` and `and`,
@@ -4165,6 +4193,39 @@ mod tests {
         assert_ne!(key("2001:db8::1"), key("2001:db8:0:1::1"));
         assert_eq!(key("::ffff:192.0.2.1"), key("192.0.2.1"));
         assert_ne!(key("192.0.2.1"), key("192.0.2.2"));
+    }
+
+    /// A text cut at MAX_ITEMS inside an `or` chain leaves the whole chain out of the index's query
+    /// (Postgres checks it on every candidate): `… w32 or w33` would otherwise require `w32`.
+    #[test]
+    fn a_cut_inside_an_or_chain_drops_the_chain() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let head: Vec<String> = (0..MAX_ITEMS - 1).map(|n| format!("w{n}")).collect();
+        let words = |text: &str| {
+            items(&open.index, text)
+                .iter()
+                .filter(|i| !matches!(i, Item::Or))
+                .count()
+        };
+        assert_eq!(words(&format!("{} last", head.join(" "))), MAX_ITEMS);
+        assert_eq!(words(&format!("{} a or b", head.join(" "))), MAX_ITEMS - 1);
+        let shorter = &head[..MAX_ITEMS - 3];
+        assert_eq!(
+            words(&format!("{} a or b or c", shorter.join(" "))),
+            MAX_ITEMS - 3,
+            "a or b is cut before c: the chain goes"
+        );
+        assert_eq!(
+            words(&format!("{} a or b", shorter.join(" "))),
+            MAX_ITEMS - 1
+        );
     }
 
     /// A word start expands to the words the most names hold while the postings they hold, in all,

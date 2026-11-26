@@ -1162,8 +1162,10 @@ distance. `q` matches like this:
   words: `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a
   sign such as `/` or `™` starts a word too) and the description by whole words. Several short
   words match in order, each at a word start (`a s` finds `A slow song`, not `As lop`).
-- A `q` of one character that is found inside names (a sign such as `(` or `€`, or a letter of
-  Hebrew or Arabic) is matched in Postgres alone, as below.
+- A `q` of one character that is found inside names (a sign such as `(` or `€`, a letter of
+  Hebrew or Arabic, or a character of a script written without spaces, such as `東`) is matched in
+  Postgres alone, as below. With a catalogue on, the catalogue cards it lists are those of each
+  catalogue's best known (twice `limits.search_text_candidates`) whose name holds it.
 
 The index reads at most 32 items of `q` (words, phrases, words to leave out, `or`) and a phrase by
 its first 8 words (by all its words, in any order, when every one is in more than 10,000 names and

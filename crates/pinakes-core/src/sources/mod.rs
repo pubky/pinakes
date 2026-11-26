@@ -227,6 +227,12 @@ pub trait Source: Send + Sync {
     fn social(&self, _doc: &ResourceMeta) -> bool {
         false
     }
+    /// Whether the card of `uri` is social content ([`Source::social`]), from what the link
+    /// names alone, when the link tells (a post or a profile against a community's page); `None`:
+    /// the link does not tell.
+    fn social_link(&self, _uri: &str) -> Option<bool> {
+        None
+    }
     /// The longest a social card of this source goes before it is read again: an hour, or longer
     /// for a service that refuses frequent requests.
     fn social_refresh_secs(&self) -> u64 {

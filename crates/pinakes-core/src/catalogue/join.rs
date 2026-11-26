@@ -303,15 +303,20 @@ const SOCIAL_TYPES: &[&str] = &[
     "Article",
     "CreativeWork",
 ];
-/// Whether `uri` is a link a source of people's own posts reads (a Nostr object, a link of an
-/// official source with social cards: Bluesky, Mastodon, Reddit, X, …): such a link keeps its own
-/// card, with its scrubs and refresh, and is never built from a catalogue card, even before its
-/// first read (when no stored card says it is social yet).
+/// Whether `uri` is a link of social content (a Nostr object, a post or a profile of an official
+/// source with social cards: Bluesky, Mastodon, Reddit, X, …): such a link keeps its own card,
+/// with its scrubs and refresh, and is never built from a catalogue card, even before its first
+/// read (when no stored card says it is social yet). Decided by what the link names when its
+/// source can tell from the link (a subreddit or a Substack publication is not social), else by
+/// whether the source's cards of any of [`SOCIAL_TYPES`] are.
 pub fn social_link(uri: &str) -> bool {
     if crate::resolver::classify(uri) == Some("nostr") {
         return true;
     }
     crate::sources::reading(uri).is_some_and(|source| {
+        if let Some(social) = source.social_link(uri) {
+            return social;
+        }
         SOCIAL_TYPES.iter().any(|t| {
             let mut doc = ResourceMeta::new(uri, source.name(), 0);
             doc.set_type(t);
