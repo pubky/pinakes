@@ -910,14 +910,22 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
                 .as_str()
                 .unwrap()
                 .contains("pinakes_source_token_refusals_total")));
-    // The catalogue alerts read only catalogues that are on and have finished a full import.
+    // The catalogue alerts read only catalogues that are on; the lag only after a finished full
+    // import, a failed run also in a first import (one refused or failing shows).
+    let failed = rules
+        .iter()
+        .find(|r| r["alert"].as_str() == Some("CatalogueImportFailed"))
+        .unwrap();
+    assert!(!failed["expr"]
+        .as_str()
+        .unwrap()
+        .contains("pinakes_catalogue_last_import_timestamp_seconds"));
     for (alert, reads) in [
         (
             "CatalogueImportFailed",
             &[
                 "pinakes_catalogue_import_errors_total",
                 "pinakes_catalogue_enabled == 1",
-                "pinakes_catalogue_last_import_timestamp_seconds > 0",
             ][..],
         ),
         (
