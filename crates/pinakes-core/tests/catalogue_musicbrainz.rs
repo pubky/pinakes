@@ -830,6 +830,26 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
             .unwrap();
         assert!(matches!(plan, Plan::Wait(_)), "{plan:?}");
     }
+    // Refused with the limit an update now runs with (after a hand-over to that limit, say): the
+    // update neither reads it nor hands over to a full import that would.
+    sqlx::query("UPDATE catalogue_state SET position=position||'{\"refused_limit\":5}' WHERE catalogue='musicbrainz'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = (*s.ctx.config).clone();
+    config.catalogues.musicbrainz.limit = Some(5);
+    let limited = Context {
+        config: Arc::new(config),
+        ..s.ctx.clone()
+    };
+    let mb = MusicBrainz::new(Source::Dir(b.clone()), "")
+        .unwrap()
+        .configured(&limited.config);
+    let again = run::run_once(Arc::new(mb), &limited, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    assert_eq!(rows(&pool).await, before);
     // A newer dump is read, but only once the disk allows. (Test dumps are never dated after
     // the day the suite was written: one after tomorrow is no dump, `version`.)
     let c = dump(s.root.path(), "20261126-001001", unchanged);
