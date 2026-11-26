@@ -28,6 +28,8 @@ pub struct Tar<R> {
 }
 /// The longest path or pax header kept (bytes).
 const HEADER_TEXT_CAP: u64 = 64 * 1024;
+/// The largest entry an archive may hold (bytes): 4 TiB, ten times the largest dump file.
+pub const ENTRY_CAP: u64 = 4 << 40;
 impl<R: Read> Tar<R> {
     pub fn new(inner: R) -> Self {
         Self {
@@ -62,6 +64,7 @@ impl<R: Read> Tar<R> {
                     if size > HEADER_TEXT_CAP {
                         bail!(Failure::new("archive"));
                     }
+                    // `size` is small here: no sum below overflows.
                     let mut text = vec![0u8; size as usize];
                     self.inner.read_exact(&mut text)?;
                     skip(&mut self.inner, pad(size))?;
@@ -84,6 +87,9 @@ impl<R: Read> Tar<R> {
                 }
                 _ => {
                     let size = pax_size.take().unwrap_or(size);
+                    if size > ENTRY_CAP {
+                        bail!(Failure::new("size"));
+                    }
                     let path = pax_path
                         .take()
                         .or_else(|| long_name.take())
@@ -136,6 +142,8 @@ impl<R: Read> Read for TarData<'_, R> {
         Ok(n)
     }
 }
+/// The padding after `size` bytes of data to the next 512-byte block. Sizes are at most
+/// [`ENTRY_CAP`], so `size + pad(size)` never overflows.
 fn pad(size: u64) -> u64 {
     (512 - size % 512) % 512
 }
@@ -295,7 +303,7 @@ impl<R: BufRead> Lines<R> {
                 }
                 return Ok(!line.is_empty());
             }
-            let (part, done) = match memchr(b'\n', buf) {
+            let (part, done) = match memchr::memchr(b'\n', buf) {
                 Some(i) => (&buf[..i], Some(i + 1)),
                 None => (buf, None),
             };
@@ -327,9 +335,6 @@ impl<R: BufRead> Lines<R> {
             }
         }
     }
-}
-fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
-    haystack.iter().position(|b| *b == needle)
 }
 
 /// An `.xz` stream decoded on `threads` threads (liblzma's multi-threaded decoder, which decodes
@@ -403,7 +408,10 @@ pub fn sha256_sums(text: &str) -> Vec<(String, String)> {
 /// A download read as a blocking stream on a `spawn_blocking` thread: its body in chunks, and on
 /// a broken connection the rest asked for again from the byte where it broke (`Range`, with
 /// `If-Range` naming the first answer's validator, so a file replaced meanwhile is an error, not
-/// a spliced stream), up to [`Download::RETRIES`] times. Every wait for a chunk is bounded.
+/// a spliced stream; without a validator it is not asked for again). Each break may be retried
+/// [`Download::RETRIES`] times (a failed request again too), the count renewed after every
+/// [`Download::RENEW_BYTES`] read; every wait for a chunk is bounded, and so is the whole
+/// download ([`Download::DEADLINE`]).
 pub struct Download {
     client: reqwest::Client,
     url: url::Url,
@@ -413,22 +421,32 @@ pub struct Download {
     chunk: bytes::Bytes,
     offset: u64,
     retries: u32,
+    /// The offset at the last break: past it by [`Download::RENEW_BYTES`], the retries count anew.
+    broke_at: u64,
     host: String,
     /// The most bytes read; a longer body is an error (`size`).
     max_bytes: u64,
+    /// The first wait before a retry; it doubles with each one.
+    retry_wait: std::time::Duration,
+    started: std::time::Instant,
 }
 impl Download {
-    /// How many times a broken body is asked for again.
+    /// How many times in a row a broken body is asked for again.
     pub const RETRIES: u32 = 5;
-    /// The longest wait for the next chunk of a body.
+    /// The bytes read after a break that renew the retries.
+    pub const RENEW_BYTES: u64 = 64 << 20;
+    /// The longest wait for an answer or the next chunk of a body.
     pub const CHUNK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+    /// The longest one download may take.
+    pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
     /// Starts `url` (blocking: call it on a `spawn_blocking` thread). A status other than 200 is
-    /// a `download` failure at its host.
+    /// a failure at its host: `not_found` for a 404, else `download`.
     pub fn open(
         client: reqwest::Client,
         handle: tokio::runtime::Handle,
         url: url::Url,
         max_bytes: u64,
+        retry_wait: std::time::Duration,
     ) -> Result<Self> {
         let host = url.host_str().unwrap_or_default().to_owned();
         let mut download = Self {
@@ -440,8 +458,11 @@ impl Download {
             chunk: bytes::Bytes::new(),
             offset: 0,
             retries: 0,
+            broke_at: 0,
             host,
             max_bytes,
+            retry_wait,
+            started: std::time::Instant::now(),
         };
         download.connect()?;
         Ok(download)
@@ -452,10 +473,12 @@ impl Download {
     fn connect(&mut self) -> Result<()> {
         let mut request = self.client.get(self.url.clone());
         if self.offset > 0 {
-            request = request.header(reqwest::header::RANGE, format!("bytes={}-", self.offset));
-            if let Some(validator) = &self.validator {
-                request = request.header(reqwest::header::IF_RANGE, validator.clone());
-            }
+            let Some(validator) = &self.validator else {
+                bail!(self.failure("download"));
+            };
+            request = request
+                .header(reqwest::header::RANGE, format!("bytes={}-", self.offset))
+                .header(reqwest::header::IF_RANGE, validator.clone());
         }
         let sent = self
             .handle
@@ -509,6 +532,33 @@ impl Download {
     pub fn offset(&self) -> u64 {
         self.offset
     }
+    /// After a break: wait, and ask for the rest, as many times as the retries allow.
+    fn resume(&mut self) -> io::Result<()> {
+        if self.offset >= self.broke_at.saturating_add(Self::RENEW_BYTES) {
+            self.retries = 0;
+        }
+        self.broke_at = self.offset;
+        loop {
+            if self.retries >= Self::RETRIES
+                || self.validator.is_none()
+                || self.started.elapsed() > Self::DEADLINE
+            {
+                return Err(io::Error::other(self.failure("download")));
+            }
+            self.retries += 1;
+            std::thread::sleep(self.retry_wait * 2u32.pow(self.retries.min(6) - 1));
+            match self.connect() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // A file gone or replaced is not retried.
+                    let class = e.downcast_ref::<Failure>().map(|f| f.class);
+                    if class == Some("not_found") {
+                        return Err(io::Error::other(self.failure("not_found")));
+                    }
+                }
+            }
+        }
+    }
 }
 impl Read for Download {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -522,6 +572,9 @@ impl Read for Download {
                     return Err(io::Error::other(self.failure("size")));
                 }
                 return Ok(n);
+            }
+            if self.started.elapsed() > Self::DEADLINE {
+                return Err(io::Error::other(self.failure("timeout")));
             }
             let Some(response) = self.response.as_mut() else {
                 return Ok(0);
@@ -538,14 +591,7 @@ impl Read for Download {
                 // A broken connection or a stall: ask for the rest.
                 _ => {
                     self.response = None;
-                    if self.retries >= Self::RETRIES {
-                        return Err(io::Error::other(self.failure("download")));
-                    }
-                    self.retries += 1;
-                    std::thread::sleep(std::time::Duration::from_secs(
-                        2u64.pow(self.retries.min(5)),
-                    ));
-                    self.connect().map_err(io::Error::other)?;
+                    self.resume()?;
                 }
             }
         }

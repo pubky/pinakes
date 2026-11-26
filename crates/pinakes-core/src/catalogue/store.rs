@@ -162,8 +162,20 @@ pub async fn upsert(
     cards: &[Card],
     cursor: Option<&serde_json::Value>,
 ) -> Result<WriteReport> {
-    ensure_state(pool, catalogue).await?;
     let (rows, rejected) = rows(catalogue, cards);
+    upsert_rows(pool, catalogue, generation, &rows, rejected, cursor).await
+}
+/// [`upsert`] of rows an importer already checked ([`Card::checked`]), each `source_id` once;
+/// `rejected` is the number of cards it refused, for the report.
+pub async fn upsert_rows(
+    pool: &PgPool,
+    catalogue: Catalogue,
+    generation: i64,
+    rows: &[Row],
+    rejected: u64,
+    cursor: Option<&serde_json::Value>,
+) -> Result<WriteReport> {
+    ensure_state(pool, catalogue).await?;
     let mut report = WriteReport {
         rejected,
         ..WriteReport::default()

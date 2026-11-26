@@ -17,6 +17,50 @@ use std::collections::{BTreeMap, BTreeSet};
 fn nullable<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> Result<T, D::Error> {
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
+/// A list the service may write as `null`, of which at most `N` entries are kept: the rest are
+/// skipped without being built, so a line's memory never grows with a list's length.
+fn capped<'de, D: Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
+    struct Capped<T, const N: usize>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for Capped<T, N> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list or null")
+        }
+        fn visit_unit<E>(self) -> Result<Vec<T>, E> {
+            Ok(vec![])
+        }
+        fn visit_none<E>(self) -> Result<Vec<T>, E> {
+            Ok(vec![])
+        }
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Vec<T>, D2::Error> {
+            d.deserialize_seq(self)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::new();
+            while out.len() < N {
+                match seq.next_element()? {
+                    Some(item) => out.push(item),
+                    None => return Ok(out),
+                }
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(out)
+        }
+    }
+    d.deserialize_option(Capped::<T, N>(std::marker::PhantomData))
+}
+/// The most entries kept of each list of a line: a release's media and a medium's tracks (a box
+/// set holds hundreds), an entity's relations, aliases, genres, ISRCs and credited artists.
+const MEDIA: usize = 512;
+const TRACKS: usize = 4096;
+const RELATIONS: usize = 2048;
+const ALIASES: usize = 256;
+const GENRE_LIST: usize = 256;
+const ISRCS: usize = 64;
+const CREDITS: usize = 64;
+const SECONDARY: usize = 16;
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -80,11 +124,11 @@ pub struct ArtistLine {
     area: Named,
     #[serde(deserialize_with = "nullable")]
     disambiguation: String,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, ALIASES>")]
     aliases: Vec<Named>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, GENRE_LIST>")]
     genres: Vec<Genre>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, RELATIONS>")]
     relations: Vec<Relation>,
 }
 #[derive(Deserialize, Default)]
@@ -96,19 +140,22 @@ pub struct GroupLine {
     title: String,
     #[serde(rename = "primary-type", deserialize_with = "nullable")]
     primary_type: String,
-    #[serde(rename = "secondary-types", deserialize_with = "nullable")]
+    #[serde(
+        rename = "secondary-types",
+        deserialize_with = "capped::<_, _, SECONDARY>"
+    )]
     secondary_types: Vec<String>,
-    #[serde(rename = "artist-credit", deserialize_with = "nullable")]
+    #[serde(rename = "artist-credit", deserialize_with = "capped::<_, _, CREDITS>")]
     credit: Vec<Credit>,
     #[serde(rename = "first-release-date", deserialize_with = "nullable")]
     first_release_date: String,
     #[serde(deserialize_with = "nullable")]
     disambiguation: String,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, ALIASES>")]
     aliases: Vec<Named>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, GENRE_LIST>")]
     genres: Vec<Genre>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, RELATIONS>")]
     relations: Vec<Relation>,
 }
 #[derive(Deserialize, Default)]
@@ -118,13 +165,13 @@ pub struct ReleaseLine {
     pub id: String,
     #[serde(deserialize_with = "nullable")]
     date: String,
-    #[serde(rename = "artist-credit", deserialize_with = "nullable")]
+    #[serde(rename = "artist-credit", deserialize_with = "capped::<_, _, CREDITS>")]
     credit: Vec<Credit>,
     #[serde(rename = "release-group", deserialize_with = "nullable")]
     group: EmbeddedGroup,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, RELATIONS>")]
     relations: Vec<Relation>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, MEDIA>")]
     media: Vec<Medium>,
 }
 #[derive(Deserialize, Default)]
@@ -136,13 +183,13 @@ struct EmbeddedGroup {
     title: String,
     #[serde(rename = "first-release-date", deserialize_with = "nullable")]
     first_release_date: String,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, GENRE_LIST>")]
     genres: Vec<Genre>,
 }
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Medium {
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, TRACKS>")]
     tracks: Vec<TrackLine>,
 }
 #[derive(Deserialize, Default)]
@@ -167,15 +214,15 @@ pub struct RecordingLine {
     length: u64,
     #[serde(deserialize_with = "nullable")]
     video: bool,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, ISRCS>")]
     isrcs: Vec<String>,
-    #[serde(rename = "artist-credit", deserialize_with = "nullable")]
+    #[serde(rename = "artist-credit", deserialize_with = "capped::<_, _, CREDITS>")]
     credit: Vec<Credit>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, ALIASES>")]
     aliases: Vec<Named>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, GENRE_LIST>")]
     genres: Vec<Genre>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "capped::<_, _, RELATIONS>")]
     relations: Vec<Relation>,
 }
 
@@ -183,21 +230,34 @@ pub struct RecordingLine {
 /// ([`key`]): an item's card is made from all the records under its key ([`Item`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Rec {
+    /// The content hash of the card stored under the key (an update compares with it). First, so
+    /// a bounded group never leaves it out ([`super::spill::Merge::next_group`] keeps the
+    /// payloads that sort first).
+    Stored(Vec<u8>),
     /// An artist (`artist/<mbid>`).
     Artist(ArtistRec),
-    /// A release crediting the artist (`artist/<mbid>`): one per release.
-    Credited,
     /// A release group (`release-group/<mbid>`).
     Group(GroupRec),
+    /// A release crediting the artist (`artist/<mbid>`): one per release.
+    Credited,
     /// A release of the release group (`release-group/<mbid>`): its MBID and the album pages
     /// its URL relations name.
     Release { release: String, links: Vec<String> },
-    /// A recording on one release, or on none (`recording/<mbid>`).
+    /// A recording on one release, or on none (`recording/<mbid>`): one per release.
     Track(TrackRec),
     /// A recording carrying the ISRC (`isrc/<ISRC>`): its MBID.
     Isrc(String),
-    /// The content hash of the card stored under the key (an update compares with it).
-    Stored(Vec<u8>),
+}
+/// The first byte of each kind of record's payload (its postcard variant index), which
+/// [`super::spill::Group::counts`] counts by.
+pub mod tag {
+    pub const STORED: usize = 0;
+    pub const ARTIST: usize = 1;
+    pub const GROUP: usize = 2;
+    pub const CREDITED: usize = 3;
+    pub const RELEASE: usize = 4;
+    pub const TRACK: usize = 5;
+    pub const ISRC: usize = 6;
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ArtistRec {
@@ -310,14 +370,15 @@ fn genres(genres: &[Genre]) -> Vec<(String, u64)> {
     out.truncate(GENRES);
     out
 }
+/// The distinct aliases in their sort order (the dump's order of aliases may change from one dump
+/// to the next), at most [`OTHER_NAMES`].
 fn aliases(aliases: &[Named]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    aliases
+    let all: BTreeSet<String> = aliases
         .iter()
         .map(|a| text(&a.name))
-        .filter(|a| !a.is_empty() && seen.insert(a.clone()))
-        .take(OTHER_NAMES)
-        .collect()
+        .filter(|a| !a.is_empty())
+        .collect();
+    all.into_iter().take(OTHER_NAMES).collect()
 }
 /// The current URL relations.
 fn urls(relations: &[Relation]) -> impl Iterator<Item = (&str, &str)> {
@@ -541,19 +602,56 @@ pub struct Item {
     pub stored: Option<Vec<u8>>,
 }
 /// The ISRCs that name more than one recording, as [`Item::of`] reads them under their keys
-/// (which sort before the recordings').
+/// (which sort before the recordings'), each as one number ([`isrc_number`]), at most
+/// [`SHARED_CAP`]: past it, [`Shared::full`] says so and the run stops rather than key an ISRC
+/// it could not check.
 #[derive(Default)]
-pub struct Shared(BTreeSet<String>);
+pub struct Shared {
+    isrcs: std::collections::HashSet<u64>,
+    full: bool,
+}
+/// The most ISRCs [`Shared`] holds (8 bytes each).
+pub const SHARED_CAP: usize = 16_000_000;
 impl Shared {
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.isrcs.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.isrcs.is_empty()
+    }
+    /// More shared ISRCs than it may hold were found.
+    pub fn full(&self) -> bool {
+        self.full
+    }
+    fn insert(&mut self, isrc: &str) {
+        let Some(n) = isrc_number(isrc) else { return };
+        if self.isrcs.len() >= SHARED_CAP {
+            self.full = true;
+        } else {
+            self.isrcs.insert(n);
+        }
+    }
+    fn contains(&self, isrc: &str) -> bool {
+        isrc_number(isrc).is_some_and(|n| self.isrcs.contains(&n))
     }
 }
+/// An ISRC (12 letters and digits) as the number its characters make in base 36, one to one.
+pub fn isrc_number(isrc: &str) -> Option<u64> {
+    let b = isrc.as_bytes();
+    if b.len() != 12 {
+        return None;
+    }
+    b.iter().try_fold(0u64, |n, c| {
+        let d = match c {
+            b'0'..=b'9' => c - b'0',
+            b'A'..=b'Z' => c - b'A' + 10,
+            _ => return None,
+        };
+        Some(n * 36 + u64::from(d))
+    })
+}
 
-fn fame(releases: usize) -> f32 {
+fn fame(releases: u64) -> f32 {
     ((1.0 + releases as f64).ln() / (1.0 + FAME_RELEASES).ln()).min(1.0) as f32
 }
 fn labels(genres: &[(String, u64)]) -> Vec<String> {
@@ -582,7 +680,7 @@ fn length(ms: u64) -> Option<String> {
     if ms == 0 {
         return None;
     }
-    let secs = (ms + 500) / 1000;
+    let secs = ms.saturating_add(500) / 1000;
     Some(if secs >= 3600 {
         format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
     } else {
@@ -598,9 +696,10 @@ fn joined(parts: impl IntoIterator<Item = String>) -> Option<String> {
 }
 
 impl Item {
-    /// The item under `key` from its records; `shared` takes the ISRCs that name several
+    /// The item under `key` from its records (those a bounded group kept) and `counts`, every
+    /// record of the key by kind ([`tag`]); `shared` takes the ISRCs that name several
     /// recordings (an `isrc/` key makes no card).
-    pub fn of(key: &str, recs: Vec<Rec>, shared: &mut Shared) -> Item {
+    pub fn of(key: &str, recs: Vec<Rec>, counts: &[u64], shared: &mut Shared) -> Item {
         let mut item = Item::default();
         let mut rest = vec![];
         for rec in recs {
@@ -609,13 +708,14 @@ impl Item {
                 rec => rest.push(rec),
             }
         }
+        let count = |t: usize| counts.get(t).copied().unwrap_or(0);
         let Some((entity, mbid)) = key.split_once('/') else {
             return item;
         };
         item.card = match entity {
-            "artist" => artist_card(mbid, rest),
-            "release-group" => group_card(mbid, rest),
-            "recording" => recording_card(mbid, rest, shared),
+            "artist" => artist_card(mbid, rest, count(tag::CREDITED)),
+            "release-group" => group_card(mbid, rest, count(tag::RELEASE)),
+            "recording" => recording_card(mbid, rest, count(tag::TRACK), shared),
             "isrc" => {
                 let recordings: BTreeSet<String> = rest
                     .into_iter()
@@ -625,7 +725,7 @@ impl Item {
                     })
                     .collect();
                 if recordings.len() > 1 {
-                    shared.0.insert(mbid.to_owned());
+                    shared.insert(mbid);
                 }
                 None
             }
@@ -635,17 +735,11 @@ impl Item {
     }
 }
 
-fn artist_card(mbid: &str, recs: Vec<Rec>) -> Option<Card> {
-    let mut artist = None;
-    let mut releases = 0;
-    for rec in recs {
-        match rec {
-            Rec::Artist(a) => artist = Some(a),
-            Rec::Credited => releases += 1,
-            _ => {}
-        }
-    }
-    let a = artist?;
+fn artist_card(mbid: &str, recs: Vec<Rec>, releases: u64) -> Option<Card> {
+    let a = recs.into_iter().find_map(|r| match r {
+        Rec::Artist(a) => Some(a),
+        _ => None,
+    })?;
     let kind = if a.kind.is_empty() {
         "Artist".to_owned()
     } else {
@@ -684,20 +778,13 @@ fn artist_card(mbid: &str, recs: Vec<Rec>) -> Option<Card> {
     })
 }
 
-fn group_card(mbid: &str, recs: Vec<Rec>) -> Option<Card> {
+fn group_card(mbid: &str, recs: Vec<Rec>, releases: u64) -> Option<Card> {
     let mut group = None;
-    let mut releases = BTreeSet::new();
     let mut links = BTreeSet::new();
     for rec in recs {
         match rec {
             Rec::Group(g) => group = Some(g),
-            Rec::Release {
-                release,
-                links: more,
-            } => {
-                releases.insert(release);
-                links.extend(more);
-            }
+            Rec::Release { links: more, .. } => links.extend(more),
             _ => {}
         }
     }
@@ -747,13 +834,13 @@ fn group_card(mbid: &str, recs: Vec<Rec>) -> Option<Card> {
         ]),
         labels: labels(&g.genres),
         keys,
-        fame: fame(releases.len()),
+        fame: fame(releases),
         details,
         ..Card::default()
     })
 }
 
-fn recording_card(mbid: &str, recs: Vec<Rec>, shared: &Shared) -> Option<Card> {
+fn recording_card(mbid: &str, recs: Vec<Rec>, tracks_seen: u64, shared: &Shared) -> Option<Card> {
     let mut tracks: Vec<TrackRec> = recs
         .into_iter()
         .filter_map(|r| match r {
@@ -777,12 +864,9 @@ fn recording_card(mbid: &str, recs: Vec<Rec>, shared: &Shared) -> Option<Card> {
                 &b.release,
             ))
     });
-    let releases: BTreeSet<&str> = tracks
-        .iter()
-        .map(|t| t.release.as_str())
-        .filter(|r| !r.is_empty())
-        .collect();
-    let releases = releases.len();
+    // One record per release it is on (and one for a recording on none).
+    let standalone = tracks.iter().any(|t| t.release.is_empty());
+    let releases = tracks_seen.saturating_sub(u64::from(standalone));
     let first = tracks.first()?.clone();
     let mut other_names = first.aliases.clone();
     let mut titles: BTreeSet<String> = tracks
@@ -799,8 +883,14 @@ fn recording_card(mbid: &str, recs: Vec<Rec>, shared: &Shared) -> Option<Card> {
             other_names.push(t);
         }
     }
+    // Its own genres, else those of the first of its releases (earliest first) whose release
+    // group has some.
     let genres = if first.genres.is_empty() {
-        &first.group_genres
+        tracks
+            .iter()
+            .map(|t| &t.group_genres)
+            .find(|g| !g.is_empty())
+            .unwrap_or(&first.group_genres)
     } else {
         &first.genres
     };
@@ -809,7 +899,7 @@ fn recording_card(mbid: &str, recs: Vec<Rec>, shared: &Shared) -> Option<Card> {
         first
             .isrcs
             .iter()
-            .filter(|i| !shared.0.contains(*i))
+            .filter(|i| !shared.contains(i))
             .take(ISRC_KEYS)
             .map(|i| format!("isrc:{i}")),
     );

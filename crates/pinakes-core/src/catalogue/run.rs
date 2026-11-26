@@ -227,6 +227,27 @@ impl Job<'_> {
         self.report += written;
         Ok(written)
     }
+    /// Write rows the importer already checked ([`store::upsert_rows`]; each `source_id` once,
+    /// `rejected` the cards it refused) and save `cursor` with them.
+    pub async fn write_rows(
+        &mut self,
+        rows: &[super::Row],
+        rejected: u64,
+        cursor: serde_json::Value,
+    ) -> Result<WriteReport> {
+        let written = store::upsert_rows(
+            self.pool,
+            self.catalogue,
+            self.generation,
+            rows,
+            rejected,
+            Some(&cursor),
+        )
+        .await?;
+        self.cursor = Some(cursor);
+        self.report += written;
+        Ok(written)
+    }
     /// Remove the cards with these source IDs ([`store::remove`]) and save `cursor` with them.
     pub async fn remove(
         &mut self,
@@ -716,9 +737,10 @@ pub async fn run_once(
     mut waiting: impl FnMut(&str),
 ) -> Result<State> {
     let catalogue = importer.catalogue();
-    let Some(lock) = SessionLock::try_take(&ctx.pool, catalogue.lock_key()).await? else {
-        anyhow::bail!("another process imports catalogue {catalogue} (its lock is held): stop that pinakesd or switch the catalogue off there first");
+    let Some(mut lock) = SessionLock::try_take(&ctx.pool, catalogue.lock_key()).await? else {
+        anyhow::bail!("another process imports catalogue {catalogue} (its lock is held): stop that pinakesd or switch the catalogue off there first, or ask it for a full import with --request");
     };
+    let held = &mut lock;
     let ran = async {
         let state = store::ensure_state(&ctx.pool, catalogue).await?;
         match run {
@@ -743,7 +765,15 @@ pub async fn run_once(
         };
         let mut said: Option<String> = None;
         loop {
-            match step(&forced, ctx).await {
+            // As the task does: a panic is a failed run, and the lock watched while it goes on.
+            let stepped = std::panic::AssertUnwindSafe(step(&forced, ctx)).catch_unwind();
+            let stepped = tokio::select! {
+                stepped = stepped => stepped.unwrap_or_else(|_| Err(Failure::new("panic").into())),
+                _ = held.lost(ctx.pace.lock_check) => {
+                    anyhow::bail!("the lock of catalogue {catalogue} was lost (its database session ended); the run resumes from its cursor at the next import");
+                }
+            };
+            match stepped {
                 Ok(Next::Again) => {
                     let state = store::ensure_state(&ctx.pool, catalogue).await?;
                     if state.run.is_none() && state.import_requested.is_none() {
@@ -770,6 +800,21 @@ pub async fn run_once(
     let ended = ran.await;
     lock.release().await;
     ended
+}
+
+/// Ask for a full import of `catalogue` (`pinakesd catalogue import --request`): the importer
+/// that holds the catalogue (a daemon's task) starts it as any full import asked for, after the
+/// run under way (an update hands over at once). Needs no lock.
+pub async fn request_import(pool: &PgPool, catalogue: Catalogue, reason: &str) -> Result<()> {
+    store::ensure_state(pool, catalogue).await?;
+    sqlx::query(
+        "UPDATE catalogue_state SET import_requested=$2,updated_at=now() WHERE catalogue=$1",
+    )
+    .bind(catalogue.name())
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// The catalogue's lock was lost while a run went on (its session ended).

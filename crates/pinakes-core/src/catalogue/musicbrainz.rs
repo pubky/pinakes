@@ -15,14 +15,19 @@
 //! that the dump says about one item comes together without holding the dump in memory: a
 //! recording's releases give its fame and its earliest release, its album and its album's genres;
 //! a release group's releases give its fame and its releases' album pages; ISRCs (`isrc/<ISRC>`,
-//! sorted before the recordings) that name several recordings are left out of the keys.
+//! sorted before the recordings) that name several recordings are left out of the keys. Each
+//! file's runs are kept with a manifest once the file is read whole and its SHA-256 checked
+//! against the dump's `SHA256SUMS`, and the runs are merged down to at most
+//! [`spill::FAN_IN`] before any card is written (the `done` file), so a run cut off resumes
+//! without reading again what it has.
 //!
 //! A first import writes every card ([`super::run::Run::Import`]). A new dump is an update: the
-//! stored cards' content hashes are sorted with the dump's records, and the merge writes only
-//! the cards that are new or changed and removes those the dump no longer has; an unchanged card
-//! is not written at all. An update that would remove more than [`MAX_REMOVED_SHARE`] of the
-//! cards stops (`removals`) before it removes any. Each file's SHA-256 is checked against the
-//! dump's `SHA256SUMS` before anything is written.
+//! stored cards' content hashes are sorted with the dump's records; a first pass over the merge
+//! lists the stored cards the dump no longer has, and when they are more than
+//! [`MAX_REMOVED_SHARE`] of the cards the update stops there (`removals`) with nothing written,
+//! and waits for a newer dump or a full import asked for (`pinakesd catalogue import musicbrainz
+//! --request`). Otherwise the second pass writes only the cards that are new or changed (an
+//! unchanged card is not written at all), and the listed cards are removed.
 //!
 //! `[catalogues.musicbrainz] limit` imports at most that many cards: the first releases whose
 //! recordings, release groups and credited artists fit, then only those release groups and
@@ -32,20 +37,23 @@ pub mod records;
 use super::{
     bulk::{self, Lines, Tar},
     failure::Failure,
-    run::{Importer, Job, Run, UpdateEnd},
-    spill::{self, Spill},
+    run::{Importer, Job, Plan, Run, UpdateEnd},
+    spill::{self, Room, Spill},
     store::State,
-    Card, Catalogue,
+    Catalogue, Row,
 };
 use anyhow::{bail, Context as _, Result};
 use async_trait::async_trait;
-use records::{Item, Rec, Shared};
+use records::{tag, Item, Rec, Shared};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
-    io::{BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -57,8 +65,11 @@ const FILES: [&str; 4] = ["release", "release-group", "artist", "recording"];
 pub const LINE_CAP: usize = 128 << 20;
 /// The largest compressed file read (bytes).
 const FILE_CAP: u64 = 128 << 30;
-/// The free disk a full read needs under `catalogues.dir/musicbrainz`: the sorted runs (measured
-/// on a sample: see `docs/deployment.md`) with room to spare.
+/// The decoded bytes an archive may hold after the entry read, before its end.
+const TRAILING_CAP: u64 = 16 << 20;
+/// The free disk a full read needs under `catalogues.dir/musicbrainz`: the sorted runs of an
+/// update (the dump's records and the stored cards' hashes, measured on a sample: see
+/// `docs/deployment.md`) with room to spare.
 pub const DISK_NEED: u64 = 40_000_000_000;
 /// The disk a read needs per card of `limit`, and at least.
 const DISK_PER_LIMITED_CARD: u64 = 16_384;
@@ -70,15 +81,24 @@ const SORT_MEMORY: usize = 512 << 20;
 /// The xz decoder's threads and memory.
 const XZ_THREADS: u32 = 2;
 const XZ_MEMORY: u64 = 512 << 20;
+/// Of one item's records at most this many, holding at most this many bytes, are kept to make
+/// its card (every one is counted for its fame).
+const GROUP_RECORDS: usize = 8192;
+const GROUP_BYTES: usize = 64 << 20;
 /// An update stops when it would remove more than this share of the cards.
 pub const MAX_REMOVED_SHARE: f64 = 0.10;
 /// Bad lines a file may hold: more than this many, and more than one in a thousand, fail the run.
 const BAD_LINES: u64 = 100;
-/// How often a new dump is looked for.
-const UPDATE_EVERY: Duration = Duration::from_secs(12 * 3600);
+/// How often a long read or write logs how far it is.
+const PROGRESS_EVERY: Duration = Duration::from_secs(60);
+/// How often `LATEST` is read for a new dump.
+pub const POLL: Duration = Duration::from_secs(3600);
+/// The first wait before a broken download is asked for again (it doubles each time).
+const RETRY_WAIT: Duration = Duration::from_secs(2);
 
 /// Where the dumps are read from: a mirror's `json-dumps/` directory (with `LATEST`), or a local
-/// directory holding one dump's files (`<entity>.tar.xz`, and `SHA256SUMS` when it is checked).
+/// directory holding one dump's files (`<entity>.tar.xz`, and `SHA256SUMS` when they are
+/// checked), named after its dump (`YYYYMMDD-HHMMSS`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Mirror(url::Url),
@@ -89,7 +109,8 @@ impl Source {
     pub fn official() -> Self {
         Self::Mirror(url::Url::parse(MIRROR).expect("a URL"))
     }
-    /// A mirror URL (`https://`, or `http://` on the loopback address) or a local directory.
+    /// A mirror URL (`https://`, or `http://` on the loopback address) or a local directory
+    /// named after its dump.
     pub fn parse(from: &str) -> Result<Self> {
         if from.starts_with("http://") || from.starts_with("https://") {
             let mut url = url::Url::parse(from).context("not a URL")?;
@@ -107,6 +128,16 @@ impl Source {
         } else {
             let dir = PathBuf::from(from);
             anyhow::ensure!(dir.is_dir(), "{} is not a directory", dir.display());
+            let named = dir
+                .canonicalize()
+                .ok()
+                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .is_some_and(|n| valid_version(&n));
+            anyhow::ensure!(
+                named,
+                "{} is not named after its dump (YYYYMMDD-HHMMSS, as the mirror names it)",
+                dir.display()
+            );
             Ok(Self::Dir(dir))
         }
     }
@@ -135,6 +166,13 @@ pub struct MusicBrainz {
     threads: usize,
     /// `[catalogues.musicbrainz] limit`, for the disk a run needs.
     limit: Option<u64>,
+    /// `catalogues.dir/musicbrainz`: what a run cut off left there counts towards its disk need.
+    work_dir: Option<PathBuf>,
+    sort_memory: usize,
+    fan_in: usize,
+    retry_wait: Duration,
+    /// When `LATEST` was last read by `plan`.
+    polled: Mutex<Option<Instant>>,
 }
 impl MusicBrainz {
     /// The importer of `source`, asking with the operator's contact in its User-Agent.
@@ -155,21 +193,46 @@ impl MusicBrainz {
             client,
             threads,
             limit: None,
+            work_dir: None,
+            sort_memory: SORT_MEMORY,
+            fan_in: spill::FAN_IN,
+            retry_wait: RETRY_WAIT,
+            polled: Mutex::new(None),
         })
     }
-    /// The importer of the official mirror.
+    /// The importer of the official mirror, as the configuration says (`limit`, the directory).
     pub fn official(config: &crate::config::Config) -> Result<Self> {
-        Ok(Self::new(Source::official(), &config.egress.contact)?
-            .limit(config.catalogues.limit(Catalogue::Musicbrainz)))
+        Ok(Self::new(Source::official(), &config.egress.contact)?.configured(config))
+    }
+    /// The configuration's `limit` and directory.
+    pub fn configured(self, config: &crate::config::Config) -> Self {
+        self.limit(config.catalogues.limit(Catalogue::Musicbrainz))
+            .work_dir(config.catalogues.work_dir(Catalogue::Musicbrainz))
     }
     /// The `limit` the runs read with (`[catalogues.musicbrainz] limit`), for their disk need.
     pub fn limit(mut self, limit: Option<u64>) -> Self {
         self.limit = limit;
         self
     }
+    /// The catalogue's directory, for the disk a resumed run still needs.
+    pub fn work_dir(mut self, dir: PathBuf) -> Self {
+        self.work_dir = Some(dir);
+        self
+    }
     /// Parse lines on this many threads (at least one).
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
+        self
+    }
+    /// Sort with this much memory, merging this many runs at once (tests make passes happen).
+    pub fn sorting(mut self, memory: usize, fan_in: usize) -> Self {
+        self.sort_memory = memory.max(1);
+        self.fan_in = fan_in.max(2);
+        self
+    }
+    /// The first wait before a broken download is asked for again.
+    pub fn retry_wait(mut self, wait: Duration) -> Self {
+        self.retry_wait = wait;
         self
     }
 
@@ -208,77 +271,138 @@ impl MusicBrainz {
                 .trim()
                 .to_owned(),
             Source::Dir(dir) => dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .filter(|n| valid_version(n))
-                .unwrap_or_else(|| "00000000-000000".into()),
+                .canonicalize()
+                .ok()
+                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_default(),
         };
         if !valid_version(&version) {
             bail!(Failure::new("version").at(self.source.at()));
         }
         Ok(version)
     }
-    /// The dump's `SHA256SUMS`, file name to digest; empty when a local dump has none.
-    async fn sums(&self, version: &str) -> Result<BTreeMap<String, String>> {
+    /// The dump's `SHA256SUMS`, file name to digest; `None` when the mirror no longer has the
+    /// dump; empty for a local dump without one.
+    async fn sums(&self, version: &str) -> Result<Option<BTreeMap<String, String>>> {
         let text = match &self.source {
-            Source::Mirror(base) => self
-                .get_text(base.join(&format!("{version}/SHA256SUMS"))?, 64 * 1024)
-                .await?
-                .ok_or_else(|| Failure::new("checksum").at(self.source.at()))?,
+            Source::Mirror(base) => {
+                match self
+                    .get_text(base.join(&format!("{version}/SHA256SUMS"))?, 64 * 1024)
+                    .await?
+                {
+                    Some(text) => text,
+                    None => return Ok(None),
+                }
+            }
             Source::Dir(dir) => match tokio::fs::read_to_string(dir.join("SHA256SUMS")).await {
                 Ok(text) => text,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(_) => bail!(Failure::new("checksum").at(self.source.at())),
             },
         };
-        Ok(bulk::sha256_sums(&text).into_iter().collect())
+        Ok(Some(bulk::sha256_sums(&text).into_iter().collect()))
+    }
+    /// The bytes the catalogue's directory holds (what earlier runs left).
+    fn held(&self) -> u64 {
+        fn size(path: &Path) -> u64 {
+            match std::fs::symlink_metadata(path) {
+                Ok(m) if m.is_dir() => std::fs::read_dir(path)
+                    .map(|entries| entries.flatten().map(|e| size(&e.path())).sum())
+                    .unwrap_or(0),
+                Ok(m) => m.len(),
+                Err(_) => 0,
+            }
+        }
+        self.work_dir.as_deref().map_or(0, size)
+    }
+    fn room(&self) -> Room {
+        Room::new(self.need(), DISK_FLOOR)
+    }
+    /// What a read takes at most.
+    fn need(&self) -> u64 {
+        match self.limit {
+            Some(limit) => limit
+                .saturating_mul(DISK_PER_LIMITED_CARD)
+                .clamp(DISK_LEAST, DISK_NEED),
+            None => DISK_NEED,
+        }
     }
 
-    /// Read the dump, sort its records (with the stored hashes for an update) and write: the
-    /// whole of a run of `mode`, or the rest of one cut off.
+    /// A run of `mode`: read the dump, sort its records (with the stored hashes for an update),
+    /// and write; or the rest of one cut off.
     async fn read_and_write(&self, job: &mut Job<'_>, mode: Run) -> Result<()> {
-        let resumed: Option<Cursor> = job
+        let stop = Stop::default();
+        let mut resumed: Option<Cursor> = job
             .cursor()
             .and_then(|c| serde_json::from_value(c.clone()).ok());
-        let version = match &resumed {
+        if let Some(c) = resumed.clone().filter(|c| c.phase == Phase::Refused) {
+            // An update refused for its removals waits for a newer dump (or a full import).
+            if self.latest().await? <= c.version {
+                bail!(Failure::new("removals").at(c.note.unwrap_or_default()));
+            }
+            resumed = None;
+        }
+        let mut version = match &resumed {
             Some(c) => c.version.clone(),
             None => self.latest().await?,
         };
         if !valid_version(&version) {
             bail!(Failure::new("version"));
         }
-        job.upstream_version(&version).await?;
-        let dir = job.dir().join(format!("spill-{version}"));
+        // A run cut off whose dump the mirror no longer has, and that must read it again, starts
+        // over on the newest dump.
+        let spill_of = |v: &str| job.dir().join(format!("spill-{v}"));
+        if let Some(c) = &resumed {
+            if c.phase == Phase::Write
+                && read_done(&spill_of(&c.version)).is_none()
+                && self.sums(&c.version).await?.is_none()
+            {
+                tracing::warn!(catalogue = "musicbrainz", version = c.version, "the dump a cut-off run read is gone from the mirror; the run starts over on the newest dump");
+                resumed = None;
+                version = self.latest().await?;
+            }
+        }
+        let spill_dir = spill_of(&version);
         let removals = job.dir().join(format!("removals-{version}"));
-        clear_others(job.dir(), &[&dir, &removals])?;
+        clear_others(job.dir(), &[&spill_dir, &removals])?;
         if resumed.is_none() && removals.exists() {
             std::fs::remove_file(&removals)
                 .with_context(|| Failure::new("disk").at(removals.display().to_string()))?;
         }
         let mut as_of = resumed.as_ref().and_then(|c| c.as_of);
         if resumed.as_ref().is_none_or(|c| c.phase == Phase::Write) {
-            let spilled = self
-                .read(job, mode, &version, &dir, resumed.is_some())
+            let done = self
+                .read(job, mode, &version, &spill_dir, resumed.is_some(), &stop)
                 .await?;
-            as_of = as_of.or(spilled.as_of);
+            as_of = as_of.or(done.as_of);
+            if mode == Run::Update && (resumed.is_none() || !removals.exists()) {
+                self.count_gone(job, &version, &spill_dir, &removals, &done, as_of, &stop)
+                    .await?;
+            }
             let after = resumed.as_ref().and_then(|c| c.after.clone());
-            self.write(job, mode, &version, &dir, &removals, &spilled, after)
+            self.write(job, mode, &version, &done, &removals, after, as_of, &stop)
                 .await?;
         }
         if mode == Run::Update {
-            remove_gone(job, &version, &removals, as_of).await?;
+            let done_already = resumed
+                .as_ref()
+                .filter(|c| c.phase == Phase::Remove)
+                .map_or(0, |c| c.removed);
+            remove_gone(job, &version, &removals, as_of, done_already).await?;
         }
         if let Some(at) = as_of {
             job.set_current_as_of(at);
         }
-        job.set_position(serde_json::json!({ "version": version }));
-        let _ = std::fs::remove_dir_all(&dir);
+        job.set_position(serde_json::json!({ "version": version, "limit": job.limit() }));
+        job.upstream_version(&version).await?;
+        let _ = std::fs::remove_dir_all(&spill_dir);
         let _ = std::fs::remove_file(&removals);
         Ok(())
     }
 
-    /// The dump read into sorted runs under `dir`, or the runs a cut-off run left there (its
-    /// `done` file) when it resumes.
+    /// The dump read into sorted runs under `dir` and merged down to at most the fan-in: the
+    /// `done` file a cut-off run left when it resumes, else a new read, which keeps the files
+    /// an earlier read of this dump finished (their manifests) and reads the others.
     async fn read(
         &self,
         job: &Job<'_>,
@@ -286,40 +410,65 @@ impl MusicBrainz {
         version: &str,
         dir: &Path,
         resumed: bool,
+        stop: &Stop,
     ) -> Result<Done> {
         if resumed {
             if let Some(done) = read_done(dir) {
                 return Ok(done);
             }
         }
-        if dir.exists() {
-            std::fs::remove_dir_all(dir)
-                .with_context(|| Failure::new("disk").at(dir.display().to_string()))?;
+        let disk = || Failure::new("disk").at(dir.display().to_string());
+        std::fs::create_dir_all(dir).with_context(disk)?;
+        let limit = job.limit();
+        // What is kept: the files whose manifests are whole (not under a limit, whose subset
+        // spans the files); everything else goes.
+        let mut kept: BTreeMap<String, FileDone> = BTreeMap::new();
+        if limit.is_none() {
+            for file in FILES {
+                if let Some(done) = read_file_done(dir, file) {
+                    kept.insert(file.to_owned(), done);
+                }
+            }
         }
+        clear_spill(dir, &kept)?;
         let started = Instant::now();
+        let room = self.room();
         let mut stored = vec![];
         if mode == Run::Update {
-            stored = snapshot(job, &dir.join("stored")).await?;
+            stored = snapshot(job, &dir.join(format!("stored-{}", nonce())), room).await?;
         }
-        let read = ReadPlan {
+        let Some(sums) = self.sums(version).await? else {
+            bail!(Failure::new("not_found").at(self.source.at()));
+        };
+        let plan = ReadPlan {
             source: self.source.clone(),
             client: self.client.clone(),
             handle: tokio::runtime::Handle::current(),
             version: version.to_owned(),
-            sums: self.sums(version).await?,
-            limit: job.limit(),
-            threads: if job.limit().is_some() {
-                1
-            } else {
-                self.threads
-            },
+            sums,
+            limit,
+            threads: if limit.is_some() { 1 } else { self.threads },
             dir: dir.to_owned(),
-            max_bytes: self.disk_need(mode, job.state()),
+            room,
+            sort_memory: self.sort_memory,
+            retry_wait: self.retry_wait,
+            stop: stop.flag(),
+            kept,
         };
-        let mut done = tokio::task::spawn_blocking(move || read_dump(read))
-            .await
-            .map_err(|_| Failure::new("panic"))??;
-        done.runs.extend(stored);
+        let fan_in = self.fan_in;
+        let final_dir = dir.join(format!("final-{}", nonce()));
+        let flag = stop.flag();
+        let mut done = tokio::task::spawn_blocking(move || -> Result<Done> {
+            let mut done = read_dump(plan)?;
+            let mut runs = std::mem::take(&mut done.runs);
+            runs.extend(stored);
+            done.runs = spill::reduce(&final_dir, runs, fan_in, &room, &|| {
+                flag.load(Ordering::Relaxed)
+            })?;
+            Ok(done)
+        })
+        .await
+        .map_err(|_| Failure::new("panic"))??;
         done.seconds = started.elapsed().as_secs_f64();
         write_done(dir, &done)?;
         tracing::info!(
@@ -330,45 +479,117 @@ impl MusicBrainz {
             bad_lines = done.bad_lines,
             too_long = done.too_long,
             downloaded = done.downloaded,
-            spilled = done.spilled,
+            checked = done.checked,
+            runs = done.runs.len(),
             seconds = done.seconds,
             "musicbrainz dump read and sorted"
         );
         Ok(done)
     }
 
-    /// The merge: each item's card, written when new or changed (every card for an import),
-    /// and for an update the stored cards the dump no longer has listed in `removals`.
+    /// An update's first pass: the stored cards the dump no longer has, listed in `removals`.
+    /// More than [`MAX_REMOVED_SHARE`] of the cards (without a limit) refuse the update before it
+    /// writes anything: its cursor says so (so it is not read again), its runs are removed.
+    #[allow(clippy::too_many_arguments)]
+    async fn count_gone(
+        &self,
+        job: &mut Job<'_>,
+        version: &str,
+        dir: &Path,
+        removals: &Path,
+        done: &Done,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+        stop: &Stop,
+    ) -> Result<()> {
+        let runs = done.runs.clone();
+        let path = removals.to_owned();
+        let flag = stop.flag();
+        let gone = tokio::task::spawn_blocking(move || list_gone(&runs, &path, &flag))
+            .await
+            .map_err(|_| Failure::new("panic"))??;
+        let cards = job.state().cards.max(0) as u64;
+        if job.limit().is_none() && gone as f64 > cards as f64 * MAX_REMOVED_SHARE {
+            let note = format!("{gone} of {cards} cards gone in dump {version}");
+            tracing::warn!(
+                catalogue = "musicbrainz",
+                version,
+                gone,
+                cards,
+                "musicbrainz update refused: it would remove more than a tenth of the cards; it waits for a newer dump, or `pinakesd catalogue import musicbrainz --request` asks for a full import"
+            );
+            let cursor = serde_json::to_value(Cursor {
+                version: version.to_owned(),
+                phase: Phase::Refused,
+                after: None,
+                removed: 0,
+                as_of,
+                note: Some(note.clone()),
+            })?;
+            job.write_rows(&[], 0, cursor).await?;
+            let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_file(removals);
+            bail!(Failure::new("removals").at(note));
+        }
+        tracing::info!(
+            catalogue = "musicbrainz",
+            version,
+            gone,
+            cards,
+            "musicbrainz update: stored cards the dump no longer has"
+        );
+        Ok(())
+    }
+
+    /// The merge: each item's card, written when new or changed (every card for an import); for
+    /// an update, a stored card whose item no longer makes a valid card is added to `removals`.
     #[allow(clippy::too_many_arguments)]
     async fn write(
         &self,
         job: &mut Job<'_>,
         mode: Run,
         version: &str,
-        dir: &Path,
+        done: &Done,
         removals: &Path,
-        spilled: &Done,
         after: Option<String>,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+        stop: &Stop,
     ) -> Result<()> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Part>(4);
-        let runs = spilled.runs.clone();
-        let merge_dir = dir.to_owned();
-        let merging = tokio::task::spawn_blocking(move || merge(&merge_dir, runs, mode, after, tx));
+        let runs = done.runs.clone();
+        let flag = stop.flag();
+        let merging = tokio::task::spawn_blocking(move || merge(runs, mode, after, tx, &flag));
         let started = Instant::now();
+        let mut said = Instant::now();
+        let mut rejected = 0;
         while let Some(part) = rx.recv().await {
+            if said.elapsed() >= PROGRESS_EVERY {
+                said = Instant::now();
+                let report = job.report();
+                tracing::info!(
+                    catalogue = "musicbrainz",
+                    version,
+                    at = %part.last,
+                    inserted = report.inserted,
+                    changed = report.changed,
+                    unchanged = report.unchanged,
+                    "musicbrainz cards being written"
+                );
+            }
             // Listed before the cursor moves past them: a run cut off between the two lists
             // some twice, which removes nothing twice.
             if !part.gone.is_empty() {
                 append_removals(removals, &part.gone)?;
             }
+            rejected += part.rejected;
             let cursor = serde_json::to_value(Cursor {
                 version: version.to_owned(),
                 phase: Phase::Write,
                 after: Some(part.last.clone()),
                 removed: 0,
-                as_of: spilled.as_of,
+                as_of,
+                note: None,
             })?;
-            job.write(&part.cards, cursor).await?;
+            job.write_rows(&part.rows, part.rejected, cursor).await?;
         }
         merging.await.map_err(|_| Failure::new("panic"))??;
         let report = job.report();
@@ -378,12 +599,41 @@ impl MusicBrainz {
             inserted = report.inserted,
             changed = report.changed,
             unchanged = report.unchanged,
-            rejected = report.rejected,
+            rejected,
             seconds = started.elapsed().as_secs_f64(),
             "musicbrainz cards written"
         );
         Ok(())
     }
+}
+
+/// Asks the threads of a run to stop when the run's future is dropped (a run cut off): a
+/// blocking thread can't be cancelled otherwise, and would go on reading into the directory the
+/// next attempt uses.
+#[derive(Default)]
+struct Stop(Arc<AtomicBool>);
+impl Stop {
+    fn flag(&self) -> Arc<AtomicBool> {
+        self.0.clone()
+    }
+}
+impl Drop for Stop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+fn stopped(flag: &AtomicBool) -> Result<()> {
+    if flag.load(Ordering::Relaxed) {
+        bail!(Failure::new("stopped"));
+    }
+    Ok(())
+}
+/// A name no other attempt has: an attempt's own directory.
+fn nonce() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{}", now.as_nanos(), std::process::id())
 }
 
 /// Where a run is: the dump, the phase, the last item written.
@@ -396,15 +646,21 @@ struct Cursor {
     removed: u64,
     /// The dump's time.
     as_of: Option<chrono::DateTime<chrono::Utc>>,
+    /// Why an update was refused (our own counts).
+    #[serde(default)]
+    note: Option<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Phase {
     Write,
     Remove,
+    /// An update refused for its removals: it waits for a newer dump.
+    Refused,
 }
 
-/// A finished read: the sorted runs and what the read found (its `done` file).
+/// A finished read: the sorted runs (at most the fan-in) and what the read found (its `done`
+/// file).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Done {
     pub runs: Vec<PathBuf>,
@@ -415,22 +671,74 @@ pub struct Done {
     pub too_long: u64,
     pub records: u64,
     pub downloaded: u64,
-    pub spilled: u64,
+    /// The files whose SHA-256 was checked.
+    pub checked: u32,
     pub seconds: f64,
-    /// Whether every file was read to its end (and its checksum checked when the dump has one).
-    pub whole: bool,
+}
+/// One file read whole: its runs and what the read found (its `<file>.done` manifest).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct FileDone {
+    runs: Vec<PathBuf>,
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
+    lines: u64,
+    bad_lines: u64,
+    too_long: u64,
+    records: u64,
+    downloaded: u64,
+    checked: bool,
+}
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let disk = || Failure::new("disk").at(path.display().to_string());
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec(value)?).with_context(disk)?;
+    std::fs::File::open(&tmp)
+        .and_then(|f| f.sync_all())
+        .with_context(disk)?;
+    std::fs::rename(&tmp, path).with_context(disk)?;
+    Ok(())
 }
 fn read_done(dir: &Path) -> Option<Done> {
-    let text = std::fs::read_to_string(dir.join("done")).ok()?;
-    let done: Done = serde_json::from_str(&text).ok()?;
+    let done: Done = read_json(&dir.join("done"))?;
     done.runs.iter().all(|r| r.exists()).then_some(done)
 }
 fn write_done(dir: &Path, done: &Done) -> Result<()> {
-    let disk = || Failure::new("disk").at(dir.display().to_string());
-    std::fs::create_dir_all(dir).with_context(disk)?;
-    let tmp = dir.join("done.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(done)?).with_context(disk)?;
-    std::fs::rename(&tmp, dir.join("done")).with_context(disk)?;
+    write_json(&dir.join("done"), done)
+}
+fn read_file_done(dir: &Path, file: &str) -> Option<FileDone> {
+    let done: FileDone = read_json(&dir.join(format!("{file}.done")))?;
+    done.runs.iter().all(|r| r.exists()).then_some(done)
+}
+/// Remove from a dump's directory every part no kept manifest names: earlier attempts' runs (an
+/// attempt cut off may still be writing into its own directory: it fails there), the snapshot,
+/// merge passes, the `done` file and manifests not kept.
+fn clear_spill(dir: &Path, kept: &BTreeMap<String, FileDone>) -> Result<()> {
+    let keep: HashSet<PathBuf> = kept
+        .values()
+        .flat_map(|d| d.runs.iter())
+        .filter_map(|r| r.parent().and_then(Path::parent).map(Path::to_owned))
+        .collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let manifest = name
+            .strip_suffix(".done")
+            .is_some_and(|f| kept.contains_key(f));
+        if keep.contains(&path) || manifest {
+            continue;
+        }
+        let gone = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        gone.with_context(|| Failure::new("disk").at(path.display().to_string()))?;
+    }
     Ok(())
 }
 /// Remove what runs over other dumps left (a run that went on to a newer dump leaves nothing
@@ -458,10 +766,10 @@ fn clear_others(work: &Path, keep: &[&Path]) -> Result<()> {
 }
 
 /// The stored cards' hashes, sorted under their keys: what an update compares the dump with.
-async fn snapshot(job: &Job<'_>, dir: &Path) -> Result<Vec<PathBuf>> {
+async fn snapshot(job: &Job<'_>, dir: &Path, room: Room) -> Result<Vec<PathBuf>> {
     const PAGE: i64 = 20_000;
     let pool = job.pool();
-    let mut spill = Some(Spill::new(dir, 64 << 20, DISK_NEED)?.keep_free(DISK_FLOOR));
+    let mut spill = Some(Spill::new(dir, 64 << 20, room)?);
     let mut after = String::new();
     loop {
         let page: Vec<(String, Vec<u8>)> = sqlx::query_as(
@@ -476,8 +784,8 @@ async fn snapshot(job: &Job<'_>, dir: &Path) -> Result<Vec<PathBuf>> {
             break;
         };
         after = last.clone();
-        let mut s = spill.take().expect("the spill is put back");
         let full = page.len() < PAGE as usize;
+        let mut s = spill.take().expect("the spill is put back");
         s = tokio::task::spawn_blocking(move || -> Result<Spill> {
             for (id, hash) in page {
                 s.push(id.as_bytes(), &postcard::to_allocvec(&Rec::Stored(hash))?)?;
@@ -497,71 +805,126 @@ async fn snapshot(job: &Job<'_>, dir: &Path) -> Result<Vec<PathBuf>> {
         .map_err(|_| Failure::new("panic"))?
 }
 
-/// Cards to write and stored cards gone, up to one batch, and the last item they reach.
+/// The kind of record that makes a card under `key` (`artist/…`, `release-group/…`,
+/// `recording/…`).
+fn entity_tag(key: &str) -> Option<usize> {
+    Some(match key.split_once('/')?.0 {
+        "artist" => tag::ARTIST,
+        "release-group" => tag::GROUP,
+        "recording" => tag::TRACK,
+        _ => return None,
+    })
+}
+/// An update's first pass over the merge: each stored card under a key with no record that
+/// makes a card, written to `path` (in key order). Their number.
+fn list_gone(runs: &[PathBuf], path: &Path, stop: &AtomicBool) -> Result<u64> {
+    let disk = || Failure::new("disk").at(path.display().to_string());
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path).with_context(disk)?);
+    let mut merged = spill::Merge::open(runs)?;
+    let mut gone = 0u64;
+    let mut seen = 0u64;
+    while let Some(group) = merged.next_group(1, 1)? {
+        seen += 1;
+        if seen.is_multiple_of(65_536) {
+            stopped(stop)?;
+        }
+        let key = String::from_utf8(group.key).map_err(|_| Failure::new("spill"))?;
+        let Some(entity) = entity_tag(&key) else {
+            continue;
+        };
+        if group.counts[tag::STORED] > 0 && group.counts[entity] == 0 {
+            writeln!(out, "{key}").with_context(disk)?;
+            gone += 1;
+        }
+    }
+    out.into_inner()
+        .map_err(|e| e.into_error())
+        .with_context(disk)?
+        .sync_all()
+        .with_context(disk)?;
+    Ok(gone)
+}
+
+/// Rows to write, stored cards to remove, the cards refused, and the last item they reach.
 struct Part {
-    cards: Vec<Card>,
+    rows: Vec<Row>,
     gone: Vec<String>,
+    rejected: u64,
     last: String,
 }
 /// The merge thread: items in key order, those after `after`; a part per
-/// [`super::store::BATCH_ROWS`] cards.
+/// [`super::store::BATCH_ROWS`] rows.
 fn merge(
-    dir: &Path,
     runs: Vec<PathBuf>,
     mode: Run,
     after: Option<String>,
     tx: tokio::sync::mpsc::Sender<Part>,
+    stop: &AtomicBool,
 ) -> Result<()> {
-    let mut merged = spill::merge(dir, runs)?;
+    let mut merged = spill::Merge::open(&runs)?;
     let mut shared = Shared::default();
-    let mut part = Part {
-        cards: vec![],
+    let empty = |last: String| Part {
+        rows: vec![],
         gone: vec![],
-        last: String::new(),
+        rejected: 0,
+        last,
     };
-    let send = |part: &mut Part| -> Result<()> {
-        let full = std::mem::replace(
-            part,
-            Part {
-                cards: vec![],
-                gone: vec![],
-                last: part.last.clone(),
-            },
-        );
-        tx.blocking_send(full)
-            .map_err(|_| Failure::new("stopped"))?;
-        Ok(())
-    };
-    while let Some((key, payloads)) = merged.next_group()? {
-        let key = String::from_utf8(key).map_err(|_| Failure::new("spill"))?;
-        let mut recs = Vec::with_capacity(payloads.len());
-        for p in payloads {
-            recs.push(postcard::from_bytes::<Rec>(&p).map_err(|_| Failure::new("spill"))?);
+    let mut part = empty(String::new());
+    let mut said = Instant::now();
+    let mut items = 0u64;
+    while let Some(group) = merged.next_group(GROUP_RECORDS, GROUP_BYTES)? {
+        items += 1;
+        if items.is_multiple_of(4096) {
+            stopped(stop)?;
+            if said.elapsed() >= PROGRESS_EVERY {
+                said = Instant::now();
+                tracing::info!(
+                    catalogue = "musicbrainz",
+                    items,
+                    "musicbrainz merge goes on"
+                );
+            }
         }
-        let item = Item::of(&key, recs, &mut shared);
+        let key = String::from_utf8(group.key).map_err(|_| Failure::new("spill"))?;
+        let mut recs = Vec::with_capacity(group.payloads.len());
+        for p in &group.payloads {
+            recs.push(postcard::from_bytes::<Rec>(p).map_err(|_| Failure::new("spill"))?);
+        }
+        let item = Item::of(&key, recs, &group.counts, &mut shared);
+        if shared.full() {
+            bail!(Failure::new("isrc_shared"));
+        }
         if key.starts_with("isrc/") || after.as_ref().is_some_and(|a| key <= *a) {
             continue;
         }
-        let card = item.card.and_then(|card| {
-            let row = card.checked(Catalogue::Musicbrainz).ok()?;
-            Some((card, row.content_hash))
-        });
-        match (card, item.stored) {
-            (Some((card, hash)), stored) => {
-                if mode == Run::Import || stored.as_deref() != Some(&hash[..]) {
-                    part.cards.push(card);
+        let made = item.card.map(|card| card.checked(Catalogue::Musicbrainz));
+        match (made, item.stored) {
+            (Some(Ok(row)), stored) => {
+                if mode == Run::Import || stored.as_deref() != Some(&row.content_hash[..]) {
+                    part.rows.push(row);
                 }
             }
-            (None, Some(_)) if mode == Run::Update => part.gone.push(key.clone()),
-            _ => {}
+            (Some(Err(_)), stored) => {
+                part.rejected += 1;
+                // The item no longer makes a valid card: its stored card goes (the first pass
+                // listed only items with no record left).
+                if mode == Run::Update && stored.is_some() {
+                    part.gone.push(key.clone());
+                }
+            }
+            (None, _) => {}
         }
         part.last = key;
-        if part.cards.len() >= super::store::BATCH_ROWS || part.gone.len() >= 10_000 {
-            send(&mut part)?;
+        if part.rows.len() >= super::store::BATCH_ROWS || part.gone.len() >= 10_000 {
+            let last = part.last.clone();
+            let full = std::mem::replace(&mut part, empty(last));
+            tx.blocking_send(full)
+                .map_err(|_| Failure::new("stopped"))?;
         }
     }
-    if !part.cards.is_empty() || !part.gone.is_empty() || !part.last.is_empty() {
-        send(&mut part)?;
+    if !part.rows.is_empty() || !part.gone.is_empty() || !part.last.is_empty() {
+        tx.blocking_send(part)
+            .map_err(|_| Failure::new("stopped"))?;
     }
     tracing::debug!(
         catalogue = "musicbrainz",
@@ -571,7 +934,6 @@ fn merge(
     Ok(())
 }
 fn append_removals(path: &Path, ids: &[String]) -> Result<()> {
-    use std::io::Write;
     let disk = || Failure::new("disk").at(path.display().to_string());
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -584,50 +946,53 @@ fn append_removals(path: &Path, ids: &[String]) -> Result<()> {
     file.sync_data().with_context(disk)?;
     Ok(())
 }
-/// An update's removals, once the merge has listed them all: refused when they are more than
-/// [`MAX_REMOVED_SHARE`] of the cards (none is removed), else removed in parts, the count in the
-/// cursor.
+/// An update's removals: the cards `removals` lists, read in parts, those after the first
+/// `done_already` (a resumed removal), the count in the cursor.
 async fn remove_gone(
     job: &mut Job<'_>,
     version: &str,
     path: &Path,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
+    done_already: u64,
 ) -> Result<()> {
-    let text = match tokio::fs::read_to_string(path).await {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(_) => bail!(Failure::new("disk").at(path.display().to_string())),
+    let disk = || Failure::new("disk").at(path.display().to_string());
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => bail!(disk()),
     };
-    let mut ids: Vec<String> = text.lines().map(str::to_owned).collect();
-    ids.sort();
-    ids.dedup();
-    let cards = job.state().cards.max(1) as f64;
-    if job.limit().is_none() && ids.len() as f64 > cards * MAX_REMOVED_SHARE {
-        tracing::warn!(
-            catalogue = "musicbrainz",
-            removals = ids.len(),
-            cards = job.state().cards,
-            "musicbrainz update would remove too many cards; run `pinakesd catalogue import musicbrainz` for a full import"
-        );
-        bail!(Failure::new("removals"));
-    }
-    let done = job
-        .cursor()
-        .and_then(|c| serde_json::from_value::<Cursor>(c.clone()).ok())
-        .filter(|c| c.phase == Phase::Remove)
-        .map_or(0, |c| c.removed as usize);
-    let mut at = done.min(ids.len());
-    while at < ids.len() {
-        let end = (at + super::store::BATCH_ROWS).min(ids.len());
+    let mut lines = BufReader::new(file).lines();
+    let mut at = 0u64;
+    let mut end = false;
+    while !end {
+        let mut ids = Vec::with_capacity(super::store::BATCH_ROWS);
+        while ids.len() < super::store::BATCH_ROWS {
+            match lines.next() {
+                Some(line) => {
+                    let line = line.with_context(disk)?;
+                    at += 1;
+                    if at > done_already && !line.is_empty() {
+                        ids.push(line);
+                    }
+                }
+                None => {
+                    end = true;
+                    break;
+                }
+            }
+        }
+        if ids.is_empty() {
+            continue;
+        }
         let cursor = serde_json::to_value(Cursor {
             version: version.to_owned(),
             phase: Phase::Remove,
             after: None,
-            removed: end as u64,
+            removed: at,
             as_of,
+            note: None,
         })?;
-        job.remove(&ids[at..end], cursor).await?;
-        at = end;
+        job.remove(&ids, cursor).await?;
     }
     Ok(())
 }
@@ -642,7 +1007,12 @@ struct ReadPlan {
     limit: Option<u64>,
     threads: usize,
     dir: PathBuf,
-    max_bytes: u64,
+    room: Room,
+    sort_memory: usize,
+    retry_wait: Duration,
+    stop: Arc<AtomicBool>,
+    /// Files an earlier attempt read whole.
+    kept: BTreeMap<String, FileDone>,
 }
 impl ReadPlan {
     fn open(&self, file: &str) -> Result<Box<dyn Read + Send>> {
@@ -654,6 +1024,7 @@ impl ReadPlan {
                     self.handle.clone(),
                     url,
                     FILE_CAP,
+                    self.retry_wait,
                 )?))
             }
             Source::Dir(dir) => {
@@ -727,115 +1098,134 @@ struct Chunk {
 }
 const CHUNK_BYTES: usize = 4 << 20;
 
-/// Read the dump's files into sorted runs under `plan.dir`.
+/// Read the dump's files into sorted runs under `plan.dir`: each file not kept into a directory
+/// of its own (`<file>-<nonce>`), its manifest written once it is read whole and checked.
 fn read_dump(plan: ReadPlan) -> Result<Done> {
-    let mut done = Done {
-        whole: true,
-        ..Done::default()
-    };
+    let mut done = Done::default();
     let mut subset = plan.limit.map(|cap| Subset {
         cap,
         ..Subset::default()
     });
-    let budget = SORT_MEMORY / plan.threads;
-    let per_spill = plan.max_bytes / plan.threads as u64;
-    let mut spills: Vec<Spill> = (0..plan.threads)
-        .map(|i| {
-            Ok(
-                Spill::new(&plan.dir.join(format!("w{i}")), budget, per_spill)?
-                    .keep_free(DISK_FLOOR),
-            )
-        })
-        .collect::<Result<_>>()?;
+    let budget = plan.sort_memory / plan.threads;
     for file in FILES {
         if file == "recording" && subset.is_some() {
             continue;
         }
-        let name = format!("{file}.tar.xz");
-        let at = match &plan.source {
-            Source::Mirror(u) => u.host_str().unwrap_or_default().to_owned(),
-            Source::Dir(d) => d.join(&name).display().to_string(),
+        let read = match plan.kept.get(file) {
+            Some(kept) => kept.clone(),
+            None => {
+                let read = read_file(&plan, file, subset.as_mut(), budget)?;
+                if subset.is_none() {
+                    write_json(&plan.dir.join(format!("{file}.done")), &read)?;
+                }
+                read
+            }
         };
-        let mut hashed = bulk::Hashed::new(plan.open(&name)?);
-        let stopped;
-        let mut timestamp = None;
-        {
-            let decoded = bulk::xz(
-                BufReader::with_capacity(1 << 20, &mut hashed),
-                XZ_THREADS,
-                XZ_MEMORY,
-            )?;
-            let mut tar = Tar::new(decoded);
-            let wanted = format!("mbdump/{file}");
-            loop {
-                let Some(entry) = tar.next_entry().map_err(|e| read_failure(e, &at))? else {
-                    bail!(Failure::new("archive").at(at.clone()));
-                };
-                if entry.path == "TIMESTAMP" {
-                    let mut text = String::new();
-                    tar.data()
-                        .take(256)
-                        .read_to_string(&mut text)
-                        .map_err(|e| read_failure(e.into(), &at))?;
-                    timestamp = dump_time(&text);
-                    continue;
-                }
-                if entry.path != wanted {
-                    continue;
-                }
-                let lines = Lines::new(BufReader::with_capacity(1 << 20, tar.data()), LINE_CAP);
-                let read = match subset.as_mut() {
-                    Some(subset) => read_limited(file, lines, subset, &mut spills[0], &at)?,
-                    None => read_parallel(file, lines, &mut spills, &at)?,
-                };
-                done.lines += read.lines;
-                done.bad_lines += read.bad;
-                done.too_long += read.too_long;
-                done.records += read.records;
-                stopped = read.stopped;
-                if read.bad > BAD_LINES && read.bad * 1000 > read.lines {
-                    bail!(Failure::new("parse").at(at.clone()));
-                }
-                break;
-            }
-            if !stopped {
-                // The rest of the archive and of the file, so the checksum covers all of it.
-                let mut decoded = tar.into_inner();
-                std::io::copy(&mut decoded, &mut std::io::sink())
-                    .map_err(|e| read_failure(e.into(), &at))?;
-                std::io::copy(&mut decoded.into_inner(), &mut std::io::sink())
-                    .map_err(|e| read_failure(e.into(), &at))?;
-            }
+        done.lines += read.lines;
+        done.bad_lines += read.bad_lines;
+        done.too_long += read.too_long;
+        done.records += read.records;
+        done.downloaded += read.downloaded;
+        done.checked += u32::from(read.checked);
+        if let Some(t) = read.as_of {
+            done.as_of = Some(done.as_of.map_or(t, |a| a.min(t)));
         }
-        done.downloaded += hashed.count();
-        if let Some(t) = timestamp {
-            done.as_of = Some(
-                done.as_of
-                    .map_or(t, |a: chrono::DateTime<chrono::Utc>| a.min(t)),
-            );
+        done.runs.extend(read.runs);
+    }
+    Ok(done)
+}
+/// One file read into sorted runs.
+fn read_file(
+    plan: &ReadPlan,
+    file: &'static str,
+    subset: Option<&mut Subset>,
+    budget: usize,
+) -> Result<FileDone> {
+    let name = format!("{file}.tar.xz");
+    let at = match &plan.source {
+        Source::Mirror(u) => u.host_str().unwrap_or_default().to_owned(),
+        Source::Dir(d) => d.join(&name).display().to_string(),
+    };
+    // A file the dump's list does not name is not read: a mirror lists every file it serves, and
+    // a local dump's list, when it has one, every file it holds.
+    let want = plan.sums.get(&name).cloned();
+    if want.is_none() && (matches!(plan.source, Source::Mirror(_)) || !plan.sums.is_empty()) {
+        bail!(Failure::new("checksum").at(at));
+    }
+    let dir = plan.dir.join(format!("{file}-{}", nonce()));
+    let threads = if subset.is_some() { 1 } else { plan.threads };
+    let mut spills: Vec<Spill> = (0..threads)
+        .map(|i| Spill::new(&dir.join(format!("w{i}")), budget, plan.room))
+        .collect::<Result<_>>()?;
+    let mut hashed = bulk::Hashed::new(plan.open(&name)?);
+    let mut out = FileDone::default();
+    let stopped_early;
+    {
+        let decoded = bulk::xz(
+            BufReader::with_capacity(1 << 20, &mut hashed),
+            XZ_THREADS,
+            XZ_MEMORY,
+        )?;
+        let mut tar = Tar::new(decoded);
+        let wanted = format!("mbdump/{file}");
+        loop {
+            stopped(&plan.stop)?;
+            let Some(entry) = tar.next_entry().map_err(|e| read_failure(e, &at))? else {
+                bail!(Failure::new("archive").at(at.clone()));
+            };
+            if entry.path == "TIMESTAMP" {
+                let mut text = String::new();
+                tar.data()
+                    .take(256)
+                    .read_to_string(&mut text)
+                    .map_err(|e| read_failure(e.into(), &at))?;
+                out.as_of = dump_time(&text);
+                continue;
+            }
+            if entry.path != wanted {
+                continue;
+            }
+            let lines = Lines::new(BufReader::with_capacity(1 << 20, tar.data()), LINE_CAP);
+            let read = match subset {
+                Some(subset) => read_limited(file, lines, subset, &mut spills[0], &at, &plan.stop)?,
+                None => read_parallel(file, lines, &mut spills, &at, &plan.stop)?,
+            };
+            out.lines = read.lines;
+            out.bad_lines = read.bad;
+            out.too_long = read.too_long;
+            out.records = read.records;
+            stopped_early = read.stopped;
+            break;
         }
-        if stopped {
-            done.whole = false;
-        } else if let Some(want) = plan.sums.get(&name) {
-            if *want != hashed.hex() {
+        if !stopped_early {
+            // The rest of the archive and of the file, so the checksum covers all of it; an
+            // archive holds little after its last entry.
+            let mut decoded = tar.into_inner();
+            let trailing = std::io::copy(
+                &mut (&mut decoded).take(TRAILING_CAP + 1),
+                &mut std::io::sink(),
+            )
+            .map_err(|e| read_failure(e.into(), &at))?;
+            if trailing > TRAILING_CAP {
+                bail!(Failure::new("archive").at(at.clone()));
+            }
+            std::io::copy(&mut decoded.into_inner(), &mut std::io::sink())
+                .map_err(|e| read_failure(e.into(), &at))?;
+        }
+    }
+    out.downloaded = hashed.count();
+    if !stopped_early {
+        if let Some(want) = want {
+            if want != hashed.hex() {
                 bail!(Failure::new("checksum").at(at));
             }
-        } else if matches!(plan.source, Source::Mirror(_)) {
-            // The mirror lists every file it serves.
-            bail!(Failure::new("checksum").at(at));
+            out.checked = true;
         }
     }
-    let mut runs = vec![];
     for spill in spills {
-        runs.extend(spill.finish()?);
+        out.runs.extend(spill.finish()?);
     }
-    done.spilled = runs
-        .iter()
-        .filter_map(|r| std::fs::metadata(r).ok())
-        .map(|m| m.len())
-        .sum();
-    done.runs = runs;
-    Ok(done)
+    Ok(out)
 }
 /// A read error as the run shows it: the failure it carries (a download's), else `read` at the
 /// file.
@@ -867,6 +1257,11 @@ struct FileRead {
     /// The read stopped before the file's end (a `limit`).
     stopped: bool,
 }
+/// More bad lines than a file may hold so far: more than [`BAD_LINES`], and more than one in a
+/// thousand of the lines read.
+fn too_bad(bad: u64, lines: u64) -> bool {
+    bad > BAD_LINES && bad.saturating_mul(1000) > lines
+}
 /// The records of one line of `file`; `None` for a line that is not one.
 fn parse_line(file: &str, line: &[u8], out: &mut Vec<(String, Rec)>) -> Option<()> {
     match file {
@@ -886,24 +1281,33 @@ fn push_all(spill: &mut Spill, recs: &mut Vec<(String, Rec)>) -> Result<u64> {
     Ok(n)
 }
 /// One file's lines parsed on `spills.len()` threads, each sorting into its own runs.
-fn read_parallel<R: std::io::BufRead>(
+fn read_parallel<R: BufRead>(
     file: &'static str,
     mut lines: Lines<R>,
     spills: &mut [Spill],
     at: &str,
+    stop: &AtomicBool,
 ) -> Result<FileRead> {
     let mut read = FileRead::default();
     let (tx, rx) = crossbeam_channel::bounded::<Chunk>(spills.len() * 2);
-    let results: Vec<Result<(u64, u64, u64)>> = std::thread::scope(|scope| {
+    // Lines and bad lines over all threads, checked as the read goes.
+    let counted = (
+        std::sync::atomic::AtomicU64::new(0),
+        std::sync::atomic::AtomicU64::new(0),
+    );
+    let results: Vec<Result<u64>> = std::thread::scope(|scope| {
         let workers: Vec<_> = spills
             .iter_mut()
             .map(|spill| {
                 let rx = rx.clone();
-                scope.spawn(move || -> Result<(u64, u64, u64)> {
-                    let (mut lines, mut bad, mut records) = (0, 0, 0);
+                let counted = &counted;
+                scope.spawn(move || -> Result<u64> {
+                    let mut records = 0;
                     let mut recs = vec![];
                     while let Ok(chunk) = rx.recv() {
+                        stopped(stop)?;
                         let mut start = 0;
+                        let (mut lines, mut bad) = (0, 0);
                         for end in chunk.ends {
                             lines += 1;
                             if parse_line(file, &chunk.data[start..end], &mut recs).is_none() {
@@ -912,8 +1316,13 @@ fn read_parallel<R: std::io::BufRead>(
                             records += push_all(spill, &mut recs)?;
                             start = end;
                         }
+                        let lines = counted.0.fetch_add(lines, Ordering::Relaxed) + lines;
+                        let bad = counted.1.fetch_add(bad, Ordering::Relaxed) + bad;
+                        if too_bad(bad, lines) {
+                            bail!(Failure::new("parse").at(at.to_owned()));
+                        }
                     }
-                    Ok((lines, bad, records))
+                    Ok(records)
                 })
             })
             .collect();
@@ -924,10 +1333,23 @@ fn read_parallel<R: std::io::BufRead>(
                 data: Vec::with_capacity(CHUNK_BYTES),
                 ends: vec![],
             };
+            let mut fed = 0u64;
+            let mut said = Instant::now();
             while lines
                 .next_line(&mut line)
                 .map_err(|e| read_failure(e.into(), at))?
             {
+                fed += 1;
+                if said.elapsed() >= PROGRESS_EVERY {
+                    said = Instant::now();
+                    stopped(stop)?;
+                    tracing::info!(
+                        catalogue = "musicbrainz",
+                        file,
+                        lines = fed,
+                        "musicbrainz dump read goes on"
+                    );
+                }
                 chunk.data.extend_from_slice(&line);
                 chunk.ends.push(chunk.data.len());
                 if chunk.data.len() >= CHUNK_BYTES {
@@ -950,7 +1372,7 @@ fn read_parallel<R: std::io::BufRead>(
         };
         let fed = feed();
         drop(tx);
-        let mut results: Vec<Result<(u64, u64, u64)>> = workers
+        let mut results: Vec<Result<u64>> = workers
             .into_iter()
             .map(|w| {
                 w.join()
@@ -958,27 +1380,27 @@ fn read_parallel<R: std::io::BufRead>(
             })
             .collect();
         if let Err(e) = fed {
-            results.push(Err(e));
+            results.insert(0, Err(e));
         }
         results
     });
     for result in results {
-        let (lines, bad, records) = result?;
-        read.lines += lines;
-        read.bad += bad;
-        read.records += records;
+        read.records += result?;
     }
+    read.lines = counted.0.load(Ordering::Relaxed);
+    read.bad = counted.1.load(Ordering::Relaxed);
     read.too_long = lines.too_long();
     Ok(read)
 }
 /// One file's lines in order on this thread, kept to `subset`: releases while their items fit,
 /// then only the release groups and artists those name (stopping once all are found).
-fn read_limited<R: std::io::BufRead>(
+fn read_limited<R: BufRead>(
     file: &'static str,
     mut lines: Lines<R>,
     subset: &mut Subset,
     spill: &mut Spill,
     at: &str,
+    stop: &AtomicBool,
 ) -> Result<FileRead> {
     let mut read = FileRead::default();
     let mut line = vec![];
@@ -989,13 +1411,23 @@ fn read_limited<R: std::io::BufRead>(
         "artist" => subset.artists.len(),
         _ => usize::MAX,
     };
+    if wanted == 0 {
+        read.stopped = true;
+        return Ok(read);
+    }
     while lines
         .next_line(&mut line)
         .map_err(|e| read_failure(e.into(), at))?
     {
         read.lines += 1;
+        if read.lines.is_multiple_of(4096) {
+            stopped(stop)?;
+        }
         if parse_line(file, &line, &mut recs).is_none() {
             read.bad += 1;
+            if too_bad(read.bad, read.lines) {
+                bail!(Failure::new("parse").at(at.to_owned()));
+            }
             continue;
         }
         match file {
@@ -1026,33 +1458,89 @@ fn read_limited<R: std::io::BufRead>(
     Ok(read)
 }
 
+fn position_version(state: &State) -> String {
+    state
+        .position
+        .as_ref()
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+fn position_limit(state: &State) -> Option<u64> {
+    state
+        .position
+        .as_ref()
+        .and_then(|p| p.get("limit"))
+        .and_then(|v| v.as_u64())
+}
+fn cursor_phase(state: &State) -> Option<Phase> {
+    let c: Cursor = serde_json::from_value(state.cursor.clone()?).ok()?;
+    Some(c.phase)
+}
+
 #[async_trait]
 impl Importer for MusicBrainz {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Musicbrainz
     }
-    fn disk_need(&self, _run: Run, _state: &State) -> u64 {
-        match self.limit {
-            Some(limit) => limit.saturating_mul(DISK_PER_LIMITED_CARD).max(DISK_LEAST),
-            None => DISK_NEED,
+    /// A read's disk ([`DISK_NEED`], or what a `limit` takes), less what the catalogue's
+    /// directory already holds (a cut-off run's runs, which it reuses or removes first); a run
+    /// cut off in its removals, or refused, needs none.
+    fn disk_need(&self, _run: Run, state: &State) -> u64 {
+        if state.run.is_some()
+            && matches!(cursor_phase(state), Some(Phase::Remove | Phase::Refused))
+        {
+            return 0;
         }
+        self.need().saturating_sub(self.held())
     }
     fn update_every(&self) -> Duration {
-        UPDATE_EVERY
+        POLL
+    }
+    /// A full import when none has finished; else, at most once per [`POLL`], an update when
+    /// `LATEST` names a newer dump than the cards are from, or the `limit` changed. A `LATEST`
+    /// that can't be read is asked again at the next poll.
+    async fn plan(&self, state: &State) -> Result<Plan> {
+        if state.current_at().is_none() {
+            return Ok(Plan::Run(Run::Import));
+        }
+        if position_limit(state) != self.limit {
+            return Ok(Plan::Run(Run::Update));
+        }
+        {
+            let mut polled = self.polled.lock().expect("the poll time");
+            if let Some(at) = *polled {
+                if at.elapsed() < POLL {
+                    return Ok(Plan::Wait(POLL - at.elapsed()));
+                }
+            }
+            *polled = Some(Instant::now());
+        }
+        match self.latest().await {
+            Ok(latest) if latest > position_version(state) => Ok(Plan::Run(Run::Update)),
+            Ok(_) => Ok(Plan::Wait(POLL)),
+            Err(error) => {
+                tracing::info!(catalogue = "musicbrainz", error = %super::failure::shown(&error), "the newest MusicBrainz dump could not be looked up; asked again in an hour");
+                Ok(Plan::Wait(POLL))
+            }
+        }
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         self.read_and_write(job, Run::Import).await
     }
+    /// An update; a full import instead when one was asked for, or when the `limit` changed (a
+    /// different subset is a new import, not a change of the old one).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
+        if job.state().import_requested.is_some() {
+            return Ok(UpdateEnd::NeedsImport(REQUESTED));
+        }
+        if position_limit(job.state()) != job.limit() {
+            return Ok(UpdateEnd::NeedsImport("the limit changed"));
+        }
         if job.cursor().is_none() {
             let latest = self.latest().await?;
-            let current = job
-                .position()
-                .and_then(|p| p.get("version"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_owned();
-            if latest.as_str() <= current.as_str() {
+            if latest <= position_version(job.state()) {
                 return Ok(UpdateEnd::Done);
             }
         }
@@ -1060,8 +1548,19 @@ impl Importer for MusicBrainz {
         Ok(UpdateEnd::Done)
     }
 }
-/// The importer `pinakesd` runs: the official mirror.
+/// The reason a full import asked for by hand is recorded under (`import_requested`).
+pub const REQUESTED: &str = "asked for by pinakesd catalogue import --request";
+
+/// The importer `pinakesd` runs: the official mirror; none without the operator's contact
+/// (`http.contact`), which every request to the mirror names.
 pub fn importer(config: &crate::config::Config) -> Option<Arc<dyn Importer>> {
+    if config.egress.contact.is_empty() {
+        tracing::warn!(
+            catalogue = "musicbrainz",
+            "the musicbrainz importer starts only with http.contact set (the mirror is asked with the operator's contact)"
+        );
+        return None;
+    }
     match MusicBrainz::official(config) {
         Ok(importer) => Some(Arc::new(importer)),
         Err(error) => {
@@ -1070,7 +1569,6 @@ pub fn importer(config: &crate::config::Config) -> Option<Arc<dyn Importer>> {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,6 +1583,167 @@ mod tests {
         .filter(|l| !l.is_empty())
         .map(<[u8]>::to_vec)
         .collect()
+    }
+
+    /// The counts by kind a group gives for these records.
+    fn counts_of(recs: &[Rec]) -> [u64; spill::TAGS] {
+        let mut counts = [0; spill::TAGS];
+        for r in recs {
+            let first = postcard::to_allocvec(r).unwrap()[0];
+            counts[usize::from(first).min(spill::TAGS - 1)] += 1;
+        }
+        counts
+    }
+
+    /// The tags the merge counts by are the records' own first bytes.
+    #[test]
+    fn record_tags_are_their_first_bytes() {
+        for (rec, want) in [
+            (Rec::Stored(vec![1]), tag::STORED),
+            (Rec::Artist(Default::default()), tag::ARTIST),
+            (Rec::Group(Default::default()), tag::GROUP),
+            (Rec::Credited, tag::CREDITED),
+            (
+                Rec::Release {
+                    release: "r".into(),
+                    links: vec![],
+                },
+                tag::RELEASE,
+            ),
+            (Rec::Track(Default::default()), tag::TRACK),
+            (Rec::Isrc("x".into()), tag::ISRC),
+        ] {
+            assert_eq!(usize::from(postcard::to_allocvec(&rec).unwrap()[0]), want);
+        }
+    }
+
+    /// A line's lists are read only up to their caps: a release of 10,000 tracks keeps 4,096,
+    /// and a list of `null` or of the wrong type is no list.
+    #[test]
+    fn long_lists_are_cut_while_they_are_read() {
+        let track = r#"{"title":"t","recording":{"id":"aeeaa6df-4ab1-4eee-b72f-f21b5c7cbdfe","title":"t"}}"#;
+        let line = format!(
+            r#"{{"id":"a96e1d03-e685-3627-8cba-f5b96be7158f","media":[{{"tracks":[{}]}}],"relations":null}}"#,
+            vec![track; 10_000].join(",")
+        );
+        let mut out = vec![];
+        parse_line("release", line.as_bytes(), &mut out).unwrap();
+        // The same recording on every track: one record and no more.
+        assert_eq!(out.len(), 1);
+        let parsed: records::ReleaseLine = serde_json::from_str(&line).unwrap();
+        let _ = parsed;
+        let many_media = format!(
+            r#"{{"id":"a96e1d03-e685-3627-8cba-f5b96be7158f","media":[{}]}}"#,
+            vec!["{}"; 2000].join(",")
+        );
+        assert!(parse_line("release", many_media.as_bytes(), &mut out).is_some());
+        assert!(parse_line(
+            "release",
+            br#"{"id":"a96e1d03-e685-3627-8cba-f5b96be7158f","media":7}"#,
+            &mut out
+        )
+        .is_none());
+    }
+
+    /// Property: an ISRC's number is one to one over valid ISRCs, and none for anything else.
+    #[test]
+    fn isrc_numbers_are_one_to_one() {
+        let mut seed = 0x5eed_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        const CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut seen = BTreeMap::new();
+        for _ in 0..20_000 {
+            let code: String = (0..12)
+                .map(|_| CHARS[(next() % 36) as usize] as char)
+                .collect();
+            let n = records::isrc_number(&code).unwrap();
+            if let Some(other) = seen.insert(n, code.clone()) {
+                assert_eq!(other, code);
+            }
+        }
+        assert_eq!(
+            records::isrc_number("ZZZZZZZZZZZZ"),
+            Some(36u64.pow(12) - 1)
+        );
+        for bad in [
+            "",
+            "GBUM7102960",
+            "GBUM710296041",
+            "gbum71029604",
+            "GB-M71029604",
+        ] {
+            assert_eq!(records::isrc_number(bad), None, "{bad}");
+        }
+    }
+
+    /// Bad lines fail a file once more than 100 and one in a thousand.
+    #[test]
+    fn a_file_fails_on_too_many_bad_lines() {
+        assert!(!too_bad(100, 100));
+        assert!(too_bad(101, 101));
+        assert!(too_bad(101, 100_000));
+        assert!(!too_bad(101, 101_000));
+        assert!(!too_bad(u64::MAX / 2, u64::MAX));
+    }
+
+    /// A run that resumes needs only the disk its directory does not already hold, a removal or a
+    /// refused update none, and a limit's need is within a full read's.
+    #[test]
+    fn the_disk_a_run_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let importer = MusicBrainz::new(Source::official(), "")
+            .unwrap()
+            .work_dir(dir.path().to_owned());
+        let state = |run: Option<&str>, cursor: Option<serde_json::Value>| State {
+            catalogue: "musicbrainz".into(),
+            phase: "idle".into(),
+            run: run.map(str::to_owned),
+            generation: 1,
+            cursor,
+            position: None,
+            cards: 0,
+            upstream_version: None,
+            last_import_at: None,
+            last_update_at: None,
+            import_requested: None,
+            current_as_of: None,
+            waiting: None,
+            last_error: None,
+            error_count: 0,
+            updated_at: chrono::Utc::now(),
+        };
+        assert_eq!(
+            importer.disk_need(Run::Import, &state(None, None)),
+            DISK_NEED
+        );
+        std::fs::create_dir_all(dir.path().join("spill-20261125-001001/x")).unwrap();
+        std::fs::write(
+            dir.path().join("spill-20261125-001001/x/run"),
+            vec![0; 5000],
+        )
+        .unwrap();
+        assert_eq!(
+            importer.disk_need(Run::Update, &state(Some("update"), None)),
+            DISK_NEED - 5000
+        );
+        let removing = serde_json::json!({"version": "20261125-001001", "phase": "remove", "after": null, "removed": 3, "as_of": null});
+        assert_eq!(
+            importer.disk_need(Run::Update, &state(Some("update"), Some(removing))),
+            0
+        );
+        let small = MusicBrainz::new(Source::official(), "")
+            .unwrap()
+            .limit(Some(10));
+        assert_eq!(small.disk_need(Run::Import, &state(None, None)), DISK_LEAST);
+        let big = MusicBrainz::new(Source::official(), "")
+            .unwrap()
+            .limit(Some(10_000_000));
+        assert_eq!(big.disk_need(Run::Import, &state(None, None)), DISK_NEED);
     }
 
     #[test]
@@ -1112,9 +1771,9 @@ mod tests {
         assert_eq!(
             counts,
             BTreeMap::from([
-                ("artist", 2),
+                ("artist", 4),
                 ("credited", 3),
-                ("group", 2),
+                ("group", 4),
                 ("release", 3),
                 ("track", 12),
                 ("isrc", 10),
@@ -1138,7 +1797,8 @@ mod tests {
             .collect();
         assert_eq!(mine.len(), 2);
         let hash = |recs: Vec<Rec>| {
-            Item::of(key, recs, &mut Shared::default())
+            let counts = counts_of(&recs);
+            Item::of(key, recs, &counts, &mut Shared::default())
                 .card
                 .unwrap()
                 .checked(Catalogue::Musicbrainz)
@@ -1195,7 +1855,8 @@ mod tests {
                     }
                     let mut shared = Shared::default();
                     for (key, rec) in out {
-                        let _ = Item::of(&key, vec![rec], &mut shared)
+                        let counts = counts_of(std::slice::from_ref(&rec));
+                        let _ = Item::of(&key, vec![rec], &counts, &mut shared)
                             .card
                             .map(|c| c.checked(Catalogue::Musicbrainz));
                     }
@@ -1226,8 +1887,20 @@ mod tests {
         ] {
             assert!(Source::parse(bad).is_err(), "{bad}");
         }
+        // A local dump is named after its dump.
+        let root = tempfile::tempdir().unwrap();
+        let named = root.path().join("20261125-001001");
+        std::fs::create_dir(&named).unwrap();
+        assert!(Source::parse(named.to_str().unwrap()).is_ok());
+        assert!(Source::parse(root.path().to_str().unwrap()).is_err());
         assert!(valid_version("20261125-001001"));
-        for bad in ["20261125001001", "2026112-0010010", "../../etc/x", "", "20261125-00100a"] {
+        for bad in [
+            "20261125001001",
+            "2026112-0010010",
+            "../../etc/x",
+            "",
+            "20261125-00100a",
+        ] {
             assert!(!valid_version(bad), "{bad}");
         }
         assert_eq!(
@@ -1250,7 +1923,12 @@ mod tests {
         // Arovane's album: 4 recordings, its release group and its artist.
         let arovane = releases
             .iter()
-            .find(|r| r.iter().filter(|(k, _)| k.starts_with("recording/")).count() == 4)
+            .find(|r| {
+                r.iter()
+                    .filter(|(k, _)| k.starts_with("recording/"))
+                    .count()
+                    == 4
+            })
             .unwrap()
             .clone();
         let mut subset = Subset {

@@ -8,9 +8,15 @@ line as in the dump:
 - `release.jsonl`: three releases: two editions of Tori Amos' "A Sorta Fairytale" that share their
   recordings and release group, and Arovane's "Cycliph" (recordings with ISRCs and streaming
   links, a release with a YouTube Music album link and a Discogs release);
-- `release-group.jsonl`: two release groups with Wikidata, Discogs master and Wikipedia links;
-- `artist.jsonl`: two artists with streaming, Bandcamp, Discogs, Wikidata and homepage links;
+- `release-group.jsonl`: two release groups with Wikidata, Discogs master and Wikipedia links, then
+  the release groups of the three releases (Tori Amos' single and Arovane's EP);
+- `artist.jsonl`: two artists with streaming, Bandcamp, Discogs, Wikidata and homepage links, then
+  the artists of the three releases (Tori Amos and Arovane, both persons);
 - `recording.jsonl`: two recordings on no release.
+
+The last two lines of `artist.jsonl` and of `release-group.jsonl` were read on 2026-11-26 from
+MusicBrainz's web service (`https://musicbrainz.org/ws/2/<entity>/<mbid>?inc=aliases+genres+url-rels`,
+with `+artist-credits` for the release groups), which writes an entity as the dump does.
 
 `tests/catalogue_musicbrainz.rs` packs them into dumps (`<entity>.tar.xz` with the dump's
 `TIMESTAMP`, and `SHA256SUMS`) as the importer reads them.

@@ -1,14 +1,16 @@
 //! An external sort: records with a text key are gathered in memory up to a budget, sorted by key
-//! (bytewise) and written as runs (lz4 frames) into a directory; [`Spill::merge`] then gives
-//! every record in key order, those of one key together. An importer uses it to bring together
-//! what a dump says about one item in several files (a recording on many releases), within a
-//! fixed memory, and to compare the result with the stored cards in the same order.
+//! (bytewise) and written as runs (lz4 frames) into a directory; [`reduce`] merges runs in passes
+//! until at most a fan-in of them is left, and [`Merge`] then gives every key in order with its
+//! records. An importer uses it to bring together what a dump says about one item in several
+//! files (a recording on many releases), within a fixed memory, and to compare the result with the
+//! stored cards in the same order.
 //!
-//! Record order within one key is not kept: a reader of a key's records must not depend on it.
+//! Record order within one key is not kept, and [`Merge::next_group`] keeps a bounded part of a
+//! key's records: which part depends only on the records, never on their order.
 use super::failure::Failure;
 use anyhow::{bail, Context as _, Result};
 use std::{
-    collections::BinaryHeap,
+    collections::{BTreeSet, BinaryHeap},
     fs::File,
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -18,34 +20,61 @@ use std::{
 pub const KEY_CAP: usize = 1024;
 /// The largest record (bytes).
 pub const RECORD_CAP: usize = 16 * 1024 * 1024;
-/// The most runs merged at once; more are merged in passes first.
-const FAN_IN: usize = 128;
+/// The most runs merged at once ([`reduce`]).
+pub const FAN_IN: usize = 256;
+/// The distinct first bytes of payloads [`Group::counts`] counts apart (higher ones count in the
+/// last).
+pub const TAGS: usize = 16;
+
+/// What the disk may take: at most `max_bytes` written in all, and `floor` bytes left free on the
+/// file system.
+#[derive(Clone, Copy)]
+pub struct Room {
+    pub max_bytes: u64,
+    pub floor: u64,
+    pub free_disk: fn(&Path) -> io::Result<u64>,
+}
+impl Room {
+    pub fn new(max_bytes: u64, floor: u64) -> Self {
+        Self {
+            max_bytes,
+            floor,
+            free_disk: super::run::free_bytes,
+        }
+    }
+    fn check(&self, dir: &Path, written: u64) -> Result<()> {
+        let disk = || Failure::new("disk").at(dir.display().to_string());
+        if written > self.max_bytes {
+            bail!(disk());
+        }
+        let free = (self.free_disk)(dir).with_context(disk)?;
+        if free < self.floor {
+            bail!(disk());
+        }
+        Ok(())
+    }
+}
 
 /// A record in memory: key and payload.
 type Pair = (Box<[u8]>, Box<[u8]>);
-/// A key with all its records' payloads.
-pub type Group = (Vec<u8>, Vec<Vec<u8>>);
 
 /// One sorter writing its runs into `dir` (which it owns: [`Spill::new`] makes it).
 pub struct Spill {
     dir: PathBuf,
-    /// Records in memory: key and payload.
     buffer: Vec<Pair>,
     buffered: usize,
     budget: usize,
     runs: Vec<PathBuf>,
-    /// Bytes written to runs, and the most they may take.
+    /// Bytes written to runs (as stored, compressed), and records written.
     written: u64,
-    max_bytes: u64,
-    /// Free bytes the file system must keep: below them a run is not written (`disk`).
-    floor: u64,
-    free_disk: fn(&Path) -> io::Result<u64>,
+    records: u64,
+    room: Room,
     next_run: usize,
 }
 impl Spill {
-    /// A sorter holding at most `budget` bytes of records in memory and writing at most
-    /// `max_bytes` of runs into `dir`, which must not exist yet or be empty.
-    pub fn new(dir: &Path, budget: usize, max_bytes: u64) -> Result<Self> {
+    /// A sorter holding at most `budget` bytes of records in memory and writing runs into `dir`
+    /// within `room`.
+    pub fn new(dir: &Path, budget: usize, room: Room) -> Result<Self> {
         std::fs::create_dir_all(dir)
             .with_context(|| Failure::new("disk").at(dir.display().to_string()))?;
         Ok(Self {
@@ -55,27 +84,22 @@ impl Spill {
             budget: budget.max(1),
             runs: vec![],
             written: 0,
-            max_bytes,
-            floor: 0,
-            free_disk: super::run::free_bytes,
+            records: 0,
+            room,
             next_run: 0,
         })
     }
-    /// Keep `floor` bytes free on the file system: a run that would go below is a `disk` failure.
-    pub fn keep_free(mut self, floor: u64) -> Self {
-        self.floor = floor;
-        self
-    }
-    /// The runs written so far and their bytes.
-    pub fn written(&self) -> (usize, u64) {
-        (self.runs.len(), self.written)
+    /// The runs written so far, their bytes and their records.
+    pub fn written(&self) -> (usize, u64, u64) {
+        (self.runs.len(), self.written, self.records)
     }
     /// Add one record.
     pub fn push(&mut self, key: &[u8], payload: &[u8]) -> Result<()> {
         if key.len() > KEY_CAP || payload.len() > RECORD_CAP {
             bail!(Failure::new("record_size"));
         }
-        self.buffered += key.len() + payload.len() + 48;
+        // What a pair takes in memory: its bytes, two boxes and the vector's slot.
+        self.buffered += key.len() + payload.len() + 64;
         self.buffer.push((key.into(), payload.into()));
         if self.buffered >= self.budget {
             self.flush()?;
@@ -90,99 +114,62 @@ impl Spill {
         self.buffer.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         let path = self.dir.join(format!("run-{:06}.lz4", self.next_run));
         self.next_run += 1;
-        let records = std::mem::take(&mut self.buffer);
+        let records = self.buffer.len() as u64;
+        let bytes = write_run(
+            &path,
+            self.buffer
+                .drain(..)
+                .map(|(k, p)| (k.into_vec(), p.into_vec())),
+            &self.room,
+            self.written,
+        )?;
         self.buffered = 0;
-        let bytes = self.write_run(&path, records.iter().map(|(k, p)| (&k[..], &p[..])))?;
         self.runs.push(path);
         self.written += bytes;
+        self.records += records;
         Ok(())
-    }
-    fn check_room(&self, written: u64) -> Result<()> {
-        let disk = || Failure::new("disk").at(self.dir.display().to_string());
-        if self.written + written > self.max_bytes {
-            bail!(disk());
-        }
-        let free = (self.free_disk)(&self.dir).with_context(disk)?;
-        if free < self.floor {
-            bail!(disk());
-        }
-        Ok(())
-    }
-    fn write_run<'a>(
-        &self,
-        path: &Path,
-        records: impl Iterator<Item = (&'a [u8], &'a [u8])>,
-    ) -> Result<u64> {
-        let disk = || Failure::new("disk").at(path.display().to_string());
-        let file = File::create(path).with_context(disk)?;
-        let mut out = lz4_flex::frame::FrameEncoder::new(BufWriter::with_capacity(1 << 16, file));
-        let mut since_check = 0u64;
-        for (key, payload) in records {
-            write_record(&mut out, key, payload).with_context(disk)?;
-            since_check += (key.len() + payload.len()) as u64;
-            if since_check > 64 << 20 {
-                self.check_room(since_check)?;
-                since_check = 0;
-            }
-        }
-        let file = out
-            .finish()
-            .map_err(io::Error::other)
-            .with_context(disk)?
-            .into_inner()
-            .map_err(|e| e.into_error())
-            .with_context(disk)?;
-        file.sync_all().with_context(disk)?;
-        let bytes = file.metadata().with_context(disk)?.len();
-        self.check_room(bytes)?;
-        Ok(bytes)
     }
     /// Write what is left in memory and give the runs (to merge with other sorters' runs).
     pub fn finish(mut self) -> Result<Vec<PathBuf>> {
         self.flush()?;
         Ok(self.runs)
     }
-    /// Every record in key order ([`merge`]).
-    pub fn merge(self) -> Result<Merge> {
-        let dir = self.dir.clone();
-        merge(&dir, self.finish()?)
-    }
 }
-/// Every record of these runs in key order, those of one key together: merged in passes of at
-/// most [`FAN_IN`] runs first (each pass's run written into `dir`, its inputs removed).
-pub fn merge(dir: &Path, mut runs: Vec<PathBuf>) -> Result<Merge> {
-    let mut pass = 0;
-    while runs.len() > FAN_IN {
-        let mut next = vec![];
-        for (n, group) in std::mem::take(&mut runs).chunks(FAN_IN).enumerate() {
-            if group.len() == 1 {
-                next.push(group[0].clone());
-                continue;
-            }
-            let path = dir.join(format!("pass-{pass:03}-{n:06}.lz4"));
-            let disk = || Failure::new("disk").at(path.display().to_string());
-            let mut merged = Merge::open(group)?;
-            let file = File::create(&path).with_context(disk)?;
-            let mut out =
-                lz4_flex::frame::FrameEncoder::new(BufWriter::with_capacity(1 << 16, file));
-            while let Some((key, payload)) = merged.next_record()? {
-                write_record(&mut out, &key, &payload).with_context(disk)?;
-            }
-            out.finish()
-                .map_err(io::Error::other)
-                .with_context(disk)?
-                .into_inner()
-                .map_err(|e| e.into_error())
-                .with_context(disk)?;
-            for old in group {
-                let _ = std::fs::remove_file(old);
-            }
-            next.push(path);
+/// Write `records` (in key order) as a run at `path`, checking `room` every 64 MiB with the bytes
+/// `before` it counted against it. The run's size on disk.
+fn write_run(
+    path: &Path,
+    records: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+    room: &Room,
+    before: u64,
+) -> Result<u64> {
+    let disk = || Failure::new("disk").at(path.display().to_string());
+    let dir = path.parent().unwrap_or(path);
+    let file = File::create(path).with_context(disk)?;
+    let mut out = lz4_flex::frame::FrameEncoder::new(BufWriter::with_capacity(1 << 16, file));
+    let (mut raw, mut since_check) = (0u64, 0u64);
+    for (key, payload) in records {
+        write_record(&mut out, &key, &payload).with_context(disk)?;
+        let n = (key.len() + payload.len() + 8) as u64;
+        raw += n;
+        since_check += n;
+        if since_check > 64 << 20 {
+            // A run takes less than its raw records: half of them bounds what it took so far.
+            room.check(dir, before + raw / 2)?;
+            since_check = 0;
         }
-        runs = next;
-        pass += 1;
     }
-    Merge::open(&runs)
+    let file = out
+        .finish()
+        .map_err(io::Error::other)
+        .with_context(disk)?
+        .into_inner()
+        .map_err(|e| e.into_error())
+        .with_context(disk)?;
+    file.sync_all().with_context(disk)?;
+    let bytes = file.metadata().with_context(disk)?.len();
+    room.check(dir, before + bytes)?;
+    Ok(bytes)
 }
 fn write_record(out: &mut impl Write, key: &[u8], payload: &[u8]) -> io::Result<()> {
     out.write_all(&(key.len() as u32).to_le_bytes())?;
@@ -218,8 +205,59 @@ fn read_record(input: &mut impl Read) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
     Ok(Some((key, payload)))
 }
 
+/// Merge `runs` in passes of at most `fan_in` until at most `fan_in` are left, writing each
+/// pass's runs into `dir` within `room` and removing its inputs. The runs left. `stop` is asked
+/// before each merged run: when it says so, the passes stop (`stopped`).
+pub fn reduce(
+    dir: &Path,
+    mut runs: Vec<PathBuf>,
+    fan_in: usize,
+    room: &Room,
+    stop: &dyn Fn() -> bool,
+) -> Result<Vec<PathBuf>> {
+    let fan_in = fan_in.max(2);
+    std::fs::create_dir_all(dir)
+        .with_context(|| Failure::new("disk").at(dir.display().to_string()))?;
+    let mut pass = 0;
+    let mut written = 0u64;
+    while runs.len() > fan_in {
+        let mut next = vec![];
+        for (n, group) in std::mem::take(&mut runs).chunks(fan_in).enumerate() {
+            if stop() {
+                bail!(Failure::new("stopped"));
+            }
+            if group.len() == 1 {
+                next.push(group[0].clone());
+                continue;
+            }
+            let path = dir.join(format!("pass-{pass:03}-{n:06}.lz4"));
+            let mut merged = Merge::open(group)?;
+            let mut failed = None;
+            let records = std::iter::from_fn(|| match merged.next_record() {
+                Ok(next) => next,
+                Err(e) => {
+                    failed = Some(e);
+                    None
+                }
+            });
+            let bytes = write_run(&path, records, room, written)?;
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            written += bytes;
+            for old in group {
+                let _ = std::fs::remove_file(old);
+            }
+            next.push(path);
+        }
+        runs = next;
+        pass += 1;
+    }
+    Ok(runs)
+}
+
 type RunReader = lz4_flex::frame::FrameDecoder<BufReader<File>>;
-/// The merge of sorted runs ([`Spill::merge`]).
+/// The merge of sorted runs.
 pub struct Merge {
     runs: Vec<RunReader>,
     heap: BinaryHeap<Head>,
@@ -249,8 +287,17 @@ impl Ord for Head {
             .then_with(|| other.run.cmp(&self.run))
     }
 }
+/// A key with a bounded part of its records ([`Merge::next_group`]).
+pub struct Group {
+    pub key: Vec<u8>,
+    /// The distinct payloads kept, in byte order.
+    pub payloads: Vec<Vec<u8>>,
+    /// Every record of the key, kept or not, by its payload's first byte (the last slot holds
+    /// those of [`TAGS`] − 1 and over).
+    pub counts: [u64; TAGS],
+}
 impl Merge {
-    fn open(paths: &[PathBuf]) -> Result<Self> {
+    pub fn open(paths: &[PathBuf]) -> Result<Self> {
         let mut runs = vec![];
         let mut heap = BinaryHeap::new();
         for (i, path) in paths.iter().enumerate() {
@@ -286,17 +333,41 @@ impl Merge {
         }
         Ok(Some((head.key, head.payload)))
     }
-    /// The next key with all its records.
-    pub fn next_group(&mut self) -> Result<Option<Group>> {
+    /// The next key, every one of its records counted, and of its distinct payloads at most
+    /// `max_records` holding at most `max_bytes`: the smallest ones in byte order that fit, so
+    /// the same records give the same group in any order.
+    pub fn next_group(&mut self, max_records: usize, max_bytes: usize) -> Result<Option<Group>> {
         let Some((key, payload)) = self.next_record()? else {
             return Ok(None);
         };
-        let mut payloads = vec![payload];
+        let mut counts = [0u64; TAGS];
+        let mut kept: BTreeSet<Vec<u8>> = BTreeSet::new();
+        let mut bytes = 0usize;
+        // Every payload at or above it was left out: none of them is taken any more.
+        let mut above: Option<Vec<u8>> = None;
+        let mut take = |payload: Vec<u8>| {
+            counts[usize::from(payload.first().copied().unwrap_or(0)).min(TAGS - 1)] += 1;
+            if above.as_ref().is_some_and(|a| payload >= *a) || kept.contains(&payload) {
+                return;
+            }
+            bytes += payload.len();
+            kept.insert(payload);
+            while kept.len() > max_records.max(1) || bytes > max_bytes {
+                let Some(last) = kept.pop_last() else { break };
+                bytes -= last.len();
+                above = Some(last);
+            }
+        };
+        take(payload);
         while self.heap.peek().is_some_and(|h| h.key == key) {
             let (_, payload) = self.next_record()?.expect("a record was peeked");
-            payloads.push(payload);
+            take(payload);
         }
-        Ok(Some((key, payloads)))
+        Ok(Some(Group {
+            key,
+            payloads: kept.into_iter().collect(),
+            counts,
+        }))
     }
 }
 
@@ -304,42 +375,108 @@ impl Merge {
 mod tests {
     use super::*;
 
-    /// Keys come out sorted bytewise, each with all its records, over many runs and merge passes.
+    fn room() -> Room {
+        Room::new(1 << 30, 0)
+    }
+    struct Gen(u64);
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    /// Property: for random keys, payloads, budgets and fan-ins, the merge after `reduce` gives
+    /// every key in byte order with exactly its distinct payloads and counts, as a `BTreeMap`
+    /// does.
     #[test]
-    fn records_come_out_sorted_and_grouped_over_many_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut spill = Spill::new(&dir.path().join("s"), 200, 1 << 30).unwrap();
-        let mut want = std::collections::BTreeMap::<Vec<u8>, Vec<Vec<u8>>>::new();
-        let mut seed = 7u64;
-        for n in 0..20_000u64 {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let key = format!("k{:05}", (seed >> 33) % 3000).into_bytes();
-            let payload = n.to_le_bytes().to_vec();
-            spill.push(&key, &payload).unwrap();
-            want.entry(key).or_default().push(payload);
+    fn the_merge_is_a_sorted_map_of_the_records() {
+        let mut gen = Gen(7);
+        for round in 0..6 {
+            let dir = tempfile::tempdir().unwrap();
+            let budget = 64 + (gen.next() % 4000) as usize;
+            let fan_in = 2 + (gen.next() % 6) as usize;
+            let mut spill = Spill::new(&dir.path().join("s"), budget, room()).unwrap();
+            let mut want = std::collections::BTreeMap::<Vec<u8>, (BTreeSet<Vec<u8>>, u64)>::new();
+            for _ in 0..(500 + round * 700) {
+                let key = format!("k{:04}", gen.next() % 400).into_bytes();
+                let payload = vec![(gen.next() % 3) as u8, (gen.next() % 50) as u8];
+                spill.push(&key, &payload).unwrap();
+                let e = want.entry(key).or_default();
+                e.0.insert(payload);
+                e.1 += 1;
+            }
+            let runs = spill.finish().unwrap();
+            let runs = reduce(&dir.path().join("p"), runs, fan_in, &room(), &|| false).unwrap();
+            assert!(runs.len() <= fan_in);
+            let mut merge = Merge::open(&runs).unwrap();
+            let mut got = std::collections::BTreeMap::new();
+            let mut last: Option<Vec<u8>> = None;
+            while let Some(g) = merge.next_group(usize::MAX, usize::MAX).unwrap() {
+                assert!(last.as_ref().is_none_or(|l| *l < g.key));
+                last = Some(g.key.clone());
+                let total: u64 = g.counts.iter().sum();
+                got.insert(
+                    g.key,
+                    (g.payloads.into_iter().collect::<BTreeSet<_>>(), total),
+                );
+            }
+            assert_eq!(got, want, "round {round}");
         }
-        assert!(spill.written().0 > FAN_IN, "{:?}", spill.written());
-        let mut merge = spill.merge().unwrap();
-        let mut got = std::collections::BTreeMap::new();
-        let mut last: Option<Vec<u8>> = None;
-        while let Some((key, mut payloads)) = merge.next_group().unwrap() {
-            assert!(last.as_ref().is_none_or(|l| *l < key));
-            last = Some(key.clone());
-            payloads.sort();
-            got.insert(key, payloads);
+    }
+
+    /// Property: a group's kept payloads depend only on its records, never on their order: the
+    /// smallest distinct payloads that fit the caps. Counts cover every record.
+    #[test]
+    fn a_bounded_group_is_the_same_in_any_order() {
+        let mut gen = Gen(99);
+        for _ in 0..200 {
+            let n = 1 + (gen.next() % 40) as usize;
+            let payloads: Vec<Vec<u8>> = (0..n)
+                .map(|_| {
+                    let len = 1 + (gen.next() % 6) as usize;
+                    (0..len).map(|_| (gen.next() % 4) as u8).collect()
+                })
+                .collect();
+            let max_records = 1 + (gen.next() % 10) as usize;
+            let max_bytes = 1 + (gen.next() % 30) as usize;
+            let group_of = |order: &[Vec<u8>]| {
+                let dir = tempfile::tempdir().unwrap();
+                let mut spill = Spill::new(dir.path(), 1, room()).unwrap();
+                for p in order {
+                    spill.push(b"k", p).unwrap();
+                }
+                let runs = spill.finish().unwrap();
+                let mut merge = Merge::open(&runs).unwrap();
+                let g = merge.next_group(max_records, max_bytes).unwrap().unwrap();
+                (g.payloads, g.counts)
+            };
+            let (first, counts) = group_of(&payloads);
+            let mut reversed = payloads.clone();
+            reversed.reverse();
+            let mut rotated = payloads.clone();
+            rotated.rotate_left(n / 2);
+            for other in [reversed, rotated] {
+                assert_eq!(group_of(&other), (first.clone(), counts));
+            }
+            assert_eq!(counts.iter().sum::<u64>(), n as u64);
+            assert!(first.len() <= max_records);
+            assert!(first.iter().map(Vec::len).sum::<usize>() <= max_bytes);
+            // The kept ones are the smallest distinct payloads.
+            let distinct: BTreeSet<Vec<u8>> = payloads.into_iter().collect();
+            assert_eq!(
+                first,
+                distinct.into_iter().take(first.len()).collect::<Vec<_>>()
+            );
         }
-        for v in want.values_mut() {
-            v.sort();
-        }
-        assert_eq!(got, want);
     }
 
     #[test]
-    fn a_spill_over_its_bytes_is_a_disk_failure() {
+    fn a_spill_over_its_room_is_a_disk_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let mut spill = Spill::new(&dir.path().join("s"), 10, 100).unwrap();
+        let mut spill = Spill::new(&dir.path().join("s"), 10, Room::new(100, 0)).unwrap();
         let failed = (0..100)
             .map(|n| spill.push(format!("{n}").as_bytes(), &[1; 64]))
             .find_map(Result::err)
@@ -349,12 +486,27 @@ mod tests {
             Some("disk")
         );
         assert!(spill.push(&[b'k'; KEY_CAP + 1], b"").is_err());
+        // Too little free disk.
+        let full = Room {
+            free_disk: |_| Ok(10),
+            ..Room::new(1 << 30, 1 << 20)
+        };
+        let mut spill = Spill::new(&dir.path().join("t"), 10, full).unwrap();
+        assert!(spill.push(b"k", b"v").is_err());
+        // Passes stop when asked to, and check their room too.
+        let mut spill = Spill::new(&dir.path().join("u"), 1, room()).unwrap();
+        for n in 0..10u8 {
+            spill.push(&[n], b"v").unwrap();
+        }
+        let runs = spill.finish().unwrap();
+        assert!(reduce(&dir.path().join("p"), runs.clone(), 2, &room(), &|| true).is_err());
+        assert!(reduce(&dir.path().join("q"), runs, 2, &full, &|| false).is_err());
     }
 
     #[test]
     fn a_damaged_run_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let mut spill = Spill::new(&dir.path().join("s"), 1 << 20, 1 << 30).unwrap();
+        let mut spill = Spill::new(&dir.path().join("s"), 1 << 20, room()).unwrap();
         for n in 0..100u32 {
             spill.push(format!("{n:04}").as_bytes(), &[7; 100]).unwrap();
         }
@@ -362,8 +514,8 @@ mod tests {
         let bytes = std::fs::read(&runs[0]).unwrap();
         std::fs::write(&runs[0], &bytes[..bytes.len() / 2]).unwrap();
         // An error when the merge opens the run or while it reads it, never a panic.
-        let read = merge(&dir.path().join("s"), runs).and_then(|mut merge| {
-            while merge.next_group()?.is_some() {}
+        let read = Merge::open(&runs).and_then(|mut merge| {
+            while merge.next_group(usize::MAX, usize::MAX)?.is_some() {}
             Ok(())
         });
         assert!(read.is_err());

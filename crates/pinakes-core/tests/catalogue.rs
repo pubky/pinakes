@@ -1140,7 +1140,7 @@ async fn a_run_that_fails_after_its_lock_went_records_nothing(pool: PgPool) {
         .await
         .unwrap();
     let ended: bool = sqlx::query_scalar(
-        "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+        "SELECT pg_terminate_backend(pid, 5000) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
     )
     .bind(Catalogue::Wikidata.lock_key())
     .fetch_one(&pool)

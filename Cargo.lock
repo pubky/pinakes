@@ -2928,6 +2928,7 @@ dependencies = [
  "liblzma",
  "lz4_flex",
  "markup5ever",
+ "memchr",
  "nostr",
  "percent-encoding",
  "pkarr 8.1.0",
