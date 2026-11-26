@@ -646,28 +646,32 @@ artist). Each source's page in [docs/sources](sources/README.md) lists its facts
 
 #### Blocked cards
 
-A social site (Instagram, Facebook, LinkedIn, X and others) can refuse Pinakes' read of a link:
-a sign-in redirect, a challenge page, a 401, 403 or 451, or a status of its own. A link never read
-before then gets a card of its shape alone, so it still resolves, groups and counts:
+A social site (Instagram, Facebook, LinkedIn, X and others) can refuse Pinakes's read of a link:
+a sign-in redirect, a challenge page, a 401 or 403 (a page's 451 too), or a status of its own. A
+link never read before then gets a card of its shape alone, so it still resolves, groups and
+counts:
 
 | Field | Value |
 | --- | --- |
 | `status` | `ok` |
-| `type` | The link's shape: `SocialMediaPosting` (a post), `VideoObject` (a video or reel) or `Person` (a profile) |
+| `type` | The link's shape: `SocialMediaPosting` (a post), `VideoObject` (a video or reel) or `Person` (a profile). Some sources keep the type their read cards have: `Organization` for a Facebook page, a LinkedIn company or a subreddit, `DiscussionForumPosting` for a Reddit post. |
 | `name` | The shape and the site: "Post on instagram.com", "Video on instagram.com", "Profile on instagram.com" |
 | `description` | "Blocked by the site." |
 | `image` | `null` |
-| `facts` | `blocked` is `"true"` |
+| `facts` (resource read) | `blocked` is `"true"`. Rows of a search, lookup or group carry no `facts`. |
 | `embed` | The site's frame when the link alone gives one ([Embed](#embed)): an Instagram post or reel keeps Instagram's captioned frame |
 
-The card has none of the object's own text, author or image: its `name` and `description` are
-not the post's. A refusal on a refresh keeps the card read before when it says more than the
-link's shape, and a card found gone stays `missing`. A refused link is read again after a day,
-then after 2, 4 and 7 more days, and every 7 days while one refusal follows another
-([failures and retries](operations.md#failures-and-retries)). When a site refuses every request
-from Pinakes' address, not only one page (Instagram's `is_from_rle`), no request goes to that
-site for a while and its links wait ([Instagram](sources/instagram.md#refused-requests)). Once a
-read answers, the card has the page's fields and no `blocked` fact.
+Tell a blocked card by its `blocked` fact, not by its type. The card has none of the object's own
+text, author or image: its `name` and `description` are not the object's. A refusal on a refresh
+keeps the card read before when it says more than the link's shape, and a card found gone stays
+`missing`. A refused link is read again after a day, then after 2, 4 and 7 more days, and every 7
+days while one refusal follows another ([failures and retries](operations.md#failures-and-retries)).
+When a site refuses every request from Pinakes's address, not only one page (Instagram's
+`is_from_rle`), no request goes to that site for a while: its links wait, and a link never read
+stays `pending` until the pause is over ([Instagram](sources/instagram.md#refused-requests)). Once
+a read names the object, the card has the page's fields and no `blocked` fact; a page that
+answers without them (a removed or private post) replaces the blocked card only after a second
+read agrees, at least an hour later.
 
 ### Related objects
 
