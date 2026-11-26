@@ -1914,8 +1914,10 @@ impl Importer for MusicBrainz {
             Ok(_) if position_limit(state) != self.limit => Ok(Plan::Run(Run::Update)),
             Ok(latest) if latest > position_version(state) => Ok(Plan::Run(Run::Update)),
             Ok(_) => Ok(Plan::Wait(POLL)),
-            Err(error) => {
-                tracing::info!(catalogue = "musicbrainz", error = %super::failure::shown(&error), "the newest MusicBrainz dump could not be looked up; asked again in an hour");
+            Err(unread) => {
+                // `shown` gives the failure's class and the host it names, never a URL.
+                let shown = super::failure::shown(&unread);
+                tracing::info!(catalogue = "musicbrainz", error = %shown, "the newest MusicBrainz dump could not be looked up; asked again in an hour");
                 Ok(Plan::Wait(POLL))
             }
         }
