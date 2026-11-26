@@ -15,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[2]
 # The peeled tagged commit, unique per workflow run: another run for the same commit (two tags on
 # one commit) cannot overwrite the bytes this run smoke-tests and promotes.
 PLATFORM_TAG = '${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}'
+# The one registry name: the org's GHCR namespace, written with the job's own GITHUB_TOKEN.
+IMAGE = 'ghcr.io/pubky/pinakes'
+SOURCE = 'https://github.com/pubky/pinakes'
+GHCR_LOGIN = {'registry': 'ghcr.io', 'username': '${{ github.actor }}', 'password': '${{ secrets.GITHUB_TOKEN }}'}
+PUSH_PERMISSIONS = {'contents': 'read', 'packages': 'write'}
 
 
 def workflow():
@@ -412,7 +417,7 @@ class Release(unittest.TestCase):
         self.assertEqual(job['steps'][1]['run'], 'python3 scripts/ci/release-tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"')
         shared = next(s for s in job['steps'] if s.get('uses', '').startswith('pubky/ci-workflows/'))
         args = shared['with']
-        self.assertEqual(args['registry'], 'registry-1.docker.io/synonymsoft')
+        self.assertEqual(args['registry'], 'ghcr.io/pubky')
         self.assertEqual(args['image'], 'pinakes')
         self.assertEqual(args['push'], 'true')
         self.assertEqual(args['latest'], 'false')
@@ -426,7 +431,7 @@ class Release(unittest.TestCase):
 
     def test_publish_smokes_the_exact_pushed_platform_image(self):
         job = workflow()['jobs']['publish']
-        pushed = f'registry-1.docker.io/synonymsoft/pinakes:{PLATFORM_TAG}'
+        pushed = f'{IMAGE}:{PLATFORM_TAG}'
         shared = step_index(job, lambda st: st.get('uses', '').startswith('pubky/ci-workflows/'), 'publishing')
         postgres = step_index(job, lambda st: st.get('run') == 'scripts/ci/setup-postgres', 'provisioning PostgreSQL')
         login = step_index(job, lambda st: st.get('uses', '').startswith('docker/login-action@'), 'logging in')
@@ -549,7 +554,7 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
     print(json.dumps({'manifests': [{'platform': {'os': 'linux', 'architecture': a}} for a in arches]}))
 """)
             docker.chmod(0o755)
-            image = 'registry-1.docker.io/synonymsoft/pinakes:'
+            image = IMAGE + ':'
             commit_sha, tag_object = 'a' * 40, 'b' * 40
             cases = [('true', False, {}), ('false', False, {}), ('true', True, {}),
                      # Fail closed before any registry call on a bad commit or run ID.
@@ -585,10 +590,61 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
                 # Exactly this run's smoke-tested platform images are combined.
                 sources = [image + f'{commit_sha}-4242-{arch}' for arch in ['amd64', 'arm64']]
                 self.assertEqual(args[-2:], sources)
+                # The index names its repository, so the package page links to it.
+                annotation = ['--annotation', f'index:org.opencontainers.image.source={SOURCE}']
+                self.assertIn(annotation, [args[i:i + 2] for i in range(len(args) - 1)])
                 for call in recorded:
                     if '--dry-run' in call:
                         self.assertEqual(call[-2:], sources)
+                        # The dry run checks the same annotation before any tag moves.
+                        self.assertIn(annotation, [call[i:i + 2] for i in range(len(call) - 1)])
                     self.assertFalse(any(tag_object in v for v in call), call)
+
+    def test_only_publishing_jobs_may_write_packages_with_the_job_token(self):
+        w = workflow()
+        self.assertEqual(w['permissions'], {'contents': 'read'})
+        text = (ROOT / '.github/workflows/ci.yml').read_text()
+        # GITHUB_TOKEN is the only secret, read only by the registry logins.
+        self.assertEqual(set(re.findall(r'secrets\.(\w+)', text)), {'GITHUB_TOKEN'})
+        for name, job in w['jobs'].items():
+            logins = [st for st in job['steps'] if st.get('uses', '').startswith('docker/login-action@')]
+            if name in ('publish', 'manifest'):
+                self.assertEqual(job['permissions'], PUSH_PERMISSIONS, name)
+                self.assertEqual(len(logins), 1, name)
+                self.assertEqual(logins[0]['with'], GHCR_LOGIN, name)
+                others = [st for st in job['steps'] if st is not logins[0]]
+                self.assertNotIn('secrets.', str(others), name)
+            else:
+                self.assertNotIn('permissions', job, name)
+                self.assertEqual(logins, [], name)
+                self.assertNotIn('secrets.', str(job), name)
+        self.assertNotIn('github.token', text)
+
+    def test_image_names_its_repository(self):
+        s = (ROOT / 'Dockerfile').read_text()
+        runtime = s[s.rindex('\nFROM '):]
+        self.assertIn(f'LABEL org.opencontainers.image.source="{SOURCE}"', runtime)
+        self.assertIn(f'image={IMAGE}\n', (ROOT / 'scripts/ci/publish-manifest').read_text())
+
+    def test_no_other_registry_is_named(self):
+        tracked = subprocess.run(['git', 'ls-files', '-z'], cwd=ROOT, check=True, capture_output=True,
+                                 text=True).stdout.split('\0')
+        # Spelled in parts so this file does not match itself.
+        old = ['synonym' + 'soft', 'docker' + '.io', 'DOCKER' + 'HUB']
+        for path in tracked:
+            if not path or '/tests/fixtures/' in path or not (ROOT / path).is_file():
+                continue
+            try:
+                text = (ROOT / path).read_text()
+            except UnicodeDecodeError:
+                continue
+            for word in old:
+                self.assertNotIn(word, text, path)
+        docs = (ROOT / 'docs/deployment.md').read_text()
+        self.assertIn(f'PINAKES_IMAGE={IMAGE}:v0.1.0', docs)
+        self.assertIn(f'| Git tag | Image tags under `{IMAGE}` |', docs)
+        self.assertIn(f'docker buildx imagetools inspect "{IMAGE}:$VERSION"', docs)
+        self.assertIn('`GITHUB_TOKEN`', docs)
 
     def test_docs_match_the_release_path_and_name_required_checks(self):
         docs = ' '.join((ROOT / 'docs/deployment.md').read_text().split())
@@ -601,7 +657,7 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
                       'the commit and never the tag object', docs)
         # main's branch protection must require every PR job, or "all PR hosted jobs must
         # pass before merge" is a convention, not a rule.
-        prerequisites = re.search(r'Owner prerequisites, not set by this repository\'s files:(.*?)Provision repository',
+        prerequisites = re.search(r'Owner prerequisites, not set by this repository\'s files:(.*?)Publishing needs no stored secret',
                                   docs).group(1)
         jobs = workflow()['jobs']
         names = [jobs['quality']['name']] + [jobs['image']['name'].replace('${{ matrix.arch }}', arch)

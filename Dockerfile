@@ -10,6 +10,7 @@ RUN cargo build --locked --release -p pinakesd \
     && strip target/release/pinakesd
 
 FROM debian:bookworm-slim AS runtime
+LABEL org.opencontainers.image.source="https://github.com/pubky/pinakes"
 # Security updates come from the distribution when the image is rebuilt.
 # hadolint ignore=DL3008
 RUN apt-get update \
