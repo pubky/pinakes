@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# Import a small real sample of a catalogue into a throwaway database and check it end to end:
+# the real `pinakesd catalogue import` path, row counts, keys, labels, canonical links, a text
+# search through `/v1/search`, shared links joining their cards through `POST /v1/resolve`, an
+# update from a newer dump that rewrites only the changed rows, and the catalogue switched off
+# leaving search at once.
+#
+# usage: scripts/catalogue-sample musicbrainz [--keep] [--release-bytes N]
+#
+# It reads the first bytes of each file of the two newest MusicBrainz JSON dumps (HTTP range
+# requests; about 120 MB in all by default), keeps their whole lines and packs them as dumps
+# again (`<entity>.tar.xz`, `SHA256SUMS`). Then it creates the database `$SAMPLE_DB`, imports the
+# older sample, runs the checks, updates from the newer one, and drops the database and the
+# downloads at the end (`--keep` keeps both).
+#
+# Environment:
+#   PINAKESD        the pinakesd binary (default: target/release/pinakesd)
+#   PGHOST, PGPORT  the PostgreSQL server the database is created on (libpq's own variables)
+#   SAMPLE_DB       the database name (default: catalogue_sample_musicbrainz); it must not exist
+#   SAMPLE_DIR      where the downloads and the daemon's files go (default: a new temporary dir)
+#   PINAKES__HTTP__CONTACT  the operator's contact, sent in the User-Agent
+# Needs curl, xz, GNU tar, psql, createdb, dropdb and python3.
+set -euo pipefail
+
+catalogue=${1:-}
+[ "$catalogue" = musicbrainz ] || { echo "usage: $0 musicbrainz [--keep] [--release-bytes N]" >&2; exit 2; }
+shift
+keep=0
+release_bytes=$((60 * 1024 * 1024))
+while [ $# -gt 0 ]; do
+  case $1 in
+    --keep) keep=1 ;;
+    --release-bytes) release_bytes=$2; shift ;;
+    *) echo "unknown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+root=$(cd "$(dirname "$0")/.." && pwd)
+pinakesd=${PINAKESD:-$root/target/release/pinakesd}
+db=${SAMPLE_DB:-catalogue_sample_musicbrainz}
+work=${SAMPLE_DIR:-$(mktemp -d)}
+mkdir -p "$work"
+mirror=https://data.metabrainz.org/pub/musicbrainz/data/json-dumps
+contact=${PINAKES__HTTP__CONTACT:-}
+ua="pinakes-catalogue-sample (+https://pubky.app${contact:+; $contact})"
+declare -A bytes=([artist]=$((8 * 1024 * 1024)) [release-group]=$((6 * 1024 * 1024))
+  [release]=$release_bytes [recording]=$((6 * 1024 * 1024)))
+report=$work/report.json
+echo '{}' > "$report"
+note() { python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d[sys.argv[2]]=json.loads(sys.argv[3]); json.dump(d,open(p,"w"),indent=1)' "$report" "$1" "$2"; }
+fail() { echo "FAILED: $*" >&2; exit 1; }
+daemon_pid=
+cleanup() {
+  [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null && wait "$daemon_pid" 2>/dev/null || true
+  if [ $keep = 0 ]; then
+    dropdb --if-exists "$db" 2>/dev/null || true
+    rm -rf "$work/dumps" "$work/run"
+  fi
+}
+trap cleanup EXIT
+
+# The two newest dumps.
+mapfile -t versions < <(curl -sSf -A "$ua" "$mirror/" | grep -oE '[0-9]{8}-[0-9]{6}/' | tr -d / | sort -u | tail -2)
+[ ${#versions[@]} = 2 ] || fail "fewer than two dumps listed at $mirror"
+old=${versions[0]} new=${versions[1]}
+echo "dumps: $old (import) and $new (update)"
+note versions "[\"$old\", \"$new\"]"
+
+# A sample of one dump: the first bytes of each file, their whole lines, packed again.
+downloaded=0
+sample() {
+  local version=$1 out=$work/dumps/$1
+  mkdir -p "$out/build/mbdump"
+  for e in release release-group artist recording; do
+    local part=$out/$e.part
+    curl -sSf -A "$ua" -r "0-$((bytes[$e] - 1))" "$mirror/$version/$e.tar.xz" -o "$part"
+    downloaded=$((downloaded + $(stat -c %s "$part")))
+    # A cut stream: xz and tar stop at its end with an error, after giving what they read.
+    (xz -dc < "$part" 2>/dev/null || true) | (tar -xOf - TIMESTAMP 2>/dev/null || true) > "$out/build/TIMESTAMP"
+    (xz -dc < "$part" 2>/dev/null || true) | (tar -xOf - "mbdump/$e" 2>/dev/null || true) | head -n -1 > "$out/build/mbdump/$e"
+    [ -s "$out/build/mbdump/$e" ] || fail "no lines of $e in the first ${bytes[$e]} bytes"
+    (cd "$out/build" && tar --format=gnu -cf - TIMESTAMP "mbdump/$e") | xz -T2 -6 > "$out/$e.tar.xz"
+    rm -f "$part"
+  done
+  (cd "$out" && sha256sum ./*.tar.xz | sed 's# \./# *#' > SHA256SUMS)
+}
+sample "$old"
+sample "$new"
+note downloaded_bytes "$downloaded"
+python3 -I - "$work/dumps/$old/build/mbdump" "$report" <<'EOF'
+import json, os, sys
+d, report = sys.argv[1], sys.argv[2]
+lines = {e: sum(1 for _ in open(os.path.join(d, e), 'rb')) for e in os.listdir(d)}
+tracks = 0
+for ln in open(os.path.join(d, 'release'), 'rb'):
+    r = json.loads(ln)
+    tracks += sum(len(m.get('tracks') or []) for m in r.get('media') or [])
+r = json.load(open(report)); r['sample_lines'] = lines; r['sample_tracks'] = tracks
+json.dump(r, open(report, 'w'), indent=1)
+print('sample lines', lines, 'tracks', tracks)
+EOF
+
+# A daemon configuration over the throwaway database.
+run=$work/run
+mkdir -p "$run/catalogues" "$run/dumps"
+createdb "$db"
+url=$(python3 -I -c 'import os,sys,urllib.parse as u
+h=os.environ.get("PGHOST",""); p=os.environ.get("PGPORT","")
+q={k:v for k,v in (("host",h),("port",p)) if v}
+print("postgresql:///"+sys.argv[1]+("?"+u.urlencode(q) if q else ""))' "$db")
+port() { python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+listen=$(port) admin=$(port)
+config() { # $1: whether musicbrainz is on
+  cat > "$run/pinakes.toml" <<EOF
+database_url = "$url"
+listen = "127.0.0.1:$listen"
+admin_listen = "127.0.0.1:$admin"
+nexus_url = "http://127.0.0.1:9"
+[http]
+contact = "$contact"
+[pubky]
+enabled = false
+[canary]
+enabled = false
+[osm]
+dump_dir = "$run/dumps"
+[search]
+index_dir = "$run/search-index"
+[catalogues]
+dir = "$run/catalogues"
+[catalogues.musicbrainz]
+enabled = $1
+EOF
+}
+config true
+"$pinakesd" --config "$run/pinakes.toml" --migrate
+psql() { command psql -X -q -v ON_ERROR_STOP=1 -At "$db" "$@"; }
+
+# The import, timed, with its peak memory.
+started=$(date +%s.%N)
+/usr/bin/time -f '%M %e' -o "$run/time" "$pinakesd" --config "$run/pinakes.toml" catalogue import musicbrainz --from "$work/dumps/$old" | tee "$run/import.log"
+read -r rss secs < "$run/time"
+note import "{\"seconds\": $secs, \"peak_rss_kb\": $rss}"
+cards=$(psql -c "SELECT count(*) FROM catalogue_card WHERE catalogue='musicbrainz'")
+[ "$cards" -gt 0 ] || fail "no cards imported"
+note cards "$cards"
+note by_type "$(psql -c "SELECT json_object_agg(type, n) FROM (SELECT type, count(*) n FROM catalogue_card GROUP BY type) x")"
+note table_bytes "$(psql -c "SELECT pg_total_relation_size('catalogue_card')")"
+note with_labels "$(psql -c "SELECT count(*) FROM catalogue_card WHERE labels<>'{}'")"
+note with_isrc "$(psql -c "SELECT count(*) FROM catalogue_card WHERE EXISTS(SELECT 1 FROM unnest(keys) k WHERE k LIKE 'isrc:%')")"
+note with_wikidata "$(psql -c "SELECT count(*) FROM catalogue_card WHERE EXISTS(SELECT 1 FROM unnest(keys) k WHERE k LIKE 'wikidata:%')")"
+note with_url_keys "$(psql -c "SELECT count(*) FROM catalogue_card WHERE (SELECT count(*) FROM unnest(keys) k WHERE k LIKE 'url:%')>1")"
+# Every card: its link the musicbrainz.org page of its entity, its MBID among its keys, its labels
+# tag labels.
+bad=$(psql -c "SELECT count(*) FROM catalogue_card WHERE uri <> 'https://musicbrainz.org/'||source_id OR NOT ('mb:'||replace(source_id,'/',':') = ANY(keys)) OR EXISTS(SELECT 1 FROM unnest(labels) l WHERE l<>lower(l) OR l ~ '[ ,:]' OR char_length(l)>20)")
+[ "$bad" = 0 ] || fail "$bad cards without their link, MBID key or valid labels"
+echo "imported $cards cards in $secs s (peak RSS $rss KB)"
+
+# Links from the sample to share: a recording's page, its streaming link and its ISRC's page; an
+# artist's streaming link.
+eval "$(python3 -I - "$db" <<'EOF'
+import json, subprocess, sys
+q = lambda sql: subprocess.run(['psql', '-X', '-At', sys.argv[1], '-c', sql], check=True, capture_output=True, text=True).stdout.strip()
+rec = q("SELECT source_id||'|'||name FROM catalogue_card WHERE source_id LIKE 'recording/%' AND EXISTS(SELECT 1 FROM unnest(keys) k WHERE k LIKE 'isrc:%') AND (SELECT count(*) FROM unnest(keys) k WHERE k LIKE 'url:%')>1 ORDER BY fame DESC, source_id LIMIT 1")
+sid, name = rec.split('|', 1)
+isrc = q(f"SELECT substr(k,6) FROM catalogue_card, unnest(keys) k WHERE source_id='{sid}' AND k LIKE 'isrc:%' LIMIT 1")
+print(f"rec_id='{sid}'"); print(f"rec_name={json.dumps(name)}"); print(f"isrc='{isrc}'")
+EOF
+)"
+echo "recording $rec_id ($rec_name), ISRC $isrc"
+streaming=$(python3 -I - "$work/dumps/$old/build/mbdump/release" "${rec_id#recording/}" <<'EOF'
+import json, sys
+want = sys.argv[2]
+for ln in open(sys.argv[1], 'rb'):
+    r = json.loads(ln)
+    for m in r.get('media') or []:
+        for t in m.get('tracks') or []:
+            rec = t.get('recording') or {}
+            if rec.get('id') == want:
+                for rel in rec.get('relations') or []:
+                    u = (rel.get('url') or {}).get('resource', '')
+                    if rel.get('target-type') == 'url' and u.startswith('https://open.spotify.com/track/'):
+                        print(u); sys.exit()
+                for rel in rec.get('relations') or []:
+                    u = (rel.get('url') or {}).get('resource', '')
+                    if rel.get('target-type') == 'url' and ('deezer.com' in u or 'music.apple.com' in u or 'tidal.com' in u):
+                        print(u); sys.exit()
+EOF
+)
+[ -n "$streaming" ] || fail "no streaming link for $rec_id"
+
+daemon() {
+  "$pinakesd" --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
+  daemon_pid=$!
+  for _ in $(seq 1 120); do
+    curl -sf "http://127.0.0.1:$admin/healthz" > /dev/null && return
+    kill -0 "$daemon_pid" 2>/dev/null || fail "the daemon stopped: $(tail -5 "$run/daemon.log")"
+    sleep 0.5
+  done
+  fail "the daemon did not come up"
+}
+stop_daemon() { kill "$daemon_pid"; wait "$daemon_pid" 2>/dev/null || true; daemon_pid=; }
+search() { curl -sf --get "http://127.0.0.1:$listen/v1/search" --data-urlencode "q=$1"; }
+found() { # $1: search answer, $2: uri
+  python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(i.get("uri")==sys.argv[1] for i in d["items"]) else 1)' "$2"
+}
+daemon
+uri="https://musicbrainz.org/$rec_id"
+answer=""
+# The text index takes the import within a few seconds of the daemon's start (its first pass).
+for _ in $(seq 1 60); do
+  answer=$(search "$rec_name")
+  echo "$answer" | found "$uri" && break
+  sleep 1
+done
+echo "$answer" | found "$uri" || fail "search for \"$rec_name\" does not list $uri"
+note search "{\"q\": $(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$rec_name"), \"found\": true}"
+# Shared links join their card: resolved without a fetch, built from the card.
+for link in "$uri" "$streaming" "https://musicbrainz.org/isrc/$isrc"; do
+  code=$(curl -s -o "$run/resolve.json" -w '%{http_code}' -H 'content-type: application/json' \
+    -d "{\"uri\": \"$link\"}" "http://127.0.0.1:$listen/v1/resolve")
+  [ "$code" = 200 ] || fail "POST /v1/resolve $link answered $code"
+  id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$run/resolve.json")
+  backed=$(psql -c "SELECT c.source_id FROM resource r JOIN catalogue_card c ON c.id=r.catalogue_card WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id='$id'),'$id')")
+  [ "$backed" = "$rec_id" ] || fail "$link is not built from $rec_id (got '$backed')"
+  echo "joined: $link -> $rec_id"
+done
+note joins "[\"$uri\", \"$streaming\", \"https://musicbrainz.org/isrc/$isrc\"]"
+stop_daemon
+
+# The update: the newer dump's sample; only rows whose content changed are written.
+psql -c "CREATE TABLE sample_before AS SELECT source_id, content_hash, xmin::text AS version FROM catalogue_card WHERE catalogue='musicbrainz'"
+/usr/bin/time -f '%M %e' -o "$run/time" "$pinakesd" --config "$run/pinakes.toml" catalogue import musicbrainz --update --from "$work/dumps/$new" | tee "$run/update.log"
+read -r rss secs < "$run/time"
+counts=$(psql -c "SELECT json_build_object(
+  'unchanged', count(*) FILTER (WHERE b.source_id IS NOT NULL AND c.source_id IS NOT NULL AND b.content_hash=c.content_hash),
+  'changed', count(*) FILTER (WHERE b.source_id IS NOT NULL AND c.source_id IS NOT NULL AND b.content_hash<>c.content_hash),
+  'inserted', count(*) FILTER (WHERE b.source_id IS NULL),
+  'removed', count(*) FILTER (WHERE c.source_id IS NULL),
+  'unchanged_rewritten', count(*) FILTER (WHERE b.content_hash=c.content_hash AND b.version<>c.xmin::text))
+  FROM sample_before b FULL JOIN (SELECT source_id, content_hash, xmin FROM catalogue_card WHERE catalogue='musicbrainz') c USING (source_id)")
+echo "update: $counts"
+note update "{\"seconds\": $secs, \"peak_rss_kb\": $rss, \"rows\": $counts}"
+rewritten=$(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["unchanged_rewritten"])' "$counts")
+[ "$rewritten" = 0 ] || fail "$rewritten unchanged cards were written by the update"
+version=$(psql -c "SELECT position->>'version' FROM catalogue_state WHERE catalogue='musicbrainz'")
+[ "$version" = "$new" ] || fail "the update did not record $new (got $version)"
+psql -c "DROP TABLE sample_before"
+
+# Switched off: gone from search at once.
+config false
+daemon
+uri_now=$(psql -c "SELECT uri FROM catalogue_card WHERE source_id='$rec_id'")
+answer=$(search "$rec_name")
+if [ -n "$uri_now" ]; then
+  echo "$answer" | found "$uri_now" && fail "search lists $uri_now with the catalogue off"
+fi
+note switched_off_hidden true
+stop_daemon
+note db_bytes "$(psql -c "SELECT pg_database_size(current_database())")"
+echo "ALL OK"
+cat "$report"

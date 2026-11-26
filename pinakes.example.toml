@@ -297,8 +297,10 @@ dir = "catalogues"
 enabled = true
 # limit = 100000 # Import at most this many items (a small instance); unset imports all.
 [catalogues.musicbrainz]
+# Every artist, release group and recording of MusicBrainz's JSON dumps
+# (docs/sources/musicbrainz_catalogue.md).
 enabled = true
-# limit = 100000
+# limit = 100000 # At most this many cards: the dump's first releases that fit.
 [catalogues.osm]
 enabled = true
 region = "planet" # Or a region of Geofabrik's extracts, e.g. "europe/switzerland".
