@@ -898,8 +898,8 @@ The hourly cleanup deletes orphans in batches of 100, until it has caught up or 
 | A derived child | `limits.grace_days` after its link's expiry, however it was created |
 | A venue of a card or an occurrence | As long as something names it |
 
-A child or venue whose holder is deleted keeps the full grace counted from its creation, never the
-preview grace.
+A child or venue whose holder is deleted, and a venue its card or occurrence stops naming, keeps the
+full grace counted from its creation, never the preview grace.
 
 ### New previews
 

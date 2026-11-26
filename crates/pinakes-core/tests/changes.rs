@@ -1769,6 +1769,122 @@ async fn what_a_preview_held_keeps_the_full_grace_after_it_goes(pool: PgPool) {
     assert!(left().await.is_empty());
 }
 
+/// A venue two days old (past the preview grace of a day, inside the full grace) that its event's
+/// save drops keeps the full grace counted from its creation, as one whose holder is deleted
+/// does: whether the card named it or one of a calendar's occurrences did.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_venue_its_event_drops_keeps_the_full_grace(pool: PgPool) {
+    use pinakes_core::event::{calendar, Venue};
+    let exists = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let venue_at = |id: &str| Venue {
+        resource_id: Some(id.to_owned()),
+        ..Default::default()
+    };
+    let calendar_at = |uri: &str, venue: Option<&str>, fetched_at: i64| {
+        let start = (chrono::Utc::now() + chrono::Duration::days(3)).format("%Y%m%dT%H%M%S");
+        let text = format!("BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:u1\nDTSTART:{start}Z\nDURATION:PT1H\nSUMMARY:Gig\nEND:VEVENT\nEND:VCALENDAR\n");
+        let mut doc = calendar::parse(
+            uri,
+            text.as_bytes(),
+            &pinakes_core::config::EventConfig::default(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        doc.fetched_at = fetched_at;
+        for o in &mut doc.container.as_mut().unwrap().occurrences {
+            o.doc.event.venue = venue.map(venue_at);
+        }
+        doc
+    };
+    let mut kept = vec![];
+    for case in ["card", "occurrence", "holder-deleted"] {
+        let event = format!("https://example.org/{case}/event");
+        let event_id = store::ensure_resource(&pool, &event).await.unwrap();
+        let venue = store::ensure_resource(&pool, &format!("https://example.org/{case}/venue"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE resource SET created_at=now()-interval '2 days', orphaned_at=now()-interval '2 days' WHERE id=$1")
+            .bind(&venue)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        match case {
+            "card" => {
+                let mut page = ResourceMeta::new(&event, "jsonld", 3600);
+                page.set_type("MusicEvent");
+                page.event.venue = Some(venue_at(&venue));
+                store::save_document(&pool, &event_id, 0, &page)
+                    .await
+                    .unwrap();
+                store::cleanup(&pool, 7, 24).await.unwrap();
+                assert!(exists(venue.clone()).await, "a held venue stays");
+                // Its next reading names no venue.
+                page.event.venue = None;
+                store::save_document(&pool, &event_id, 0, &page)
+                    .await
+                    .unwrap();
+                let named: Option<String> =
+                    sqlx::query_scalar("SELECT venue_id FROM resource WHERE id=$1")
+                        .bind(&event_id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(named, None);
+            }
+            "occurrence" => {
+                let doc = calendar_at(&event, Some(&venue), now);
+                store::save_document(&pool, &event_id, 0, &doc)
+                    .await
+                    .unwrap();
+                store::cleanup(&pool, 7, 24).await.unwrap();
+                assert!(exists(venue.clone()).await, "a held venue stays");
+                let doc = calendar_at(&event, None, now + 1000);
+                store::save_document(&pool, &event_id, 0, &doc)
+                    .await
+                    .unwrap();
+                let named: Vec<Option<String>> =
+                    sqlx::query_scalar("SELECT venue_id FROM occurrence WHERE resource_id=$1")
+                        .bind(&event_id)
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(named, vec![None], "the occurrence names no venue now");
+            }
+            _ => {
+                // An event that lost its last reference past the grace holds it, and is deleted.
+                sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days', venue_id=$2 WHERE id=$1")
+                    .bind(&event_id)
+                    .bind(&venue)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        store::cleanup(&pool, 7, 24).await.unwrap();
+        store::cleanup(&pool, 7, 24).await.unwrap();
+        kept.push((case, exists(venue).await));
+    }
+    assert_eq!(
+        kept,
+        vec![
+            ("card", true),
+            ("occurrence", true),
+            ("holder-deleted", true)
+        ],
+        "a two-day-old venue keeps the 7-day grace however it was let go"
+    );
+}
+
 /// A change line names its occurrence by the key as it is stored (`changes::stored_key`): a UID
 /// that holds a link carrying a credential (a percent-encoded key, a link start split by a tab
 /// or a newline included) is written by its stand-in, the same on every read, its recurrence id
