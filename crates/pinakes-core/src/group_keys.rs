@@ -29,6 +29,8 @@ pub struct PathRule {
     pub query: Vec<String>,
 }
 impl PathRule {
+    /// Whether the rule stays within the bounds the shipped rules keep (a test checks them).
+    #[cfg(any(test, feature = "test-util"))]
     pub fn valid(&self) -> bool {
         (1..=8).contains(&self.segment)
             && self.skip.len() <= 8

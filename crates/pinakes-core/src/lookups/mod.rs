@@ -687,9 +687,9 @@ mod tests {
     /// its own parsers the same way.
     #[test]
     fn no_parser_panics_on_a_malformed_answer() {
-        for (status, raw) in fixture::malformed_answers() {
-            let _ = wikidata::parse_entities(status, raw);
+        for (_, raw) in fixture::malformed_answers() {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) {
+                let _ = wikidata::entities(v.clone());
                 let _ = wikidata::best_values(&v, "P402");
             }
         }

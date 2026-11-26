@@ -60,7 +60,7 @@ pub struct Changes {
     pub skipped: std::collections::BTreeMap<&'static str, u64>,
 }
 /// The reasons a feed line is skipped while parsing a page (`Changes::skipped`).
-pub const SKIP_REASONS: &[&str] = &["unknown_kind", "malformed"];
+pub const SKIP_REASONS: [&str; 2] = ["unknown_kind", "malformed"];
 /// The kinds of the reference feed this build reads. A `kind:event` line, which Nexus reserves,
 /// is `unknown_kind`: social events are Nexus's.
 const KINDS: &[&str] = &["tag", "reply", "embed", "collection", "post"];
@@ -89,11 +89,8 @@ impl Changes {
             match serde_json::from_value::<Change>(line) {
                 Ok(change) => page.lines.push(change),
                 Err(_) => {
-                    let reason = if unknown_kind {
-                        "unknown_kind"
-                    } else {
-                        "malformed"
-                    };
+                    let [unknown, malformed] = SKIP_REASONS;
+                    let reason = if unknown_kind { unknown } else { malformed };
                     *page.skipped.entry(reason).or_default() += 1;
                 }
             }

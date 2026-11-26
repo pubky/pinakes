@@ -341,6 +341,8 @@ pub fn fact(value: &Value) -> Option<String> {
 /// The card types that happen at a time, and so carry `start` and `end`: a card with a past
 /// start or end is final, so every other date is a fact. An observation is no such type: its
 /// record can still be obscured, re-identified or deleted, so its time is a fact and it refreshes.
+/// Every source's tests check their cards against it (`checked`).
+#[cfg(test)]
 pub const DATED: &[&str] = &[
     "Event",
     "MedicalTrial",

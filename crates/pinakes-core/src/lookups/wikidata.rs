@@ -3,7 +3,7 @@
 //! Only best-rank statements count (preferred if any, else normal; never deprecated). A
 //! property with more than one best-rank value after validation is ambiguous and adds nothing
 //! (`hubs::wikidata::single`).
-use super::{body, encode_path, plain, web_url, Key, Link};
+use super::{encode_path, plain, web_url, Key, Link};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -19,21 +19,8 @@ pub fn key(qid: &str) -> Key {
     Key::new("wikidata", qid)
 }
 
-/// The items of a `wbgetentities` response by their own id. Missing items are left out; a
+/// The items of a parsed `wbgetentities` response by their own id. Missing items are left out; a
 /// redirected id appears under the id it redirects to.
-pub fn parse_entities(status: u16, raw: &[u8]) -> Result<BTreeMap<String, Value>> {
-    entities(parse_answer(status, raw)?)
-}
-/// A `wbgetentities` response as JSON; an answer that is an API error is an error.
-pub fn parse_answer(status: u16, raw: &[u8]) -> Result<Value> {
-    let raw = body(status, raw, &[])?.context("no body")?;
-    let value: Value = serde_json::from_slice(raw)?;
-    if let Some(error) = value.get("error") {
-        anyhow::bail!("wikidata error: {}", error["code"]);
-    }
-    Ok(value)
-}
-/// The items of a parsed `wbgetentities` response (`parse_answer`) by their own id.
 pub fn entities(mut value: Value) -> Result<BTreeMap<String, Value>> {
     let entities = value
         .get_mut("entities")
@@ -273,7 +260,7 @@ mod tests {
     use crate::lookups::fixture;
 
     fn items(name: &str) -> BTreeMap<String, Value> {
-        parse_entities(200, &fixture::read(name)).unwrap()
+        entities(serde_json::from_slice(&fixture::read(name)).unwrap()).unwrap()
     }
     fn sites(links: &[Link]) -> Vec<(&str, &str)> {
         links
@@ -283,10 +270,8 @@ mod tests {
     }
 
     #[test]
-    fn errors() {
-        assert!(parse_entities(429, b"").is_err());
-        assert!(parse_entities(200, br#"{"error":{"code":"no-such-entity"}}"#).is_err());
-        let map = parse_entities(200, br#"{"entities":{"Q404":{"id":"Q404","missing":""}}}"#);
+    fn a_missing_item_is_left_out() {
+        let map = entities(serde_json::json!({"entities":{"Q404":{"id":"Q404","missing":""}}}));
         assert!(map.unwrap().is_empty());
     }
 
@@ -412,7 +397,7 @@ mod tests {
     fn a_malformed_answer_is_an_error() {
         for raw in [&b"[]"[..], b"false", b"{\"entities\": []}", b"{}"] {
             assert!(
-                parse_entities(200, raw).is_err(),
+                entities(serde_json::from_slice(raw).unwrap()).is_err(),
                 "{}",
                 String::from_utf8_lossy(raw)
             );

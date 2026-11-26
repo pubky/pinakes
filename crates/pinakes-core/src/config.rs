@@ -121,6 +121,7 @@ impl Sections {
         )
     }
     /// Set a section as the file would (its secrets in clear).
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set(&mut self, name: &str, value: serde_json::Value) {
         self.0.insert(name.to_owned(), value);
     }

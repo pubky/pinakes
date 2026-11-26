@@ -83,14 +83,10 @@ fn package(value: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The document number of a GovInfo copy: `/content/pkg/FR-{date}/pdf/{number}.pdf` or
-/// `/app/details/FR-{date}/{number}`. The same document, at another publisher.
-pub fn from_govinfo_uri(uri: &str) -> Option<String> {
-    Some(govinfo_copy(uri)?.0)
-}
-
-/// The document number of a GovInfo copy and the day of its package (`YYYY-MM-DD`): the copy is
-/// the document's only when that day is the document's publication date.
+/// The document number of a GovInfo copy (`/content/pkg/FR-{date}/pdf/{number}.pdf` or
+/// `/app/details/FR-{date}/{number}`, the same document at another publisher) and the day of its
+/// package (`YYYY-MM-DD`): the copy is the document's only when that day is the document's
+/// publication date.
 pub fn govinfo_copy(uri: &str) -> Option<(String, String)> {
     let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "www.govinfo.gov" | "govinfo.gov") {
@@ -961,7 +957,7 @@ mod tests {
             "https://www.govinfo.gov/app/details/FR-2026-09-09/2026-18291",
         ] {
             assert_eq!(
-                from_govinfo_uri(uri).as_deref(),
+                govinfo_copy(uri).map(|c| c.0).as_deref(),
                 Some("2026-18291"),
                 "{uri}"
             );
@@ -971,7 +967,7 @@ mod tests {
             "https://www.govinfo.gov/app/details/FR-2026-09-09",
             "https://www.govinfo.gov/app/details/CFR-2026-title14/2026-18291",
         ] {
-            assert_eq!(from_govinfo_uri(uri), None, "{uri}");
+            assert_eq!(govinfo_copy(uri), None, "{uri}");
         }
     }
 
@@ -1018,7 +1014,10 @@ mod tests {
             ]
         );
         for link in &document.related[..2] {
-            assert_eq!(from_govinfo_uri(&link.uri).as_deref(), Some("2026-18291"));
+            assert_eq!(
+                govinfo_copy(&link.uri).map(|c| c.0).as_deref(),
+                Some("2026-18291")
+            );
         }
         // GovInfo's own record names the same details page.
         let mods = String::from_utf8(fixture("govinfo-mods-2026-18291.xml")).unwrap();

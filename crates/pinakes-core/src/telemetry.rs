@@ -996,6 +996,7 @@ pub fn after_save_failure(resolver: &str) {
     AFTER_SAVE_FAILURES.with_label_values(&[resolver]).inc();
 }
 /// The failed steps after a save counted for `resolver` so far.
+#[cfg(test)]
 pub fn after_save_failures(resolver: &str) -> u64 {
     AFTER_SAVE_FAILURES.with_label_values(&[resolver]).get()
 }
