@@ -26,7 +26,9 @@ pub async fn run(
             }
             _=tick.tick()=>{}
         }
-        if let Err(e) = crate::changes::retain(&pool, retention_days).await {
+        let retained = crate::changes::retain(&pool, retention_days).await;
+        crate::telemetry::background_pass("retention", &retained);
+        if let Err(e) = retained {
             tracing::warn!(error=%crate::resolver::log_error(&e),"change retention failed");
         }
         // Cleanup may run for minutes: the fold keeps its minute meanwhile, and shutdown stops it
@@ -42,6 +44,7 @@ pub async fn run(
                 _=fold.tick()=>compact(&pool).await,
             }
         };
+        crate::telemetry::background_pass("cleanup", &cleaned);
         if let Err(e) = cleaned {
             tracing::warn!(error=%crate::resolver::log_error(&e),"cleanup failed");
         }
@@ -49,10 +52,14 @@ pub async fn run(
             break;
         }
         // After the cleanup: the places only deleted cards named go too.
-        if let Err(e) = crate::store::prune_osm_places(&pool).await {
+        let pruned = crate::store::prune_osm_places(&pool).await;
+        crate::telemetry::background_pass("osm_prune", &pruned);
+        if let Err(e) = pruned {
             tracing::warn!(error=%crate::resolver::log_error(&e),"pruning cached OSM objects failed");
         }
-        if let Err(e) = crate::also_on::prune(&pool).await {
+        let pruned = crate::also_on::prune(&pool).await;
+        crate::telemetry::background_pass("also_on_prune", &pruned);
+        if let Err(e) = pruned {
             tracing::warn!(error=%crate::resolver::log_error(&e),"also-on pruning failed");
         }
         // After the pruning: a card loses what its sources' expired facts gave it. It reads every
@@ -65,12 +72,14 @@ pub async fn run(
                 _=fold.tick()=>compact(&pool).await,
             }
         };
+        crate::telemetry::background_pass("refill", &refilled);
         if let Err(e) = refilled {
             tracing::warn!(error=%crate::resolver::log_error(&e),"taking stale values out of cards failed");
         }
         // A card that became final or dead-lettered since the start while it held what a
         // switched-off also-on source wrote: nothing to read unless that happened (its marker).
         let unhinted = crate::also_on::unhint(&pool).await;
+        crate::telemetry::background_pass("unhint", &unhinted);
         if let Err(e) = unhinted {
             tracing::warn!(error=%crate::resolver::log_error(&e),"taking switched-off sources' values out of cards no refresh reads failed");
         }
@@ -78,7 +87,49 @@ pub async fn run(
 }
 /// Fold the search revision's rows (`store::compact_search_writes`).
 async fn compact(pool: &PgPool) {
-    if let Err(e) = crate::store::compact_search_writes(pool).await {
+    let folded = crate::store::compact_search_writes(pool).await;
+    crate::telemetry::background_pass("search_fold", &folded);
+    if let Err(e) = folded {
         tracing::warn!(error=%crate::resolver::log_error(&e),"search revision fold failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A maintenance pass whose steps fail (here the database is gone) counts each failed step
+    /// in `pinakes_background_failures_total`, so a step that fails every hour shows, and its
+    /// last success stands still.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn each_failed_maintenance_step_is_counted(pool: PgPool) {
+        let steps = [
+            "retention",
+            "cleanup",
+            "osm_prune",
+            "also_on_prune",
+            "search_fold",
+        ];
+        let failures = || {
+            steps
+                .iter()
+                .map(|s| crate::telemetry::background_failures(s))
+                .collect::<Vec<_>>()
+        };
+        let before = failures();
+        pool.close().await;
+        let (stop, shutdown) = watch::channel(false);
+        let pass = tokio::spawn(run(pool, 7, 24, 30, Duration::from_secs(3600), shutdown));
+        for _ in 0..200 {
+            if failures().iter().zip(&before).all(|(now, was)| now > was) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        stop.send(true).unwrap();
+        pass.await.unwrap();
+        for ((step, now), was) in steps.iter().zip(failures()).zip(before) {
+            assert!(now > was, "{step}: {was} -> {now}");
+        }
     }
 }

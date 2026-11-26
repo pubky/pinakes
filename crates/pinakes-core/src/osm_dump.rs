@@ -229,6 +229,7 @@ pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watc
             continue;
         }
         let written = tokio::select! { _=shutdown.changed()=>break, r=write(&pool, &dir)=>r };
+        crate::telemetry::background_pass("osm_dump", &written);
         wait = match written {
             Ok(places) => {
                 tracing::info!(places, file=%path(&dir).display(), "ODbL dump written");

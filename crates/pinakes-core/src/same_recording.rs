@@ -56,7 +56,9 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
     let mut swept: Option<tokio::time::Instant> = None;
     loop {
         if swept.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600)) {
-            match sweep(&pool).await {
+            let result = sweep(&pool).await;
+            crate::telemetry::background_pass("same_recording_sweep", &result);
+            match result {
                 Ok(_) => swept = Some(tokio::time::Instant::now()),
                 Err(error) => {
                     tracing::warn!(error = %crate::resolver::log_error(&error), "same-recording sweep will retry")
@@ -64,6 +66,7 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
             }
         }
         let pass = tokio::select! { _=shutdown.changed()=>break, result=drain(&pool, &config, 200)=>result };
+        crate::telemetry::background_pass("same_recording", &pass);
         match pass {
             // There was work: more may be due, so go on at once.
             Ok(n) if n > 0 => {

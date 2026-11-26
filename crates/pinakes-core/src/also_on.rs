@@ -1652,6 +1652,7 @@ pub async fn run(
     loop {
         // Up to 100 resources a tick, so their hub lookups batch.
         let handled = tokio::select! { _=shutdown.changed()=>break, result=drain(&pool,&cx,&sources,100)=>result };
+        crate::telemetry::background_pass("also_on", &handled);
         match handled {
             Ok(100) => continue,
             Ok(_) => {}
