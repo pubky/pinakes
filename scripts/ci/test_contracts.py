@@ -408,6 +408,15 @@ elif url.endswith('.ndjson.gz'):
                     stop = calls.index(['stop', '--time', '30', name])
                     self.assertEqual(calls[stop + 1], ['inspect', '--format', '{{.State.ExitCode}}', name])
 
+class SupplyChain(unittest.TestCase):
+    def test_no_crate_is_publishable(self):
+        workspace = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']
+        self.assertIs(workspace['package']['publish'], False)
+        for member in workspace['members']:
+            package = tomllib.loads((ROOT / member / 'Cargo.toml').read_text())['package']
+            self.assertEqual(package.get('publish'), {'workspace': True}, member)
+
+
 class Release(unittest.TestCase):
     def test_release_waits_for_gates_and_only_tags_get_secrets(self):
         w = workflow()
