@@ -97,6 +97,10 @@ jobs:
     name: Publish platform (${{ matrix.arch }})
     needs: [quality, image]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # Only the two publishing jobs may write packages, with this run's own token.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -126,16 +130,16 @@ jobs:
       # The pushed bytes come from a separate build: they are smoke-tested before manifest.
       - name: Provision PostgreSQL and PostGIS
         run: scripts/ci/setup-postgres
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
-          registry: registry-1.docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish release platforms
         uses: pubky/ci-workflows/.github/actions/docker/build_and_push@a57f2ae6382a8519ba4aa09d58b706f6b68a4426
         with:
-          registry: registry-1.docker.io/synonymsoft
+          registry: ghcr.io/pubky
           image: pinakes
           context: .
           push: true
@@ -152,18 +156,21 @@ jobs:
           cache_to: type=gha,mode=max,scope=pinakes-release-${{ matrix.arch }}
       - name: Pull the published platform image
         env:
-          PUBLISHED_IMAGE: registry-1.docker.io/synonymsoft/pinakes:${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}
+          PUBLISHED_IMAGE: ghcr.io/pubky/pinakes:${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}
           PUBLISHED_ARCH: ${{ matrix.arch }}
         run: docker pull --platform "linux/$PUBLISHED_ARCH" "$PUBLISHED_IMAGE"
       - name: Smoke the published platform image against PostgreSQL
         env:
-          PUBLISHED_IMAGE: registry-1.docker.io/synonymsoft/pinakes:${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}
+          PUBLISHED_IMAGE: ghcr.io/pubky/pinakes:${{ steps.main.outputs.commit }}-${{ github.run_id }}-${{ matrix.arch }}
         run: scripts/ci/container-smoke "$PUBLISHED_IMAGE"
 
   manifest:
     name: Publish multiarch manifest
     needs: [publish]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -180,12 +187,12 @@ jobs:
       - name: Require the tagged commit on main
         id: main
         run: scripts/ci/release-on-main >> "$GITHUB_OUTPUT"
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
-          registry: registry-1.docker.io
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Combine verified platforms and set release tags
         env:

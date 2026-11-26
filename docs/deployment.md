@@ -64,7 +64,7 @@ The commands start the daemon with a read-only root file system, a named volume 
 dump, and the public port published on the host's loopback only:
 
 ```sh
-PINAKES_IMAGE=registry-1.docker.io/synonymsoft/pinakes:v0.1.0
+PINAKES_IMAGE=ghcr.io/pubky/pinakes:v0.1.0
 docker pull "$PINAKES_IMAGE"
 docker volume create pinakes-dumps
 docker run --detach --name pinakes --restart unless-stopped \
@@ -128,15 +128,16 @@ match `v*.*.*`. Rust is 1.98.1 in CI, in the image build and in `rust-toolchain.
 check passes, the image exposes only port 8090, and port 9090 is bound to loopback only. It needs
 no public provider and no test identity.
 
-Pull request and `main` runs need no registry secret and never write to the registry. The
-workflow creates no Git tags, releases or deployments.
+Pull request and `main` runs of this workflow don't log in to a registry, and their token can't
+write packages: only the two publishing jobs ask for `packages: write`. The workflow creates no
+Git tags, releases or deployments.
 
 ### How a tag is published
 
 Only a pushed, valid `v`-prefixed SemVer tag of at most 128 characters publishes
 (`scripts/ci/release-tag`):
 
-| Git tag | Image tags under `registry-1.docker.io/synonymsoft/pinakes` |
+| Git tag | Image tags under `ghcr.io/pubky/pinakes` |
 | --- | --- |
 | `v1.2.3` | `v1.2.3`, the full commit SHA, `latest` |
 | `v1.2.3-rc.1` | `v1.2.3-rc.1`, the full commit SHA; `latest` is unchanged |
@@ -154,8 +155,8 @@ The publishing jobs run after both test jobs pass:
    pushed SHA to its commit (`git rev-parse "$GITHUB_SHA^{commit}"`) and requires the checked-out
    tree to be that commit. For an annotated tag, such as the signed one below, the commit-named
    image tags still name the commit and never the tag object.
-2. Each platform job sets up its database before it logs in to Docker Hub, so no registry
-   credential is on disk during package installs.
+2. Each platform job sets up its database before it logs in to the GitHub Container Registry
+   (`ghcr.io`), so no registry credential is on disk during package installs.
 3. Each platform job builds its image with the org's
    `build_and_push` action (`pubky/ci-workflows`, pinned to a commit in `.github/workflows/ci.yml`)
    and pushes it as `<full-commit-SHA>-<run-ID>-amd64` or `<full-commit-SHA>-<run-ID>-arm64`. The Dockerfile builds inside each platform's Rust image and ignores the action's `TARGETARCH` build argument.
@@ -165,7 +166,9 @@ The publishing jobs run after both test jobs pass:
    pushed bytes come from a separate build from the one the test job checked.
 5. The manifest job (`scripts/ci/publish-manifest`) checks that the combined manifest holds
    `linux/amd64` and `linux/arm64`, then sets the version tag, the full-SHA tag and, for a stable
-   version, `latest`.
+   version, `latest`. The combined manifest carries the `org.opencontainers.image.source`
+   annotation, and each platform image the same label from the `Dockerfile`, so the package links
+   to this repository.
 
 The per-platform tags belong to one workflow run. Two tags on the same commit start two runs, and
 neither can replace the bytes the other tested. A re-run of a failed job keeps the run ID, so it
@@ -173,7 +176,11 @@ replaces and tests its own tag again before the manifest job reads it. A failed 
 its run's tag in the registry, never promoted.
 
 The `main` check runs from the tagged commit's own workflow, so it stops mistaken tags, not
-someone who can push tags. That protection comes from the repository settings below.
+someone who can push tags or branches. `GITHUB_TOKEN` is not limited to a ref or an Environment:
+anyone with write access to the repository can push a branch whose workflow asks for
+`packages: write` and writes to `ghcr.io/pubky/pinakes`, release tags included. Pull requests
+from forks get a read-only token. Keep write access to release maintainers; the repository
+settings below cover tags and `main`.
 
 ### Repository settings for publishing
 
@@ -185,16 +192,27 @@ Owner prerequisites, not set by this repository's files:
   `scripts/ci/release-on-main` assumes.
 - A tag ruleset for `refs/tags/v*` that lets only release maintainers create, update or delete
   those tags.
-- Optionally, a `release` Environment that holds the two secrets below, limited to `v*` tags (with
-  required reviewers if you want them). Create it and move the secrets into it first, then add
+- Optionally, a `release` Environment limited to `v*` tags, with required reviewers if you want
+  them, as an approval step for the publishing jobs. It holds no credential, so it doesn't stop
+  another workflow from writing packages. Create it with its rules first, then add
   `environment: release` to the `publish` and `manifest` jobs: naming an Environment in the
-  workflow creates it with no protection rules. `scripts/ci/test_contracts.py` refuses an
-  `environment:`, so change that contract in the same commit.
+  workflow creates it with no protection rules.
+  `scripts/ci/test_contracts.py` refuses an `environment:`, so change that contract in the same
+  commit.
+- The organization's package settings (Settings, Packages, Package creation) let members create
+  public container packages.
+- After the first release, the package `ghcr.io/pubky/pinakes` is public (package settings,
+  Change visibility). While it is private, `docker pull` without a login fails. An organization
+  owner or a package admin can change it.
+- No package named `ghcr.io/pubky/pinakes` exists before the first release, or it gives this
+  repository write access (package settings, Manage Actions access). A package first pushed by
+  hand or with a personal token, even one linked by the image's source label, doesn't give this
+  repository's workflows write access, and the first publish fails with 403.
 
-Provision repository or explicitly granted organization Actions secrets before publishing:
-
-- `DOCKERHUB_USERNAME`: a Docker Hub account that may push `synonymsoft/pinakes`.
-- `DOCKERHUB_TOKEN`: that account's token with write access to the image repository.
+Publishing needs no stored secret. The two publishing jobs log in to `ghcr.io` with the run's own
+`GITHUB_TOKEN`, which only they get with `packages: write`. A workflow that creates the package
+with that token links it to this repository and gives the repository admin access to it, so later
+releases can push new versions.
 
 ### Release a version
 
@@ -207,7 +225,7 @@ VERSION=v0.1.0
 git tag -s "$VERSION" -m "Pinakes $VERSION"
 git push origin "refs/tags/$VERSION"
 # After the publish jobs succeed, check that the manifest holds both platforms.
-docker buildx imagetools inspect "registry-1.docker.io/synonymsoft/pinakes:$VERSION"
+docker buildx imagetools inspect "ghcr.io/pubky/pinakes:$VERSION"
 ```
 
 ## What to host

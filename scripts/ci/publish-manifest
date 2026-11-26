@@ -8,14 +8,17 @@ set -euo pipefail
 [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ ]]
 [[ "$RELEASE_IMAGE_TAG" =~ ^v[0-9A-Za-z._-]+$ && ${#RELEASE_IMAGE_TAG} -le 128 ]]
 [[ "$RELEASE_LATEST" == true || "$RELEASE_LATEST" == false ]]
-image=registry-1.docker.io/synonymsoft/pinakes
+image=ghcr.io/pubky/pinakes
+# The index names its repository, so the package page links to it.
+source=https://github.com/pubky/pinakes
+annotation=(--annotation "index:org.opencontainers.image.source=$source")
 platforms=("$image:$RELEASE_COMMIT-$GITHUB_RUN_ID-amd64" "$image:$RELEASE_COMMIT-$GITHUB_RUN_ID-arm64")
 tags=(--tag "$image:$RELEASE_IMAGE_TAG" --tag "$image:$RELEASE_COMMIT")
 if [[ "$RELEASE_LATEST" == true ]]; then
   tags+=(--tag "$image:latest")
 fi
 validate_manifest() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "$source" <<'PY'
 import json
 import sys
 with open(sys.argv[1]) as f:
@@ -23,12 +26,14 @@ with open(sys.argv[1]) as f:
 platforms = {item['platform']['architecture'] for item in manifest['manifests']
              if item.get('platform', {}).get('os') == 'linux'}
 assert platforms == {'amd64', 'arm64'}, platforms
+source = manifest.get('annotations', {}).get('org.opencontainers.image.source')
+assert source == sys.argv[2], source
 PY
 
 }
 # Check both architectures before moving any version, SHA or latest tag.
-docker buildx imagetools create --dry-run "${platforms[@]}" > "$RUNNER_TEMP/pinakes-candidate-manifest.json"
+docker buildx imagetools create --dry-run "${annotation[@]}" "${platforms[@]}" > "$RUNNER_TEMP/pinakes-candidate-manifest.json"
 validate_manifest "$RUNNER_TEMP/pinakes-candidate-manifest.json"
-docker buildx imagetools create "${tags[@]}" "${platforms[@]}"
+docker buildx imagetools create "${annotation[@]}" "${tags[@]}" "${platforms[@]}"
 docker buildx imagetools inspect --raw "$image:$RELEASE_IMAGE_TAG" > "$RUNNER_TEMP/pinakes-release-manifest.json"
 validate_manifest "$RUNNER_TEMP/pinakes-release-manifest.json"
