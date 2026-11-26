@@ -277,7 +277,9 @@ async fn search_filters_facets_true_keyset_and_invalid_options(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    // Its many facet searches each cost their facets: a budget they all fit.
+    let config = Config::from_value(json!({"api": {"requests_per_minute": 10_000}})).unwrap();
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
     let (code, page) = call(
         &app,
         "GET",
@@ -1828,6 +1830,50 @@ async fn related_searches_cost_their_own_units_and_with_reach_both(pool: PgPool)
         assert_eq!(calls.load(Ordering::SeqCst), fetched, "{budget}");
     }
     task.abort();
+}
+
+/// Facets and trending pages read the whole matching set or every reference in their window:
+/// a search costs `limits.facet_cost` per facet asked (each once) and `limits.trending_cost` per
+/// started week of a trending window, on top of reach and related, taken from the per-IP budget
+/// before the search runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn facet_and_trending_searches_cost_their_configured_units(pool: PgPool) {
+    let seed = "0".repeat(32);
+    for (path, cost) in [
+        ("/v1/search?facet=type,tags,host,category".to_owned(), 12),
+        ("/v1/search?facet=type,tags,type".to_owned(), 6),
+        ("/v1/search?sort=trending&window=90d".to_owned(), 26),
+        ("/v1/search?sort=trending".to_owned(), 2),
+        ("/v1/search?sort=trending&window=8d".to_owned(), 4),
+        ("/v1/search?sort=trending&window=1h".to_owned(), 2),
+        (
+            "/v1/search?sort=trending&window=90d&facet=host".to_owned(),
+            29,
+        ),
+        (format!("/v1/search?related={seed}&facet=tags"), 9),
+        ("/v1/search?sort=recent".to_owned(), 1),
+    ] {
+        for (budget, status) in [(cost - 1, 429), (cost, 200)] {
+            if budget == 0 {
+                continue;
+            }
+            let config = Config::from_value(json!({
+                "api": {"requests_per_minute": budget},
+                "limits": {"facet_cost": 3, "trending_cost": 2},
+            }))
+            .unwrap();
+            let app = api::router(AppState::new(pool.clone(), config).unwrap());
+            assert_eq!(
+                call(&app, "GET", &path, None).await.0,
+                status,
+                "{path} with {budget}"
+            );
+            if status == 200 {
+                // The search took the whole budget.
+                assert_eq!(call(&app, "GET", "/v1/info", None).await.0, 429, "{path}");
+            }
+        }
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations")]

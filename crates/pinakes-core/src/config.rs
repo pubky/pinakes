@@ -937,6 +937,10 @@ pub struct ApiConfig {
     pub reach_cost: usize,
     #[serde(skip)]
     pub related_cost: usize,
+    #[serde(skip)]
+    pub facet_cost: usize,
+    #[serde(skip)]
+    pub trending_cost: usize,
     /// Browser origins allowed to call the public listener (CORS): `["*"]` (any origin; the
     /// public API takes no cookies or tokens), a list of `scheme://host[:port]` origins, or `[]`
     /// to send no CORS headers. Never applied to the admin listener.
@@ -990,6 +994,8 @@ impl Default for ApiConfig {
             request_timeout_secs: 30,
             reach_cost: 6,
             related_cost: 6,
+            facet_cost: 2,
+            trending_cost: 1,
             cors_allow_origins: vec!["*".into()],
             swagger_ui: true,
             mcp: true,
@@ -1444,6 +1450,8 @@ impl Config {
             || !(1..=600).contains(&self.shutdown_grace_secs)
             || !(2..=100).contains(&self.api.reach_cost)
             || !(2..=100).contains(&self.api.related_cost)
+            || !(1..=100).contains(&self.api.facet_cost)
+            || !(1..=100).contains(&self.api.trending_cost)
             || !(1..=60).contains(&self.search.reach_timeout_secs)
             || !(1..=10_000).contains(&self.search.related_taggers)
             || !(1..=3650).contains(&self.search.related_window_days)
@@ -1653,11 +1661,17 @@ mod tests {
     fn related_limits_have_config_bounds() {
         assert_eq!(Config::default().search.related_seed_links, 32);
         assert_eq!(Config::default().api.related_cost, 6);
+        assert_eq!(Config::default().api.facet_cost, 2);
+        assert_eq!(Config::default().api.trending_cost, 1);
         for (key, value) in [
             ("related_seed_links", 0),
             ("related_seed_links", 1001),
             ("related_cost", 1),
             ("related_cost", 101),
+            ("facet_cost", 0),
+            ("facet_cost", 101),
+            ("trending_cost", 0),
+            ("trending_cost", 101),
         ] {
             assert!(
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
@@ -2996,6 +3010,10 @@ limits! {
     reach_cost: usize = |c| c.api.reach_cost => [|c, v| c.api.reach_cost = v],
     /// Budget units a related search costs.
     related_cost: usize = |c| c.api.related_cost => [|c, v| c.api.related_cost = v],
+    /// Budget units a search costs for each facet it asks (`facet=type,tags` is two).
+    facet_cost: usize = |c| c.api.facet_cost => [|c, v| c.api.facet_cost = v],
+    /// Budget units a trending search costs for each started week of its window (`window=90d` is 13 weeks).
+    trending_cost: usize = |c| c.api.trending_cost => [|c, v| c.api.trending_cost = v],
     /// Preview requests per minute per client.
     preview_requests_per_minute: usize = |c| c.preview.requests_per_minute => [|c, v| c.preview.requests_per_minute = v],
     /// Preview requests per minute per URI.

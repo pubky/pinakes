@@ -251,6 +251,8 @@ resolver limits apply to pubky and to each card route.
 | `reach_timeout_secs` | `5` | 1–60 | Nexus reach deadline per search, and for all of an MCP `social` call's Nexus reads (seconds). Must be more than two seconds below `request_timeout_secs`. |
 | `reach_cost` | `6` | 2–100 | Budget units a search costs for each of `reach` and `boost`. |
 | `related_cost` | `6` | 2–100 | Budget units a related search costs. |
+| `facet_cost` | `2` | 1–100 | Budget units a search costs for each facet it asks (`facet=type,tags` is two). |
+| `trending_cost` | `1` | 1–100 | Budget units a trending search costs for each started week of its window (`window=90d` is 13 weeks). |
 | `related_taggers` | `200` | 1–10000 | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
 | `related_window_days` | `365` | 1–3650 | Days a related page looks back, for those taggers and their tags. |
 | `related_refs_per_tagger` | `1000` | 1–100000 | References a related page reads per sampled tagger (their most recent). |

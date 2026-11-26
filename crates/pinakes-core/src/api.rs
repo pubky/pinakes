@@ -357,24 +357,12 @@ async fn public_budget(
             client
         }
     };
-    // A reach search (`reach` or `boost`, each a set read from Nexus) and a related search cost
-    // their own units, a search with several all of them together; anything else costs one.
-    let (mut reach, mut boost, mut related) = (false, false, false);
-    if request.method() != axum::http::Method::OPTIONS && request.uri().path() == "/v1/search" {
-        let query = request.uri().query().unwrap_or_default();
-        for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
-            reach |= key == "reach";
-            boost |= key == "boost";
-            related |= key == "related";
-        }
-    }
-    let api = &state.config.api;
-    let cost = match (reach, boost, related) {
-        (false, false, false) => 1,
-        _ => {
-            (usize::from(reach) + usize::from(boost)) * api.reach_cost
-                + usize::from(related) * api.related_cost
-        }
+    let cost = if request.method() != axum::http::Method::OPTIONS
+        && request.uri().path() == "/v1/search"
+    {
+        search_cost(request.uri().query().unwrap_or_default(), &state.config.api)
+    } else {
+        1
     };
     if let Err(error) = state
         .budget(
@@ -391,6 +379,46 @@ async fn public_budget(
         return error.into_response();
     }
     next.run(request).await
+}
+
+/// The budget units of a search with this query string. A reach search (`reach` or `boost`, each
+/// a set read from Nexus), a related search, each facet asked (`facet=type,tags`: each counts
+/// the whole matching set) and a trending page (each started week of its window: it counts
+/// every reference inside it) cost their own units, a search with several all of them together;
+/// any other search costs one. An unknown facet adds nothing and a window the search refuses
+/// counts as one week: such a search answers 400.
+pub(crate) fn search_cost(query: &str, api: &crate::config::ApiConfig) -> usize {
+    let (mut reach, mut boost, mut related, mut trending) = (false, false, false, false);
+    let mut facets = std::collections::BTreeSet::new();
+    let mut window = None;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match &*key {
+            "reach" => reach = true,
+            "boost" => boost = true,
+            "related" => related = true,
+            "sort" => trending = value == "trending",
+            "window" => window = Some(value),
+            "facet" => facets.extend(
+                value
+                    .split(',')
+                    .filter(|f| matches!(*f, "type" | "tags" | "host" | "category"))
+                    .map(str::to_owned),
+            ),
+            _ => {}
+        }
+    }
+    let weeks = if trending {
+        trend_window(window.as_deref()).map_or(1, |span| {
+            usize::try_from((span.num_hours() + 7 * 24 - 1) / (7 * 24)).unwrap_or(1)
+        })
+    } else {
+        0
+    };
+    let cost = (usize::from(reach) + usize::from(boost)) * api.reach_cost
+        + usize::from(related) * api.related_cost
+        + facets.len() * api.facet_cost
+        + weeks * api.trending_cost;
+    cost.max(1)
 }
 
 /// Whether `origin` may call the public listener (`api.cors_allow_origins`).

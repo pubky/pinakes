@@ -3357,10 +3357,14 @@ entry that is not one of them ([operations](operations.md#clients-and-budgets)).
 | A search with `reach` | `limits.reach_cost` (6) |
 | A search with `boost` | `limits.reach_cost` (6) |
 | A search with `related` | `limits.related_cost` (6) |
+| A search with `facet` | `limits.facet_cost` (2) for each facet asked |
+| A search with `sort=trending` | `limits.trending_cost` (1) for each started week of its window (90 days: 13) |
 | A search with several of these | All of them together |
 | Any other request | 1 |
 
 The reach and boost costs are charged before any Nexus call, because each reads a set from Nexus.
+A search that costs more than the whole budget (an operator's high costs over a low
+`api.requests_per_minute`) always answers 429.
 Over budget, the answer is 429 with `Retry-After: 60`.
 
 ### Errors
@@ -3489,8 +3493,8 @@ text. Every other method is MCP's.
 #### MCP budget and deadlines
 
 - An MCP message spends one unit of the per-IP budget, and a tool call what its requests cost on
-  top: a `reach` search 6, `types` two requests, `social` its lookup plus one per 100 URIs it
-  asks Nexus.
+  top: a `reach` search 6, `types` 3 (a search with one facet, 2, and `/v1/info`, 1), `social`
+  its lookup plus one per 100 URIs it asks Nexus.
 - Bodies are capped at 2 MiB, as for every route. The routes keep their statement timeout, and
   `social` the Nexus client's 10-second timeout.
 - A tool call has one deadline for all its requests together: two seconds inside
