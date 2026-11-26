@@ -1695,6 +1695,14 @@ async fn api_pool_enforces_query_timeout(pool: PgPool) {
             .unwrap(),
         "5s"
     );
+    // A search is planned near the JIT threshold, where compiling costs more than it saves.
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW jit")
+            .fetch_one(&api_pool)
+            .await
+            .unwrap(),
+        "off"
+    );
     // 57014 (query_canceled): the statement timeout cut the six-second sleep.
     let error = sqlx::query("SELECT pg_sleep(6)")
         .execute(&api_pool)

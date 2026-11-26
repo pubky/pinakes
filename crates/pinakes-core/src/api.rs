@@ -257,6 +257,9 @@ impl AppState {
         .await
     }
 }
+/// The API's pool: 10 connections, each statement cut at 5 s, and no JIT. The search statements
+/// are planned near PostgreSQL's JIT threshold, where compiling their expressions takes longer
+/// than the query itself.
 pub fn pool_options() -> sqlx::postgres::PgPoolOptions {
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
@@ -264,8 +267,9 @@ pub fn pool_options() -> sqlx::postgres::PgPoolOptions {
         .after_connect(|conn, _| {
             Box::pin(async move {
                 sqlx::query("SET statement_timeout = '5s'")
-                    .execute(conn)
+                    .execute(&mut *conn)
                     .await?;
+                sqlx::query("SET jit = off").execute(&mut *conn).await?;
                 Ok(())
             })
         })
@@ -4314,10 +4318,6 @@ pub async fn search(
     sql.push(format!(") AS facets, {REVISION} AS revision"));
     // A related page is planned for its own parameters every time: a cached generic plan
     // guesses its sets hold a row or two and nests loops over thousands.
-    // A search through the catalogue paths (cards listed, or a link built from a card about) is
-    // planned near Postgres' JIT threshold, where compiling its expressions (about 85 ms on
-    // stable's data) costs several times the query: read without JIT, in its own transaction.
-    // Without catalogues the search reads as before.
     // A read that holds a text-search turn (a text the index left to Postgres) stops with the
     // turn's budget, not the pool's 5 s: past it, the search answers as a busy index does.
     let remaining_ms = postgres_deadline.map(|deadline| {
@@ -4326,17 +4326,12 @@ pub async fn search(
             .as_millis()
             .max(1)
     });
-    let row = if with_cards || backed || remaining_ms.is_some() {
+    let row = if let Some(ms) = remaining_ms {
         let mut tx = state.pool.begin().await?;
-        if with_cards || backed {
-            sqlx::query("SET LOCAL jit = off").execute(&mut *tx).await?;
-        }
-        if let Some(ms) = remaining_ms {
-            sqlx::query("SELECT set_config('statement_timeout',$1,true)")
-                .bind(format!("{ms}ms"))
-                .execute(&mut *tx)
-                .await?;
-        }
+        sqlx::query("SELECT set_config('statement_timeout',$1,true)")
+            .bind(format!("{ms}ms"))
+            .execute(&mut *tx)
+            .await?;
         let row = match sql
             .build()
             .persistent(related.is_none())
@@ -4345,9 +4340,7 @@ pub async fn search(
         {
             Ok(row) => row,
             // `query_canceled`: the turn's budget ran out during the read.
-            Err(sqlx::Error::Database(error))
-                if remaining_ms.is_some() && error.code().as_deref() == Some("57014") =>
-            {
+            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("57014") => {
                 crate::telemetry::search_index_busy("budget");
                 return Ok(text_search_busy());
             }
