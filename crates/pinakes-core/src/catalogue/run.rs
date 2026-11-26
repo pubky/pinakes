@@ -72,6 +72,25 @@ pub enum UpdateEnd {
     /// reason is the importer's own fixed text.
     NeedsImport(&'static str),
 }
+/// A run its importer abandons (`Err(Abandoned(..).into())` from [`Importer::import`] or
+/// [`Importer::update`]): what it read can't be applied (a dump refused for its checksums, its
+/// shape or what it would remove). The run ends without a full import's removal of the cards it
+/// did not read: its run and cursor are cleared, the position the importer set
+/// ([`Job::set_position`]) is kept, so its plan can tell what it refused, and the failure is
+/// recorded as any. Nothing else of the run is kept.
+#[derive(Debug)]
+pub struct Abandoned(pub Failure);
+impl std::fmt::Display for Abandoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for Abandoned {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// What an importer does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plan {
@@ -80,7 +99,7 @@ pub enum Plan {
     Wait(Duration),
 }
 
-/// One catalogue's importer. Steps 4–7 add one per catalogue to [`importers`].
+/// One catalogue's importer; [`importers`] lists them.
 #[async_trait]
 pub trait Importer: Send + Sync + 'static {
     /// Its catalogue; whether its full import is a large one is `Catalogue::large`.
@@ -127,12 +146,18 @@ pub trait Importer: Send + Sync + 'static {
     /// is a finished update that moves nothing. [`UpdateEnd::NeedsImport`] hands over to a full
     /// import.
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd>;
+    /// Whether the full imports this importer runs are asked for by hand (`pinakesd catalogue
+    /// import`'s, [`run_once`]): [`Job::asked`]. Kept with the run, never in the state row, so a
+    /// by-hand run that fails or is cut off leaves no standing request behind.
+    fn asked(&self) -> bool {
+        false
+    }
 }
 
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
 /// ([`to_start`]).
-pub fn importers(_config: &Config) -> Vec<Arc<dyn Importer>> {
-    Vec::new()
+pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
+    super::musicbrainz::importer(config).into_iter().collect()
 }
 
 /// What a run writes through: its catalogue, generation, resume point, position, work directory
@@ -149,6 +174,8 @@ pub struct Job<'a> {
     current_as_of: Option<chrono::DateTime<chrono::Utc>>,
     /// The state row as the run started.
     state: State,
+    /// A full import asked for ([`Job::asked`]).
+    asked: bool,
     dir: &'a Path,
     config: &'a Config,
     report: WriteReport,
@@ -157,12 +184,31 @@ impl Job<'_> {
     pub fn catalogue(&self) -> Catalogue {
         self.catalogue
     }
+    /// The database the run writes to (an importer reads its stored cards through it).
+    pub fn pool(&self) -> &PgPool {
+        self.pool
+    }
     pub fn run(&self) -> Run {
         self.run
     }
     /// The generation this run stamps on the cards it writes.
     pub fn generation(&self) -> i64 {
         self.generation
+    }
+    /// A full import that starts over, dropping a cut-off attempt's cursor (of another source or
+    /// dump): a generation of its own, so the cards that attempt wrote and this one does not read
+    /// are removed at its end as any others.
+    pub async fn new_generation(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.run == Run::Import,
+            "only a full import starts a generation"
+        );
+        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,cursor=NULL,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+            .bind(self.catalogue.name())
+            .fetch_one(self.pool)
+            .await?;
+        self.cursor = None;
+        Ok(())
     }
     /// Where to resume: the cursor of the last [`Job::write`] or [`Job::remove`] of this run, or
     /// none at its start.
@@ -178,6 +224,11 @@ impl Job<'_> {
     /// version.
     pub fn state(&self) -> &State {
         &self.state
+    }
+    /// Whether this is a full import asked for: by `--request` or an update's hand-over
+    /// (`import_requested` as it started), or by hand ([`Importer::asked`]).
+    pub fn asked(&self) -> bool {
+        self.asked
     }
     /// Where the last finished run left the next update to start; none before the first.
     pub fn position(&self) -> Option<&serde_json::Value> {
@@ -216,6 +267,27 @@ impl Job<'_> {
             self.catalogue,
             self.generation,
             cards,
+            Some(&cursor),
+        )
+        .await?;
+        self.cursor = Some(cursor);
+        self.report += written;
+        Ok(written)
+    }
+    /// Write rows the importer already checked ([`store::upsert_rows`]; each `source_id` once,
+    /// `rejected` the cards it refused) and save `cursor` with them.
+    pub async fn write_rows(
+        &mut self,
+        rows: &[super::Row],
+        rejected: u64,
+        cursor: serde_json::Value,
+    ) -> Result<WriteReport> {
+        let written = store::upsert_rows(
+            self.pool,
+            self.catalogue,
+            self.generation,
+            rows,
+            rejected,
             Some(&cursor),
         )
         .await?;
@@ -382,6 +454,22 @@ pub enum Next {
     Wait(Duration),
 }
 
+/// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz without
+/// `http.contact` ([`super::musicbrainz::NEEDS_CONTACT`] in `waiting`). Started with its contact,
+/// or with the catalogue off, the text goes (a task that starts clears any at its first step).
+pub async fn note_unstarted(pool: &PgPool, config: &Config) -> Result<()> {
+    let note = super::musicbrainz::NEEDS_CONTACT;
+    if super::musicbrainz::needs_contact(config) {
+        set_waiting(pool, Catalogue::Musicbrainz, note).await?;
+    } else {
+        sqlx::query("UPDATE catalogue_state SET waiting=NULL,updated_at=now() WHERE catalogue=$1 AND waiting=$2")
+            .bind(Catalogue::Musicbrainz.name())
+            .bind(note)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
 /// The importers `pinakesd` starts: those of the catalogues that are on. With every catalogue
 /// off, none.
 pub fn to_start(importers: Vec<Arc<dyn Importer>>, config: &Config) -> Vec<Arc<dyn Importer>> {
@@ -451,9 +539,24 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
                 lock = None;
                 ctx.pace.turn
             }
+            // A run that failed while this task's catalogue lock went too (a database restart
+            // ends both sessions): another daemon may hold the lock and the state row by now, so
+            // it is a lost lock, logged only.
+            Err(_) if catalogue_lock_gone(&mut lock, ctx.pace.lock_check).await => {
+                tracing::warn!(
+                    catalogue = catalogue.name(),
+                    "catalogue lock lost; the run resumes from its cursor once the lock is taken again"
+                );
+                lock = None;
+                ctx.pace.turn
+            }
             Err(failed) => {
                 let shown = failure::shown(&failed);
-                tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue import failed; it resumes from its cursor");
+                if failed.is::<Abandoned>() {
+                    tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue run abandoned: what it read can't be applied; the importer waits for something new");
+                } else {
+                    tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue import failed; it resumes from its cursor");
+                }
                 if let Err(unrecorded) = record_failure(&ctx.pool, catalogue, &shown).await {
                     tracing::warn!(catalogue = catalogue.name(), error = %failure::shown(&unrecorded), "catalogue failure not recorded");
                 }
@@ -464,6 +567,14 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             _ = shutdown.changed() => return,
             _ = tokio::time::sleep(wait) => {}
         }
+    }
+}
+
+/// Whether the catalogue lock this task held has gone (its session ended).
+async fn catalogue_lock_gone(lock: &mut Option<SessionLock>, wait: Duration) -> bool {
+    match lock.as_mut() {
+        Some(l) => l.check(wait).await == crate::locks::Check::Gone,
+        None => true,
     }
 }
 
@@ -560,7 +671,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         .await?;
         (state.generation, state.cursor.clone())
     } else {
-        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(catalogue.name())
             .bind(run.name())
             .fetch_one(pool)
@@ -574,6 +685,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         resumed = resumed.is_some(),
         "catalogue run starts"
     );
+    let asked = run == Run::Import && (importer.asked() || state.import_requested.is_some());
     let mut job = Job {
         pool,
         catalogue,
@@ -582,6 +694,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         cursor,
         position: None,
         current_as_of: None,
+        asked,
         state,
         dir: &dir,
         config: &ctx.config,
@@ -604,11 +717,35 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         }
     };
     let ended = tokio::select! {
-        ran = ran => ran?,
+        ran = ran => ran,
         _ = watched => return Err(Failure::new("turn_lost").into()),
+    };
+    let ended = match ended {
+        Ok(ended) => ended,
+        Err(error) if error.is::<Abandoned>() => {
+            // A full import abandoned answers its request (the dump it read can't be applied).
+            sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,position=coalesce($2,position),import_requested=CASE WHEN $3='import' THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1")
+                .bind(catalogue.name())
+                .bind(job.position.take())
+                .bind(run.name())
+                .execute(pool)
+                .await?;
+            if let Some(lock) = large {
+                lock.release().await;
+            }
+            tracing::info!(
+                catalogue = catalogue.name(),
+                run = run.name(),
+                "catalogue run abandoned: what it read can't be applied"
+            );
+            return Err(error);
+        }
+        Err(error) => return Err(error),
     };
     let mut report = job.report;
     let position = job.position.take();
+    // The run's own generation (a full import that started over has a new one).
+    let generation = job.generation;
     if let UpdateEnd::NeedsImport(reason) = ended {
         // The update ends without marking anything current, and a full import is asked for: the
         // next step starts it as a new import, through the large-import turn and the disk check.
@@ -630,6 +767,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     sqlx::query(
         "UPDATE catalogue_state SET run=NULL,cursor=NULL,phase='idle',waiting=NULL,position=coalesce($3,position),\
          last_import_at=CASE WHEN $2='import' THEN now() ELSE last_import_at END,\
+         import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,\
          last_update_at=CASE WHEN $2='update' THEN now() ELSE last_update_at END,\
          current_as_of=CASE WHEN $2='import' THEN coalesce($4,now()) ELSE coalesce($4,current_as_of) END,\
          updated_at=now() WHERE catalogue=$1",
@@ -655,6 +793,137 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     );
     Ok(Next::Again)
 }
+/// An importer whose plan is always `run` (`pinakesd catalogue import`); it keeps what its runs
+/// wrote.
+struct Forced {
+    inner: Arc<dyn Importer>,
+    run: Run,
+    written: std::sync::Mutex<WriteReport>,
+}
+#[async_trait]
+impl Importer for Forced {
+    fn catalogue(&self) -> Catalogue {
+        self.inner.catalogue()
+    }
+    fn disk_need(&self, run: Run, state: &State) -> u64 {
+        self.inner.disk_need(run, state)
+    }
+    async fn plan(&self, _state: &State) -> Result<Plan> {
+        Ok(Plan::Run(self.run))
+    }
+    fn asked(&self) -> bool {
+        self.run == Run::Import
+    }
+    async fn import(&self, job: &mut Job<'_>) -> Result<()> {
+        let ran = self.inner.import(job).await;
+        *self.written.lock().expect("the report") += job.report();
+        ran
+    }
+    async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
+        let ran = self.inner.update(job).await;
+        *self.written.lock().expect("the report") += job.report();
+        ran
+    }
+}
+
+/// One run of `importer` now, in this process (`pinakesd catalogue import`): a full import
+/// ([`Run::Import`], which takes up a full import that was cut off, else begins a new one), or an
+/// update ([`Run::Update`], after a finished import). It takes the catalogue's lock (refused
+/// while another process holds it), waits for the large-import turn and the disk as the task
+/// does (`waiting` says why, at each change), and runs through [`step`], so the daemon's code and
+/// state rows are the same. A failure is recorded as the task records it, and returned. The state
+/// row when the run has finished, and what it wrote (the cards a full import removed at its end
+/// not counted).
+pub async fn run_once(
+    importer: Arc<dyn Importer>,
+    ctx: &Context,
+    run: Run,
+    mut waiting: impl FnMut(&str),
+) -> Result<(State, WriteReport)> {
+    let catalogue = importer.catalogue();
+    let Some(mut lock) = SessionLock::try_take(&ctx.pool, catalogue.lock_key()).await? else {
+        anyhow::bail!("another process imports catalogue {catalogue} (its lock is held): stop that pinakesd or switch the catalogue off there first, or ask it for a full import with --request");
+    };
+    let held = &mut lock;
+    let ran = async {
+        let state = store::ensure_state(&ctx.pool, catalogue).await?;
+        match run {
+            // A new full import (an update under way is dropped); asked for through the run
+            // itself ([`Importer::asked`]), never as a request left in the state row.
+            Run::Import if state.run.as_deref() != Some("import") => {
+                sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,updated_at=now() WHERE catalogue=$1")
+                    .bind(catalogue.name())
+                    .execute(&ctx.pool)
+                    .await?;
+            }
+            Run::Import => {}
+            Run::Update => {
+                anyhow::ensure!(
+                    state.last_import_at.is_some() && state.run.as_deref() != Some("import"),
+                    "catalogue {catalogue} has no finished full import to update: run the import first"
+                );
+            }
+        }
+        let forced = Forced {
+            inner: importer.clone(),
+            run,
+            written: Default::default(),
+        };
+        let mut said: Option<String> = None;
+        loop {
+            // As the task does: a panic is a failed run, and the lock watched while it goes on.
+            let stepped = std::panic::AssertUnwindSafe(step(&forced, ctx)).catch_unwind();
+            let stepped = tokio::select! {
+                stepped = stepped => stepped.unwrap_or_else(|_| Err(Failure::new("panic").into())),
+                _ = held.lost(ctx.pace.lock_check) => {
+                    anyhow::bail!("the lock of catalogue {catalogue} was lost (its database session ended); the run resumes from its cursor at the next import");
+                }
+            };
+            match stepped {
+                Ok(Next::Again) => {
+                    let state = store::ensure_state(&ctx.pool, catalogue).await?;
+                    if state.run.is_none() && state.import_requested.is_none() {
+                        let written = *forced.written.lock().expect("the report");
+                        return Ok((state, written));
+                    }
+                }
+                Ok(Next::Wait(wait)) => {
+                    let state = store::ensure_state(&ctx.pool, catalogue).await?;
+                    let why = state.waiting.clone().unwrap_or_default();
+                    if said.as_deref() != Some(why.as_str()) {
+                        waiting(&why);
+                        said = Some(why);
+                    }
+                    tokio::time::sleep(wait.min(Duration::from_secs(60))).await;
+                }
+                Err(failed) => {
+                    let shown = failure::shown(&failed);
+                    record_failure(&ctx.pool, catalogue, &shown).await?;
+                    anyhow::bail!("catalogue {catalogue} run failed: {shown}");
+                }
+            }
+        }
+    };
+    let ended = ran.await;
+    lock.release().await;
+    ended
+}
+
+/// Ask for a full import of `catalogue` (`pinakesd catalogue import --request`): the importer
+/// that holds the catalogue (a daemon's task) starts it as any full import asked for, after the
+/// run under way, or at its next step. Needs no lock.
+pub async fn request_import(pool: &PgPool, catalogue: Catalogue, reason: &str) -> Result<()> {
+    store::ensure_state(pool, catalogue).await?;
+    sqlx::query(
+        "UPDATE catalogue_state SET import_requested=$2,updated_at=now() WHERE catalogue=$1",
+    )
+    .bind(catalogue.name())
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// The catalogue's lock was lost while a run went on (its session ended).
 #[derive(Debug)]
 struct CatalogueLockLost;
@@ -697,7 +966,7 @@ async fn clear_waiting(pool: &PgPool, catalogue: Catalogue) -> Result<()> {
 }
 /// A failed run: `failed`, its error (as logged: no secret) and one more in the count. The run
 /// and its cursor stay.
-async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) -> Result<()> {
+pub async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) -> Result<()> {
     let mut error = error.to_owned();
     crate::model::truncate(&mut error, 1024);
     store::ensure_state(pool, catalogue).await?;

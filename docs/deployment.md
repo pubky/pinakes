@@ -110,6 +110,8 @@ To run a command, put it after the image name, with the same mounts and environm
 - `--config /etc/pinakes/pinakes.toml reextract all`, with the daemon stopped
 - `--config /etc/pinakes/pinakes.toml reindex`, with the daemon stopped
 - `--config /etc/pinakes/pinakes.toml catalogue status`, beside the daemon
+- `--config /etc/pinakes/pinakes.toml catalogue import musicbrainz`, with the daemon stopped or
+  the catalogue off there
 
 ## CI and image publishing
 
@@ -340,7 +342,7 @@ Nexus replay. Budget backup retention apart from the database itself.
 
 ## Catalogues
 
-These apply once a catalogue has an importer ([importer rules](operations.md#importer-rules)):
+Each catalogue's importer follows these ([importer rules](operations.md#importer-rules)):
 
 - **Free disk.** Before a run starts or resumes, its importer compares the free disk under its
   directory (`catalogues.dir/<name>`) with what the run still needs. While it is short, the run
@@ -352,6 +354,25 @@ These apply once a catalogue has an importer ([importer rules](operations.md#imp
   them. A large catalogue switched off in the middle of its full import keeps its files there
   until it is on again and finishes, or until `pinakesd catalogue drop <name>` deletes its
   directory with its cards.
+
+### MusicBrainz
+
+The importer needs `http.contact` ([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md)).
+Measured on a sample of the real dump (the first 60 MB of the release file and a few MB of the
+others: 63,313 lines, 177,190 cards) on a 20-core host, and estimated from it for the whole
+dump (48.8 million cards):
+
+| | Sample | Whole dump (estimate) |
+| --- | --- | --- |
+| Download | 84 MB a dump | 26 GB, once per run, streamed (MusicBrainz serves at about 35 MB/s) |
+| Disk under `catalogues.dir/musicbrainz` | 51 MB of sorted runs (0.6 of the files) | about 16 GB for an import, 19 GB for an update (the stored cards' hashes too); a run waits for 40 GB free (`DISK_NEED`), less what a cut-off run left there |
+| PostgreSQL | 254 MB (1.4 KB a card with its indexes) | about 70 GB |
+| Memory | 195 MB for the import, 214 MB for the update | about 1.5 GB (512 MiB of records being sorted, the xz decoder, the lines in flight) |
+| Read and sort | 2.2 s | 15–20 minutes, bound by the download |
+| Write | 8.1 s (21,800 cards a second) | about 40 minutes for a full import; an update writes only what changed (0.9% of the sample's cards from one dump to the next) |
+
+A full import takes about an hour; the text index then reads the new cards in the background
+([text index](operations.md#text-index)).
 
 ## Network and secrets
 

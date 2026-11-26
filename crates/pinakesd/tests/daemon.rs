@@ -31,7 +31,7 @@ fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String, String) {
         format!(
             "database_url = {:?}\nlisten = \"127.0.0.1:{listen}\"\nadmin_listen = \"127.0.0.1:{admin}\"\n\
              nexus_url = \"http://127.0.0.1:9\"\n[pubky]\nenabled = false\n[canary]\nenabled = false\n\
-             [osm]\ndump_dir = {:?}\n[search]\nindex_dir = {:?}\n",
+             [osm]\ndump_dir = {:?}\n[search]\nindex_dir = {:?}\n[catalogues]\nenabled = false\n",
             database.as_str(),
             dir.join("dumps").to_str().unwrap(),
             dir.join("search-index").to_str().unwrap(),
@@ -390,5 +390,97 @@ async fn a_stopping_daemon_answers_healthz_with_503(pool: PgPool) {
         .expect("pinakesd stops on SIGTERM")
         .unwrap();
     assert!(status.success(), "{status}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// MusicBrainz on without `http.contact`: the daemon starts no importer and says why, in the
+/// catalogue's state row (`catalogue status`'s `waiting`) and in `pinakes_catalogue_needs_contact`;
+/// started again with the catalogue off, both are clear.
+#[sqlx::test(migrations = false)]
+async fn the_daemon_says_when_a_catalogue_needs_its_contact(pool: PgPool) {
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(pool.connect_options().get_database().unwrap());
+    let (config, base, admin) = config(&pool, &dir);
+    let off = std::fs::read_to_string(&config).unwrap();
+    let on = off.replace(
+        "[catalogues]\nenabled = false\n",
+        &format!(
+            "[catalogues]\ndir = {:?}\n",
+            dir.join("catalogues").to_str().unwrap()
+        ),
+    );
+    assert_ne!(on, off);
+    let http = reqwest::Client::new();
+    let serve = |name: &'static str| {
+        let (config, dir, base, http) = (config.clone(), dir.clone(), base.clone(), http.clone());
+        async move {
+            let log = std::fs::File::create(dir.join(name)).unwrap();
+            let mut serving = daemon(&config, &[])
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            while !http
+                .get(format!("{base}/v1/info"))
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+            {
+                assert!(
+                    serving.try_wait().unwrap().is_none(),
+                    "pinakesd exited; see {}",
+                    dir.join(name).display()
+                );
+                assert!(started.elapsed() < Duration::from_secs(60), "not serving");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            serving
+        }
+    };
+    let read = || async {
+        let metrics = http
+            .get(format!("{admin}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let waiting: Option<String> =
+            sqlx::query_scalar("SELECT waiting FROM catalogue_state WHERE catalogue='musicbrainz'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                .flatten();
+        (metrics, waiting)
+    };
+    std::fs::write(&config, &on).unwrap();
+    let serving = serve("pinakesd-on.log").await;
+    let (metrics, waiting) = read().await;
+    assert!(
+        metrics.contains("pinakes_catalogue_needs_contact{catalogue=\"musicbrainz\"} 1"),
+        "{metrics}"
+    );
+    assert!(
+        waiting
+            .as_deref()
+            .is_some_and(|w| w.starts_with("needs http.contact")),
+        "{waiting:?}"
+    );
+    stop(serving).await;
+    std::fs::write(
+        &config,
+        format!("{on}[catalogues.musicbrainz]\nenabled = false\n"),
+    )
+    .unwrap();
+    let serving = serve("pinakesd-off.log").await;
+    let (metrics, waiting) = read().await;
+    assert!(
+        metrics.contains("pinakes_catalogue_needs_contact{catalogue=\"musicbrainz\"} 0"),
+        "{metrics}"
+    );
+    assert_eq!(waiting, None);
+    stop(serving).await;
     std::fs::remove_dir_all(dir).unwrap();
 }

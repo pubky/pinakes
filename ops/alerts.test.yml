@@ -45,7 +45,58 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: wikidata}
             exp_annotations:
-              summary: "A wikidata catalogue import or update failed in the last hour; pinakesd catalogue status shows the error, and the run resumes from its cursor"
+              summary: "A wikidata catalogue import or update failed in the last hour; pinakesd catalogue status shows the error; the run resumes from its cursor, or, abandoned for its dump, waits for another"
+  # MusicBrainz's first import fails on a (a refused dump, say): it has finished no import, and
+  # the failure still fires; on b it is off.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="musicbrainz"}'
+        values: '1x60'
+      - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="musicbrainz"}'
+        values: '0x60'
+      - series: 'pinakes_catalogue_last_import_timestamp_seconds{instance="a",job="pinakes",catalogue="musicbrainz"}'
+        values: '0x60'
+      - series: 'pinakes_catalogue_last_import_timestamp_seconds{instance="b",job="pinakes",catalogue="musicbrainz"}'
+        values: '0x60'
+      - series: 'pinakes_catalogue_import_errors_total{instance="a",job="pinakes",catalogue="musicbrainz"}'
+        values: '0 0 0 1x57'
+      - series: 'pinakes_catalogue_import_errors_total{instance="b",job="pinakes",catalogue="musicbrainz"}'
+        values: '0 0 0 1x57'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CatalogueImportFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: musicbrainz}
+            exp_annotations:
+              summary: "A musicbrainz catalogue import or update failed in the last hour; pinakesd catalogue status shows the error; the run resumes from its cursor, or, abandoned for its dump, waits for another"
+  # MusicBrainz's first import was refused on a and b (one failure each, an hour ago and more):
+  # the refusal stands, so a, where the catalogue is on, keeps alerting after the failure's hour;
+  # b has it off.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_refused{instance="a",job="pinakes",catalogue="musicbrainz"}'
+        values: '1x300'
+      - series: 'pinakes_catalogue_refused{instance="b",job="pinakes",catalogue="musicbrainz"}'
+        values: '1x300'
+      - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="musicbrainz"}'
+        values: '1x300'
+      - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="musicbrainz"}'
+        values: '0x300'
+      - series: 'pinakes_catalogue_import_errors_total{instance="a",job="pinakes",catalogue="musicbrainz"}'
+        values: '1x300'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CatalogueDumpRefused
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: CatalogueDumpRefused
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: musicbrainz}
+            exp_annotations:
+              summary: "The musicbrainz catalogue's importer refused the newest dump it read and waits for another: pinakesd catalogue status shows which and why; if the dump is right, ask for a full import of it"
+      - eval_time: 4h
+        alertname: CatalogueImportFailed
+        exp_alerts: []
   # OpenStreetMap waits for the large-import turn on both instances; only on a does a large
   # catalogue's import keep failing.
   - interval: 1m

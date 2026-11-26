@@ -21,6 +21,8 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] reindex` | Builds the text index from the database into a new generation and switches to it. Run it with the daemon stopped ([text index](#text-index)). |
 | `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
+| `pinakesd [--config PATH] catalogue import NAME [--from DIR\|URL] [--limit N] [--update] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz` only in this version. |
+| `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
 | `pinakesd --openapi` | Prints the OpenAPI document. |
 | `pinakesd --help` | Prints the usage line. |
@@ -1714,8 +1716,9 @@ an error ([alerts](#alerts)).
 A catalogue card is one item of an open catalogue, stored in `catalogue_card`. The catalogues are
 `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` and `software` (crates.io,
 F-Droid and Flathub). An importer is the only writer of a catalogue's cards; they don't go
-through the fetch queue, the refresh tiers or the change journal. This version has no importer: no
-catalogue is read, and the catalogue tables stay empty.
+through the fetch queue, the refresh tiers or the change journal. MusicBrainz has an importer
+([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md)); the other catalogues have none in
+this version, and hold no cards.
 
 ### What a card holds
 
@@ -1767,6 +1770,7 @@ before its catalogue was imported joins at its next refresh. A card holds a link
 | Link | Key |
 | --- | --- |
 | A MusicBrainz artist, release group, release or recording page | `mb:<entity>:<mbid>` |
+| A MusicBrainz ISRC page (`musicbrainz.org/isrc/<ISRC>`) | `isrc:<ISRC>` |
 | A Wikidata item page | `wikidata:Q…` |
 | A DOI (`doi.org`, `doi:`) | `doi:` and the DOI in lower case |
 | An arXiv page | `arxiv:<id>` |
@@ -1806,7 +1810,7 @@ A catalogue-backed card:
   fetch replaces it. The references people made stay on the link.
 
 A card names the links it holds when it is written: its own link, its `url:` keys, the canonical
-link of each of its keys (`catalogue_key_links`: the musicbrainz.org, wikidata.org, `doi:`,
+link of each of its keys (`catalogue_key_links`: the musicbrainz.org entity and ISRC pages, wikidata.org, `doi:`,
 arxiv.org abstract and PDF, openalex.org, crates.io, docs.rs, lib.rs, F-Droid (English) and Flathub pages, and a homepage with
 or without `www.`) and its related links. The card table's triggers mark those links' rows in
 `catalogue_join_due`, so a link shared before the import joins then; a background task checks
@@ -1830,6 +1834,8 @@ max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, wh
 ```sh
 pinakesd --config <path> catalogue status
 pinakesd --config <path> catalogue drop <name>
+pinakesd --config <path> catalogue import <name> [--from DIR|URL] [--limit N] [--update] [--force]
+pinakesd --config <path> catalogue import <name> --request
 ```
 
 `catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, when its
@@ -1847,25 +1853,39 @@ is) and prints the directory it removed, or that there was none. It refuses:
 - while a daemon runs the catalogue's importer, which holds the catalogue's advisory lock for as
   long as it runs. The drop takes the same lock, so it can run beside the daemon.
 
+`catalogue import <name>` runs one full import of the catalogue now, or with `--update` one
+update, through the same code and state rows as the daemon's task: it takes the catalogue's lock
+(refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
+disk as the task does (printing why), watches its lock, and prints the cards before and after and
+the status table when it has finished. A full import takes up one that was cut off, else begins a
+new one. `--from`, `--limit` and `--force` are the importer's own
+([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand)). A failure is recorded as the
+task records it. `catalogue import <name> --request` needs no lock: it records that a full import
+is asked for (`import_requested`). The process running the importer starts it after an update
+under way, or at its next step (MusicBrainz: within the hour when idle); a full import under way
+is the one asked for, and its end, or its abandonment, clears the request. The command says when no process holds the
+catalogue.
+
 `scripts/lock-waits` names these locks `catalogue <name>` and `large catalogue import`.
 
 ### Importer rules
 
-No importer is registered in this version, so `pinakesd` starts no importer task. Once a
-catalogue has one, its importer runs as a background task of `pinakesd`, started only for a
-catalogue that is on, and follows these rules:
+A catalogue's importer runs as a background task of `pinakesd`, started only for a catalogue that
+is on (in this version: `musicbrainz`), and follows these rules:
 
 | Rule | What the task does |
 | --- | --- |
 | One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
-| What runs | A full import when none has finished, then an update a day after the last finished full import or update. An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
+| What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
 | How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. Each catalogue may lag as far as its source's publication rhythm allows (below). |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
 | Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
 | Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |
 | Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is one whose importer panicked. A run whose catalogue lock's database session has ended stops, is logged and resumes once the task holds the lock again; nothing about it is written to the state row, which another daemon may hold by then. Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
+| Abandoned runs | An importer may abandon a run whose data can't be applied (MusicBrainz: a refused dump). The run is recorded as failed, but its cursor goes and no card is removed for it; what the importer keeps about the refusal stays in its position, and the task waits for something new rather than trying again. |
+| Requests | A finished full import clears `import_requested`, also one asked for while it ran. |
 | Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
-| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. |
+| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). |
 
 ### Allowed update lag
 
@@ -1914,7 +1934,8 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CursorReset` | info | A feed resync or [feed reset](#feed-resets). |
 | `PreviewCapacityReached` | warning | [New previews](#new-previews). |
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
-| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
+| `CatalogueDumpRefused` | warning | `pinakesd catalogue status` (`waiting`: `dump <version> refused`, `last_error`); [MusicBrainz](sources/musicbrainz_catalogue.md#a-dump-that-is-refused). A refusal that has stood an hour, until a dump is applied. |
+| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on; `CatalogueImportFailed` also for a first import that fails or is refused, `CatalogueUpdateLag` only after a first finished import. A catalogue on without its importer (MusicBrainz without `http.contact`) shows in `catalogue status` (`waiting`) and `pinakes_catalogue_needs_contact`. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
 | `CatalogueJoinsBehind` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): the oldest join check has waited over six hours. |
 | `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |

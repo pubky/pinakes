@@ -261,7 +261,8 @@ async fn start(
     }
     pinakes_core::configure_sources(&config);
     // A drop refuses before it touches the database.
-    if let Some(CatalogueCommand::Drop(name)) = catalogue {
+    if let Some(CatalogueCommand::Drop(name)) = &catalogue {
+        let name = *name;
         refuse_enabled_drop(&config, name)?;
     }
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -516,6 +517,9 @@ async fn start(
             pinakes_core::catalogue::run::run(importer, catalogues.clone(), shutdown_rx.clone()),
         );
     }
+    if let Err(error) = pinakes_core::catalogue::run::note_unstarted(&pool, &config).await {
+        tracing::warn!(error = %pinakes_core::resolver::log_error(&error), "why a catalogue has no importer is not recorded");
+    }
     warn_admin_listener(admin_address);
     warn_admin_without_token(admin_address, config.admin_token.is_some());
     let admin_app = api::admin_router(state.clone());
@@ -591,7 +595,129 @@ async fn catalogue_command(
             lock.release().await;
             dropped?;
         }
+        CatalogueCommand::Import {
+            catalogue,
+            request: true,
+            ..
+        } => {
+            pinakes_core::catalogue::run::request_import(
+                pool,
+                catalogue,
+                pinakes_core::catalogue::musicbrainz::REQUESTED,
+            )
+            .await?;
+            writeln!(out, "a full import of catalogue {catalogue} is asked for: the process running its importer starts it after an update under way, or at its next step (a full import under way is the one asked for)")?;
+            // Whether one runs: its lock is held.
+            if let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? {
+                lock.release().await;
+                writeln!(out, "no process runs the importer of catalogue {catalogue} now: the next pinakesd started with it on (and http.contact set) starts the import, or run catalogue import {catalogue} with it stopped")?;
+            }
+        }
+        CatalogueCommand::Import {
+            catalogue,
+            from,
+            limit,
+            update,
+            force,
+            ..
+        } => {
+            import(
+                pool,
+                config,
+                catalogue,
+                from.as_deref(),
+                limit,
+                update,
+                force,
+                out,
+            )
+            .await?;
+        }
     }
+    Ok(())
+}
+
+/// `catalogue import NAME`: one run of the catalogue's importer now, through the daemon's code
+/// (`catalogue::run::run_once`): a full import, or with `--update` an update, from the official
+/// mirror or `--from` (a local directory holding one dump's files, or a mirror URL), with
+/// `--limit` in place of the configured limit (below the cards stored only with `--force`). It
+/// prints why it waits, then the cards before and after and the catalogue's state.
+#[allow(clippy::too_many_arguments)]
+async fn import(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    catalogue: Catalogue,
+    from: Option<&str>,
+    limit: Option<u64>,
+    update: bool,
+    force: bool,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
+    use pinakes_core::catalogue::{musicbrainz, run, store};
+    let mut config = config.clone();
+    if limit.is_some() {
+        config.catalogues.musicbrainz.limit = limit;
+    }
+    let source = match from {
+        Some(from) => musicbrainz::Source::parse(from)?,
+        None => musicbrainz::Source::official(),
+    };
+    if matches!(source, musicbrainz::Source::Mirror(_)) && config.egress.contact.is_empty() {
+        bail!("set http.contact (or PINAKES__HTTP__CONTACT): the dump mirror is asked with the operator's contact");
+    }
+    let before = store::state(pool, catalogue).await?;
+    let cards = before.as_ref().map_or(0, |s| s.cards);
+    let stored_limit = before
+        .as_ref()
+        .and_then(|s| s.position.as_ref())
+        .and_then(|p| p.get("limit"))
+        .and_then(|l| l.as_u64());
+    if let Some(limit) = config.catalogues.limit(catalogue) {
+        // A limit other than the one the cards were read with makes a full import of the new
+        // subset (an update hands over to one), which removes the others.
+        if stored_limit != Some(limit) && (limit as i64) < cards && !force {
+            bail!("catalogue {catalogue} holds {cards} cards: a full import with --limit {limit} removes all but at most {limit} of them; add --force to do so");
+        }
+    }
+    if !config.catalogues.enabled(catalogue) {
+        writeln!(
+            out,
+            "catalogue {catalogue} is off in this configuration: its cards stay out of search and lookups until it is on"
+        )?;
+    }
+    let importer =
+        musicbrainz::MusicBrainz::new(source, &config.egress.contact)?.configured(&config);
+    let ctx = run::Context::new(pool.clone(), std::sync::Arc::new(config.clone()));
+    let started = std::time::Instant::now();
+    let kind = if update {
+        run::Run::Update
+    } else {
+        run::Run::Import
+    };
+    let (state, written) = run::run_once(std::sync::Arc::new(importer), &ctx, kind, |why| {
+        let _ = writeln!(out, "waiting: {why}");
+    })
+    .await?;
+    // An update can have handed over to a full import (a limit changed, one asked for).
+    let ran = if state.last_import_at != before.as_ref().and_then(|s| s.last_import_at) {
+        run::Run::Import
+    } else {
+        kind
+    };
+    writeln!(
+        out,
+        "catalogue {catalogue}: {} finished in {:.0} s; {cards} cards before, {} after; written: {} new, {} changed, {} unchanged, {} refused, {} removed",
+        ran.name(),
+        started.elapsed().as_secs_f64(),
+        state.cards,
+        written.inserted,
+        written.changed,
+        written.unchanged,
+        written.rejected,
+        written.removed
+    )?;
+    let states = store::states(pool).await?;
+    writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
     Ok(())
 }
 
@@ -726,10 +852,21 @@ enum Command {
     /// `HEALTHCHECK`, which has no HTTP client of its own).
     Healthcheck,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum CatalogueCommand {
     Status,
     Drop(Catalogue),
+    /// `catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | --request`.
+    Import {
+        catalogue: Catalogue,
+        from: Option<String>,
+        limit: Option<u64>,
+        update: bool,
+        /// Only ask the daemon for a full import (`--request`).
+        request: bool,
+        /// A `--limit` below the cards stored (`--force`).
+        force: bool,
+    },
 }
 /// How long `pinakesd healthcheck` waits for the admin listener's answer, all of it.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -798,7 +935,56 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             )
                         })?)
                     }
-                    _ => bail!("catalogue takes status or drop NAME"),
+                    "import" => {
+                        let name = args.next().context("catalogue import requires a catalogue name")?;
+                        let catalogue = Catalogue::parse(&name).with_context(|| {
+                            format!(
+                                "unknown catalogue {name:?}: one of {}",
+                                Catalogue::ALL.map(Catalogue::name).join(", ")
+                            )
+                        })?;
+                        anyhow::ensure!(
+                            catalogue == Catalogue::Musicbrainz,
+                            "catalogue {catalogue} has no importer in this build"
+                        );
+                        let (mut from, mut limit, mut update, mut request, mut force) =
+                            (None, None, false, false, false);
+                        while let Some(option) = args.next() {
+                            match option.as_str() {
+                                "--from" => from = Some(args.next().context("--from requires a directory or URL")?),
+                                "--limit" => {
+                                    let n: u64 = args
+                                        .next()
+                                        .and_then(|n| n.parse().ok())
+                                        .filter(|n| *n >= 1)
+                                        .context("--limit requires a whole number of at least 1")?;
+                                    limit = Some(n);
+                                }
+                                "--update" => update = true,
+                                "--request" => request = true,
+                                "--force" => force = true,
+                                "--config" => {
+                                    config = Some(PathBuf::from(
+                                        args.next().context("--config requires a TOML path")?,
+                                    ))
+                                }
+                                other => bail!("unknown argument {other} for catalogue import"),
+                            }
+                        }
+                        anyhow::ensure!(
+                            !request || (from.is_none() && limit.is_none() && !update && !force),
+                            "catalogue import --request takes no other option"
+                        );
+                        CatalogueCommand::Import {
+                            catalogue,
+                            from,
+                            limit,
+                            update,
+                            request,
+                            force,
+                        }
+                    }
+                    _ => bail!("catalogue takes status, drop NAME or import NAME"),
                 });
             }
             "--config" => {
@@ -824,7 +1010,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | catalogue import NAME --request | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -890,6 +1076,55 @@ mod tests {
             command,
             Command::Catalogue(CatalogueCommand::Drop(Catalogue::Osm))
         ));
+        let (config, command) = parse(&[
+            "catalogue",
+            "import",
+            "musicbrainz",
+            "--from",
+            "/tmp/dump",
+            "--limit",
+            "500",
+            "--update",
+            "--config",
+            "x.toml",
+        ])
+        .unwrap();
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("x.toml")));
+        assert_eq!(
+            match command {
+                Command::Catalogue(c) => c,
+                _ => panic!("not a catalogue command"),
+            },
+            CatalogueCommand::Import {
+                catalogue: Catalogue::Musicbrainz,
+                from: Some("/tmp/dump".into()),
+                limit: Some(500),
+                update: true,
+                request: false,
+                force: false,
+            }
+        );
+        let (_, command) = parse(&["catalogue", "import", "musicbrainz", "--request"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::Import { request: true, .. })
+        ));
+        for bad in [
+            &["catalogue", "import"][..],
+            &["catalogue", "import", "osm"],
+            &["catalogue", "import", "musicbrainz", "--limit", "0"],
+            &["catalogue", "import", "musicbrainz", "--limit"],
+            &["catalogue", "import", "musicbrainz", "--bogus"],
+            &[
+                "catalogue",
+                "import",
+                "musicbrainz",
+                "--request",
+                "--update",
+            ],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
         let (_, command) = parse(&["--config", "x.toml", "catalogue", "status"]).unwrap();
         assert!(matches!(
             command,
@@ -1147,6 +1382,101 @@ mod tests {
             "{waited:?}"
         );
     }
+    /// `catalogue import` refuses a limit below the stored cards that would remove the others
+    /// unless forced (with `--update` too), runs the import otherwise and names the run that ran;
+    /// `--request` records a full import asked for and says when no process holds the catalogue.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn catalogue_import_guards_its_limit_and_asks_for_imports(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{store, Card};
+        let cards: Vec<Card> = (0..3)
+            .map(|n| Card {
+                source_id: format!("artist/0000000{n}-0000-4000-8000-000000000000"),
+                uri: format!(
+                    "https://musicbrainz.org/artist/0000000{n}-0000-4000-8000-000000000000"
+                ),
+                r#type: "MusicGroup".into(),
+                name: format!("Band {n}"),
+                ..Card::default()
+            })
+            .collect();
+        store::upsert(&pool, Catalogue::Musicbrainz, 1, &cards, None)
+            .await
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let dump = root.join("20261125-001001");
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut config = Config::default();
+        config.catalogues.dir = root.join("catalogues").to_string_lossy().into_owned();
+        let import =
+            |limit, update, force, from: Option<&std::path::Path>| CatalogueCommand::Import {
+                catalogue: Catalogue::Musicbrainz,
+                from: from.map(|d| d.to_string_lossy().into_owned()),
+                limit,
+                update,
+                request: false,
+                force,
+            };
+        // A limit below the cards would remove the others: refused without --force, also as an
+        // update (which hands over to a full import of the new subset). Nothing is read.
+        for update in [false, true] {
+            let mut out = Vec::new();
+            let refused = catalogue_command(
+                &pool,
+                &config,
+                import(Some(1), update, false, Some(&dump)),
+                &mut out,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(refused.contains("--force"), "{refused}");
+        }
+        assert_eq!(
+            store::state(&pool, Catalogue::Musicbrainz)
+                .await
+                .unwrap()
+                .unwrap()
+                .cards,
+            3
+        );
+        // The official mirror needs the operator's contact.
+        let mut out = Vec::new();
+        let refused = catalogue_command(&pool, &config, import(None, false, false, None), &mut out)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("http.contact"), "{refused}");
+        // --request asks for a full import, and says when no process runs the importer.
+        let mut out = Vec::new();
+        catalogue_command(
+            &pool,
+            &config,
+            CatalogueCommand::Import {
+                catalogue: Catalogue::Musicbrainz,
+                from: None,
+                limit: None,
+                update: false,
+                request: true,
+                force: false,
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("is asked for") && out.contains("no process runs"),
+            "{out}"
+        );
+        assert!(store::state(&pool, Catalogue::Musicbrainz)
+            .await
+            .unwrap()
+            .unwrap()
+            .import_requested
+            .is_some());
+    }
+
     /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
     /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
     /// prints the table.
@@ -1177,7 +1507,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut out = Vec::new();
-        let refused = catalogue_command(&pool, &config, drop, &mut out)
+        let refused = catalogue_command(&pool, &config, drop.clone(), &mut out)
             .await
             .unwrap_err()
             .to_string();
@@ -1190,7 +1520,7 @@ mod tests {
         importer.release().await;
         // Free: the cards, the state row and the directory go, and the output says so.
         let mut out = Vec::new();
-        catalogue_command(&pool, &config, drop, &mut out)
+        catalogue_command(&pool, &config, drop.clone(), &mut out)
             .await
             .unwrap();
         let printed = String::from_utf8(out).unwrap();
@@ -1210,7 +1540,7 @@ mod tests {
             .is_none());
         // Again: nothing left, and no directory to remove.
         let mut out = Vec::new();
-        catalogue_command(&pool, &config, drop, &mut out)
+        catalogue_command(&pool, &config, drop.clone(), &mut out)
             .await
             .unwrap();
         let printed = String::from_utf8(out).unwrap();

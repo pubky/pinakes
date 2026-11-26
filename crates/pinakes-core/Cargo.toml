@@ -69,6 +69,16 @@ pubky-social-specs = "=1.0.0-rc.1"
 tantivy = { version = "=0.27.0", default-features = false, features = ["mmap", "lz4-compression"] }
 # The text index's map cells (`search_index::cells`), H3 in pure Rust.
 h3o = "=0.11.1"
+# Catalogue bulk files (`catalogue::bulk`): xz streams with liblzma's multi-threaded decoder
+# (built from its bundled source), and the importers' sorted runs (`catalogue::spill`) as lz4
+# frames (tantivy's own lz4).
+liblzma = { version = "=0.4.9", features = ["parallel", "static"] }
+lz4_flex = "=0.14.2"
+bytes = "1"
+# The importers' parsing threads share one bounded queue of lines.
+crossbeam-channel = "0.5"
+# Line ends in the importers' bulk files.
+memchr = "2"
 
 [[example]]
 name = "e2e_stack"
@@ -83,3 +93,4 @@ serde_yaml_ng = "0.10"
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { version = "0.3", features = ["json"] }
 http-body-util = "0.1"
+tempfile = "3"

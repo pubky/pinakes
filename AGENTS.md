@@ -107,8 +107,9 @@ ID a page names for something it lists (an event page's performer keys an artist
 service whose artist page it names). Joins never come from a title or name match.
 
 **Egress.** Every request a reference can steer goes through `resolver::egress::Egress`: never
-build another HTTP client for them (the two others, `resolver/osm.rs` and `nexus.rs`, ask only the
-Nominatim and Nexus URLs the operator sets). The egress pins DNS, refuses private addresses, caps bodies,
+build another HTTP client for them (the others, `resolver/osm.rs`, `nexus.rs` and the catalogue
+importers' (`catalogue/musicbrainz.rs`), ask only the Nominatim, Nexus and dump mirror URLs the
+operator or the build sets). The egress pins DNS, refuses private addresses, caps bodies,
 paces each host and each address (one request at a time, at `limits.host_requests_per_second` or the service's
 published rate; a service's own host named with its pace, `budgets` or `PUBLISHED_RATES`, by host alone) and caches answers. A source with a published limit lowers its host's rate; it
 never raises it.

@@ -20,7 +20,8 @@
 pub struct Failure {
     /// A fixed class: lower case letters and underscores.
     pub class: &'static str,
-    /// Where: the host of a fixed bulk file, or a local path. Never a page's text.
+    /// Where: the host of a fixed bulk file, a local path, or the importer's own counts (why it
+    /// refused a dump). Never a page's text.
     pub at: Option<String>,
 }
 impl Failure {

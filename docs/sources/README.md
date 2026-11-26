@@ -151,6 +151,15 @@ they record, and what a lookup costs.
 | --- | --- | --- |
 | [`mempool`](mempool.md) | Bitcoin blocks, transactions and addresses, and Lightning nodes and channels, from mempool.space (Esplora as fallback) | None |
 
+## Catalogues
+
+A catalogue is imported in bulk, one card per item, from the files its publisher offers; nothing
+of it is fetched link by link ([catalogues](../operations.md#catalogues)).
+
+| Catalogue | Imports | Credentials |
+| --- | --- | --- |
+| [`musicbrainz`](musicbrainz_catalogue.md) | Every artist, release group and recording of MusicBrainz's JSON dumps | None |
+
 ## Also on
 
 The also-on sources run in this order. Each reads a resource after it is saved and adds keys,

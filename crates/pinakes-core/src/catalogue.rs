@@ -22,10 +22,13 @@ use crate::model;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 
+pub mod bulk;
 pub mod extras;
 pub mod failure;
 pub mod join;
+pub mod musicbrainz;
 pub mod run;
+pub mod spill;
 pub mod store;
 
 /// One catalogue.

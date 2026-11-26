@@ -47,6 +47,8 @@ struct Fixture {
     current: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Panic once, in the next import.
     panic_once: AtomicBool,
+    /// Fail once, in the next import, when its gate opens.
+    fail_at_gate: AtomicBool,
     need: u64,
 }
 impl Fixture {
@@ -64,6 +66,7 @@ impl Fixture {
             update_end: Mutex::new(UpdateEnd::Done),
             current: Mutex::default(),
             panic_once: AtomicBool::new(false),
+            fail_at_gate: AtomicBool::new(false),
             need: 1000,
         }
     }
@@ -106,6 +109,9 @@ impl Importer for Fixture {
                 self.entered.notify_one();
                 if let Some(gate) = &self.gate {
                     gate.notified().await;
+                    if self.fail_at_gate.swap(false, Ordering::SeqCst) {
+                        anyhow::bail!("the fixture dump broke off");
+                    }
                 }
             }
         }
@@ -779,7 +785,7 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     store::ensure_state(&pool, Catalogue::Wikidata)
         .await
         .unwrap();
-    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '1 hour',current_as_of=now()-interval '50 hours' WHERE catalogue='wikidata'")
+    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '1 hour',current_as_of=now()-interval '50 hours',position='{\"refused\":\"20261125\"}' WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
         .unwrap();
@@ -790,6 +796,19 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     assert_eq!(get(&metrics2.catalogue_cards, "wikidata"), 42);
     assert_eq!(get(&metrics2.catalogue_enabled, "wikidata"), 1);
     assert_eq!(get(&metrics2.catalogue_enabled, "tranco"), 0);
+    // A refusal standing in the position (before any version was applied).
+    assert_eq!(get(&metrics2.catalogue_refused, "wikidata"), 1);
+    assert_eq!(get(&metrics2.catalogue_refused, "tranco"), 0);
+    // One of an older dump than the applied one (a trial by hand) is not the importer's wait.
+    store::ensure_state(&pool, Catalogue::Osm).await.unwrap();
+    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"20261125-001001\",\"refused\":\"20261121-001001\"}' WHERE catalogue='osm'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let metrics3 = Metrics::new().unwrap();
+    metrics3.refresh(&pool).await.unwrap();
+    assert_eq!(get(&metrics3.catalogue_refused, "osm"), 0);
+    assert_eq!(get(&metrics3.catalogue_refused, "wikidata"), 1);
     // The lag counts from how current the data is, not from the update that finished an hour
     // ago.
     let lag = get(&metrics2.catalogue_lag, "wikidata");
@@ -1114,6 +1133,59 @@ async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
     assert_eq!((s.cards, s.error_count, s.phase.as_str()), (25, 0, "idle"));
 }
 
+/// A run that fails after the session of its catalogue lock ended (a database restart ends every
+/// session), before the lock's watch saw it, is a lost lock: logged only, nothing written to the
+/// state row (another daemon may hold the lock and the row by then), and the run resumes from its
+/// cursor once the lock is taken again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_fails_after_its_lock_went_records_nothing(pool: PgPool) {
+    let (mut ctx, _dir) = context(&pool, plenty());
+    // The watch checks only every 30 s: the failure comes first.
+    ctx.pace.lock_check = Duration::from_secs(30);
+    let mut fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    fixture.fail_at_gate.store(true, Ordering::SeqCst);
+    let fixture = Arc::new(fixture);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    let ended: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid, 5000) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+    )
+    .bind(Catalogue::Wikidata.lock_key())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(ended);
+    // The run fails now, with its catalogue lock gone.
+    gate.notify_one();
+    until("the resumed run", || async {
+        fixture.started_from.lock().unwrap().len() == 2
+    })
+    .await;
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.last_error), (0, None));
+    gate.notify_one();
+    until("the resumed import", || async {
+        state(&pool, Catalogue::Wikidata)
+            .await
+            .last_import_at
+            .is_some()
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        fixture.started_from.lock().unwrap()[..2],
+        [None, Some(json!({"next": 10}))]
+    );
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.cards, s.error_count, s.phase.as_str()), (25, 0, "idle"));
+}
+
 /// An importer that panics fails its run (`panic`), recorded like any failure: the task goes on
 /// and the run is tried again.
 #[sqlx::test(migrations = "../../migrations")]
@@ -1300,4 +1372,59 @@ async fn jsonb_text_len_is_postgresql_s_length(pool: PgPool) {
             "{value}"
         );
     }
+}
+
+/// MusicBrainz on without `http.contact` starts no importer, and says so: `waiting` in its state
+/// row (`catalogue status`) and `pinakes_catalogue_needs_contact`; with a contact, or off, neither.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
+    let mut config = pinakes_core::config::Config::default();
+    assert!(config.egress.contact.is_empty());
+    assert!(run::importers(&config).is_empty());
+    run::note_unstarted(&pool, &config).await.unwrap();
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state.waiting.as_deref(),
+        Some(pinakes_core::catalogue::musicbrainz::NEEDS_CONTACT)
+    );
+    let table = store::status_table(&config.catalogues, std::slice::from_ref(&state));
+    assert!(table.contains("needs http.contact"), "{table}");
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    let needs = |m: &Metrics| {
+        m.catalogue_needs_contact
+            .with_label_values(&["musicbrainz"])
+            .get()
+    };
+    assert_eq!(needs(&metrics), 1);
+    config.egress.contact = "ops@example.org".into();
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    assert_eq!(needs(&metrics), 0);
+    // Started with its contact, the note goes; another `waiting` stays.
+    run::note_unstarted(&pool, &config).await.unwrap();
+    let waiting = || async {
+        store::state(&pool, Catalogue::Musicbrainz)
+            .await
+            .unwrap()
+            .unwrap()
+            .waiting
+    };
+    assert_eq!(waiting().await, None);
+    sqlx::query(
+        "UPDATE catalogue_state SET waiting='free disk 1.0 GB' WHERE catalogue='musicbrainz'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    run::note_unstarted(&pool, &config).await.unwrap();
+    assert_eq!(waiting().await.as_deref(), Some("free disk 1.0 GB"));
+    config.egress.contact.clear();
+    config.catalogues.musicbrainz.enabled = false;
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    assert_eq!(needs(&metrics), 0);
 }

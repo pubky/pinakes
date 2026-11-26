@@ -1428,6 +1428,7 @@ CREATE FUNCTION catalogue_key_links(key text) RETURNS text[]
     AS $$
  SELECT CASE split_part(key,':',1)
   WHEN 'mb' THEN CASE WHEN split_part(key,':',2) IN ('artist','recording','release','release-group') THEN ARRAY['https://musicbrainz.org/'||split_part(key,':',2)||'/'||split_part(key,':',3)] END
+  WHEN 'isrc' THEN ARRAY['https://musicbrainz.org/isrc/'||substr(key,6)]
   WHEN 'wikidata' THEN ARRAY['https://www.wikidata.org/wiki/'||substr(key,10)]
   WHEN 'doi' THEN ARRAY[key]
   WHEN 'arxiv' THEN ARRAY['https://arxiv.org/abs/'||substr(key,7),'https://arxiv.org/pdf/'||substr(key,7)]

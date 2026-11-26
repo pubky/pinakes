@@ -90,11 +90,17 @@ pub struct Metrics {
     /// waits for the large-import turn.
     pub catalogue_cards: IntGaugeVec,
     pub catalogue_enabled: IntGaugeVec,
+    /// Whether a catalogue that is on has no importer for want of `http.contact` (MusicBrainz).
+    pub catalogue_needs_contact: IntGaugeVec,
     pub catalogue_import: IntGaugeVec,
     pub catalogue_update: IntGaugeVec,
     pub catalogue_lag: IntGaugeVec,
     pub catalogue_errors: IntCounterVec,
     pub catalogue_turn: IntGaugeVec,
+    /// Whether the catalogue's importer refused the dump it waits behind: `refused` in its
+    /// position, newer than the version applied (or before any), until a dump is applied. A
+    /// refusal of an older dump (a trial by hand) is not what the importer waits for.
+    pub catalogue_refused: IntGaugeVec,
     /// How far behind upstream each catalogue may fall before the lag alert fires
     /// (`Catalogue::max_update_lag`), fixed per catalogue.
     pub catalogue_max_lag: IntGaugeVec,
@@ -338,6 +344,12 @@ impl Metrics {
                 "Whether each catalogue is on in the daemon's configuration (1) or off (0)",
                 &["catalogue"]
             ),
+            catalogue_needs_contact: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_needs_contact",
+                "Whether each catalogue is on but its importer does not start without http.contact (1) or not (0)",
+                &["catalogue"]
+            ),
             catalogue_import: metric!(
                 IntGaugeVec,
                 "pinakes_catalogue_last_import_timestamp_seconds",
@@ -374,6 +386,12 @@ impl Metrics {
                 "Whether each catalogue's full import waits for another large catalogue's (1) or not (0)",
                 &["catalogue"]
             ),
+            catalogue_refused: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_refused",
+                "Whether each catalogue's importer refused the newest dump it read and waits for another (1) or not (0)",
+                &["catalogue"]
+            ),
             search_index_pass,
             search_index_open,
             registry,
@@ -403,11 +421,13 @@ impl Metrics {
             let name = [catalogue.name()];
             out.catalogue_cards.with_label_values(&name);
             out.catalogue_enabled.with_label_values(&name);
+            out.catalogue_needs_contact.with_label_values(&name);
             out.catalogue_import.with_label_values(&name);
             out.catalogue_update.with_label_values(&name);
             out.catalogue_lag.with_label_values(&name);
             out.catalogue_errors.with_label_values(&name);
             out.catalogue_turn.with_label_values(&name);
+            out.catalogue_refused.with_label_values(&name);
             out.catalogue_max_lag
                 .with_label_values(&name)
                 .set(catalogue.max_update_lag().as_secs() as i64);
@@ -422,6 +442,15 @@ impl Metrics {
                 .with_label_values(&[catalogue.name()])
                 .set(i64::from(config.enabled(catalogue)));
         }
+    }
+    /// Which catalogues that are on have no importer for want of `http.contact`
+    /// (`pinakes_catalogue_needs_contact`).
+    pub fn catalogue_contact(&self, config: &crate::config::Config) {
+        self.catalogue_needs_contact
+            .with_label_values(&[crate::catalogue::Catalogue::Musicbrainz.name()])
+            .set(i64::from(crate::catalogue::musicbrainz::needs_contact(
+                config,
+            )));
     }
     /// A source's series from the start, each at 0: its fetches by outcome, changes by class,
     /// held snapshots and cursor resets. A rule on `increase()` reads a rise from 0; a series
@@ -463,7 +492,7 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version'))::int,0)::bigint AS refused FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
@@ -562,6 +591,9 @@ impl Metrics {
             self.catalogue_turn
                 .with_label_values(&[name])
                 .set(value("turn")?);
+            self.catalogue_refused
+                .with_label_values(&[name])
+                .set(value("refused")?);
         }
         self.group_key_conflicts.set(groups.try_get("conflicts")?);
         self.preview_backlog.set(previews);

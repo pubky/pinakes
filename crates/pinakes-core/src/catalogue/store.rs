@@ -162,8 +162,20 @@ pub async fn upsert(
     cards: &[Card],
     cursor: Option<&serde_json::Value>,
 ) -> Result<WriteReport> {
-    ensure_state(pool, catalogue).await?;
     let (rows, rejected) = rows(catalogue, cards);
+    upsert_rows(pool, catalogue, generation, &rows, rejected, cursor).await
+}
+/// [`upsert`] of rows an importer already checked ([`Card::checked`]), each `source_id` once;
+/// `rejected` is the number of cards it refused, for the report.
+pub async fn upsert_rows(
+    pool: &PgPool,
+    catalogue: Catalogue,
+    generation: i64,
+    rows: &[Row],
+    rejected: u64,
+    cursor: Option<&serde_json::Value>,
+) -> Result<WriteReport> {
+    ensure_state(pool, catalogue).await?;
     let mut report = WriteReport {
         rejected,
         ..WriteReport::default()
@@ -380,10 +392,21 @@ async fn sweep(
     }
 }
 
-/// The table's `waiting` cell: a full import an update asked for, with its reason, and why the
-/// importer waits.
+/// The table's `waiting` cell: a full import an update asked for, with its reason, a dump its
+/// importer refused (`refused` in its position), and why the importer waits.
 fn waiting_cell(state: Option<&State>) -> String {
+    let refused = state
+        .and_then(|s| s.position.as_ref())
+        .and_then(|p| p.get("refused"))
+        .and_then(|v| v.as_str())
+        .map(|v| format!("dump {v} refused"));
     let waiting = state.and_then(|s| s.waiting.as_deref());
+    let waiting = match (refused, waiting) {
+        (Some(r), Some(w)) if !w.trim().is_empty() => Some(format!("{r}; {w}")),
+        (Some(r), _) => Some(r),
+        (None, w) => w.map(str::to_owned),
+    };
+    let waiting = waiting.as_deref();
     match state.and_then(|s| s.import_requested.as_deref()) {
         Some(reason) => {
             let requested = format!("full import requested: {reason}");
@@ -564,6 +587,52 @@ mod tests {
                 .ends_with("full import requested: the change stream is gone  -"),
             "{table}"
         );
+    }
+
+    /// A dump the importer refused shows in `waiting` (from its position), before why it waits,
+    /// and alone when it does not.
+    #[test]
+    fn the_status_table_shows_a_refused_dump() {
+        let mut refused = State {
+            catalogue: "musicbrainz".into(),
+            phase: "failed".into(),
+            run: None,
+            generation: 1,
+            cursor: None,
+            position: Some(
+                serde_json::json!({"version": "20261121-001001", "refused": "20261125-001001"}),
+            ),
+            cards: 5,
+            upstream_version: None,
+            last_import_at: None,
+            last_update_at: None,
+            current_as_of: None,
+            import_requested: None,
+            waiting: Some("free disk 1.0 GB".into()),
+            last_error: Some("removals (8 of 17 cards gone)".into()),
+            error_count: 1,
+            updated_at: Utc::now(),
+        };
+        let row = |state: &State| {
+            status_table(&CataloguesConfig::default(), std::slice::from_ref(state))
+                .lines()
+                .nth(2)
+                .unwrap()
+                .to_owned()
+        };
+        assert!(
+            row(&refused).contains("dump 20261125-001001 refused; free disk 1.0 GB"),
+            "{}",
+            row(&refused)
+        );
+        refused.waiting = None;
+        assert!(
+            row(&refused).contains("dump 20261125-001001 refused  removals"),
+            "{}",
+            row(&refused)
+        );
+        refused.position = Some(serde_json::json!({"version": "20261121-001001"}));
+        assert!(!row(&refused).contains("refused "), "{}", row(&refused));
     }
 
     /// The table's own checks refuse a row `Card::checked` let through (here a link over the
