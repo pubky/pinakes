@@ -6,6 +6,7 @@ requests.
 
 Each directory's `provenance.json` lists, per fixture, the request URL (and method and body for a
 POST), the HTTP status, the content type, the time of recording, the size and SHA-256 of the body
-as served, and the file that holds it. Bodies over 64 KB are stored gzip-compressed (`.gz`); a
+as served, and the file that holds it. Keys a publisher sends every visitor are replaced by
+`REDACTED` (`scripts/scrub-publisher-keys`); the size and SHA-256 of such a body are of that form. Bodies over 64 KB are stored gzip-compressed (`.gz`); a
 redirect is recorded as its status and `Location` only; an error page keeps the extension of its
 content type. Licences and required attributions are named in `docs/sources/<name>.md`.

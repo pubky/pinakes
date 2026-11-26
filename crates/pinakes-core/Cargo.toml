@@ -88,6 +88,11 @@ name = "e2e_stack"
 # Its unit tests (the live sample selection) run with the workspace's tests.
 test = true
 
+[[example]]
+name = "adapter_probe"
+# Its unit tests (what a recording keeps) run with the workspace's tests.
+test = true
+
 [dev-dependencies]
 # scraper's tree nodes, named by a test of the rebuilt tree (`resolver::html`).
 ego-tree = "0.10.0"

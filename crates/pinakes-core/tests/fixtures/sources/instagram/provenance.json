@@ -1,21 +1,21 @@
 {
   "post-C2vXx0yPvYq": {
-    "bytes": 502210,
+    "bytes": 502095,
     "content_type": "text/html; charset=\"utf-8\"",
     "file": "post-C2vXx0yPvYq.html.gz",
     "note": "A post page without the post's tags (the post is not public to a request without an account): the plain card.",
     "recorded_at": "2026-10-26T00:37:18+00:00",
-    "sha256": "3588026fc0c03c888baca8f78de7394a912c09592c46a612932df8acfa731682",
+    "sha256": "d8fa89b04a60f0b8c04a0a9807a90b9b7ca9b876dc108d142a2f52bf00249957",
     "status": 200,
     "url": "https://www.instagram.com/p/C2vXx0yPvYq/"
   },
   "post-Df_H64Tul-0": {
-    "bytes": 657710,
+    "bytes": 657595,
     "content_type": "text/html; charset=\"utf-8\"",
     "file": "post-Df_H64Tul-0.html.gz",
     "note": "A public post, as Instagram answers this host's request: og:title, og:description, og:image and og:url (the /{name}/p/{code}/ form).",
     "recorded_at": "2026-11-22T00:07:26+00:00",
-    "sha256": "f9a8f384415bcfcefb4fae5dd004266c30bfe891f255bd25cee336f6bb6cbbb7",
+    "sha256": "ed68f19f61937a5ff23568d70f862ce8924c95381afc56ad1d0a1a408a5bc5ea",
     "status": 200,
     "url": "https://www.instagram.com/p/Df_H64Tul-0/"
   },
@@ -31,12 +31,12 @@
     "url": "https://www.instagram.com/instagram/"
   },
   "reel-missing": {
-    "bytes": 502214,
+    "bytes": 502099,
     "content_type": "text/html; charset=\"utf-8\"",
     "file": "reel-missing.html.gz",
     "note": "A reel that does not exist answers 200 with the same tagless page: the plain card, as for a post without tags.",
     "recorded_at": "2026-10-26T00:37:19+00:00",
-    "sha256": "8b0d4cca5410e6232ff2f01f0049c48e3477241fd3009e9a34a3b5493ec0e3a1",
+    "sha256": "bc11d406fe6a4091ce97831bd2d88fc1b6237d7abf572df56cd99d243dd86694",
     "status": 200,
     "url": "https://www.instagram.com/reel/AAAAAAAAAAA/"
   }

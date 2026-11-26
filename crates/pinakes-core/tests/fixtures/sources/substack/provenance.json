@@ -11,11 +11,11 @@
     "url": "https://on.substack.com/p/this-post-does-not-exist-12345x"
   },
   "post-model-behavior-rick-rubin": {
-    "bytes": 335498,
+    "bytes": 325754,
     "content_type": "text/html; charset=utf-8",
     "file": "post-model-behavior-rick-rubin.html.gz",
     "recorded_at": "2026-10-26T00:25:52+00:00",
-    "sha256": "575da3e23a9e2636c12cb7ef0f41d6bfa9d96535c9524c9445c784acbd5add59",
+    "sha256": "ae21bc08dafc0be9f431ca7f6a472c95b0d4be0fb845e58eb4d241bc7295f342",
     "status": 200,
     "url": "https://on.substack.com/p/model-behavior-rick-rubin"
   },
