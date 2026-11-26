@@ -1900,6 +1900,34 @@ mod tests {
             }
         }
     }
+    /// `.env.example` lists every credential variable the code reads: each named variable
+    /// (sections, tokens, app keys, the Nexus authorization) and each source's app key.
+    #[test]
+    fn the_env_example_names_every_credential() {
+        let example = include_str!("../../../.env.example");
+        let listed: Vec<&str> = example
+            .lines()
+            .map(|l| l.trim_start_matches("# "))
+            .filter_map(|l| l.split_once('=').map(|(name, _)| name))
+            .collect();
+        let mut names: Vec<String> = named_variables()
+            .into_iter()
+            .map(|(name, _, _)| name.to_owned())
+            .collect();
+        names.extend(
+            crate::sources::REGISTRY
+                .iter()
+                .filter(|s| s.takes_key())
+                .map(|s| format!("PINAKES__SOURCES__{}__KEY", s.name().to_uppercase())),
+        );
+        assert!(names.len() >= 10, "{names:?}");
+        for name in &names {
+            assert!(
+                listed.contains(&name.as_str()),
+                "{name} is not in .env.example"
+            );
+        }
+    }
     /// A relay entry that is refused is named by its place and host, never with what its URL
     /// carries.
     #[test]

@@ -309,7 +309,7 @@ The table below is an estimate in decimal units. It assumes:
 | --- | --- | --- | --- | --- | --- |
 | Baseline | 225 | 1,198 | ~27 MB | ~3 GB | ~3–8 MB |
 | 100× | 22,500 | 119,800 | ~695 MB | ~4 GB | ~70–210 MB |
-| 100,000× | 22.5 million | 119.8 million | ~675 GB | ~1.02 TB | ~70–210 GB |
+| 100,000× | 22.5 million | 119.8 million | ~675 GB | ~1.02 TB | ~68–203 GB |
 
 Longer change journals, larger documents, resources with many references, table bloat,
 replication slots and WAL retention can dominate. At large scale, measure them instead of

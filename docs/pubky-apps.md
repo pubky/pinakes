@@ -299,7 +299,8 @@ one (`resolver is disabled`).
    `Read::NoCard` for an object its owner did not mean to list.
 4. Add `pub mod <app>;` and one line in `REGISTRY` (`resolver/pubky_apps/mod.rs`).
 5. Record a few real public objects in `tests/fixtures/pubky_apps/<app>/` (`<name>.json` as
-   served and `<name>.uri`). Check them for private data, and list them in that folder's README.
+   served and `<name>.uri`). Check them for private data, and list them in
+   `tests/fixtures/pubky_apps/README.md`.
 6. Test the profile in `tests/pubky_apps.rs`: each kind's card and links, the objects without a
    card, and the paths never fetched.
 7. Describe it on this page.

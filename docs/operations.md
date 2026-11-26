@@ -2017,9 +2017,10 @@ A new key needs a restart.
 ### Info and stored errors
 
 Admin `GET /v1/info` has the manifests, resolver status (aliases left out), counts (`aliases` among them),
-ingestion, source and canary state. Public `/v1/info` shows only the version, what the instance resolves, the
-limits a client must respect and the OSM licence. Admin info and the database metrics are cached for 15
-seconds.
+ingestion, source and canary state. Public `/v1/info` has what a client needs: the version, the card shape,
+the User-Agent this instance sends, what it resolves, the spelling rules' version, the limits a client must
+respect, the OSM licence and the notices a client must show ([Info](api.md#info)). Admin info and the
+database metrics are cached for 15 seconds.
 
 Stored errors are classes, never texts: the [queue's](#failures-and-retries) `last_error`, and a source's
 health (`source_state`), one of `dns`, `connect`, `timeout`, `http_4xx`, `http_5xx`, `parse`, `policy`,

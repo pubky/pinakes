@@ -98,7 +98,7 @@ moves to the front of the refresh queue; its TTL, backoff and final state still 
 | `GET /v1/resources/{id}/collections` | Optional `viewer`, `limit`, `cursor` | `{items: [{uri, author, indexed_at}], cursor}`: the public collections that hold the card's link ([Collections](#collections)); 404 if unknown |
 | `GET /v1/groups/{id}` | A 32-character group ID | `{id, type, curated, keys, members: [card]}` ([Groups](#groups)); 404 if unknown; 400 for a malformed ID or while groups are off (`groups.enabled = false`) |
 | `POST /v1/changes/lookup` | `{resource_ids?, uris?, since?, cursor?, limit?}`: 1–500 IDs and links together | A page of [change lines](#change-line) ([Changes](#changes)) |
-| `GET /v1/info` | None | `{version, api_shape, user_agent, resolves, limits, osm_licence, attributions?}` ([Info](#info)) |
+| `GET /v1/info` | None | `{version, api_shape, user_agent, resolves, spelling_rules, limits, osm_licence, attributions?}` ([Info](#info)) |
 | `GET /v1/dumps/osm_place.ndjson.gz` | None | The ODbL derivative database as a daily gzip file ([OpenStreetMap and locations](#openstreetmap-and-locations)) |
 | `GET /v1/openapi.json` | None | The OpenAPI 3.1 document |
 | `GET /swagger-ui` | None | Swagger UI, when `api.swagger_ui` is on |
@@ -3368,7 +3368,8 @@ listener's layers, with the caller's address:
 | `social` | `POST /v1/resources/lookup` for card `ids`, then Nexus `POST /v1/stream/resources/by_ids` (100 URIs a call) with each card's `uri` and `refs`, and any plain `uris`; 1–100 entries together, optional `viewer` | Tags and taggers per card or link ([below](#the-social-tool)) |
 
 A compact card keeps `id`, `uri`, `status`, `type`, `name`, `description` (at most 300
-characters, then `…`), `image`, `site`, `point`, `start`, `end`, `credits`, `group`, `also_on`
+characters, then `…`), `image`, `site`, `point`, `start`, `end`, `labels` (a catalogue card's,
+when it has any), `credits`, `group`, `also_on`
 (at most 8, one per service: `uri`, `site`, and `id`, `refs`, `derived`, `kind` when present),
 `refs`, `collections` (when more than 0), `occurrence` and `attribution`. It adds `url`, the
 card's full read (`GET /v1/resources/{id}`). A shortened description's credit is marked
