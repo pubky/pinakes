@@ -128,9 +128,9 @@ match `v*.*.*`. Rust is 1.98.1 in CI, in the image build and in `rust-toolchain.
 check passes, the image exposes only port 8090, and port 9090 is bound to loopback only. It needs
 no public provider and no test identity.
 
-Pull request and `main` runs don't log in to a registry, and their token can't write packages:
-only the two publishing jobs get `packages: write`. The workflow creates no Git tags, releases or
-deployments.
+Pull request and `main` runs of this workflow don't log in to a registry, and their token can't
+write packages: only the two publishing jobs ask for `packages: write`. The workflow creates no
+Git tags, releases or deployments.
 
 ### How a tag is published
 
@@ -176,7 +176,11 @@ replaces and tests its own tag again before the manifest job reads it. A failed 
 its run's tag in the registry, never promoted.
 
 The `main` check runs from the tagged commit's own workflow, so it stops mistaken tags, not
-someone who can push tags. That protection comes from the repository settings below.
+someone who can push tags or branches. `GITHUB_TOKEN` is not limited to a ref or an Environment:
+anyone with write access to the repository can push a branch whose workflow asks for
+`packages: write` and writes to `ghcr.io/pubky/pinakes`, release tags included. Pull requests
+from forks get a read-only token. Keep write access to release maintainers; the repository
+settings below cover tags and `main`.
 
 ### Repository settings for publishing
 
@@ -189,8 +193,10 @@ Owner prerequisites, not set by this repository's files:
 - A tag ruleset for `refs/tags/v*` that lets only release maintainers create, update or delete
   those tags.
 - Optionally, a `release` Environment limited to `v*` tags, with required reviewers if you want
-  them. Create it with its rules first, then add `environment: release` to the `publish` and
-  `manifest` jobs: naming an Environment in the workflow creates it with no protection rules.
+  them, as an approval step for the publishing jobs. It holds no credential, so it doesn't stop
+  another workflow from writing packages. Create it with its rules first, then add
+  `environment: release` to the `publish` and `manifest` jobs: naming an Environment in the
+  workflow creates it with no protection rules.
   `scripts/ci/test_contracts.py` refuses an `environment:`, so change that contract in the same
   commit.
 - The organization's package settings (Settings, Packages, Package creation) let members create
@@ -198,6 +204,9 @@ Owner prerequisites, not set by this repository's files:
 - After the first release, the package `ghcr.io/pubky/pinakes` is public (package settings,
   Change visibility). While it is private, `docker pull` without a login fails. An organization
   owner or a package admin can change it.
+- No package named `ghcr.io/pubky/pinakes` exists before the first release, or it gives this
+  repository write access (package settings, Manage Actions access). A package pushed by hand or
+  with a personal token is not linked to the repository, and the first publish fails with 403.
 
 Publishing needs no stored secret. The two publishing jobs log in to `ghcr.io` with the run's own
 `GITHUB_TOKEN`, which only they get with `packages: write`. A workflow that creates the package

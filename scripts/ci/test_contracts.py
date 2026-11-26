@@ -551,12 +551,17 @@ with (p / 'calls.jsonl').open('a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\\n')
 if '--raw' in sys.argv or '--dry-run' in sys.argv:
     arches = ['amd64'] if os.environ.get('MISSING_ARM') else ['amd64', 'arm64']
-    print(json.dumps({'manifests': [{'platform': {'os': 'linux', 'architecture': a}} for a in arches]}))
+    annotations = {} if os.environ.get('MISSING_SOURCE') else {
+        'org.opencontainers.image.source': 'https://github.com/pubky/pinakes'}
+    print(json.dumps({'annotations': annotations,
+                      'manifests': [{'platform': {'os': 'linux', 'architecture': a}} for a in arches]}))
 """)
             docker.chmod(0o755)
             image = IMAGE + ':'
             commit_sha, tag_object = 'a' * 40, 'b' * 40
             cases = [('true', False, {}), ('false', False, {}), ('true', True, {}),
+                     # An index without the source annotation is refused before any tag moves.
+                     ('true', 'source', {'MISSING_SOURCE': '1'}),
                      # Fail closed before any registry call on a bad commit or run ID.
                      ('true', None, {'RELEASE_COMMIT': ''}), ('true', None, {'RELEASE_COMMIT': 'main'}),
                      ('true', None, {'GITHUB_RUN_ID': ''}), ('true', None, {'GITHUB_RUN_ID': '1-arm64'})]
@@ -569,7 +574,8 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
                        'GITHUB_REF_TYPE': 'tag', 'GITHUB_SHA': tag_object, 'RELEASE_COMMIT': commit_sha,
                        'GITHUB_RUN_ID': '4242',
                        'RELEASE_IMAGE_TAG': 'v1.2.3' if latest == 'true' else 'v1.2.3-rc.1',
-                       'RELEASE_LATEST': latest, 'MISSING_ARM': '1' if missing else '', **override}
+                       'RELEASE_LATEST': latest, 'MISSING_ARM': '1' if missing is True else '',
+                       'MISSING_SOURCE': '', **override}
                 run = subprocess.run(['scripts/ci/publish-manifest'], cwd=ROOT, env=env, capture_output=True, text=True)
                 recorded = [json.loads(line) for line in calls.read_text().splitlines()]
                 mutations = [call for call in recorded if call[:3] == ['buildx', 'imagetools', 'create'] and '--dry-run' not in call]
@@ -604,7 +610,9 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
         w = workflow()
         self.assertEqual(w['permissions'], {'contents': 'read'})
         text = (ROOT / '.github/workflows/ci.yml').read_text()
-        # GITHUB_TOKEN is the only secret, read only by the registry logins.
+        # GITHUB_TOKEN is the only secret named, and only the registry logins name it. (Pinned
+        # actions such as checkout still use the job token by default; outside these two jobs it
+        # can't write packages.)
         self.assertEqual(set(re.findall(r'secrets\.(\w+)', text)), {'GITHUB_TOKEN'})
         for name, job in w['jobs'].items():
             logins = [st for st in job['steps'] if st.get('uses', '').startswith('docker/login-action@')]
@@ -631,13 +639,18 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
                                  text=True).stdout.split('\0')
         # Spelled in parts so this file does not match itself.
         old = ['synonym' + 'soft', 'docker' + '.io', 'DOCKER' + 'HUB']
-        for path in tracked:
-            if not path or '/tests/fixtures/' in path or not (ROOT / path).is_file():
-                continue
-            try:
-                text = (ROOT / path).read_text()
-            except UnicodeDecodeError:
-                continue
+        # Where an image name is published, pulled or documented. Sources (the Docker Hub source)
+        # and their fixtures may name Docker Hub links.
+        def publishes(path):
+            return (path.startswith(('.github/', 'scripts/', 'ops/', 'e2e/')) and '/fixtures/' not in path
+                    or path in ('Dockerfile', '.dockerignore', 'README.md', '.env.example',
+                                'pinakes.example.toml', 'docs/deployment.md', 'docs/operations.md')
+                    or 'compose' in path)
+        checked = [p for p in tracked if p and publishes(p) and (ROOT / p).is_file()]
+        self.assertIn('docs/deployment.md', checked)
+        self.assertIn('.github/workflows/ci.yml', checked)
+        for path in checked:
+            text = (ROOT / path).read_text(errors='replace')
             for word in old:
                 self.assertNotIn(word, text, path)
         docs = (ROOT / 'docs/deployment.md').read_text()
