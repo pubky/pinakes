@@ -2,7 +2,8 @@
 //! vectors): every vector is what this build answers for its link, the file keeps its one
 //! layout (one vector per line), every root is its own root, and every rule has vectors. Its
 //! identifier pages likewise: each is what this build answers, an address of its identifier's
-//! card, and every source with roots of its own scheme has them.
+//! card, and every source with roots of its own scheme has them. Its tracking parameters are the
+//! ones this build drops (`alias::TRACKING`).
 use pinakes_core::{
     alias::{self, Rule},
     model,
@@ -30,11 +31,33 @@ struct Page {
     page: Option<String>,
     rule: String,
 }
+/// A tracking parameter (`alias::Tracking`): its name, `exact` or `prefix`, and the hosts it
+/// tracks on (with their subdomains), none for every host.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct Tracking {
+    param: String,
+    #[serde(rename = "match")]
+    matching: String,
+    hosts: Vec<String>,
+}
 #[derive(Deserialize)]
 struct File {
     about: String,
+    tracking: Vec<Tracking>,
     vectors: Vec<Vector>,
     pages: Vec<Page>,
+}
+
+/// The tracking parameters this build drops, as the file lists them.
+fn tracking() -> Vec<Tracking> {
+    alias::TRACKING
+        .iter()
+        .map(|t| Tracking {
+            param: t.param.to_owned(),
+            matching: if t.prefix { "prefix" } else { "exact" }.to_owned(),
+            hosts: t.hosts.iter().map(|h| (*h).to_owned()).collect(),
+        })
+        .collect()
 }
 
 fn file() -> File {
@@ -85,8 +108,9 @@ fn page_answer(id: &str) -> Page {
     }
 }
 
-/// The file's one layout: the vectors, then the pages, in their order, one per line.
-fn render(about: &str, vectors: &[Vector], pages: &[Page]) -> String {
+/// The file's one layout: the tracking parameters, the vectors, then the pages, in their order,
+/// one per line.
+fn render(about: &str, tracking: &[Tracking], vectors: &[Vector], pages: &[Page]) -> String {
     fn lines<T: Serialize>(out: &mut String, all: &[T]) {
         for (i, v) in all.iter().enumerate() {
             out.push_str("    ");
@@ -95,9 +119,11 @@ fn render(about: &str, vectors: &[Vector], pages: &[Page]) -> String {
         }
     }
     let mut out = format!(
-        "{{\n  \"about\": {},\n  \"vectors\": [\n",
+        "{{\n  \"about\": {},\n  \"tracking\": [\n",
         serde_json::to_string(about).unwrap()
     );
+    lines(&mut out, tracking);
+    out.push_str("  ],\n  \"vectors\": [\n");
     lines(&mut out, vectors);
     out.push_str("  ],\n  \"pages\": [\n");
     lines(&mut out, pages);
@@ -105,7 +131,8 @@ fn render(about: &str, vectors: &[Vector], pages: &[Page]) -> String {
     out
 }
 
-/// A rule change that changes an answer fails here until the file says the same, which also
+/// A rule change that changes an answer (or the tracking parameters) fails here until the file
+/// says the same, which also
 /// changes the version (`/v1/info` `spelling_rules`). The file this build would write is left in
 /// the test's temporary directory, to compare and copy.
 #[test]
@@ -136,8 +163,15 @@ fn every_vector_is_what_this_build_answers() {
         .filter(|(p, a)| p != a)
         .map(|(p, a)| format!("{p:?}\n  this build: {a:?}"))
         .collect();
-    let wrong: Vec<String> = wrong.into_iter().chain(wrong_pages).collect();
-    let expected = render(&file.about, &answers, &pages);
+    let tracking = tracking();
+    let wrong_tracking = (file.tracking != tracking)
+        .then(|| format!("tracking: {:?}\n  this build: {tracking:?}", file.tracking));
+    let wrong: Vec<String> = wrong
+        .into_iter()
+        .chain(wrong_pages)
+        .chain(wrong_tracking)
+        .collect();
+    let expected = render(&file.about, &tracking, &answers, &pages);
     if expected != FILE {
         let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("spellings.json");
         std::fs::write(&out, &expected).unwrap();
@@ -186,7 +220,7 @@ fn every_page_is_an_address_of_its_card() {
         );
         assert!(matches!(scheme.as_str(), "https"), "{p:?}: an https page");
         let root = folded(page);
-        if p.rule == "doi" || p.rule.starts_with("source/") {
+        if matches!(p.rule.as_str(), "doi" | "isbn") || p.rule.starts_with("source/") {
             assert_eq!(
                 root,
                 folded(&p.id),
@@ -213,10 +247,16 @@ fn every_page_rule_has_vectors() {
     for p in &file.pages {
         *count.entry(p.rule.as_str()).or_default() += 1;
     }
-    let mut rules: Vec<String> = [Rule::Doi, Rule::Wikidata, Rule::MusicBrainz, Rule::Osm]
-        .into_iter()
-        .map(|r| r.name().to_owned())
-        .collect();
+    let mut rules: Vec<String> = [
+        Rule::Doi,
+        Rule::Isbn,
+        Rule::Wikidata,
+        Rule::MusicBrainz,
+        Rule::Osm,
+    ]
+    .into_iter()
+    .map(|r| r.name().to_owned())
+    .collect();
     rules.push("none".to_owned());
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sources");
     for entry in std::fs::read_dir(&dir).unwrap() {
@@ -244,6 +284,41 @@ fn every_page_rule_has_vectors() {
             let (_, rule) =
                 alias::web_page(&v.root).unwrap_or_else(|| panic!("no page for the root of {v:?}"));
             assert_eq!(rule.name(), v.rule, "{v:?}");
+        }
+    }
+}
+
+/// Every tracking parameter has a vector: a link that carries it on a host where it tracks, whose
+/// root drops it. A link whose rule is `tracking` drops nothing but listed parameters.
+#[test]
+fn every_tracking_parameter_has_a_vector() {
+    let file = file();
+    let params = |link: &str| -> Vec<(String, String)> {
+        let u = url::Url::parse(link).unwrap();
+        let host = u.host_str().unwrap_or_default().to_owned();
+        u.query_pairs()
+            .map(|(k, _)| (host.clone(), k.into_owned()))
+            .collect()
+    };
+    for t in alias::TRACKING {
+        let shown = file.vectors.iter().any(|v| {
+            params(&v.link)
+                .iter()
+                .any(|(host, name)| t.matches(host, name))
+                && !params(&v.root)
+                    .iter()
+                    .any(|(host, name)| t.matches(host, name))
+        });
+        assert!(shown, "no vector drops the tracking parameter {t:?}");
+    }
+    for v in file.vectors.iter().filter(|v| v.rule == "tracking") {
+        let kept = params(&v.root);
+        for (host, name) in params(&v.link) {
+            assert!(
+                kept.contains(&(host.clone(), name.clone()))
+                    || alias::TRACKING.iter().any(|t| t.matches(&host, &name)),
+                "{v:?}: drops {name}, no tracking parameter"
+            );
         }
     }
 }
@@ -372,7 +447,8 @@ fn every_rule_has_vectors() {
 }
 
 /// `scripts/check-removals` rewrites the file when it removes a source (its vectors and its
-/// pages): it writes this file's layout byte for byte.
+/// pages; the tracking parameters are core rules and stay): it writes this file's layout byte
+/// for byte.
 #[test]
 fn check_removals_writes_this_layout() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

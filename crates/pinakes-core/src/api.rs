@@ -4377,10 +4377,10 @@ pub struct Info {
     pub user_agent: String,
     /// The kinds of links this instance resolves: its routes and card kinds that are on.
     pub resolves: Vec<String>,
-    /// The version of the URI-only spelling rules and identifier pages (docs/api.md, Spelling
-    /// vectors, Identifier pages): the first 16 hex characters of the BLAKE3 hash of
-    /// `data/spellings.json`, the vectors and pages this build answers exactly. It changes with
-    /// every change to that file.
+    /// The version of the URI-only spelling rules, tracking parameters and identifier pages
+    /// (docs/api.md, Spelling vectors, Identifier pages): the first 16 hex characters of the
+    /// BLAKE3 hash of `data/spellings.json`, the parameters, vectors and pages this build answers
+    /// exactly. It changes with every change to that file.
     #[schema(example = "3f9a0c1d2e4b5a69")]
     pub spelling_rules: String,
     pub limits: InfoLimits,
