@@ -193,6 +193,11 @@ impl MusicBrainz {
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            // The files are xz already; an answer the client unpacked would count other bytes than
+            // the ranges a resume asks for.
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
             .user_agent(crate::resolver::egress::user_agent(contact))
             .connect_timeout(Duration::from_secs(30))
             .build()?;
@@ -417,6 +422,9 @@ impl MusicBrainz {
         let forced = resumed
             .as_ref()
             .map_or(job.state().import_requested.is_some(), |c| c.forced);
+        let cards_before = resumed
+            .as_ref()
+            .map_or(Some(job.state().cards.max(0) as u64), |c| c.cards_before);
         let cursor = |phase, after: Option<String>, removed, as_of| {
             serde_json::to_value(Cursor {
                 version: version.clone(),
@@ -426,6 +434,7 @@ impl MusicBrainz {
                 as_of,
                 source: source.clone(),
                 limit,
+                cards_before,
                 forced,
             })
         };
@@ -458,6 +467,17 @@ impl MusicBrainz {
                     .await?;
             }
             let cards = job.state().cards.max(0) as u64;
+            // A read that found no record, or a file that found none while cards of its kind are
+            // stored, never empties them, even in a run asked for (`catalogue drop` empties a
+            // catalogue): a file of one kind is a small share of the cards, below the removal
+            // check's tenth, and a `limit` has no removal check.
+            if cards > 0 {
+                if let Some(note) = self.empty_read(job, &done, &version).await? {
+                    return self
+                        .refuse(job, mode, &version, "empty", &note, &spill_dir)
+                        .await;
+                }
+            }
             if mode == Run::Update && !removals.exists() {
                 let gone = self.count_gone(&removals, &done, &stop).await?;
                 if too_many(gone, cards, job.limit()) {
@@ -470,7 +490,15 @@ impl MusicBrainz {
             let after = resumed.as_ref().and_then(|c| c.after.clone());
             let read = self
                 .write(
-                    job, mode, &version, &done, &removals, after, as_of, forced, &stop,
+                    job,
+                    mode,
+                    &version,
+                    &done,
+                    &removals,
+                    after,
+                    as_of,
+                    (forced, cards_before),
+                    &stop,
                 )
                 .await;
             match read {
@@ -484,17 +512,11 @@ impl MusicBrainz {
                 }
                 Err(error) => return Err(error),
             }
-            // A full import that read nothing never empties the catalogue, even one asked for
-            // (`catalogue drop` empties it).
-            if mode == Run::Import && done.records == 0 && cards > 0 {
-                let note = format!("no record read in dump {version}");
-                return self
-                    .refuse(job, mode, &version, "empty", &note, &spill_dir)
-                    .await;
-            }
             // A full import of the importer's own removes at most a tenth of the cards: a dump
-            // whose cards are mostly refused never empties the catalogue.
-            if mode == Run::Import && !forced && job.limit().is_none() {
+            // whose cards are mostly refused never empties the catalogue. Over a catalogue that
+            // held no card when the run began (a first import) there is nothing to remove, and
+            // the count, a read of the whole table, is not made.
+            if mode == Run::Import && !forced && job.limit().is_none() && cards_before != Some(0) {
                 let (gone, all): (i64, i64) = sqlx::query_as(
                     "SELECT count(*) FILTER (WHERE seen_generation<$2),count(*) FROM catalogue_card WHERE catalogue=$1",
                 )
@@ -715,13 +737,17 @@ impl MusicBrainz {
         removals: &Path,
         after: Option<String>,
         as_of: Option<chrono::DateTime<chrono::Utc>>,
-        forced: bool,
+        // Whether the run was asked for, and the cards when it began: kept in its cursors.
+        (forced, cards_before): (bool, Option<u64>),
         stop: &Stop,
     ) -> Result<()> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Part>(4);
         let runs = done.runs.clone();
         let flag = stop.flag();
-        let merging = tokio::task::spawn_blocking(move || merge(runs, mode, after, tx, &flag));
+        // Under a `limit` an ISRC unique in the subset may be shared in the dump: none is a key.
+        let limited = job.limit().is_some();
+        let merging =
+            tokio::task::spawn_blocking(move || merge(runs, mode, after, limited, tx, &flag));
         let started = Instant::now();
         let mut said = Instant::now();
         let mut rejected = 0;
@@ -753,6 +779,7 @@ impl MusicBrainz {
                 as_of,
                 source: self.source_id(),
                 limit: job.limit(),
+                cards_before,
                 forced,
             })?;
             job.write_rows(&part.rows, part.rejected, cursor).await?;
@@ -817,6 +844,9 @@ struct Cursor {
     source: String,
     #[serde(default)]
     limit: Option<u64>,
+    /// The cards the catalogue held when the run began (`None` in a cursor of an older run).
+    #[serde(default)]
+    cards_before: Option<u64>,
     /// A full import asked for: no removal check.
     #[serde(default)]
     forced: bool,
@@ -844,6 +874,10 @@ pub struct Done {
     #[serde(default)]
     pub cut: u64,
     pub records: u64,
+    /// The records each file read gave (a file not read, as `recording` under a `limit`, is not
+    /// named).
+    #[serde(default)]
+    pub files: BTreeMap<String, u64>,
     pub downloaded: u64,
     /// The files whose SHA-256 was checked.
     pub checked: u32,
@@ -1109,11 +1143,16 @@ fn merge(
     runs: Vec<PathBuf>,
     mode: Run,
     after: Option<String>,
+    limited: bool,
     tx: tokio::sync::mpsc::Sender<Part>,
     stop: &AtomicBool,
 ) -> Result<()> {
     let mut merged = spill::Merge::open(&runs)?;
-    let mut shared = Shared::default();
+    let mut shared = if limited {
+        Shared::every()
+    } else {
+        Shared::default()
+    };
     let empty = |last: String| Part {
         rows: vec![],
         gone: vec![],
@@ -1390,6 +1429,45 @@ struct Chunk {
     ends: Vec<usize>,
 }
 const CHUNK_BYTES: usize = 4 << 20;
+/// The most bytes of lines queued for and held by the parsing threads together: a chunk may hold
+/// a line of up to [`LINE_CAP`], and a few such chunks queued must not add up. One chunk is
+/// always let through, however long.
+const QUEUED_BYTES: usize = 64 << 20;
+
+/// The bytes of chunks handed to the parsing threads and not yet parsed.
+#[derive(Default)]
+struct InFlight {
+    held: std::sync::Mutex<(usize, bool)>,
+    freed: std::sync::Condvar,
+}
+impl InFlight {
+    /// Wait until `bytes` more fit under `cap` (or nothing is held, or the threads are gone), then
+    /// count them.
+    fn take(&self, bytes: usize, cap: usize, stop: &AtomicBool) -> Result<()> {
+        let mut held = self.held.lock().expect("the queued bytes");
+        while held.0 > 0 && held.0 + bytes > cap && !held.1 {
+            stopped(stop)?;
+            held = self
+                .freed
+                .wait_timeout(held, Duration::from_millis(200))
+                .expect("the queued bytes")
+                .0;
+        }
+        held.0 += bytes;
+        Ok(())
+    }
+    /// `bytes` parsed: their room is free again.
+    fn give(&self, bytes: usize) {
+        let mut held = self.held.lock().expect("the queued bytes");
+        held.0 = held.0.saturating_sub(bytes);
+        self.freed.notify_all();
+    }
+    /// A parsing thread ended: the reader no longer waits for room.
+    fn close(&self) {
+        self.held.lock().expect("the queued bytes").1 = true;
+        self.freed.notify_all();
+    }
+}
 
 /// Read the dump's files into sorted runs under `plan.dir`: each file not kept into a directory
 /// of its own (`<file>-<nonce>`), its manifest written once it is read whole and checked.
@@ -1419,6 +1497,7 @@ fn read_dump(plan: ReadPlan) -> Result<Done> {
         done.too_long += read.too_long;
         done.cut += read.cut;
         done.records += read.records;
+        done.files.insert(file.to_owned(), read.records);
         done.downloaded += read.downloaded;
         done.checked += u32::from(read.checked);
         if let Some(t) = read.as_of {
@@ -1533,9 +1612,18 @@ fn read_failure(error: anyhow::Error, at: &str) -> anyhow::Error {
         .and_then(|e| e.get_ref())
         .and_then(|e| e.downcast_ref::<Failure>())
         .cloned();
+    // Data the decoder or the archive reader can't read (a download's failures carry their own
+    // class): the file is broken, read again it is broken again; refused as the dump's own.
+    let broken = error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+        )
+    });
     match carried {
         Some(f) => f.into(),
         None if error.downcast_ref::<Failure>().is_some() => error,
+        None if broken => Failure::new("archive").at(at.to_owned()).into(),
         None => Failure::new("read").at(at.to_owned()).into(),
     }
 }
@@ -1566,8 +1654,15 @@ fn too_bad(bad: u64, lines: u64) -> bool {
 /// is not one.
 fn parse_line(file: &str, line: &[u8], out: &mut dyn FnMut(String, Rec)) -> Option<()> {
     records::line_budget();
+    // A line that parses but makes no record (no valid MBID: a renamed field, say) is a bad one,
+    // so a dump of such lines fails its read (`parse`) instead of reading empty.
+    let mut made = 0u64;
+    let mut out = |k: String, r: Rec| {
+        made += 1;
+        out(k, r)
+    };
     match file {
-        "release" => records::release(&serde_json::from_slice(line).ok()?, out),
+        "release" => records::release(&serde_json::from_slice(line).ok()?, &mut out),
         "release-group" => {
             let (k, r) = records::group(&serde_json::from_slice(line).ok()?)?;
             out(k, r)
@@ -1576,10 +1671,10 @@ fn parse_line(file: &str, line: &[u8], out: &mut dyn FnMut(String, Rec)) -> Opti
             let (k, r) = records::artist(&serde_json::from_slice(line).ok()?)?;
             out(k, r)
         }
-        "recording" => records::standalone(&serde_json::from_slice(line).ok()?, out),
+        "recording" => records::standalone(&serde_json::from_slice(line).ok()?, &mut out),
         _ => return None,
     }
-    Some(())
+    (made > 0).then_some(())
 }
 /// [`parse_line`] into a vector (a limited read takes a release's records together, and the
 /// tests), at most `cap` records: `None` past it, as for a line that is not one.
@@ -1614,6 +1709,7 @@ fn read_parallel<R: BufRead>(
 ) -> Result<FileRead> {
     let mut read = FileRead::default();
     let (tx, rx) = crossbeam_channel::bounded::<Chunk>(spills.len() * 2);
+    let in_flight = InFlight::default();
     // Lines and bad lines over all threads, checked as the read goes.
     let counted = (
         std::sync::atomic::AtomicU64::new(0),
@@ -1626,9 +1722,18 @@ fn read_parallel<R: BufRead>(
             .map(|spill| {
                 let rx = rx.clone();
                 let counted = &counted;
+                let in_flight = &in_flight;
                 scope.spawn(move || -> Result<u64> {
+                    struct Leaving<'a>(&'a InFlight);
+                    impl Drop for Leaving<'_> {
+                        fn drop(&mut self) {
+                            self.0.close();
+                        }
+                    }
+                    let _leaving = Leaving(in_flight);
                     let mut records = 0;
                     while let Ok(chunk) = rx.recv() {
+                        let size = chunk.data.len();
                         stopped(stop)?;
                         let mut start = 0;
                         let (mut lines, mut bad, mut cut) = (0, 0, 0);
@@ -1659,6 +1764,7 @@ fn read_parallel<R: BufRead>(
                             }
                             start = end;
                         }
+                        in_flight.give(size);
                         let lines = counted.0.fetch_add(lines, Ordering::Relaxed) + lines;
                         let bad = counted.1.fetch_add(bad, Ordering::Relaxed) + bad;
                         counted.2.fetch_add(cut, Ordering::Relaxed);
@@ -1704,12 +1810,14 @@ fn read_parallel<R: BufRead>(
                             ends: vec![],
                         },
                     );
+                    in_flight.take(full.data.len(), QUEUED_BYTES, stop)?;
                     if tx.send(full).is_err() {
                         break;
                     }
                 }
             }
             if !chunk.ends.is_empty() {
+                in_flight.take(chunk.data.len(), QUEUED_BYTES, stop)?;
                 let _ = tx.send(chunk);
             }
             Ok(())
@@ -1849,6 +1957,47 @@ fn position_refused(state: &State) -> (String, String) {
 }
 
 impl MusicBrainz {
+    /// Why a read can't be applied as it is: no record at all, or none from a file whose kind of
+    /// card the catalogue holds (`None`: it can).
+    async fn empty_read(
+        &self,
+        job: &Job<'_>,
+        done: &Done,
+        version: &str,
+    ) -> Result<Option<String>> {
+        if done.records == 0 {
+            return Ok(Some(format!("no record read in dump {version}")));
+        }
+        for (file, records) in &done.files {
+            if *records == 0 && holds_kind(job.pool(), card_prefix(file)).await? {
+                return Ok(Some(format!("no record read in {file} of dump {version}")));
+            }
+        }
+        Ok(None)
+    }
+}
+/// The cards a dump file's records make: artists, release groups, recordings (from releases'
+/// tracks and from the recording file).
+fn card_prefix(file: &str) -> &'static str {
+    match file {
+        "artist" => "artist/",
+        "release-group" => "release-group/",
+        _ => "recording/",
+    }
+}
+/// Whether the catalogue holds a card whose `source_id` starts with `prefix`: the first at or after
+/// it in the `(catalogue, source_id)` index.
+async fn holds_kind(pool: &sqlx::PgPool, prefix: &str) -> Result<bool> {
+    let first: Option<String> = sqlx::query_scalar(
+        "SELECT source_id FROM catalogue_card WHERE catalogue=$1 AND source_id>=$2 ORDER BY source_id LIMIT 1",
+    )
+    .bind(Catalogue::Musicbrainz.name())
+    .bind(prefix)
+    .fetch_optional(pool)
+    .await?;
+    Ok(first.is_some_and(|id| id.starts_with(prefix)))
+}
+impl MusicBrainz {
     /// Whether `latest` is the dump a run refused from this source with this limit: not read
     /// again (another limit reads it once more, as a new subset).
     fn refused(&self, state: &State, latest: &str) -> bool {
@@ -1957,6 +2106,13 @@ pub const REQUESTED: &str = "asked for by pinakesd catalogue import --request";
 
 /// The importer `pinakesd` runs: the official mirror; none without the operator's contact
 /// (`http.contact`), which every request to the mirror names.
+/// Whether the catalogue is on but its importer does not start: it needs `http.contact`.
+pub fn needs_contact(config: &crate::config::Config) -> bool {
+    config.catalogues.enabled(Catalogue::Musicbrainz) && config.egress.contact.is_empty()
+}
+/// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
+pub const NEEDS_CONTACT: &str =
+    "needs http.contact: the importer asks the mirror with the operator's contact";
 pub fn importer(config: &crate::config::Config) -> Option<Arc<dyn Importer>> {
     if config.egress.contact.is_empty() {
         if !config.catalogues.enabled(Catalogue::Musicbrainz) {
@@ -2021,6 +2177,48 @@ mod tests {
         assert!(records::budget_left() > records::LINE_ELEMENTS - 10);
         // A limited read refuses a release of more records than it takes.
         assert!(parse_into("release", line.as_bytes(), 0).is_none());
+    }
+
+    /// The lines queued for the parsing threads hold at most the cap in bytes: past it the
+    /// reader waits until a thread has parsed some; one chunk passes alone however long; when the
+    /// threads are gone, or the run stops, the reader no longer waits.
+    #[test]
+    fn queued_lines_wait_for_room() {
+        let stop = AtomicBool::new(false);
+        let queue = InFlight::default();
+        queue.take(100, 64, &stop).unwrap();
+        std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                queue.take(10, 64, &stop).unwrap();
+                Instant::now()
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            let freed = Instant::now();
+            queue.give(100);
+            assert!(waiting.join().unwrap() >= freed);
+        });
+        // 10 held: 50 more fit, 60 more don't.
+        queue.take(50, 64, &stop).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        assert!(queue.take(60, 64, &stop).is_err());
+        stop.store(false, Ordering::SeqCst);
+        queue.close();
+        queue.take(1 << 30, 64, &stop).unwrap();
+    }
+
+    /// A line that parses but names no valid MBID makes no record: a bad line.
+    #[test]
+    fn a_line_without_an_mbid_is_bad() {
+        for file in ["release", "recording", "artist", "release-group"] {
+            assert!(
+                parse_into(file, br#"{"title":"x","name":"x"}"#, 10).is_none(),
+                "{file}"
+            );
+            assert!(
+                parse_into(file, br#"{"id":"not-an-mbid","name":"x"}"#, 10).is_none(),
+                "{file}"
+            );
+        }
     }
 
     /// The counts by kind a group gives for these records.
@@ -2121,8 +2319,9 @@ mod tests {
         assert_eq!(out.len(), 1);
         let parsed: records::ReleaseLine = serde_json::from_str(&line).unwrap();
         let _ = parsed;
+        // Its release group gives the release its record; the media are cut at their cap.
         let many_media = format!(
-            r#"{{"id":"a96e1d03-e685-3627-8cba-f5b96be7158f","media":[{}]}}"#,
+            r#"{{"id":"a96e1d03-e685-3627-8cba-f5b96be7158f","release-group":{{"id":"51e8835b-98de-4cf9-aae1-6315fa762aa9"}},"media":[{}]}}"#,
             vec!["{}"; 2000].join(",")
         );
         assert!(parse_line_vec("release", many_media.as_bytes(), &mut out).is_some());

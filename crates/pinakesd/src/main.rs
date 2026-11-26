@@ -517,6 +517,9 @@ async fn start(
             pinakes_core::catalogue::run::run(importer, catalogues.clone(), shutdown_rx.clone()),
         );
     }
+    if let Err(error) = pinakes_core::catalogue::run::note_unstarted(&pool, &config).await {
+        tracing::warn!(error = %pinakes_core::resolver::log_error(&error), "why a catalogue has no importer is not recorded");
+    }
     warn_admin_listener(admin_address);
     warn_admin_without_token(admin_address, config.admin_token.is_some());
     let admin_app = api::admin_router(state.clone());
@@ -603,7 +606,7 @@ async fn catalogue_command(
                 pinakes_core::catalogue::musicbrainz::REQUESTED,
             )
             .await?;
-            writeln!(out, "a full import of catalogue {catalogue} is asked for: the process running its importer starts it when the run under way ends, or at its next step")?;
+            writeln!(out, "a full import of catalogue {catalogue} is asked for: the process running its importer starts it after an update under way, or at its next step (a full import under way is the one asked for)")?;
             // Whether one runs: its lock is held.
             if let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? {
                 lock.release().await;
@@ -1379,9 +1382,9 @@ mod tests {
             "{waited:?}"
         );
     }
-    /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
-    /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
-    /// prints the table.
+    /// `catalogue import` refuses a limit below the stored cards that would remove the others
+    /// unless forced (with `--update` too), runs the import otherwise and names the run that ran;
+    /// `--request` records a full import asked for and says when no process holds the catalogue.
     #[sqlx::test(migrations = "../../migrations")]
     async fn catalogue_import_guards_its_limit_and_asks_for_imports(pool: sqlx::PgPool) {
         use pinakes_core::catalogue::{store, Card};
@@ -1480,6 +1483,9 @@ mod tests {
         dir
     }
 
+    /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
+    /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
+    /// prints the table.
     #[sqlx::test(migrations = "../../migrations")]
     async fn the_drop_command_takes_the_lock_and_removes_the_directory(pool: sqlx::PgPool) {
         use pinakes_core::catalogue::{run::SessionLock, store, Card};

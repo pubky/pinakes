@@ -102,6 +102,7 @@ impl AppState {
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
         metrics.catalogue_switches(&config.catalogues);
+        metrics.catalogue_contact(&config);
         let trusted_proxies = Arc::new(config.api.trusted_proxy_nets()?);
         Ok(Self {
             pool,

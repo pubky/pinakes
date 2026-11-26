@@ -1360,3 +1360,40 @@ async fn jsonb_text_len_is_postgresql_s_length(pool: PgPool) {
         );
     }
 }
+
+/// MusicBrainz on without `http.contact` starts no importer, and says so: `waiting` in its state
+/// row (`catalogue status`) and `pinakes_catalogue_needs_contact`; with a contact, or off, neither.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
+    let mut config = pinakes_core::config::Config::default();
+    assert!(config.egress.contact.is_empty());
+    assert!(run::importers(&config).is_empty());
+    run::note_unstarted(&pool, &config).await.unwrap();
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state.waiting.as_deref(),
+        Some(pinakes_core::catalogue::musicbrainz::NEEDS_CONTACT)
+    );
+    let table = store::status_table(&config.catalogues, std::slice::from_ref(&state));
+    assert!(table.contains("needs http.contact"), "{table}");
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    let needs = |m: &Metrics| {
+        m.catalogue_needs_contact
+            .with_label_values(&["musicbrainz"])
+            .get()
+    };
+    assert_eq!(needs(&metrics), 1);
+    config.egress.contact = "ops@example.org".into();
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    assert_eq!(needs(&metrics), 0);
+    config.egress.contact.clear();
+    config.catalogues.musicbrainz.enabled = false;
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    assert_eq!(needs(&metrics), 0);
+}

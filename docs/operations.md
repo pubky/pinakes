@@ -1861,9 +1861,10 @@ the status table when it has finished. A full import takes up one that was cut o
 new one. `--from`, `--limit` and `--force` are the importer's own
 ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand)). A failure is recorded as the
 task records it. `catalogue import <name> --request` needs no lock: it records that a full import
-is asked for (`import_requested`). The process running the importer starts it when the run under
-way ends, or at its next step (MusicBrainz: within the hour when idle); the command says when no
-process holds the catalogue.
+is asked for (`import_requested`). The process running the importer starts it after an update
+under way, or at its next step (MusicBrainz: within the hour when idle); a full import under way
+is the one asked for, and its end clears the request. The command says when no process holds the
+catalogue.
 
 `scripts/lock-waits` names these locks `catalogue <name>` and `large catalogue import`.
 
@@ -1933,7 +1934,7 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CursorReset` | info | A feed resync or [feed reset](#feed-resets). |
 | `PreviewCapacityReached` | warning | [New previews](#new-previews). |
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
-| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on and have finished a full import; a failed first import shows in `catalogue status` and `pinakes_catalogue_import_errors_total` alone. |
+| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on; `CatalogueImportFailed` also for a first import that fails or is refused, `CatalogueUpdateLag` only after a first finished import. A catalogue on without its importer (MusicBrainz without `http.contact`) shows in `catalogue status` (`waiting`) and `pinakes_catalogue_needs_contact`. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
 | `CatalogueJoinsBehind` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): the oldest join check has waited over six hours. |
 | `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |

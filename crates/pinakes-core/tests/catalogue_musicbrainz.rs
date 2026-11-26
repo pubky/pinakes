@@ -569,6 +569,11 @@ async fn a_limit_imports_the_first_releases_that_fit(pool: PgPool) {
     );
     assert_eq!(state.cards, 5);
     assert_eq!(state.position, Some(json!({ "version": B, "limit": 5 })));
+    // An ISRC unique in the subset may be shared in the dump: none is a key under a limit.
+    assert!(rows(&pool)
+        .await
+        .iter()
+        .all(|r| !r.keys.iter().any(|k| k.starts_with("isrc:"))));
     // The fame counts both editions, which fit.
     assert_eq!(
         row(&rows(&pool).await, &format!("recording/{MIX}")).fame,
@@ -751,8 +756,9 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     run(&s, &a, Run::Import).await.unwrap();
     let before = rows(&pool).await;
     let shrunk = |entity: &str, lines: &mut Vec<Value>| {
+        // All but one artist and one release group gone (a file read empty is `empty`).
         if matches!(entity, "artist" | "release-group") {
-            lines.clear();
+            lines.truncate(1);
         }
         // A change that would be written, were the update not refused.
         if entity == "recording" {
@@ -762,7 +768,7 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     let b = dump(s.root.path(), B, shrunk);
     let failed = run(&s, &b, Run::Update).await.unwrap_err();
     assert!(
-        failed.to_string().contains("removals (8 of 17 cards gone"),
+        failed.to_string().contains("removals (6 of 17 cards gone"),
         "{failed}"
     );
     let state = store::state(&pool, Catalogue::Musicbrainz)
@@ -777,7 +783,7 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     assert!(state
         .last_error
         .unwrap()
-        .starts_with("removals (8 of 17 cards gone"));
+        .starts_with("removals (6 of 17 cards gone"));
     let position = state.position.unwrap();
     assert_eq!(
         (position["refused"].as_str(), position["version"].as_str()),
@@ -878,7 +884,7 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     .await
     .unwrap();
     let state = run(&s, &b, Run::Update).await.unwrap();
-    assert_eq!((state.cards, rows(&pool).await.len()), (9, 9));
+    assert_eq!((state.cards, rows(&pool).await.len()), (11, 11));
     assert_eq!((state.import_requested, state.generation), (None, 2));
 }
 
@@ -943,8 +949,9 @@ async fn an_import_asked_for_stays_asked_for_when_cut_off(pool: PgPool) {
     let a = dump(s.root.path(), A, unchanged);
     run(&s, &a, Run::Import).await.unwrap();
     let shrunk = dump(s.root.path(), B, |entity, lines| {
+        // All but one artist and one release group gone (a file read empty is `empty`).
         if matches!(entity, "artist" | "release-group") {
-            lines.clear();
+            lines.truncate(1);
         }
     });
     let m = mirror(served(&shrunk, B), B, Breaks::ArtistBusyOnce).await;
@@ -969,8 +976,8 @@ async fn an_import_asked_for_stays_asked_for_when_cut_off(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((state.cards, state.run), (9, None));
-    assert_eq!(rows(&pool).await.len(), 9);
+    assert_eq!((state.cards, state.run), (11, None));
+    assert_eq!(rows(&pool).await.len(), 11);
 }
 
 /// A full import that reads no record never empties the catalogue, even one asked for: it is
@@ -1003,6 +1010,112 @@ async fn an_empty_dump_never_empties_the_catalogue(pool: PgPool) {
         .unwrap();
     assert!(state.last_error.unwrap().starts_with("empty"));
     assert_eq!(state.position.unwrap()["refused"].as_str(), Some(B));
+}
+
+/// One file read empty while cards of its kind are stored is refused (`empty`), in an update
+/// below the removal check's tenth and under a `limit` (which has no removal check); so is a
+/// file whose lines all lost their MBIDs (each a bad line, none a record).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_file_read_empty_removes_nothing(pool: PgPool) {
+    let s = setup(&pool, None);
+    let a = dump(s.root.path(), A, unchanged);
+    run(&s, &a, Run::Import).await.unwrap();
+    let before = rows(&pool).await;
+    let no_artists = dump(s.root.path(), B, |entity, lines| {
+        if entity == "artist" {
+            lines.clear();
+        }
+    });
+    let failed = run(&s, &no_artists, Run::Update).await.unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains(&format!("empty (no record read in artist of dump {B}")),
+        "{failed}"
+    );
+    assert_eq!(rows(&pool).await, before);
+    let no_ids = dump(s.root.path(), "20261126-001001", |entity, lines| {
+        if entity == "release" {
+            for l in lines.iter_mut() {
+                l.as_object_mut().unwrap().remove("id");
+            }
+        }
+    });
+    let failed = run(&s, &no_ids, Run::Update).await.unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains("no record read in release of dump"),
+        "{failed}"
+    );
+    assert_eq!(rows(&pool).await, before);
+    // Under a limit, an update of a dump that reads nothing removes nothing either.
+    reset(&pool).await;
+    let s = setup(&pool, Some(5));
+    let a = dump(s.root.path(), A, unchanged);
+    run(&s, &a, Run::Import).await.unwrap();
+    let before = rows(&pool).await;
+    assert_eq!(before.len(), 5);
+    let empty = dump(s.root.path(), B, |_, lines| lines.clear());
+    let failed = run(&s, &empty, Run::Update).await.unwrap_err();
+    assert!(
+        failed.to_string().contains("no record read in dump"),
+        "{failed}"
+    );
+    assert_eq!(rows(&pool).await, before);
+    // A file read empty whose kind of card is not stored (release groups, over a catalogue of
+    // artists alone) is no refusal.
+    reset(&pool).await;
+    let s = setup(&pool, None);
+    let artists = dump(s.root.path(), A, |entity, lines| {
+        if entity != "artist" {
+            lines.clear();
+        }
+    });
+    run(&s, &artists, Run::Import).await.unwrap();
+    assert!(rows(&pool)
+        .await
+        .iter()
+        .all(|r| r.source_id.starts_with("artist/")));
+    let no_groups = dump(s.root.path(), B, |entity, lines| {
+        if entity == "release-group" {
+            lines.clear();
+        }
+    });
+    let state = run(&s, &no_groups, Run::Update).await.unwrap();
+    assert!(state.cards > 4, "{}", state.cards);
+}
+
+/// A file whose xz stream is damaged or cut short is the dump's own failure (`archive`), not a
+/// read retried every ten minutes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_broken_file_is_refused_as_an_archive(pool: PgPool) {
+    let s = setup(&pool, None);
+    for (version, damage) in [("20261121-001001", "flipped"), ("20261125-001001", "cut")] {
+        let dir = dump(s.root.path(), version, unchanged);
+        let path = dir.join("release.tar.xz");
+        let mut bytes = std::fs::read(&path).unwrap();
+        if damage == "flipped" {
+            let mid = bytes.len() / 2;
+            for b in &mut bytes[mid..mid + 64] {
+                *b ^= 0x5a;
+            }
+        } else {
+            bytes.truncate(bytes.len() / 2);
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let failed = run(&s, &dir, Run::Import).await.unwrap_err();
+        assert!(failed.to_string().contains("archive"), "{damage}: {failed}");
+        let state = store::state(&pool, Catalogue::Musicbrainz)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.position.unwrap()["refused"].as_str(),
+            Some(version),
+            "{damage}"
+        );
+    }
 }
 
 /// A dump named after a day after tomorrow is no dump: nothing is read.
@@ -1316,6 +1429,16 @@ async fn serve(
         .lock()
         .unwrap()
         .push((path.clone(), header("range"), header("if-range")));
+    // The importer asks for the files as they are: an answer its client unpacked would count
+    // other bytes than the ranges it resumes with.
+    if header("accept-encoding")
+        .is_some_and(|e| ["gzip", "br", "deflate"].iter().any(|c| e.contains(c)))
+    {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .unwrap();
+    }
     if path == "LATEST" {
         return Response::new(Body::from(format!("{}\n", s.latest)));
     }

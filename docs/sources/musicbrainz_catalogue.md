@@ -12,7 +12,7 @@ MusicBrainz relates to an item gets its card from the catalogue without a fetch.
 | Credentials | None |
 | Rate | `LATEST` polled once an hour (and asked again by the run it starts); one file at a time, streamed; nothing is kept but sorted runs under `catalogues.dir/musicbrainz` |
 | Refresh | A new dump is read when `LATEST` names one; MusicBrainz publishes two a week |
-| Needs | `http.contact`: without it the importer does not start (every request names the operator's contact) |
+| Needs | `http.contact`: without it the importer does not start (every request names the operator's contact); `catalogue status` then shows it in `waiting` and `pinakes_catalogue_needs_contact` is 1 |
 | Card types | `Person` or `MusicGroup` (artists), `MusicAlbum` (release groups), `MusicRecording` (recordings) |
 | Keys | `mb:artist:…`, `mb:release-group:…`, `mb:recording:…`, `isrc:…`, `wikidata:Q…`, `url:…` |
 | Credit | `from: "musicbrainz"`; the card's link is its musicbrainz.org page |
@@ -40,9 +40,12 @@ most 256 before any card is written.
 - **Bounds.** A line longer than 128 MiB is skipped and counted. Each list of a line is read up to
   a cap (4,096 tracks a medium, 512 media, 2,048 relations, 256 aliases and genres, 64 ISRCs and
   credited artists) and the rest skipped; all the lists of one line together build at most
-  500,000 entries. Under a `limit`, a release of more than 50,000 records is skipped. Of one item's records at most 8,192 holding 64 MiB make
-  its card (every one counts for its fame). More than 100 lines that don't parse, and more than
-  one in a thousand of the lines read, stop the run (`parse`).
+  500,000 entries. Under a `limit`, a release of more than 50,000 records is skipped. Of one
+  item's records at most 8,192 holding 64 MiB make its card (every one counts for its fame). The
+  lines waiting for the parsing threads hold at most 64 MiB (one longer line is let through
+  alone). A line that doesn't parse, or parses but names no valid MBID, is a bad line; more than
+  100 bad lines, and more than one in a thousand of the lines read, stop the run (`parse`). A file
+  whose xz stream or archive is broken stops it as `archive`.
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range`
   with `If-Range`, so a file replaced meanwhile is refused, never spliced), up to five times in a
   row (renewed after every 64 MiB read), and not at all when the mirror names no ETag or
@@ -78,7 +81,7 @@ most 256 before any card is written.
 | Key | When |
 | --- | --- |
 | `mb:<entity>:<mbid>` | Always |
-| `isrc:<ISRC>` | A recording's ISRCs, at most eight, each only when no other recording of the dump carries it |
+| `isrc:<ISRC>` | A recording's ISRCs, at most eight, each only when no other recording of the dump carries it; none under a `limit` (an ISRC unique in the subset may be shared in the dump) |
 | `wikidata:Q…` | An artist's or release group's `wikidata` relation, when it names exactly one item |
 | `url:<resource id>` | Each current URL relation that is a music service's page at the item's level: a recording's tracks and videos (Spotify, Apple Music, Deezer, TIDAL, YouTube, …), an artist's artist pages (also Bandcamp and Discogs artists), a release group's albums and Discogs master, and its releases' album pages (not their Discogs releases, which are editions) |
 
@@ -118,8 +121,10 @@ A dump is refused, and no card is removed for it, when:
   changed cards are written by then);
 - a full import of the importer's own (not asked for by hand, nor by an update handing over for a
   changed `limit`) would remove more than a tenth of the cards (one whose cards are mostly refused);
-- a full import reads no record at all while cards are stored, even one asked for (`empty`;
-  `catalogue drop` empties a catalogue);
+- a run (an update or a full import, even one asked for, with or without a `limit`) reads no
+  record at all, or none from one file whose kind of card is stored (artists, release groups,
+  recordings), while cards are stored (`empty`; `catalogue drop` empties a catalogue): one kind is
+  a small share of the cards, below the removal check's tenth;
 - its files don't match their checksums, don't parse, or hold more than a file may (`checksum`,
   `parse`, `archive`, `size`, `record_size`, `isrc_shared`).
 
@@ -185,8 +190,9 @@ started by hand takes up one that was cut off, else begins a new one.
   new subset), so it needs `--force` then, with `--update` too.
 
 `--request` only asks for a full import: the process running the importer starts it, with its
-turn and disk checks, when the run under way ends or at its next step (within the hour when idle).
-The command says when no process holds the catalogue.
+turn and disk checks, after an update under way or at its next step (within the hour when idle); a
+full import under way is the one asked for, and its end clears the request. The command says when
+no process holds the catalogue.
 
 `scripts/catalogue-sample musicbrainz` imports a sample of the two newest dumps (the first
 megabytes of each file) into a throwaway database and checks it end to end: the cards, a search,

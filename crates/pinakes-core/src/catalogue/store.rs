@@ -589,6 +589,52 @@ mod tests {
         );
     }
 
+    /// A dump the importer refused shows in `waiting` (from its position), before why it waits,
+    /// and alone when it does not.
+    #[test]
+    fn the_status_table_shows_a_refused_dump() {
+        let mut refused = State {
+            catalogue: "musicbrainz".into(),
+            phase: "failed".into(),
+            run: None,
+            generation: 1,
+            cursor: None,
+            position: Some(
+                serde_json::json!({"version": "20261121-001001", "refused": "20261125-001001"}),
+            ),
+            cards: 5,
+            upstream_version: None,
+            last_import_at: None,
+            last_update_at: None,
+            current_as_of: None,
+            import_requested: None,
+            waiting: Some("free disk 1.0 GB".into()),
+            last_error: Some("removals (8 of 17 cards gone)".into()),
+            error_count: 1,
+            updated_at: Utc::now(),
+        };
+        let row = |state: &State| {
+            status_table(&CataloguesConfig::default(), std::slice::from_ref(state))
+                .lines()
+                .nth(2)
+                .unwrap()
+                .to_owned()
+        };
+        assert!(
+            row(&refused).contains("dump 20261125-001001 refused; free disk 1.0 GB"),
+            "{}",
+            row(&refused)
+        );
+        refused.waiting = None;
+        assert!(
+            row(&refused).contains("dump 20261125-001001 refused  removals"),
+            "{}",
+            row(&refused)
+        );
+        refused.position = Some(serde_json::json!({"version": "20261121-001001"}));
+        assert!(!row(&refused).contains("refused "), "{}", row(&refused));
+    }
+
     /// The table's own checks refuse a row `Card::checked` let through (here a link over the
     /// column's 2048 bytes): that row alone is left out, unstamped and uncounted, and the rest of
     /// its part is written.

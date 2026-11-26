@@ -8,7 +8,7 @@
 # usage: scripts/catalogue-sample musicbrainz [--keep] [--import-only] [--bytes ENTITY=N]...
 #
 # It reads the first bytes of each file of the two newest MusicBrainz JSON dumps (HTTP range
-# requests; about 120 MB in all by default; `--bytes release=N` and the like change a file's), keeps
+# requests; 160 MiB in all by default; `--bytes release=N` and the like change a file's), keeps
 # their whole lines and packs them as dumps again (`<entity>.tar.xz`, `SHA256SUMS`), without
 # writing the decoded lines to disk. Then it creates the database `$SAMPLE_DB`, imports the older
 # sample, runs the checks, updates from the newer one (`--import-only` reads only the newest dump

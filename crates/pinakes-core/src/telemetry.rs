@@ -90,6 +90,8 @@ pub struct Metrics {
     /// waits for the large-import turn.
     pub catalogue_cards: IntGaugeVec,
     pub catalogue_enabled: IntGaugeVec,
+    /// Whether a catalogue that is on has no importer for want of `http.contact` (MusicBrainz).
+    pub catalogue_needs_contact: IntGaugeVec,
     pub catalogue_import: IntGaugeVec,
     pub catalogue_update: IntGaugeVec,
     pub catalogue_lag: IntGaugeVec,
@@ -338,6 +340,12 @@ impl Metrics {
                 "Whether each catalogue is on in the daemon's configuration (1) or off (0)",
                 &["catalogue"]
             ),
+            catalogue_needs_contact: metric!(
+                IntGaugeVec,
+                "pinakes_catalogue_needs_contact",
+                "Whether each catalogue is on but its importer does not start without http.contact (1) or not (0)",
+                &["catalogue"]
+            ),
             catalogue_import: metric!(
                 IntGaugeVec,
                 "pinakes_catalogue_last_import_timestamp_seconds",
@@ -403,6 +411,7 @@ impl Metrics {
             let name = [catalogue.name()];
             out.catalogue_cards.with_label_values(&name);
             out.catalogue_enabled.with_label_values(&name);
+            out.catalogue_needs_contact.with_label_values(&name);
             out.catalogue_import.with_label_values(&name);
             out.catalogue_update.with_label_values(&name);
             out.catalogue_lag.with_label_values(&name);
@@ -422,6 +431,15 @@ impl Metrics {
                 .with_label_values(&[catalogue.name()])
                 .set(i64::from(config.enabled(catalogue)));
         }
+    }
+    /// Which catalogues that are on have no importer for want of `http.contact`
+    /// (`pinakes_catalogue_needs_contact`).
+    pub fn catalogue_contact(&self, config: &crate::config::Config) {
+        self.catalogue_needs_contact
+            .with_label_values(&[crate::catalogue::Catalogue::Musicbrainz.name()])
+            .set(i64::from(crate::catalogue::musicbrainz::needs_contact(
+                config,
+            )));
     }
     /// A source's series from the start, each at 0: its fetches by outcome, changes by class,
     /// held snapshots and cursor resets. A rule on `increase()` reads a rise from 0; a series

@@ -428,6 +428,20 @@ pub enum Next {
 
 /// The importers `pinakesd` starts: those of the catalogues that are on. With every catalogue
 /// off, none.
+/// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz without
+/// `http.contact` ([`super::musicbrainz::NEEDS_CONTACT`] in `waiting`). A task that starts
+/// clears it at its first step.
+pub async fn note_unstarted(pool: &PgPool, config: &Config) -> Result<()> {
+    if super::musicbrainz::needs_contact(config) {
+        set_waiting(
+            pool,
+            Catalogue::Musicbrainz,
+            super::musicbrainz::NEEDS_CONTACT,
+        )
+        .await?;
+    }
+    Ok(())
+}
 pub fn to_start(importers: Vec<Arc<dyn Importer>>, config: &Config) -> Vec<Arc<dyn Importer>> {
     importers
         .into_iter()

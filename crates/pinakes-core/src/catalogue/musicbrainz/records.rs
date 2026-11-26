@@ -644,10 +644,19 @@ pub struct Item {
 pub struct Shared {
     isrcs: std::collections::HashSet<u64>,
     full: bool,
+    /// Every ISRC counts as shared (a subset's: one unique in it may be shared in the dump).
+    every: bool,
 }
 /// The most ISRCs [`Shared`] holds (8 bytes each).
 pub const SHARED_CAP: usize = 16_000_000;
 impl Shared {
+    /// One where every ISRC counts as shared: no ISRC is a key.
+    pub fn every() -> Self {
+        Self {
+            every: true,
+            ..Self::default()
+        }
+    }
     pub fn len(&self) -> usize {
         self.isrcs.len()
     }
@@ -667,7 +676,7 @@ impl Shared {
         }
     }
     fn contains(&self, isrc: &str) -> bool {
-        isrc_number(isrc).is_some_and(|n| self.isrcs.contains(&n))
+        self.every || isrc_number(isrc).is_some_and(|n| self.isrcs.contains(&n))
     }
 }
 /// An ISRC (12 letters and digits) as the number its characters make in base 36, one to one.
