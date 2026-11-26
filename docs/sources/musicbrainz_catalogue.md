@@ -198,7 +198,10 @@ started by hand takes up one that was cut off, else begins a new one.
   `json-dumps/` URL (`https://`). The official mirror needs `http.contact`.
 - `--limit` takes the place of the configured limit. Another limit than the cards were read with,
   below the cards stored, would remove the others (an update hands over to a full import of the
-  new subset), so it needs `--force` then, with `--update` too.
+  new subset), so it needs `--force` then, with `--update` too. `--force` also lets that import
+  remove the other cards past the shrink floor (they are what the lower limit drops). A full
+  import with `--force` and no lower `--limit` keeps the floor: a dump that reads under half the
+  cards fails `shrunk`, and `pinakesd catalogue allow-shrink musicbrainz` lets it through.
 
 `--request` only asks for a full import: the process running the importer starts it, with its
 turn and disk checks, after an update under way or at its next step (within the hour when idle); a

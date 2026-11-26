@@ -2485,7 +2485,8 @@ async fn with_replacers(
 /// The keys of `rows` (not `url:` keys) that would merge two of them (held by cards of two
 /// catalogues among the rows) but name more than one card of one of those catalogues (two
 /// MusicBrainz recordings of one ISRC): each with that catalogue. Such a key merges nothing
-/// ([`units_of`]). One read for the few keys two catalogues' found cards share.
+/// ([`units_of`]). One read for the few keys two catalogues' found cards share, at most two cards
+/// per key and catalogue (only those of the rows, which are on).
 async fn ambiguous_keys(
     pool: &PgPool,
     rows: &[CardRow],
@@ -2497,18 +2498,25 @@ async fn ambiguous_keys(
             by_key.entry(key).or_default().insert(catalogue);
         }
     }
-    let shared: Vec<String> = by_key
+    // Each shared key with each catalogue among the rows that holds it (catalogues that are on).
+    let (keys, catalogues): (Vec<String>, Vec<String>) = by_key
         .into_iter()
         .filter(|(_, catalogues)| catalogues.len() > 1)
-        .map(|(key, _)| key.to_owned())
-        .collect();
-    if shared.is_empty() {
+        .flat_map(|(key, catalogues)| {
+            catalogues
+                .into_iter()
+                .map(move |catalogue| (key.to_owned(), catalogue.to_owned()))
+        })
+        .unzip();
+    if keys.is_empty() {
         return Ok(Default::default());
     }
+    // Two cards of the catalogue with the key are enough to know: the read stops there.
     let ambiguous: Vec<(String, String)> = sqlx::query_as(
-        "SELECT k,c.catalogue FROM unnest($1::text[]) k JOIN catalogue_card c ON c.keys@>ARRAY[k] GROUP BY k,c.catalogue HAVING count(*)>1",
+        "SELECT p.k,p.catalogue FROM unnest($1::text[],$2::text[]) AS p(k,catalogue) WHERE (SELECT count(*) FROM (SELECT 1 FROM catalogue_card c WHERE c.catalogue=p.catalogue AND c.keys@>ARRAY[p.k] LIMIT 2) x)>1",
     )
-    .bind(&shared)
+    .bind(&keys)
+    .bind(&catalogues)
     .fetch_all(pool)
     .await?;
     Ok(ambiguous.into_iter().collect())
@@ -2681,6 +2689,18 @@ fn by_fame(
     inner: &dyn Fn(&mut QueryBuilder<'static, Postgres>),
     limit: usize,
 ) {
+    each_by_fame(sql, columns, branches, inner, limit);
+    sql.push(" ORDER BY b.fame DESC,b.id LIMIT ")
+        .push_bind(limit as i64);
+}
+/// [`by_fame`] without the merged limit: each branch's `limit` rows, as `b`.
+fn each_by_fame(
+    sql: &mut QueryBuilder<'static, Postgres>,
+    columns: &str,
+    branches: &[Branch],
+    inner: &dyn Fn(&mut QueryBuilder<'static, Postgres>),
+    limit: usize,
+) {
     sql.push("SELECT * FROM (");
     for (i, (catalogue, extra)) in branches.iter().enumerate() {
         if i > 0 {
@@ -2701,8 +2721,7 @@ fn by_fame(
             .push_bind(limit as i64)
             .push(")");
     }
-    sql.push(") b ORDER BY b.fame DESC,b.id LIMIT ")
-        .push_bind(limit as i64);
+    sql.push(") b");
 }
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
 /// the filters let in, at most `cap`. Each read stops after a bounded number of rows, and reads
@@ -2723,8 +2742,10 @@ fn by_fame(
 /// reads go one branch per catalogue in its own `point` index (partial, `WHERE catalogue=…`).
 ///
 /// With `inside` (a text of one character found inside names, which the text index leaves to
-/// Postgres): only the [`FAMOUS_PROBE`] times `cap` best known cards of each catalogue are read,
-/// in fame order, and those whose name holds the text kept (with every filter and the place).
+/// Postgres): only the [`FAMOUS_PROBE`] times `cap` best known cards of each catalogue are read
+/// (each catalogue's own, not of all together), in fame order, and those whose name holds the
+/// character kept (with every filter and the place); other names are not read, as a link's are
+/// not.
 #[allow(clippy::too_many_arguments)]
 async fn best_known_cards(
     pool: &PgPool,
@@ -2862,7 +2883,14 @@ async fn best_known_cards(
         // The best known first, kept when in the place and through every filter.
         let mut rows = read_cards(pool, Plan::Ordered, |sql| {
             sql.push("SELECT ").push(CARD_READ_COLUMNS).push(" FROM (");
-            by_fame(
+            // A place takes the best known of all catalogues together; one character each
+            // catalogue's own, so a catalogue of lesser known cards still lists its matches.
+            let probe = if inside.is_some() {
+                each_by_fame
+            } else {
+                by_fame
+            };
+            probe(
                 sql,
                 "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point,c.labels,c.name",
                 &each,
@@ -3673,7 +3701,11 @@ pub async fn search(
         }
         // One character found inside names, which the text index leaves to Postgres: the best
         // known cards that hold it.
-        (None, true) if _postgres_turn.is_some() && related.is_none() => {
+        (None, true)
+            if _postgres_turn.is_some()
+                && related.is_none()
+                && query_text(&q).is_some_and(|t| t.trim().chars().count() == 1) =>
+        {
             best_known_cards(
                 &state.pool,
                 &q,

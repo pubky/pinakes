@@ -1576,6 +1576,14 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
         .await
         .unwrap();
     assert_eq!(allow().await.unwrap(), store::Allowance::Allowed);
+    // A second call while the allowed try runs (its phase is `import` then) keeps the allowance:
+    // it answers as allowed and the try goes through.
+    sqlx::query("UPDATE catalogue_state SET phase='import' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(allow().await.unwrap(), store::Allowance::Allowed);
+    assert!(state(&pool, Catalogue::Wikidata).await.shrink_allowed);
     assert_eq!(run::step(&none, &ctx).await.unwrap(), Next::Again);
     assert_eq!(count(&pool, Catalogue::Wikidata).await, 0);
     let s = state(&pool, Catalogue::Wikidata).await;

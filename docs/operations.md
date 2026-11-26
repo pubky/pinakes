@@ -1796,8 +1796,8 @@ Set `[catalogues.<name>] enabled = false`, or `[catalogues] enabled = false` for
   Later starts find nothing left to do. A link a later check finds built from a catalogue that is
   off, or that was dropped, is given back the same way, its read spread over the next day.
 - reads nothing for its cards: no Wikipedia summary is asked for a card built from it. With every
-  catalogue off, the daemon's joins task gives the links back and checks what is queued once at
-  start, then reads nothing more, and the extras task reads nothing.
+  catalogue off, the daemon's joins task gives the links back, then checks the queue every ten
+  minutes (it finds nothing there), and the extras task reads nothing.
 
 ### Shared links a catalogue holds
 
@@ -1935,7 +1935,7 @@ is on (in this version: `musicbrainz`), and follows these rules:
 | Abandoned runs | An importer may abandon a run whose data can't be applied (MusicBrainz: a refused dump). The run is recorded as failed, but its cursor goes and no card is removed for it; what the importer keeps about the refusal stays in its position, and the task waits for something new rather than trying again. |
 | Requests | A finished full import clears `import_requested`, also one asked for while it ran. |
 | Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `shrunk`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
-| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, the operator allows it (`catalogue allow-shrink`, [below](#a-full-import-that-shrinks-the-catalogue)), or the import's scope is narrower than the last finished one's (a lower `limit`, a higher `min_citations`; kept in `catalogue_state.scope`, else the limit the state's position records). `catalogue import --force` says the drop is expected. Another `region` is no narrower scope: it may be larger, so it needs the allowance. |
+| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, the operator allows it (`catalogue allow-shrink`, [below](#a-full-import-that-shrinks-the-catalogue)), or the import's scope is narrower than the last finished one's (a lower `limit`, a higher `min_citations`; kept in `catalogue_state.scope`, else the limit the state's position records). `catalogue import --force` with a `--limit` below the stored one says the drop is expected (without such a limit, `--force` leaves the floor in place). Another `region` is no narrower scope: it may be larger, so it needs the allowance. |
 
 ### Allowed update lag
 
@@ -1966,7 +1966,9 @@ nothing and is tried again every ten minutes from its last cursor (`CatalogueImp
    that fails for any reason first takes it back.
 3. A narrower scope (a lower `limit`, a higher `min_citations`) needs no allowance: its first full
    import removes the rest on its own. `catalogue import NAME --limit N --force` runs one such
-   import by hand. Another `region` needs the allowance, as it may be larger.
+   import by hand: `--force` passes the floor only for a `--limit` below the limit the cards were
+   read with (or the whole catalogue). A full import with `--force` keeps the floor;
+   `allow-shrink` lets a real shrink through. Another `region` needs the allowance, as it may be larger.
 
 ### A large import that keeps failing
 

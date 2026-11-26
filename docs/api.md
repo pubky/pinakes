@@ -1164,8 +1164,9 @@ distance. `q` matches like this:
   words match in order, each at a word start (`a s` finds `A slow song`, not `As lop`).
 - A `q` of one character that is found inside names (a sign such as `(` or `€`, a letter of
   Hebrew or Arabic, or a character of a script written without spaces, such as `東`) is matched in
-  Postgres alone, as below. With a catalogue on, the catalogue cards it lists are those of each
-  catalogue's best known (twice `limits.search_text_candidates`) whose name holds it.
+  Postgres alone, as below. With a catalogue on, it also lists catalogue cards: of each catalogue
+  that is on, its twice `limits.search_text_candidates` best known cards are read, and those whose
+  name holds the character are listed (their other names are not read, as a link's are not).
 
 The index reads at most 32 items of `q` (words, phrases, words to leave out, `or`) and a phrase by
 its first 8 words (by all its words, in any order, when every one is in more than 10,000 names and
@@ -1175,7 +1176,10 @@ its first 8 words (by all its words, in any order, when every one is in more tha
 are in 500,000 names in all); Postgres checks every candidate against the whole `q`. At most
 `limits.search_index_searches` text searches use the index at once (one per CPU core by default),
 and each has `limits.search_index_budget_ms` (2 s) for its index stage, its wait for a turn
-included. A search waits for a free turn; one client address (an IPv6 address by its /64) that
+included. `or` joins the parts on its two sides as Postgres reads them: `x a or b` is `x a`, or
+`b`, and a word left out with `-` belongs to its side. When the 32 items end inside a list of
+`or`s, an `or` follows past them, or a side of an `or` has no word to find (`-x or y`), Postgres
+reads the text alone, as a text of one character; it then lists no catalogue cards. A search waits for a free turn; one client address (an IPv6 address by its /64) that
 already runs half the turns waits while another client's search does, and alone it takes every
 free turn. A search that gets no turn within its budget, or runs past it, answers `503` with
 `Retry-After: 1`: the index stops it at its next check (between the posting steps of a word or
@@ -1241,7 +1245,10 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   `bbox`, those of the twice `limits.search_text_candidates` best known cards that are inside it;
   when they are fewer, also the best known of the twice `limits.search_text_candidates` cards
   nearest to the circle's centre (or to each box's centre) inside it, so a large area reads a
-  bounded number of cards. With `host`, each catalogue's best known of each host; with `type` (no
+  bounded number of cards. A filter (`type`, `tags`, `host`, `exclude_type`) is checked as the
+  nearest are read: when few cards of the area pass it, that read goes through the area's cards
+  of each catalogue until it has its twice `limits.search_text_candidates`, so its bound is then
+  the area, as for every place search on Postgres. With `host`, each catalogue's best known of each host; with `type` (no
   `tags`), each catalogue's best known of each type and subtype; both merged. A catalogue switched
   off but not dropped costs these reads nothing;
 - a catalogue switched off leaves every search at once.

@@ -1466,6 +1466,37 @@ async fn one_character_inside_names_finds_catalogue_cards(pool: PgPool) {
     );
 }
 
+/// One character inside names reads each catalogue's own twice `cap` best known cards, not the
+/// twice `cap` best known of all catalogues together: a catalogue whose cards are less known
+/// still lists those whose name holds the character.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_character_reads_each_catalogue_s_best_known(pool: PgPool) {
+    // Wikidata: 30 well known cards without the character. MusicBrainz: 3 lesser known with it.
+    let famous: Vec<Card> = (1..=30)
+        .map(|n| card(n, &format!("Famous {n}"), "Person", &[], None, 0.9))
+        .collect();
+    import(&pool, Catalogue::Wikidata, &famous).await;
+    let cats: Vec<Card> = (1..=3)
+        .map(|n| {
+            let mut c = card(100 + n, &format!("猫 {n}"), "MusicGroup", &[], None, 0.1);
+            c.source_id = format!("artist/{n}");
+            c
+        })
+        .collect();
+    import(&pool, Catalogue::Musicbrainz, &cats).await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut config = Config::default();
+    // Twice cap (10) is under each catalogue's count of Wikidata's 30.
+    config.search.text_candidates = 5;
+    let mut state = AppState::new(pool.clone(), config).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let mut found = names(&common::get(&app, "/v1/search?q=%E7%8C%AB").await);
+    found.sort();
+    assert_eq!(found, ["猫 1", "猫 2", "猫 3"]);
+}
+
 /// Each catalogue has its own two `point` indexes (geometry and geography, partial on it), which
 /// the reads near a place use one catalogue at a time.
 #[sqlx::test(migrations = "../../migrations")]

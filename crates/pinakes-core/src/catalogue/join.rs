@@ -10,8 +10,8 @@
 //! built from a catalogue switched off are given back by `sweep`, run in the background at start,
 //! and so are those a check finds built from a catalogue that is off or dropped: their next reads
 //! spread over a day. With every catalogue off, a join reads nothing; the daemon's joins task runs
-//! the sweep and works the queue off once at start, then reads nothing more, and the extras task
-//! reads nothing at all.
+//! the sweep, then checks the queue every ten minutes (it finds nothing there), and the extras
+//! task reads nothing at all.
 //!
 //! What joins: the card whose `uri` is the link, then the card that holds the link's `url:` key,
 //! then a card holding a key the link names ([`link_keys`]): the key's own catalogue first. Two

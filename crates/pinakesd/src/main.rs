@@ -400,7 +400,7 @@ async fn start(
     // Links built from a card of a catalogue that is off now go back to the fetch queue: the
     // joins task does that first, in the background (until then an answer shows nothing of such a
     // catalogue), then checks the links each card's write names. With every catalogue off it
-    // works the queue off once and then reads nothing more.
+    // checks the queue every ten minutes (it finds nothing there).
     let join_pool = pool.clone();
     let join_config = config.queue.clone();
     let mut join_shutdown = shutdown_rx.clone();
@@ -718,12 +718,20 @@ async fn import(
     } else {
         run::Run::Import
     };
-    // `--force` says the drop is expected: the shrink floor lets the run remove the rest.
-    let (state, written) =
-        run::run_once_with(std::sync::Arc::new(importer), &ctx, kind, force, |why| {
+    // `--force` says the drop is expected only for a `--limit` below the one the cards were read
+    // with (none stored: every card): the shrink floor then lets the run remove the rest. A full
+    // import with `--force` keeps the floor (`catalogue allow-shrink` lets a real shrink through).
+    let expect_shrink = force && limit.is_some_and(|l| stored_limit.is_none_or(|s| l < s));
+    let (state, written) = run::run_once_with(
+        std::sync::Arc::new(importer),
+        &ctx,
+        kind,
+        expect_shrink,
+        |why| {
             let _ = writeln!(out, "waiting: {why}");
-        })
-        .await?;
+        },
+    )
+    .await?;
     // An update can have handed over to a full import (a limit changed, one asked for).
     let ran = if state.last_import_at != before.as_ref().and_then(|s| s.last_import_at) {
         run::Run::Import
@@ -1540,6 +1548,116 @@ mod tests {
             .unwrap()
             .import_requested
             .is_some());
+    }
+
+    /// `catalogue import --force` lets the shrink floor remove the rest only for a `--limit` below
+    /// the scope the cards were read with: a forced full import of a dump that reads under half
+    /// the cards fails `shrunk` and removes nothing; with a lower `--limit` it goes through.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_forced_import_passes_the_shrink_floor_only_for_a_lower_limit(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{store, Card};
+        use std::io::Write;
+        const FIXTURES: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pinakes-core/tests/fixtures/catalogue/musicbrainz"
+        );
+        // A ustar archive of these files, xz-packed, as the dump's mirror serves it.
+        fn tar_xz(files: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut out = vec![];
+            for (path, data) in files {
+                let mut h = [0u8; 512];
+                h[..path.len()].copy_from_slice(path.as_bytes());
+                h[100..108].copy_from_slice(b"0000644\0");
+                h[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+                h[156] = b'0';
+                h[257..265].copy_from_slice(b"ustar  \0");
+                h[148..156].copy_from_slice(b"        ");
+                let sum: u64 = h.iter().map(|b| u64::from(*b)).sum();
+                h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+                out.extend_from_slice(&h);
+                out.extend_from_slice(data);
+                out.resize(out.len().div_ceil(512) * 512, 0);
+            }
+            out.resize(out.len() + 1024, 0);
+            let mut encoder = liblzma::write::XzEncoder::new(vec![], 3);
+            encoder.write_all(&out).unwrap();
+            encoder.finish().unwrap()
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dump = temp.path().join("20261125-001001");
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut sums = String::new();
+        for entity in ["artist", "release-group", "release", "recording"] {
+            let body = std::fs::read(format!("{FIXTURES}/{entity}.jsonl")).unwrap();
+            let path = format!("mbdump/{entity}");
+            let packed = tar_xz(&[
+                ("TIMESTAMP", b"2026-11-25 01:17:36.116289+00\n"),
+                ("README", b"one entity per line\n"),
+                (&path, &body),
+            ]);
+            let digest: String = <sha2::Sha256 as sha2::Digest>::digest(&packed)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            sums.push_str(&format!("{digest} *{entity}.tar.xz\n"));
+            std::fs::write(dump.join(format!("{entity}.tar.xz")), packed).unwrap();
+        }
+        std::fs::write(dump.join("SHA256SUMS"), sums).unwrap();
+        // 40 cards from a finished full import: the fixture's dump holds 17, under half.
+        let old: Vec<Card> = (0..40)
+            .map(|n| Card {
+                source_id: format!("artist/9{n:07}-0000-4000-8000-000000000000"),
+                uri: format!("https://musicbrainz.org/artist/9{n:07}-0000-4000-8000-000000000000"),
+                r#type: "MusicGroup".into(),
+                name: format!("Old band {n}"),
+                ..Card::default()
+            })
+            .collect();
+        store::upsert(&pool, Catalogue::Musicbrainz, 1, &old, None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE catalogue_state SET generation=1,cards=40,last_import_at=now(),run=NULL,phase='idle' WHERE catalogue='musicbrainz'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let olds = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM catalogue_card WHERE name LIKE 'Old band %'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let mut config = Config::default();
+        config.catalogues.dir = temp
+            .path()
+            .join("catalogues")
+            .to_string_lossy()
+            .into_owned();
+        let import = |limit, force| CatalogueCommand::Import {
+            catalogue: Catalogue::Musicbrainz,
+            from: Some(dump.to_string_lossy().into_owned()),
+            limit,
+            update: false,
+            request: false,
+            force,
+        };
+        // Forced, the whole catalogue: the floor holds.
+        let mut out = Vec::new();
+        let failed = catalogue_command(&pool, &config, import(None, true), &mut out)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{failed:#}").ends_with("failed: shrunk"),
+            "{failed:#}"
+        );
+        assert_eq!(olds().await, 40);
+        // Forced with a limit below the stored scope (none: every card): the rest goes.
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, import(Some(20), true), &mut out)
+            .await
+            .unwrap();
+        assert_eq!(olds().await, 0, "{}", String::from_utf8_lossy(&out));
     }
 
     /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it

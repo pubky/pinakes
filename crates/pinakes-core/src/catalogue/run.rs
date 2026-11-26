@@ -19,7 +19,7 @@
 //!   import read fewer than half the cards the catalogue holds ([`SHRINK_FLOOR`]): then the run
 //!   fails (`shrunk`) and removes nothing, until the importer says the drop is expected
 //!   ([`Job::expect_shrink`]), the operator allows it (`pinakesd catalogue allow-shrink`,
-//!   [`store::allow_shrink`]) or the import's scope is narrower (`limit`, `region`,
+//!   [`store::allow_shrink`]) or the import's scope is narrower (a lower `limit`, a higher
 //!   `min_citations`; [`CataloguesConfig::scope`](super::CataloguesConfig::scope));
 //! - keeps how current the cards are (`current_as_of`, the upstream data time the importer
 //!   states with [`Job::set_current_as_of`]), which the update lag metric measures.

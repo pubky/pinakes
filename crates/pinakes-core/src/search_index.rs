@@ -2535,10 +2535,18 @@ enum Item {
     /// `or` between the items around it.
     Or,
 }
+/// [`parse`]'s items (tests).
+#[cfg(test)]
+fn items(index: &Index, text: &str) -> Vec<Item> {
+    parse(index, text).0
+}
 /// The text's items as Postgres' `websearch_to_tsquery` reads them: words, `"quoted phrases"`,
 /// `-word` to leave out, and `or` between two items. Each word is split and folded as the index
-/// splits the fields; a word that is several tokens (`pinakes-test`) is a phrase.
-fn items(index: &Index, text: &str) -> Vec<Item> {
+/// splits the fields; a word that is several tokens (`pinakes-test`) is a phrase. With them,
+/// whether the index can search them: not when the cut at MAX_ITEMS drops an `or`
+/// (one past the cut, or one left last: the alternatives it adds would not be seen), nor when a
+/// side of an `or` has no word to find (`-x or y`). Postgres reads such a text alone.
+fn parse(index: &Index, text: &str) -> (Vec<Item>, bool) {
     let mut out = vec![];
     let mut rest = text;
     // At most MAX_ITEMS items: a longer text's rest is Postgres' alone to check.
@@ -2582,23 +2590,23 @@ fn items(index: &Index, text: &str) -> Vec<Item> {
             });
         }
     }
-    // Cut inside an `or` chain (the next item is `or`): the whole chain leaves the index's query,
-    // which would otherwise require its part before the cut.
-    let next_is_or = rest
-        .split_whitespace()
-        .next()
-        .is_some_and(|w| w.eq_ignore_ascii_case("or"));
-    if out.len() == MAX_ITEMS && next_is_or {
-        out.pop();
-        while matches!(out.last(), Some(Item::Or)) {
-            out.pop();
-            out.pop();
-        }
-    }
+    // A cut that leaves the rest to the last side of an `or` only widens what the index finds; one
+    // that drops an `or` would leave out the documents only a side past it holds.
+    let cut = out.len() == MAX_ITEMS && !rest.trim().is_empty();
+    let or_cut = cut
+        && (matches!(out.last(), Some(Item::Or))
+            || rest
+                .split_whitespace()
+                .any(|w| w.eq_ignore_ascii_case("or")));
     while matches!(out.last(), Some(Item::Or)) {
         out.pop();
     }
-    out
+    let sides = out.iter().any(|i| matches!(i, Item::Or));
+    let every_side_has_words = out
+        .split(|i| matches!(i, Item::Or))
+        .all(|side| side.iter().any(|i| matches!(i, Item::Words(..))));
+    let served = !or_cut && (!sides || every_side_has_words);
+    (out, served)
 }
 
 /// A text search's time: its deadline, and whether a part of it ran past it.
@@ -2821,8 +2829,12 @@ impl Open {
         budget: &Arc<Budget>,
     ) -> Result<Option<Vec<Candidate>>> {
         // One character found inside names (`ILIKE '%c%'`) would read the whole dictionary of
-        // the names' pieces: Postgres reads such a text alone. Decided before any index work.
-        let items = items(&self.index, &q.text);
+        // the names' pieces, and a text cut across an `or` would miss what a later side finds:
+        // Postgres reads such a text alone. Decided before any index work.
+        let (items, served) = parse(&self.index, &q.text);
+        if !served {
+            return Ok(None);
+        }
         let one_character = q.text.trim().chars().count() == 1;
         let has_words = items.iter().any(|i| matches!(i, Item::Words(..)));
         if one_character && (!has_words || q.inside_words) {
@@ -3360,37 +3372,42 @@ impl Open {
     ) -> Option<Box<dyn Query>> {
         let f = &self.fields;
         let last_words = items.iter().rposition(|i| matches!(i, Item::Words(..)))?;
-        // Items joined by `or` form one group; every group must match.
-        let mut groups: Vec<Vec<Box<dyn Query>>> = vec![];
-        let mut joined = false;
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![];
+        // `or` splits the items into sides, as Postgres reads the text (`websearch_to_tsquery`:
+        // `x a or b` is `x & a | b`): a side matches with every one of its words and none it
+        // leaves out, and one side must match.
+        let mut sides: Vec<Vec<(Occur, Box<dyn Query>)>> = vec![vec![]];
         for (position, item) in items.iter().enumerate() {
+            let side = sides.last_mut().expect("a side");
             match item {
-                Item::Or => joined = true,
-                Item::Words(words, whole) => {
-                    let query = self.item_query(searcher, words, position == last_words && *whole);
-                    match (joined, groups.last_mut()) {
-                        (true, Some(group)) => group.push(query),
-                        _ => groups.push(vec![query]),
-                    }
-                    joined = false;
-                }
+                Item::Or => sides.push(vec![]),
+                Item::Words(words, whole) => side.push((
+                    Occur::Must,
+                    self.item_query(searcher, words, position == last_words && *whole),
+                )),
                 Item::Not(words) => {
-                    clauses.push((Occur::MustNot, self.item_query(searcher, words, false)));
-                    joined = false;
+                    side.push((Occur::MustNot, self.item_query(searcher, words, false)))
                 }
             }
         }
-        for group in groups {
-            let query: Box<dyn Query> = if group.len() == 1 {
-                group.into_iter().next().expect("one")
-            } else {
+        sides.retain(|side| !side.is_empty());
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = if sides.len() == 1 {
+            sides.pop().expect("one side")
+        } else {
+            vec![(
+                Occur::Must,
                 Box::new(BooleanQuery::new(
-                    group.into_iter().map(|q| (Occur::Should, q)).collect(),
-                ))
-            };
-            clauses.push((Occur::Must, query));
-        }
+                    sides
+                        .into_iter()
+                        .map(|side| {
+                            (
+                                Occur::Should,
+                                Box::new(BooleanQuery::new(side)) as Box<dyn Query>,
+                            )
+                        })
+                        .collect(),
+                )),
+            )]
+        };
         // The name is the whole text, or holds its words in order.
         if let Some(exact) = tokens(&self.index, EXACT, &squashed(text)).pop() {
             clauses.push((
@@ -3912,9 +3929,11 @@ mod tests {
         for part in names.chunks(names.len() / 4) {
             named(&open, part);
         }
-        let mut served = 0;
+        let (mut served, mut to_postgres) = (0, 0);
         let mut most_steps = 0;
-        const STEP_CEILING: u64 = 1_000_000;
+        // About twice the most this seed's searches take (59,792 posting steps, measured at
+        // 59ecf879; the run prints its own): a lost bound shows as many times more.
+        const STEP_CEILING: u64 = 120_000;
         let pieces = [
             "or",
             "OR",
@@ -3996,12 +4015,22 @@ mod tests {
                     served += 1;
                     assert!(found.len() <= 1000, "{round}: {text:?}")
                 }
-                Ok(None) => assert_eq!(text.trim().chars().count(), 1, "{text:?}"),
+                // Left to Postgres: one character, or a text cut across an `or`.
+                Ok(None) => {
+                    assert!(
+                        text.trim().chars().count() == 1 || !parse(&open.index, &text).1,
+                        "{round}: {text:?}"
+                    );
+                    to_postgres += 1;
+                }
                 Err(error) => panic!("{round}: {text:?}: {error}"),
             }
         }
-        assert!(served >= 250, "{served} of 300 answered");
-        eprintln!("most posting steps of one search: {most_steps}");
+        assert_eq!(served + to_postgres, 300);
+        assert!(served >= 100, "{served} of 300 answered by the index");
+        eprintln!(
+            "most posting steps of one search: {most_steps}; answered by the index {served}, left to Postgres {to_postgres}"
+        );
     }
 
     /// A part of a query that matches nothing for long (every name holds `the`, `of` and `and`,
@@ -4195,10 +4224,31 @@ mod tests {
         assert_ne!(key("192.0.2.1"), key("192.0.2.2"));
     }
 
-    /// A text cut at MAX_ITEMS inside an `or` chain leaves the whole chain out of the index's query
-    /// (Postgres checks it on every candidate): `… w32 or w33` would otherwise require `w32`.
+    /// The candidates the index finds for `text`, by their names' positions in `named`; `None`
+    /// when the index leaves the text to Postgres.
+    fn found_positions(open: &Open, text: &str) -> Option<Vec<usize>> {
+        let q = TextQuery {
+            text: text.into(),
+            at: chrono::Utc::now(),
+            ..Default::default()
+        };
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let mut found: Vec<usize> = open
+            .search(&q, 500, &budget)
+            .unwrap()?
+            .iter()
+            .map(|c| usize::from_str_radix(&c.unit_id, 16).unwrap())
+            .collect();
+        found.sort();
+        Some(found)
+    }
+
+    /// `or` binds looser than the words around it, as Postgres reads the text
+    /// (`websearch_to_tsquery`): `xx aa or bb` is (xx and aa) or bb, and a word left out belongs
+    /// to its own side of the `or`. An alternative without a word to find (`-yy or bb`) is left
+    /// to Postgres.
     #[test]
-    fn a_cut_inside_an_or_chain_drops_the_chain() {
+    fn or_splits_the_text_into_alternatives() {
         let open = Open::new(
             index(),
             0,
@@ -4207,25 +4257,55 @@ mod tests {
             Default::default(),
         )
         .unwrap();
-        let head: Vec<String> = (0..MAX_ITEMS - 1).map(|n| format!("w{n}")).collect();
-        let words = |text: &str| {
-            items(&open.index, text)
-                .iter()
-                .filter(|i| !matches!(i, Item::Or))
-                .count()
-        };
-        assert_eq!(words(&format!("{} last", head.join(" "))), MAX_ITEMS);
-        assert_eq!(words(&format!("{} a or b", head.join(" "))), MAX_ITEMS - 1);
+        let names: Vec<String> = ["xx aa", "bb", "xx", "aa", "xx yy", "bb yy"]
+            .map(String::from)
+            .to_vec();
+        named(&open, &names);
+        assert_eq!(found_positions(&open, "xx aa or bb"), Some(vec![0, 1, 5]));
+        assert_eq!(
+            found_positions(&open, "xx -yy or bb"),
+            Some(vec![0, 1, 2, 5])
+        );
+        assert_eq!(found_positions(&open, "-yy or bb"), None);
+    }
+
+    /// A text cut at MAX_ITEMS is searched by the index only when no `or` is cut off: the rest
+    /// then belongs to the last alternative, and leaving it out only widens the candidates. An
+    /// `or` past the cut, or one left last (a chain of `or`s of 17 words or more), adds
+    /// alternatives the index would not see: Postgres reads such a text alone.
+    #[test]
+    fn a_cut_across_an_or_leaves_the_text_to_postgres() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut names: Vec<String> = (0..20).map(|n| format!("w{n}")).collect();
+        names.push("aa".into());
+        named(&open, &names);
+        let head: Vec<String> = (0..MAX_ITEMS - 1).map(|n| format!("h{n}")).collect();
+        let served = |text: &str| found_positions(&open, text).is_some();
+        assert!(served(&format!("{} last", head.join(" "))));
+        assert!(served(&format!("{} last more words", head.join(" "))));
+        assert!(!served(&format!("{} a or b", head.join(" "))));
         let shorter = &head[..MAX_ITEMS - 3];
+        assert!(!served(&format!("{} a or b or c", shorter.join(" "))));
+        assert!(served(&format!("{} a or b", shorter.join(" "))));
+        // A chain of `or`s: 16 words are 31 items, whole; 20 words are cut with `or` the 32nd.
+        let chain = |n: usize| {
+            (0..n)
+                .map(|n| format!("w{n}"))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        };
         assert_eq!(
-            words(&format!("{} a or b or c", shorter.join(" "))),
-            MAX_ITEMS - 3,
-            "a or b is cut before c: the chain goes"
+            found_positions(&open, &chain(16)),
+            Some((0..16).collect::<Vec<_>>())
         );
-        assert_eq!(
-            words(&format!("{} a or b", shorter.join(" "))),
-            MAX_ITEMS - 1
-        );
+        assert_eq!(found_positions(&open, &chain(20)), None);
     }
 
     /// A word start expands to the words the most names hold while the postings they hold, in all,
