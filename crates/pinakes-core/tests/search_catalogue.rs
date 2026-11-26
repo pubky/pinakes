@@ -1497,6 +1497,48 @@ async fn one_character_reads_each_catalogue_s_best_known(pool: PgPool) {
     assert_eq!(found, ["猫 1", "猫 2", "猫 3"]);
 }
 
+/// Whether a key two catalogues' listed cards share names one card of each (so the cards merge)
+/// is read through the key index: a catalogue of many cards that holds the key once is not read
+/// through to prove there is no second card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_shared_key_is_checked_through_the_key_index(pool: PgPool) {
+    const MBID: &str = "0383dadf-2a4e-4d10-a46a-e9e041da8eb3";
+    let mut item = card(1, "Shared Band", "MusicGroup", &[], None, 1.0);
+    item.keys.push(format!("mb:artist:{MBID}"));
+    import(&pool, Catalogue::Wikidata, &[item]).await;
+    let mut artist = card(2, "Shared Band", "MusicGroup", &[], None, 1.0);
+    artist.source_id = format!("artist/{MBID}");
+    artist.uri = format!("https://musicbrainz.org/artist/{MBID}");
+    artist.keys = vec![format!("mb:artist:{MBID}")];
+    let mut others: Vec<Card> = (0..3000)
+        .map(|n| {
+            let mut c = card(10 + n, &format!("Band {n}"), "MusicGroup", &[], None, 0.2);
+            c.source_id = format!("artist/{n:08}-0000-4000-8000-000000000000");
+            c.uri = format!("https://musicbrainz.org/artist/{n:08}-0000-4000-8000-000000000000");
+            c.keys = vec![format!("mb:artist:{n:08}-0000-4000-8000-000000000000")];
+            c
+        })
+        .collect();
+    others.push(artist);
+    import(&pool, Catalogue::Musicbrainz, &others).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?limit=20").await);
+    let read = card_rows_read(&api::card_read_plans());
+    assert_eq!(
+        page.iter().filter(|n| *n == "Shared Band").count(),
+        1,
+        "merged: {page:?}"
+    );
+    assert!(read <= 100, "{read} card rows read");
+}
+
 /// Each catalogue has its own two `point` indexes (geometry and geography, partial on it), which
 /// the reads near a place use one catalogue at a time.
 #[sqlx::test(migrations = "../../migrations")]

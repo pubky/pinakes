@@ -1176,10 +1176,13 @@ its first 8 words (by all its words, in any order, when every one is in more tha
 are in 500,000 names in all); Postgres checks every candidate against the whole `q`. At most
 `limits.search_index_searches` text searches use the index at once (one per CPU core by default),
 and each has `limits.search_index_budget_ms` (2 s) for its index stage, its wait for a turn
-included. `or` joins the parts on its two sides as Postgres reads them: `x a or b` is `x a`, or
-`b`, and a word left out with `-` belongs to its side. When the 32 items end inside a list of
-`or`s, an `or` follows past them, or a side of an `or` has no word to find (`-x or y`), Postgres
-reads the text alone, as a text of one character; it then lists no catalogue cards. A search waits for a free turn; one client address (an IPv6 address by its /64) that
+included. The index reads `or` as joining the items on its two sides: `x a or b` finds the units
+with `x` and with `a` or `b`, as people mostly mean it (Postgres alone, `websearch_to_tsquery`,
+binds `or` looser: `x a` or `b`); a word left out with `-` is left out of every unit. When the 32
+items end inside a list of `or`s (the next item is `or`, also right after a closing quote, or the
+32nd is `or`), the whole list leaves the index's query: the index finds what the rest of the text
+finds (for a text that is one long list, the names similar to it), and Postgres checks every
+candidate against the whole text. A search waits for a free turn; one client address (an IPv6 address by its /64) that
 already runs half the turns waits while another client's search does, and alone it takes every
 free turn. A search that gets no turn within its budget, or runs past it, answers `503` with
 `Retry-After: 1`: the index stops it at its next check (between the posting steps of a word or

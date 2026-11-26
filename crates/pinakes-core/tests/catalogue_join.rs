@@ -2429,6 +2429,8 @@ async fn a_card_s_host_is_the_same_in_postgres_and_in_the_code(pool: PgPool) {
             WEBSITE,
             "https://Example.COM:8080/a?b#c",
             "doi:10.1000/ABC",
+            "https://[2001:db8::1]:8080/a",
+            "http://[::ffff:192.0.2.1]/",
         ]
         .into_iter()
         .filter_map(|u| model::identity(u).ok())
@@ -2466,4 +2468,63 @@ fn a_link_is_social_by_what_it_names() {
     ] {
         assert_eq!(join::social_link(uri), social, "{uri}");
     }
+}
+
+/// A page of the start's sweep seeks to where the last ended through its index, also inside one
+/// key many links hold (a card with 20,000 related links): it reads its page's rows, not the
+/// key's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_sweep_page_inside_one_key_reads_only_its_rows(pool: PgPool) {
+    sqlx::query("INSERT INTO resource(id,uri) SELECT md5('r'||n),'https://example.org/related/'||n FROM generate_series(1,20000) n")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) SELECT id,'catalogue:wikidata:Q1','catalogue','catalogue','infinity' FROM resource")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE resource_key")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The page after the 10,000th link.
+    let after: String = sqlx::query_scalar(
+        "SELECT resource_id FROM resource_key ORDER BY resource_id OFFSET 9999 LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        join::SWEEP_PAGE
+    ))
+    .bind("catalogue:wikidata:")
+    .bind("catalogue:wikidata;")
+    .bind("catalogue:wikidata:Q1")
+    .bind(&after)
+    .bind(100i64)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    fn read(node: &Value) -> f64 {
+        let n = |k: &str| node[k].as_f64().unwrap_or(0.0);
+        let own = if node["Relation Name"] == "resource_key"
+            || node["Index Name"]
+                .as_str()
+                .is_some_and(|i| i.starts_with("resource_key"))
+        {
+            (n("Actual Rows") + n("Rows Removed by Filter") + n("Rows Removed by Index Recheck"))
+                * n("Actual Loops").max(1.0)
+        } else {
+            0.0
+        };
+        own + node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(read)
+            .sum::<f64>()
+    }
+    let rows = read(&plan[0]["Plan"]);
+    assert!(rows <= 200.0, "{rows} rows read for a page of 100: {plan}");
 }

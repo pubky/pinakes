@@ -1609,7 +1609,8 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
 
 /// A full import that starts over in a generation of its own (`Job::new_generation`: a cut-off
 /// attempt of another dump is dropped) counts only the cards of its own generation for the floor:
-/// the attempt's cards are removed at its end like any it did not read.
+/// the attempt's cards are removed at its end like any it did not read. An allowance to shrink
+/// given to the attempt does not carry over.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_full_import_that_starts_over_counts_its_own_cards_for_the_floor(pool: PgPool) {
     let (ctx, _dir) = context(&pool, plenty());
@@ -1620,6 +1621,12 @@ async fn a_full_import_that_starts_over_counts_its_own_cards_for_the_floor(pool:
     *fixture.next.lock().unwrap() = Some(Run::Import);
     run::step(&fixture, &ctx).await.unwrap_err();
     assert_eq!(state(&pool, Catalogue::Wikidata).await.generation_cards, 20);
+    // An allowance given to that attempt (after a `shrunk` failure) is no allowance for another
+    // dump's: starting over takes it back.
+    sqlx::query("UPDATE catalogue_state SET shrink_allowed=true WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
     // It starts over (another dump) and reads 10: under half of the 25, the floor holds.
     fixture.items.lock().unwrap().truncate(10);
     fixture.start_over.store(true, Ordering::SeqCst);

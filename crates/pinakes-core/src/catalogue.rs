@@ -538,9 +538,11 @@ pub fn stored_key(key: &str) -> Option<String> {
         "isbn" => crate::resolver::cards::isbn(key)
             .map(|isbn| format!("isbn:{}", crate::resolver::cards::isbn13(&isbn))),
         "url" => model::valid_id(value).then(|| key.to_owned()),
-        // Resources key an ISRC in upper case (`isrc:GBUM71029604`), and join an OpenAlex work as
-        // `openalex:W…` (`join::link_keys`).
-        "isrc" | "openalex" => Some(format!("{kind}:{}", value.to_ascii_uppercase())),
+        // Resources key an ISRC as `music::isrc` writes it (upper case, without the hyphens of its
+        // standard spelling: `isrc:GBUM71029604`), and join an OpenAlex work as `openalex:W…`
+        // (`join::link_keys`).
+        "isrc" => crate::music::isrc(value).map(|isrc| format!("isrc:{isrc}")),
+        "openalex" => Some(format!("openalex:{}", value.to_ascii_uppercase())),
         "wikidata" => crate::hubs::key::wikidata(&value.to_ascii_uppercase()),
         "mb" => {
             let (entity, mbid) = value.split_once(':')?;
@@ -564,14 +566,16 @@ pub fn stored_key(key: &str) -> Option<String> {
     // A key never carries a credential, whatever its kind (a later importer's `feed:…`).
     (valid_key(&stored) && !crate::capability::contains_credential(&stored)).then_some(stored)
 }
-/// `value` without the strings that carry a credential: an object's entry or an array's element
-/// that does is left out, at any depth.
+/// `value` without the strings that carry a credential: an object's entry whose name or value does,
+/// or an array's element that does, is left out, at any depth.
 fn without_credentials(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
-            map.retain(|_, v| {
-                !v.as_str()
-                    .is_some_and(crate::capability::contains_credential)
+            map.retain(|k, v| {
+                !crate::capability::contains_credential(k)
+                    && !v
+                        .as_str()
+                        .is_some_and(crate::capability::contains_credential)
             });
             map.values_mut().for_each(without_credentials);
         }
@@ -1478,6 +1482,20 @@ mod tests {
             stored_key("isrc:gbum71029604").as_deref(),
             Some("isrc:GBUM71029604")
         );
+        // The standard hyphenated spelling is the same ISRC, stored as shared links key it; the
+        // stored form reads back as itself, and a value that is no ISRC is no key.
+        for spelling in ["isrc:GB-UM7-10-29604", "isrc:gb-um7-10-29604"] {
+            assert_eq!(
+                stored_key(spelling).as_deref(),
+                Some("isrc:GBUM71029604"),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            stored_key("isrc:GBUM71029604").as_deref(),
+            Some("isrc:GBUM71029604")
+        );
+        assert_eq!(stored_key("isrc:not-an-isrc"), None);
         // Each kind in the form the link it names derives (`join::link_keys`).
         for (raw, stored) in [
             ("crate:Serde_Json", Some("crate:serde-json")),
@@ -1766,7 +1784,9 @@ mod tests {
             "site": "https://example.org/?access_token=abc",
             "kept": "plain text",
             "list": ["https://user:pw@example.org/x", "y"],
-            "nested": {"feed": "https://user:pw@example.org/feed", "n": 3}
+            "nested": {"feed": "https://user:pw@example.org/feed", "n": 3,
+                "https://example.org/?access_token=abc": "a key that carries one"},
+            "https://user:pw@example.org/k": {"deep": "value"}
         })
         .as_object()
         .unwrap()

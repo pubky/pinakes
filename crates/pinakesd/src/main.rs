@@ -718,10 +718,12 @@ async fn import(
     } else {
         run::Run::Import
     };
-    // `--force` says the drop is expected only for a `--limit` below the one the cards were read
-    // with (none stored: every card): the shrink floor then lets the run remove the rest. A full
-    // import with `--force` keeps the floor (`catalogue allow-shrink` lets a real shrink through).
-    let expect_shrink = force && limit.is_some_and(|l| stored_limit.is_none_or(|s| l < s));
+    // `--force` says the drop is expected only for a `--limit` below the cards held and below the
+    // one the cards were read with (none stored: every card): the shrink floor then lets the run
+    // remove the rest. A full import with `--force` keeps the floor (`catalogue allow-shrink` lets
+    // a real shrink through).
+    let expect_shrink =
+        force && limit.is_some_and(|l| (l as i64) < cards && stored_limit.is_none_or(|s| l < s));
     let (state, written) = run::run_once_with(
         std::sync::Arc::new(importer),
         &ctx,
@@ -1551,8 +1553,9 @@ mod tests {
     }
 
     /// `catalogue import --force` lets the shrink floor remove the rest only for a `--limit` below
-    /// the scope the cards were read with: a forced full import of a dump that reads under half
-    /// the cards fails `shrunk` and removes nothing; with a lower `--limit` it goes through.
+    /// the cards held and the scope the cards were read with: a forced full import of a dump that
+    /// reads under half the cards fails `shrunk` and removes nothing, also with a `--limit` above
+    /// the cards; with a lower `--limit` it goes through.
     #[sqlx::test(migrations = "../../migrations")]
     async fn a_forced_import_passes_the_shrink_floor_only_for_a_lower_limit(pool: sqlx::PgPool) {
         use pinakes_core::catalogue::{store, Card};
@@ -1652,7 +1655,18 @@ mod tests {
             "{failed:#}"
         );
         assert_eq!(olds().await, 40);
-        // Forced with a limit below the stored scope (none: every card): the rest goes.
+        // Forced with a limit above the cards held drops nothing by its limit: the floor holds.
+        let mut out = Vec::new();
+        let failed = catalogue_command(&pool, &config, import(Some(100_000_000), true), &mut out)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{failed:#}").ends_with("failed: shrunk"),
+            "{failed:#}"
+        );
+        assert_eq!(olds().await, 40);
+        // Forced with a limit below the cards held and the stored scope (none: every card): the
+        // rest goes.
         let mut out = Vec::new();
         catalogue_command(&pool, &config, import(Some(20), true), &mut out)
             .await

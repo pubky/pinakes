@@ -905,6 +905,11 @@ pub async fn drain(pool: &PgPool, cfg: &QueueConfig, limit: i64) -> Result<usize
 }
 /// The rows the start's sweep writes per transaction.
 const SWEEP_ROWS: i64 = 1000;
+/// A page of the start's sweep: the catalogue keys of `[$1, $2)` (in byte order) after
+/// `($3, $4)`, by key and resource, at most `$5`. `resource_key_catalogue_idx` holds that order,
+/// so a page reads its own rows, also inside one key many links hold.
+#[doc(hidden)]
+pub const SWEEP_PAGE: &str = "SELECT key,resource_id FROM resource_key WHERE source='catalogue' AND key COLLATE \"C\">=$1 AND key COLLATE \"C\"<$2 AND (key COLLATE \"C\",resource_id)>($3,$4) ORDER BY key COLLATE \"C\",resource_id LIMIT $5";
 thread_local! {
     /// The catalogue keys the sweeps this thread ran have read (tests).
     static SWEEP_KEYS_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -1005,16 +1010,14 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
         let mut after = String::new();
         let mut after_id = String::new();
         loop {
-            let page: Vec<(String, String)> = sqlx::query_as(
-                "SELECT key,resource_id FROM resource_key WHERE source='catalogue' AND key COLLATE \"C\">=$1 AND key COLLATE \"C\"<$2 AND (key COLLATE \"C\">$3 OR (key=$3 AND resource_id>$4)) ORDER BY key COLLATE \"C\",resource_id LIMIT $5",
-            )
-            .bind(&prefix)
-            .bind(&past)
-            .bind(&after)
-            .bind(&after_id)
-            .bind(SWEEP_ROWS)
-            .fetch_all(pool)
-            .await?;
+            let page: Vec<(String, String)> = sqlx::query_as(SWEEP_PAGE)
+                .bind(&prefix)
+                .bind(&past)
+                .bind(&after)
+                .bind(&after_id)
+                .bind(SWEEP_ROWS)
+                .fetch_all(pool)
+                .await?;
             SWEEP_KEYS_READ.with(|n| n.set(n.get() + page.len() as u64));
             let Some(last) = page.last().cloned() else {
                 break;
