@@ -1063,27 +1063,22 @@ async fn a_file_read_empty_removes_nothing(pool: PgPool) {
         "{failed}"
     );
     assert_eq!(rows(&pool).await, before);
-    // A file read empty whose kind of card is not stored (release groups, over a catalogue of
-    // artists alone) is no refusal.
+    // A file read empty whose kind of card is not stored (artists, over a catalogue of recordings
+    // and release groups, whose ids sort after theirs) is no refusal.
     reset(&pool).await;
     let s = setup(&pool, None);
-    let artists = dump(s.root.path(), A, |entity, lines| {
-        if entity != "artist" {
+    let no_artists = |entity: &str, lines: &mut Vec<Value>| {
+        if entity == "artist" {
             lines.clear();
         }
-    });
-    run(&s, &artists, Run::Import).await.unwrap();
-    assert!(rows(&pool)
-        .await
-        .iter()
-        .all(|r| r.source_id.starts_with("artist/")));
-    let no_groups = dump(s.root.path(), B, |entity, lines| {
-        if entity == "release-group" {
-            lines.clear();
-        }
-    });
-    let state = run(&s, &no_groups, Run::Update).await.unwrap();
-    assert!(state.cards > 4, "{}", state.cards);
+    };
+    let a = dump(s.root.path(), A, no_artists);
+    run(&s, &a, Run::Import).await.unwrap();
+    let before = rows(&pool).await;
+    assert!(!before.is_empty() && before.iter().all(|r| !r.source_id.starts_with("artist/")));
+    let b = dump(s.root.path(), B, no_artists);
+    let state = run(&s, &b, Run::Update).await.unwrap();
+    assert_eq!(state.cards as usize, before.len());
 }
 
 /// A file whose xz stream is damaged or cut short is the dump's own failure (`archive`), not a
