@@ -311,9 +311,13 @@ pub(crate) async fn rewrite<T, F: std::future::Future<Output = Result<T>>>(
         return Ok(false);
     }
     let after = normalize(&doc);
-    sqlx::query("UPDATE resource SET doc=$2 WHERE id=$1")
+    // The columns read from the card follow it (`store::write_document`).
+    sqlx::query("UPDATE resource SET doc=$2,name=$3,type=$4,type_path=$5 WHERE id=$1")
         .bind(id)
         .bind(serde_json::to_value(&doc)?)
+        .bind(&doc.name)
+        .bind(&doc.type_name)
+        .bind(&doc.type_path)
         .execute(&mut *tx)
         .await?;
     if let Some(diff) = diff(Some(&before), Some(&after)) {

@@ -4345,6 +4345,189 @@ impl pinakes_core::resolver::Resolver for Scripted {
     }
 }
 
+/// A card no refresh reads keeps nothing a switched-off source wrote into it (here the `titles`
+/// source's name for a Netflix title), once the daemon has started (`configure`, then `unhint`
+/// after the listeners): a final one is read once, and takes its page's own name; a
+/// dead-lettered one, which no read reaches until a new reference, loses the name from its
+/// stored card and stays dead-lettered, not due. A final card that holds a source's facts is read
+/// once when that source is switched on. Nothing moved since the last run: no card is read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_switched_off_source_s_name_leaves_a_card_no_read_reaches(pool: PgPool) {
+    use pinakes_core::{also_on::Fact, also_on::SourceOptions, config::QueueConfig, queue};
+    if !also_on::registered().iter().any(|s| s.id() == "titles") {
+        return;
+    }
+    let config = |on: bool| {
+        let mut config = Config::default();
+        config.also_on.sources.insert(
+            "titles".into(),
+            SourceOptions {
+                enabled: Some(on),
+                ..Default::default()
+            },
+        );
+        config
+    };
+    // A start: the switches, then the cards no refresh reads.
+    let start = |on: bool| {
+        let (pool, config) = (pool.clone(), config(on));
+        async move {
+            also_on::configure(&pool, &config).await.unwrap();
+            also_on::unhint(&pool).await.unwrap()
+        }
+    };
+    let cfg = QueueConfig::default();
+    for (n, state) in ["dead_letter", "final", "final_on"].into_iter().enumerate() {
+        let uri = format!("https://www.netflix.com/title/8002567{n}");
+        let id = store::ensure_resource(&pool, &uri).await.unwrap();
+        let titles = Fake::new("titles");
+        titles.answer(
+            &uri,
+            Ok(Found {
+                facts: vec![Fact::new("title", "The Crown")],
+                ..Default::default()
+            }),
+        );
+        let read = || {
+            let (pool, cfg, id) = (pool.clone(), cfg.clone(), id.clone());
+            async move {
+                // This card alone is due: the earlier cases' cards wait.
+                sqlx::query(
+                    "UPDATE resource SET next_attempt_at='infinity',priority_at=NULL WHERE id<>$1",
+                )
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+                sqlx::query("UPDATE resource SET resolver='web',next_attempt_at=now() WHERE id=$1")
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+                assert_eq!(job.id, id);
+                queue::run_job(&pool, &Scripted::new(&[false]), &cfg, &job)
+                    .await
+                    .unwrap();
+            }
+        };
+        let card = || {
+            let (pool, id) = (pool.clone(), id.clone());
+            async move {
+                sqlx::query_as::<_, (Option<String>, Option<String>, bool, bool, bool, bool)>(
+                    "SELECT name,doc->>'name',coalesce(doc->'hinted_by' ? 'titles',false),dead_letter,final,next_attempt_at<=now() FROM resource WHERE id=$1",
+                )
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        start(true).await;
+        read().await;
+        let sources: Vec<Arc<dyn Source>> = vec![titles];
+        drain(&pool, &cx(config(true)), &sources).await;
+        read().await;
+        assert_eq!(card().await.0.as_deref(), Some("The Crown"), "{state}");
+        if state == "final_on" {
+            // Off while it is final (its read keeps no name of an off source), then on again:
+            // the card that holds the source's facts is read once.
+            start(false).await;
+            sqlx::query("UPDATE resource SET final=true,next_attempt_at='infinity' WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            start(true).await;
+            let (_, _, _, dead, fin, due) = card().await;
+            assert_eq!((dead, fin, due), (false, false, true), "{state}");
+            continue;
+        }
+        if state == "final" {
+            // Switched off while the card is an ordinary one, which stays final without a read:
+            // the start after it becomes final finds it.
+            start(false).await;
+        }
+        // No read reaches it: five walls in a row keep the accepted card, or its route reads
+        // it once.
+        let held = if state == "final" {
+            "UPDATE resource SET final=true,next_attempt_at='infinity' WHERE id=$1"
+        } else {
+            "UPDATE resource SET dead_letter=true,attempts=5,last_error='wall',status='unreachable',next_attempt_at=now()+interval '1 day' WHERE id=$1"
+        };
+        sqlx::query(held).bind(&id).execute(&pool).await.unwrap();
+        // The daemon starts with `titles` off (switched off now, for the dead-lettered card).
+        start(false).await;
+        let (column, doc, hinted, dead, fin, due) = card().await;
+        if state == "final" {
+            // Due once, as an ordinary card, its stored card as it was until the read.
+            assert_eq!((dead, fin, due), (false, false, true));
+            read().await;
+            assert_eq!(
+                card().await,
+                (
+                    Some("Netflix".into()),
+                    Some("Netflix".into()),
+                    false,
+                    false,
+                    false,
+                    false
+                )
+            );
+        } else {
+            assert_eq!(
+                (column.as_deref(), doc.as_deref(), hinted),
+                (None, None, false),
+                "the switched-off source's name leaves the dead-lettered card"
+            );
+            assert_eq!((dead, fin, due), (true, false, false));
+            // The name back, with nothing moved (no switch, no card turned final or
+            // dead-lettered): a start reads no card, so it stays.
+            sqlx::query("UPDATE resource SET name='The Crown',doc=jsonb_set(jsonb_set(doc,'{name}','\"The Crown\"'),'{hinted_by}','{\"titles\":\"written\"}') WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(start(false).await, (0, 0));
+            assert_eq!(card().await.0.as_deref(), Some("The Crown"));
+            // It turns dead-lettered again (the marker moves): the next maintenance pass, not
+            // only a start, takes the name out.
+            for dead in [false, true] {
+                sqlx::query("UPDATE resource SET dead_letter=$2 WHERE id=$1")
+                    .bind(&id)
+                    .bind(dead)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            let (stop, shutdown) = tokio::sync::watch::channel(false);
+            let pass = tokio::spawn(pinakes_core::maintenance::run(
+                pool.clone(),
+                7,
+                24,
+                30,
+                Duration::from_secs(3600),
+                shutdown,
+            ));
+            for _ in 0..200 {
+                if card().await.0.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            stop.send(true).unwrap();
+            pass.await.unwrap();
+            assert_eq!(
+                card().await.0,
+                None,
+                "the maintenance pass took the name out"
+            );
+        }
+        // Another start with nothing moved reads no card.
+        assert_eq!(start(false).await, (0, 0), "{state}");
+    }
+}
+
 /// What a switched-off source gave a card itself (here the `titles` source's name for a Netflix
 /// title, which the queue writes into the card) leaves at its next read, which switching it
 /// makes due at once, and a 304 does not keep it: the page is read again in full. Switched on

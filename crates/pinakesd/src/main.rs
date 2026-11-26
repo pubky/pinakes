@@ -564,6 +564,13 @@ async fn start(
             tracing::error!(error = %pinakes_core::resolver::log_error(&error), "the public listener failed");
         }
     });
+    // Once the listeners serve: what switched-off also-on sources wrote leaves the cards no
+    // refresh reads (`also_on::unhint`), a step that never stops the daemon.
+    let unhint_pool = pool.clone();
+    let mut unhint_shutdown = shutdown_rx.clone();
+    tasks.spawn_optional("also-on cards no refresh reads", async move {
+        tokio::select! { _=unhint_shutdown.changed()=>{}, _=pinakes_core::also_on::unhint_after_start(unhint_pool)=>{} }
+    });
     Ok(Some(Daemon {
         tasks,
         workers,

@@ -68,6 +68,12 @@ pub async fn run(
         if let Err(e) = refilled {
             tracing::warn!(error=%crate::resolver::log_error(&e),"taking stale values out of cards failed");
         }
+        // A card that became final or dead-lettered since the start while it held what a
+        // switched-off also-on source wrote: nothing to read unless that happened (its marker).
+        let unhinted = crate::also_on::unhint(&pool).await;
+        if let Err(e) = unhinted {
+            tracing::warn!(error=%crate::resolver::log_error(&e),"taking switched-off sources' values out of cards no refresh reads failed");
+        }
     }
 }
 /// Fold the search revision's rows (`store::compact_search_writes`).

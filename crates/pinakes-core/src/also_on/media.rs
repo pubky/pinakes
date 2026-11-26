@@ -466,6 +466,46 @@ pub async fn outdated(
         now.as_ref() != Some(written)
     }))
 }
+/// Take out of a card what the sources in `off` wrote into it (`hinted_by`) that is still as they
+/// wrote it: the name `titles` gave, and its description when that is still the one it gave; a
+/// stream a source heard of. For a dead-lettered card, which no read reaches until a new reference
+/// and which a source switched off would otherwise keep as it was (`also_on::configure`). A type a source
+/// gave (a title's, an episode's, an artist's) stays with its finding: the link alone does not say
+/// what the card's own type was, and the card's next read, in full, types it again. The values a
+/// source that fills cards wrote go with `unfill`. Whether anything went.
+pub fn unhint(off: &[&str], doc: &mut crate::model::ResourceMeta) -> bool {
+    let mut changed = false;
+    for source in off {
+        let Some(written) = doc.hinted_by.get(*source).cloned() else {
+            continue;
+        };
+        if *source == "titles" {
+            // `type_card` writes the title into the card whenever it records the finding.
+            let name = doc.name.take().unwrap_or_default();
+            let description = doc.description.clone().unwrap_or_default();
+            if doc.description.is_some() && fingerprint(&[&name, &description]) == written {
+                doc.description = None;
+            }
+            doc.hinted_by.remove(*source);
+            changed = true;
+            continue;
+        }
+        if !STREAMS.iter().any(|(s, _)| s == source) {
+            continue;
+        }
+        let Some(stream) = &doc.stream else { continue };
+        if written == stream_fingerprint(None, stream) {
+            doc.stream = None;
+            doc.hinted_by.remove(*source);
+            changed = true;
+        } else if written == stream_fingerprint(Some("episode"), stream) {
+            // The episode's type stays with the finding.
+            doc.stream = None;
+            changed = true;
+        }
+    }
+    changed
+}
 /// Record that `source`'s finding, `fingerprint`, is written into the card.
 pub fn hinted(doc: &mut crate::model::ResourceMeta, source: &str, fingerprint: String) {
     doc.hinted_by.insert(source.to_owned(), fingerprint);

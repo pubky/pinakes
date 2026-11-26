@@ -1466,8 +1466,14 @@ shows them at once. TMDB also counts as switched off while it has no credential;
 its credentials doesn't run, and its stored rows show until they expire.
 
 When a source is switched, the resources that its keys and keyed links name are regrouped. Cards that hold
-its keys or facts are due at once, unless they are final or dead-lettered, so what it wrote into a card (a
-title's name and description, a type) changes as the queue reaches them. A card records the findings it
+its keys or facts are due at once, final ones included, unless they are dead-lettered, so what it wrote into a
+card (a title's name and description, a type) changes as the queue reaches them; a final card is read once
+and is final again after. After a start, once the listeners serve, a final card that still holds what a
+switched-off source wrote is read once the same way, and a dead-lettered card, which no read reaches until a
+new reference, loses the name, description and stream that source wrote into it; a type it gave stays until
+the card is read again. Every hourly maintenance pass does the same. The step reads the cards only after a
+switch, or after such a card became final or dead-lettered; a failure is logged and the next pass or start
+tries again. A card records the findings it
 carries (`hinted_by`); one whose finding is off, expired or changed is read in full, so a 304 never keeps
 it.
 
