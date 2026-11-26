@@ -387,6 +387,55 @@ async fn a_cancelled_job_refuses_the_rest_of_a_plain_answer() {
     );
 }
 
+/// The same for a card's text without markup read by `cards::plain` (kept as written, never
+/// parsed): once the job's caller is gone, the rest is refused (empty).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_cancelled_job_refuses_the_rest_of_a_plain_card_text() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let _serial = worker();
+    let texts: Vec<String> = (0..2_000).map(|n| format!("plain {n}")).collect();
+    let (read, refused) = (
+        std::sync::Arc::new(AtomicUsize::new(0)),
+        std::sync::Arc::new(AtomicUsize::new(0)),
+    );
+    let (read_in_job, refused_in_job) = (read.clone(), refused.clone());
+    let (under_way, is_under_way) = std::sync::mpsc::channel::<()>();
+    let (caller_left, has_caller_left) = std::sync::mpsc::channel::<()>();
+    let job = tokio::spawn(html::blocking(move || {
+        for (n, text) in texts.iter().enumerate() {
+            if n == 1_000 {
+                let _ = under_way.send(());
+                let _ = has_caller_left.recv_timeout(Duration::from_secs(30));
+            }
+            if pinakes_core::resolver::cards::plain(text).is_empty() {
+                refused_in_job.fetch_add(1, SeqCst);
+            } else {
+                read_in_job.fetch_add(1, SeqCst);
+            }
+        }
+    }));
+    let started = Instant::now();
+    while is_under_way.try_recv().is_err() && started.elapsed() < Duration::from_secs(10) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!((read.load(SeqCst), refused.load(SeqCst)), (1_000, 0));
+    job.abort();
+    assert!(job.await.unwrap_err().is_cancelled());
+    caller_left.send(()).unwrap();
+    let started = Instant::now();
+    while read.load(SeqCst) + refused.load(SeqCst) < 2_000
+        && started.elapsed() < Duration::from_secs(10)
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        (read.load(SeqCst), refused.load(SeqCst)),
+        (1_000, 1_000),
+        "the job read on after its caller left"
+    );
+}
+
 /// The worker runs under its memory limit (`html::PARSE_MEMORY` of address space): a request
 /// whose text would need more is not read. The worker makes room for a text before it reads it,
 /// cannot, and aborts, which a job reads as the memory limit (`parse_worker_stub`). Without the

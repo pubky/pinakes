@@ -749,11 +749,19 @@ pub fn parse_nostr(uri: &str, e: &nostr::event::Event, ttl: u64) -> Result<Resou
     }
     d.bounded(web::ATTRIBUTES)
 }
+/// HTML as plain text, one line per block ([`html::text_lines`](crate::resolver::html::text_lines)):
+/// inline tags split no word (`H<sub>2</sub>O` is `H2O`), JATS blocks keep a paper's paragraphs
+/// apart. Text without markup stays as it is, its character references decoded, its line breaks
+/// and blank lines kept. Empty when no text is left, or in a parse job that is over (its caller
+/// gone: `html::admitted`).
 pub fn plain(s: &str) -> String {
-    let Ok(html) = crate::resolver::html::fragment(s) else {
-        return String::new();
-    };
-    html.root_element().text().collect::<Vec<_>>().join(" ")
+    if crate::resolver::html::markup(s) {
+        crate::resolver::html::text_lines(s).unwrap_or_default()
+    } else if crate::resolver::html::admitted(s) {
+        crate::resolver::web::decoded(s)
+    } else {
+        String::new()
+    }
 }
 pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<ResourceMeta> {
     let kind = match v["type"].as_str()? {
@@ -796,10 +804,15 @@ pub fn activitypub(uri: &str, v: &Value, base: &Url, ttl: u64) -> Option<Resourc
         d.description = d.description.map(|s| s.chars().take(200).collect());
     }
     if d.name.is_none() {
-        d.name = d
-            .description
-            .as_ref()
-            .map(|s| s.chars().take(120).collect());
+        // A name is one line: the description's paragraphs joined by a space.
+        d.name = d.description.as_ref().map(|s| {
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(120)
+                .collect()
+        });
     }
     d.image = v
         .pointer("/icon/url")
@@ -1705,6 +1718,89 @@ mod tests {
         );
         let d = parse_doi("doi:10.5555/x", &f, 86400).unwrap();
         assert_eq!(d.name.as_deref(), Some("Growth of E. coli at 3 < pH"));
+        // A title is one line, a line break in it white space.
+        let f = Fetched::answer(
+            Url::parse("https://api.crossref.org/v1/works/10.5555%2Fy/transform").unwrap(),
+            200,
+            "application/json".into(),
+            br#"{"type":"article-journal","title":"Growth of <i>E. coli</i>\n at pH"}"#.to_vec(),
+        );
+        let d = parse_doi("doi:10.5555/y", &f, 86400).unwrap();
+        assert_eq!(d.name.as_deref(), Some("Growth of E. coli at pH"));
+    }
+
+    /// Text without markup stays as written (a podcast episode's plain notes keep their blank
+    /// lines), its references decoded; with markup it is read as HTML.
+    #[test]
+    fn plain_text_stays_as_written() {
+        assert_eq!(plain("One.\n\n Two &amp; three"), "One.\n\n Two & three");
+        assert_eq!(plain("One.\n\n<b>Two</b>"), "One.\nTwo");
+    }
+
+    /// An ActivityPub object without a name is named by its text on one line, its paragraphs
+    /// joined by a space; its description keeps them apart.
+    #[test]
+    fn a_note_without_a_name_is_named_on_one_line() {
+        let note = serde_json::json!({
+            "type": "Note",
+            "id": "https://social.example/users/a/statuses/1",
+            "content": "<p>Hello</p><p>World</p>",
+        });
+        let base = Url::parse("https://social.example/@a/1").unwrap();
+        let d = activitypub("https://social.example/@a/1", &note, &base, 3600).unwrap();
+        assert_eq!(d.name.as_deref(), Some("Hello World"));
+        assert_eq!(d.description.as_deref(), Some("Hello\nWorld"));
+    }
+
+    /// A Crossref abstract (a recorded answer: a title, then three sections of a title and a
+    /// paragraph each) keeps its JATS blocks apart, one line each, and its words whole across
+    /// inline tags: `H<jats:sub>2</jats:sub>O<jats:sub>2</jats:sub>` is `H2O2`.
+    #[test]
+    fn a_crossref_abstract_keeps_its_paragraphs_and_its_words() {
+        let body = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/lookups/papers/crossref-csl-1743-422x-3-62.json"
+        ))
+        .unwrap();
+        // The recorded abstract puts each JATS element on a line of its own; the same abstract on
+        // one line reads the same, its blocks alone keeping the paragraphs apart.
+        let mut csl: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let one_line = csl["abstract"].as_str().unwrap().replace('\n', " ");
+        csl["abstract"] = one_line.into();
+        for body in [body, serde_json::to_vec(&csl).unwrap()] {
+            let f = Fetched::answer(
+                Url::parse("https://api.crossref.org/v1/works/10.1186%2F1743-422x-3-62/transform")
+                    .unwrap(),
+                200,
+                "application/vnd.citationstyles.csl+json".into(),
+                body,
+            );
+            let d = parse_doi("doi:10.1186/1743-422x-3-62", &f, 86400).unwrap();
+            let description = d.description.unwrap();
+            let lines: Vec<&str> = description.lines().collect();
+            assert_eq!(lines.len(), 7, "{description}");
+            assert_eq!(
+                [lines[0], lines[1], lines[3], lines[5]],
+                ["Abstract", "Background", "Results", "Conclusion"]
+            );
+            assert!(lines[2].starts_with("It was reported that elevation of the intracellular concentration of free Ca2+ ([Ca2+]i) by a calcium ionophore"), "{}", lines[2]);
+            assert!(
+                lines[2].contains("hydrogen peroxide (H2O2) is implied"),
+                "{}",
+                lines[2]
+            );
+            assert!(
+                lines[4].starts_with("H2O2 treatment increased"),
+                "{}",
+                lines[4]
+            );
+            assert!(
+                lines[6].starts_with("These results indicate that H2O2 can elevate [Ca2+]i"),
+                "{}",
+                lines[6]
+            );
+            assert!(lines[6].ends_with("from epithelial cells."), "{}", lines[6]);
+        }
     }
 
     use super::*;

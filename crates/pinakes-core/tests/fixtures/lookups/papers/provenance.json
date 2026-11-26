@@ -1,4 +1,14 @@
 {
+  "crossref-csl-1743-422x-3-62": {
+    "bytes": 20315,
+    "content_type": "application/vnd.citationstyles.csl+json",
+    "file": "crossref-csl-1743-422x-3-62.json",
+    "note": "The DOI card's answer: https://doi.org/10.1186/1743-422x-3-62 asked for CSL JSON, redirected here. Its abstract is JATS: a title, then three sections of a title and a paragraph each, with inline sub- and superscripts (H2O2, Ca2+). Recorded with a plain user agent and no contact.",
+    "recorded_at": "2026-11-26T16:44:41+00:00",
+    "sha256": "a7364212c02ea4cdf0336ebb9e6223b0bc3e223f06032b99d7c1e55cca0c5559",
+    "status": 200,
+    "url": "https://api.crossref.org/v1/works/10.1186%2F1743-422x-3-62/transform"
+  },
   "crossref-lmcs-20-1-8": {
     "bytes": 3262,
     "content_type": "application/json",
