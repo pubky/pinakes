@@ -932,14 +932,16 @@ const FEED_TYPES: &[&str] = &[
     "application/feed+json",
 ];
 /// Whether `body` is a feed, and its own title and description: RSS (`<rss>`), RSS 1.0 or 0.90
-/// (`<rdf:RDF>` with its channel), Atom (`<feed>` in the Atom namespace) or JSON Feed (a `version`
-/// on jsonfeed.org), whatever the content type says; or a body served as a feed type
-/// (`FEED_TYPES`) that does not read as one, with neither.
+/// (`<rdf:RDF>` with its channel), Atom (`<feed>` in the Atom namespace) or JSON Feed (a JSON
+/// object whose parsed `version` is on jsonfeed.org, however its writer escapes the string:
+/// `https:\/\/jsonfeed.org\/version\/1.1` is the same), whatever the content type says; or a body
+/// served as a feed type (`FEED_TYPES`) that does not read as one, with neither.
 pub(crate) fn feed(content_type: &str, body: &str) -> Option<(Option<String>, Option<String>)> {
     let body = body.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']);
     let read = if body.starts_with('<') {
         xml_feed(body)
-    } else if body.starts_with('{') && body.contains("https://jsonfeed.org/version/") {
+    } else if body.starts_with('{') && body.contains("jsonfeed.org") {
+        // Only a body that names jsonfeed.org at all is parsed; the parsed `version` decides.
         serde_json::from_str::<Value>(body).ok().and_then(|v| {
             v["version"]
                 .as_str()
@@ -2290,6 +2292,29 @@ mod tests {
         assert_eq!(doc.description.as_deref(), Some("Doors at eight"));
         let stored = serde_json::to_string(&doc).unwrap();
         assert!(!stored.contains("\\u0000"), "{stored}");
+    }
+    /// A JSON Feed whose writer escapes its slashes (PHP's `json_encode` does by default) is the
+    /// same JSON, so the same feed with its title.
+    #[test]
+    fn a_json_feed_with_escaped_slashes_is_a_feed() {
+        let plain =
+            r#"{"version":"https://jsonfeed.org/version/1.1","title":"Escaped","items":[]}"#;
+        let escaped =
+            r#"{"version":"https:\/\/jsonfeed.org\/version\/1.1","title":"Escaped","items":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<Value>(plain).unwrap(),
+            serde_json::from_str::<Value>(escaped).unwrap()
+        );
+        for body in [plain, escaped] {
+            assert_eq!(
+                feed("application/json", body),
+                Some((Some("Escaped".into()), None)),
+                "{body}"
+            );
+        }
+        // A JSON body that only names jsonfeed.org elsewhere is no feed.
+        let other = r#"{"version":"2","home":"https:\/\/jsonfeed.org\/","title":"Other"}"#;
+        assert_eq!(feed("application/json", other), None);
     }
     /// A feed is a DataFeed named by its own title on every route: Atom (bitcoinops.org's,
     /// served as `application/xml`; GitHub's releases), JSON Feed (jsonfeed.org's own), RSS and
