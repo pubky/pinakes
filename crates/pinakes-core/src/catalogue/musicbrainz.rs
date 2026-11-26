@@ -71,6 +71,9 @@ const TRAILING_CAP: u64 = 16 << 20;
 /// update (the dump's records and the stored cards' hashes, measured on a sample: see
 /// `docs/deployment.md`) with room to spare.
 pub const DISK_NEED: u64 = 40_000_000_000;
+/// The disk a read of a local dump needs per byte of its files (the sorted runs of an update
+/// took about a tenth of the compressed files on a sample of the real dump).
+const DISK_PER_DUMP_BYTE: u64 = 4;
 /// The disk a read needs per card of `limit`, and at least.
 const DISK_PER_LIMITED_CARD: u64 = 16_384;
 const DISK_LEAST: u64 = 256 << 20;
@@ -318,14 +321,23 @@ impl MusicBrainz {
     fn room(&self) -> Room {
         Room::new(self.need(), DISK_FLOOR)
     }
-    /// What a read takes at most.
+    /// What a read takes at most: [`DISK_NEED`]; for a local dump [`DISK_PER_DUMP_BYTE`] times
+    /// its files' size; for a `limit` [`DISK_PER_LIMITED_CARD`] per card; at least
+    /// [`DISK_LEAST`].
     fn need(&self) -> u64 {
-        match self.limit {
-            Some(limit) => limit
-                .saturating_mul(DISK_PER_LIMITED_CARD)
-                .clamp(DISK_LEAST, DISK_NEED),
-            None => DISK_NEED,
+        let mut need = DISK_NEED;
+        if let Source::Dir(dir) = &self.source {
+            let files: u64 = FILES
+                .iter()
+                .filter_map(|f| std::fs::metadata(dir.join(format!("{f}.tar.xz"))).ok())
+                .map(|m| m.len())
+                .sum();
+            need = need.min(files.saturating_mul(DISK_PER_DUMP_BYTE));
         }
+        if let Some(limit) = self.limit {
+            need = need.min(limit.saturating_mul(DISK_PER_LIMITED_CARD));
+        }
+        need.max(DISK_LEAST)
     }
 
     /// A run of `mode`: read the dump, sort its records (with the stored hashes for an update),
@@ -470,6 +482,12 @@ impl MusicBrainz {
         .await
         .map_err(|_| Failure::new("panic"))??;
         done.seconds = started.elapsed().as_secs_f64();
+        done.spilled = done
+            .runs
+            .iter()
+            .filter_map(|r| std::fs::metadata(r).ok())
+            .map(|m| m.len())
+            .sum();
         write_done(dir, &done)?;
         tracing::info!(
             catalogue = "musicbrainz",
@@ -481,6 +499,7 @@ impl MusicBrainz {
             downloaded = done.downloaded,
             checked = done.checked,
             runs = done.runs.len(),
+            spilled = done.spilled,
             seconds = done.seconds,
             "musicbrainz dump read and sorted"
         );
@@ -673,6 +692,9 @@ pub struct Done {
     pub downloaded: u64,
     /// The files whose SHA-256 was checked.
     pub checked: u32,
+    /// The bytes of the merged runs.
+    #[serde(default)]
+    pub spilled: u64,
     pub seconds: f64,
 }
 /// One file read whole: its runs and what the read found (its `<file>.done` manifest).
@@ -1744,6 +1766,18 @@ mod tests {
             .unwrap()
             .limit(Some(10_000_000));
         assert_eq!(big.disk_need(Run::Import, &state(None, None)), DISK_NEED);
+        // A local dump: four times its files.
+        let dump = dir.path().join("20261125-001001");
+        std::fs::create_dir(&dump).unwrap();
+        for f in FILES {
+            // Sparse: its length, no disk.
+            std::fs::File::create(dump.join(format!("{f}.tar.xz")))
+                .unwrap()
+                .set_len(100 << 20)
+                .unwrap();
+        }
+        let local = MusicBrainz::new(Source::Dir(dump), "").unwrap();
+        assert_eq!(local.disk_need(Run::Import, &state(None, None)), 1600 << 20);
     }
 
     #[test]

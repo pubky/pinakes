@@ -679,16 +679,21 @@ async fn import(
     } else {
         run::Run::Import
     };
-    let state = run::run_once(std::sync::Arc::new(importer), &ctx, kind, |why| {
+    let (state, written) = run::run_once(std::sync::Arc::new(importer), &ctx, kind, |why| {
         let _ = writeln!(out, "waiting: {why}");
     })
     .await?;
     writeln!(
         out,
-        "catalogue {catalogue}: {} finished in {:.0} s; {cards} cards before, {} after",
+        "catalogue {catalogue}: {} finished in {:.0} s; {cards} cards before, {} after; written: {} new, {} changed, {} unchanged, {} refused, {} removed",
         kind.name(),
         started.elapsed().as_secs_f64(),
-        state.cards
+        state.cards,
+        written.inserted,
+        written.changed,
+        written.unchanged,
+        written.rejected,
+        written.removed
     )?;
     let states = store::states(pool).await?;
     writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;

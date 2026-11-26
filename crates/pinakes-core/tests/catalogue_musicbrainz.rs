@@ -183,6 +183,13 @@ fn importer(s: &Setup, source: Source) -> MusicBrainz {
         .retry_wait(Duration::from_millis(10))
 }
 async fn run_with(s: &Setup, importer: MusicBrainz, kind: Run) -> anyhow::Result<store::State> {
+    Ok(run_reported(s, importer, kind).await?.0)
+}
+async fn run_reported(
+    s: &Setup,
+    importer: MusicBrainz,
+    kind: Run,
+) -> anyhow::Result<(store::State, store::WriteReport)> {
     run::run_once(Arc::new(importer), &s.ctx, kind, |_| {}).await
 }
 async fn run(s: &Setup, dir: &Path, kind: Run) -> anyhow::Result<store::State> {
@@ -428,9 +435,21 @@ async fn an_update_writes_only_what_changed(pool: PgPool) {
         }
         _ => {}
     });
-    let state = run(&s, &b, Run::Update).await.unwrap();
+    let (state, written) = run_reported(&s, importer(&s, Source::Dir(b.clone())), Run::Update)
+        .await
+        .unwrap();
     let after = rows(&pool).await;
     assert_eq!(state.cards, CARDS as i64);
+    // Only the new card and the changed one were written; the unchanged ones were not sent at all.
+    assert_eq!(
+        (
+            written.inserted,
+            written.changed,
+            written.unchanged,
+            written.removed
+        ),
+        (1, 1, 0, 1)
+    );
     assert_eq!(state.position, Some(json!({ "version": B, "limit": null })));
     assert_eq!(state.upstream_version.as_deref(), Some(B));
     let renamed = row(&after, &format!("artist/{ARTIFACTS}"));
@@ -596,6 +615,36 @@ async fn checksums_cover_whole_files(pool: PgPool) {
             ..Pack::default()
         },
     );
+    run(&s, &dir, Run::Import).await.unwrap();
+    assert_eq!(rows(&pool).await.len(), CARDS);
+    // An archive that goes on for more than 16 MiB after the entry read is refused.
+    reset(&pool).await;
+    let s = setup(&pool, None);
+    let dir = pack(
+        s.root.path(),
+        A,
+        Pack {
+            after: Some(vec![0; 17 << 20]),
+            ..Pack::default()
+        },
+    );
+    let failed = run(&s, &dir, Run::Import).await.unwrap_err();
+    assert!(failed.to_string().contains("archive"), "{failed}");
+    assert!(rows(&pool).await.is_empty());
+    // Stream padding after the xz stream, which the checksum covers too.
+    reset(&pool).await;
+    let s = setup(&pool, None);
+    let dir = dump(s.root.path(), B, unchanged);
+    let mut sums = String::new();
+    for e in ENTITIES {
+        let path = dir.join(format!("{e}.tar.xz"));
+        let mut bytes = std::fs::read(&path).unwrap();
+        // More than the 1 MiB the reader buffers.
+        bytes.extend_from_slice(&[0; 3 << 20]);
+        sums.push_str(&format!("{} *{e}.tar.xz\n", sha256(&bytes)));
+        std::fs::write(&path, bytes).unwrap();
+    }
+    std::fs::write(dir.join("SHA256SUMS"), sums).unwrap();
     run(&s, &dir, Run::Import).await.unwrap();
     assert_eq!(rows(&pool).await.len(), CARDS);
 

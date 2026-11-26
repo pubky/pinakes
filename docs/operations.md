@@ -21,7 +21,8 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] reindex` | Builds the text index from the database into a new generation and switches to it. Run it with the daemon stopped ([text index](#text-index)). |
 | `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
-| `pinakesd [--config PATH] catalogue import NAME [--from DIR\|URL] [--limit N] [--update]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz` only in this version. |
+| `pinakesd [--config PATH] catalogue import NAME [--from DIR\|URL] [--limit N] [--update] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz` only in this version. |
+| `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
 | `pinakesd --openapi` | Prints the OpenAPI document. |
 | `pinakesd --help` | Prints the usage line. |
@@ -1833,7 +1834,8 @@ max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, wh
 ```sh
 pinakesd --config <path> catalogue status
 pinakesd --config <path> catalogue drop <name>
-pinakesd --config <path> catalogue import <name> [--from DIR|URL] [--limit N] [--update]
+pinakesd --config <path> catalogue import <name> [--from DIR|URL] [--limit N] [--update] [--force]
+pinakesd --config <path> catalogue import <name> --request
 ```
 
 `catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, when its
@@ -1854,10 +1856,13 @@ is) and prints the directory it removed, or that there was none. It refuses:
 `catalogue import <name>` runs one full import of the catalogue now, or with `--update` one
 update, through the same code and state rows as the daemon's task: it takes the catalogue's lock
 (refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
-disk as the task does (printing why), and prints the status table when it has finished. A full
-import takes up one that was cut off, else begins a new one. `--from` and `--limit` are the
-importer's own ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand)). A failure is
-recorded as the task records it.
+disk as the task does (printing why), watches its lock, and prints the cards before and after and
+the status table when it has finished. A full import takes up one that was cut off, else begins a
+new one. `--from`, `--limit` and `--force` are the importer's own
+([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand)). A failure is recorded as the
+task records it. `catalogue import <name> --request` needs no lock: it records that a full import
+is asked for (`import_requested`), and the daemon running the importer starts it after the run
+under way.
 
 `scripts/lock-waits` names these locks `catalogue <name>` and `large catalogue import`.
 

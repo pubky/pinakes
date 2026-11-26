@@ -699,10 +699,12 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     );
     Ok(Next::Again)
 }
-/// An importer whose plan is always `run` (`pinakesd catalogue import`).
+/// An importer whose plan is always `run` (`pinakesd catalogue import`); it keeps what its runs
+/// wrote.
 struct Forced {
     inner: Arc<dyn Importer>,
     run: Run,
+    written: std::sync::Mutex<WriteReport>,
 }
 #[async_trait]
 impl Importer for Forced {
@@ -716,10 +718,14 @@ impl Importer for Forced {
         Ok(Plan::Run(self.run))
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
-        self.inner.import(job).await
+        let ran = self.inner.import(job).await;
+        *self.written.lock().expect("the report") += job.report();
+        ran
     }
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
-        self.inner.update(job).await
+        let ran = self.inner.update(job).await;
+        *self.written.lock().expect("the report") += job.report();
+        ran
     }
 }
 
@@ -729,13 +735,14 @@ impl Importer for Forced {
 /// while another process holds it), waits for the large-import turn and the disk as the task
 /// does (`waiting` says why, at each change), and runs through [`step`], so the daemon's code and
 /// state rows are the same. A failure is recorded as the task records it, and returned. The state
-/// row when the run has finished.
+/// row when the run has finished, and what it wrote (the cards a full import removed at its end
+/// not counted).
 pub async fn run_once(
     importer: Arc<dyn Importer>,
     ctx: &Context,
     run: Run,
     mut waiting: impl FnMut(&str),
-) -> Result<State> {
+) -> Result<(State, WriteReport)> {
     let catalogue = importer.catalogue();
     let Some(mut lock) = SessionLock::try_take(&ctx.pool, catalogue.lock_key()).await? else {
         anyhow::bail!("another process imports catalogue {catalogue} (its lock is held): stop that pinakesd or switch the catalogue off there first, or ask it for a full import with --request");
@@ -762,6 +769,7 @@ pub async fn run_once(
         let forced = Forced {
             inner: importer.clone(),
             run,
+            written: Default::default(),
         };
         let mut said: Option<String> = None;
         loop {
@@ -777,7 +785,8 @@ pub async fn run_once(
                 Ok(Next::Again) => {
                     let state = store::ensure_state(&ctx.pool, catalogue).await?;
                     if state.run.is_none() && state.import_requested.is_none() {
-                        return Ok(state);
+                        let written = *forced.written.lock().expect("the report");
+                        return Ok((state, written));
                     }
                 }
                 Ok(Next::Wait(wait)) => {
