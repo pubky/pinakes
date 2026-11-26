@@ -1260,7 +1260,9 @@ async fn finished_foreign_and_handed_over_cursors(pool: PgPool) {
     let set = |cursor: Value, run: &'static str| {
         let pool = pool.clone();
         async move {
-            sqlx::query("UPDATE catalogue_state SET run=$2,phase=$2,generation=1,cursor=$1 WHERE catalogue='musicbrainz'")
+            // The generation stays: a run never goes back below the generation its cards were
+            // read in (the shrink floor counts the cards of a generation).
+            sqlx::query("UPDATE catalogue_state SET run=$2,phase=$2,cursor=$1 WHERE catalogue='musicbrainz'")
                 .bind(cursor)
                 .bind(run)
                 .execute(&pool)

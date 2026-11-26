@@ -206,12 +206,13 @@ impl Job<'_> {
     /// A full import that starts over, dropping a cut-off attempt's cursor (of another source or
     /// dump): a generation of its own, so the cards that attempt wrote and this one does not read
     /// are removed at its end as any others.
+    /// The shrink floor counts only this generation's cards ([`SHRINK_FLOOR`]).
     pub async fn new_generation(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.run == Run::Import,
             "only a full import starts a generation"
         );
-        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,cursor=NULL,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,generation_cards=0,cursor=NULL,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(self.catalogue.name())
             .fetch_one(self.pool)
             .await?;

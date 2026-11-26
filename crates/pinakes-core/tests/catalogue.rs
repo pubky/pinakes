@@ -51,6 +51,9 @@ struct Fixture {
     fail_at_gate: AtomicBool,
     /// Say the next import may read far fewer cards than the catalogue holds.
     expect_shrink: AtomicBool,
+    /// Start the next import over in a generation of its own, dropping a cut-off attempt's cursor
+    /// (`Job::new_generation`, as an importer does for another dump).
+    start_over: AtomicBool,
     need: u64,
 }
 impl Fixture {
@@ -70,6 +73,7 @@ impl Fixture {
             panic_once: AtomicBool::new(false),
             fail_at_gate: AtomicBool::new(false),
             expect_shrink: AtomicBool::new(false),
+            start_over: AtomicBool::new(false),
             need: 1000,
         }
     }
@@ -98,6 +102,9 @@ impl Importer for Fixture {
         }
         if self.expect_shrink.swap(false, Ordering::SeqCst) {
             job.expect_shrink();
+        }
+        if self.start_over.swap(false, Ordering::SeqCst) {
+            job.new_generation().await?;
         }
         let start = job.cursor().and_then(|c| c["next"].as_u64()).unwrap_or(0) as usize;
         let items = self.items.lock().unwrap().clone();
@@ -1580,6 +1587,28 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
             .unwrap(),
         store::Allowance::NoState
     );
+}
+
+/// A full import that starts over in a generation of its own (`Job::new_generation`: a cut-off
+/// attempt of another dump is dropped) counts only the cards of its own generation for the floor:
+/// the attempt's cards are removed at its end like any it did not read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_full_import_that_starts_over_counts_its_own_cards_for_the_floor(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    // The next full import writes 20 of the 25, then breaks off.
+    *fixture.fail_after.lock().unwrap() = Some(2);
+    *fixture.next.lock().unwrap() = Some(Run::Import);
+    run::step(&fixture, &ctx).await.unwrap_err();
+    assert_eq!(state(&pool, Catalogue::Wikidata).await.generation_cards, 20);
+    // It starts over (another dump) and reads 10: under half of the 25, the floor holds.
+    fixture.items.lock().unwrap().truncate(10);
+    fixture.start_over.store(true, Ordering::SeqCst);
+    let failed = run::step(&fixture, &ctx).await.unwrap_err();
+    assert_eq!(pinakes_core::catalogue::failure::shown(&failed), "shrunk");
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 25);
+    assert_eq!(state(&pool, Catalogue::Wikidata).await.generation_cards, 10);
 }
 
 /// No scope recorded (a state row from before scopes were kept) counts as the same scope: the
