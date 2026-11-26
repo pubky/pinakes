@@ -5850,7 +5850,7 @@ pub async fn curate_group(
 }
 /// `DELETE /v1/groups/{id}` (admin listener only): undo a curation ([`crate::groups::uncurate`]).
 /// 204 when it was a curated group, 404 when it is no curated group, 400 for an invalid ID or
-/// with groups off, 503 while the group writer is busy.
+/// with groups off, 503 while the group writer or the write order is busy.
 pub async fn uncurate_group(
     State(state): State<AppState>,
     Path(id): Path<String>,

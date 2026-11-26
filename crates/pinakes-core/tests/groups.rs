@@ -2986,3 +2986,66 @@ async fn removing_a_keyed_link_and_saving_the_resource_it_names_take_locks_in_on
             .unwrap();
     assert!(dirty);
 }
+
+/// A curation (`PUT`) or its undoing (`DELETE /v1/groups/{id}`) behind a writer that holds the
+/// write order exclusively (the hourly orphan cleanup, a re-extraction) answers 503 with
+/// `Retry-After` once its two-second wait runs out, as behind a busy group writer; nothing
+/// changes. (The wait's statement timeout read as a database error answered 500.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_curation_behind_an_exclusive_writer_answers_busy(pool: PgPool) {
+    let (a, b) = pair(&pool, "busy", None).await;
+    let curated = "c".repeat(32);
+    let members = |ids: [&String; 2]| groups::Curation {
+        members: ids
+            .iter()
+            .map(|id| groups::Member {
+                resource_id: (*id).clone(),
+                occurrence: None,
+            })
+            .collect(),
+    };
+    groups::curate(&pool, &curated, members([&a, &b]), &Default::default())
+        .await
+        .unwrap();
+    let request = |method: &str, body: Body| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("/v1/groups/{curated}"))
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        request
+    };
+    let admin = api::admin_router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let mut writer = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let body = Body::from(serde_json::to_vec(&members([&a, &b])).unwrap());
+    for request in [request("PUT", body), request("DELETE", Body::empty())] {
+        let response = admin.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers()["retry-after"], "60");
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"], "group writer busy; retry later");
+    }
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(pinakes_core::locks::WRITE_ORDER)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    // Still curated: the undoing goes through once the writer is done.
+    assert_eq!(gid(&pool, &a).await, curated);
+    let response = admin
+        .oneshot(request("DELETE", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 204);
+}

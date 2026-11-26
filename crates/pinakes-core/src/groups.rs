@@ -1035,6 +1035,23 @@ impl std::fmt::Display for LockBusy {
     }
 }
 impl std::error::Error for LockBusy {}
+/// `error` as `busy` when it is a statement timeout (57014): a lock wait that outlasted the
+/// statement's limit is contention, which the caller answers as busy, not as a failure.
+fn timeout_as(
+    error: impl Into<anyhow::Error>,
+    busy: impl std::error::Error + Send + Sync + 'static,
+) -> anyhow::Error {
+    let error = error.into();
+    let timed_out = error
+        .downcast_ref::<sqlx::Error>()
+        .and_then(|e| e.as_database_error())
+        .is_some_and(|d| d.code().as_deref() == Some("57014"));
+    if timed_out {
+        anyhow::Error::new(busy)
+    } else {
+        error
+    }
+}
 /// Hold the inputs' rows as checked until this run commits: a writer that changes one waits.
 /// A row a writer holds now means its change is coming, so the run retries shortly instead of
 /// waiting while it holds rows (an ingested batch locks its rows in feed order, never by ID).
@@ -1047,17 +1064,7 @@ async fn fence(
     // for a whole batch, past the run's statement timeout: that is contention too.
     crate::store::lock_writers(tx, crate::store::WriteOrder::Shared)
         .await
-        .map_err(|e| {
-            let timed_out = e
-                .downcast_ref::<sqlx::Error>()
-                .and_then(|e| e.as_database_error())
-                .is_some_and(|d| d.code().as_deref() == Some("57014"));
-            if timed_out {
-                anyhow::Error::new(LockBusy)
-            } else {
-                e
-            }
-        })?;
+        .map_err(|e| timeout_as(e, LockBusy))?;
     sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1) ORDER BY id FOR SHARE NOWAIT")
         .bind(revisions.keys().collect::<Vec<_>>())
         .execute(&mut **tx)
@@ -1197,8 +1204,9 @@ impl std::fmt::Display for CurationError {
     }
 }
 impl std::error::Error for CurationError {}
-/// A curation's transaction: it waits for the active group writer within its two-second limit
-/// ([`GroupBusy`] after that), then takes the write order a save takes.
+/// A curation's transaction: it waits for the active group writer, then for the write order a
+/// save takes (held exclusively by the orphan cleanup, a re-extraction, an ingest batch or a
+/// source switch), each within its two-second limit ([`GroupBusy`] after that).
 async fn curation_tx(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL statement_timeout='2s'")
@@ -1208,16 +1216,10 @@ async fn curation_tx(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
         .bind(crate::locks::GROUP)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
-            if e.as_database_error()
-                .is_some_and(|d| d.code().as_deref() == Some("57014"))
-            {
-                anyhow::Error::new(GroupBusy)
-            } else {
-                e.into()
-            }
-        })?;
-    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
+        .map_err(|e| timeout_as(e, GroupBusy))?;
+    crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared)
+        .await
+        .map_err(|e| timeout_as(e, GroupBusy))?;
     Ok(tx)
 }
 /// Undo a curation: the group's members are no longer pinned and the group is no longer curated,
