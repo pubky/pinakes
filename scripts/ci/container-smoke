@@ -50,6 +50,10 @@ for _ in {1..30}; do
 done
 [[ "$ready" == true ]]
 [[ "$(docker exec "$name" id -u)" == 10001 ]]
+# The licence notices ship in the image (Dockerfile): Pinakes' licence, the data sets' and every crate's.
+for file in LICENSE LICENSE.tzf-rel.md THIRD-PARTY-NOTICES; do
+  docker exec "$name" cat "/usr/share/doc/pinakes/$file" > "$RUNNER_TEMP/pinakes-$file"
+done
 # The image's HEALTHCHECK asks the admin listener's /healthz, which reads the database.
 [[ "$(docker image inspect "$image" --format '{{json .Config.Healthcheck.Test}}')" == '["CMD","/usr/local/bin/pinakesd","healthcheck"]' ]]
 [[ "$(docker exec "$name" /usr/local/bin/pinakesd healthcheck)" == healthy ]]
@@ -59,6 +63,7 @@ docker exec "$name" cat /proc/net/tcp > "$RUNNER_TEMP/pinakes-tcp.txt"
 python3 - "$RUNNER_TEMP" <<'PY'
 import gzip
 import json
+import re
 from pathlib import Path
 import sys
 p = Path(sys.argv[1])
@@ -66,6 +71,12 @@ assert json.loads((p / 'pinakes-info.json').read_text())['version']
 assert isinstance(json.loads((p / 'pinakes-search.json').read_text()), dict)
 notice = json.loads(gzip.decompress((p / 'pinakes-osm.gz').read_bytes()).splitlines()[0])
 assert notice['licence'] == 'ODbL-1.0'
+assert 'MIT License' in (p / 'pinakes-LICENSE').read_text()
+assert 'ODbL' in (p / 'pinakes-LICENSE.tzf-rel.md').read_text()
+notices = (p / 'pinakes-THIRD-PARTY-NOTICES').read_text()
+assert notices.startswith('Third-party notices for pinakesd\n'), notices[:80]
+for crate, licence in [('tzf-rel', 'ODbL-1.0'), ('cssparser', 'MPL-2.0'), ('webpki-roots', 'CDLA-Permissive-2.0')]:
+    assert re.search(rf'(?m)^{crate} \S+\n  Licence: {licence}\n', notices), crate
 listeners = [line.split()[1] for line in (p / 'pinakes-tcp.txt').read_text().splitlines()[1:]
              if line.split()[3] == '0A']
 assert '0100007F:2382' in listeners, listeners

@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import gzip
+import hashlib
 import re
 import subprocess
 import tomllib
@@ -360,6 +361,13 @@ elif a[0] == 'exec' and a[2:] == ['cat', '/proc/net/tcp']:
     print('  sl  local_address rem_address   st')
     print('   0: 0100007F:2382 00000000:0000 0A')
     print('   1: 00000000:1F9A 00000000:0000 0A')
+elif a[0] == 'exec' and a[2] == 'cat' and a[3].startswith('/usr/share/doc/pinakes/'):
+    if os.environ.get('FAKE_NO_NOTICES'):
+        sys.exit(1)
+    print({'LICENSE': 'The MIT License (MIT)', 'LICENSE.tzf-rel.md': 'ODbL-1.0',
+           'THIRD-PARTY-NOTICES': 'Third-party notices for pinakesd\\n\\n'
+           'cssparser 0.35.0\\n  Licence: MPL-2.0\\n\\ntzf-rel 0.0.2025-c\\n  Licence: ODbL-1.0\\n\\n'
+           'webpki-roots 1.0.9\\n  Licence: CDLA-Permissive-2.0\\n'}[a[3].rsplit('/', 1)[1]])
 elif a[0] == 'exec' and a[2:] == ['/usr/local/bin/pinakesd', 'healthcheck']:
     if os.environ.get('FAKE_UNHEALTHY'):
         sys.exit(1)
@@ -390,21 +398,23 @@ elif url.endswith('.ndjson.gz'):
                 (p / 'bin' / name).write_text(body)
                 (p / 'bin' / name).chmod(0o755)
             name = 'pinakes-smoke-7-1'
-            for exit_code, down, unhealthy, ok in [('0', '', '', True), ('143', '', '', False),
-                                                   ('0', '1', '', False), ('0', '', '1', False)]:
+            for exit_code, down, unhealthy, no_notices, ok in [
+                    ('0', '', '', '', True), ('143', '', '', '', False), ('0', '1', '', '', False),
+                    ('0', '', '1', '', False), ('0', '', '', '1', False)]:
                 (p / 'docker.jsonl').write_text('')
                 env = {**os.environ, 'PATH': f'{p / "bin"}{os.pathsep}{os.environ["PATH"]}',
                        'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': d, 'FAKE_DIR': d, 'GITHUB_RUN_ID': '7',
                        'GITHUB_RUN_ATTEMPT': '1', 'DATABASE_URL': 'postgresql://ci@/postgres',
-                       'FAKE_EXIT': exit_code, 'FAKE_DOWN': down, 'FAKE_UNHEALTHY': unhealthy}
+                       'FAKE_EXIT': exit_code, 'FAKE_DOWN': down, 'FAKE_UNHEALTHY': unhealthy,
+                       'FAKE_NO_NOTICES': no_notices}
                 run = subprocess.run(['scripts/ci/container-smoke', 'pinakes:ci'], cwd=ROOT, env=env,
                                      capture_output=True, text=True)
                 calls = [json.loads(line) for line in (p / 'docker.jsonl').read_text().splitlines()]
                 self.assertEqual(run.returncode == 0, ok,
-                                 (exit_code, down, unhealthy, run.stdout, run.stderr))
+                                 (exit_code, down, unhealthy, no_notices, run.stdout, run.stderr))
                 # The container and its volume are removed on success and on failure.
                 self.assertEqual(calls[-2:], [['rm', '--force', name], ['volume', 'rm', f'{name}-dumps']])
-                if not down and not unhealthy:
+                if not down and not unhealthy and not no_notices:
                     stop = calls.index(['stop', '--time', '30', name])
                     self.assertEqual(calls[stop + 1], ['inspect', '--format', '{{.State.ExitCode}}', name])
 
@@ -471,6 +481,120 @@ class SupplyChain(unittest.TestCase):
         for member in workspace['members']:
             package = tomllib.loads((ROOT / member / 'Cargo.toml').read_text())['package']
             self.assertEqual(package.get('publish'), {'workspace': True}, member)
+
+    def test_image_ships_the_licence_notices(self):
+        s = (ROOT / 'Dockerfile').read_text()
+        build, runtime = s[:s.rindex('\nFROM ')], s[s.rindex('\nFROM '):]
+        self.assertIn('COPY scripts/third-party-notices scripts/', build)
+        self.assertIn('COPY scripts/spdx/ scripts/spdx/', build)
+        run = build[build.index('RUN cargo build --locked'):]
+        self.assertLess(run.index('cargo build --locked'), run.index('scripts/third-party-notices notices/THIRD-PARTY-NOTICES'))
+        # The build downloads only what pinakesd needs; cargo metadata reads every manifest.
+        self.assertLess(run.index('cargo fetch --locked --target "$(rustc --print host-tuple)"'),
+                        run.index('scripts/third-party-notices notices/THIRD-PARTY-NOTICES'))
+        self.assertIn('cp LICENSE data/LICENSE.* data/oembed-LICENSE notices/', run)
+        self.assertIn('COPY --from=build /build/notices/ /usr/share/doc/pinakes/', runtime)
+        rules = dockerignore_rules((ROOT / '.dockerignore').read_text())
+        for path in ['LICENSE', 'scripts/third-party-notices', 'scripts/spdx/MIT.txt']:
+            self.assertTrue(in_build_context(rules, path), path)
+        # Every licence text in data/ is one the copy names.
+        for path in (ROOT / 'data').iterdir():
+            if 'licen' in path.name.lower():
+                self.assertTrue(path.name.startswith('LICENSE.') or path.name == 'oembed-LICENSE', path)
+        smoke = (ROOT / 'scripts/ci/container-smoke').read_text()
+        self.assertIn('/usr/share/doc/pinakes/$file', smoke)
+        self.assertIn('for file in LICENSE LICENSE.tzf-rel.md THIRD-PARTY-NOTICES; do', smoke)
+
+    def test_canonical_licence_texts_are_the_pinned_ones(self):
+        folder = ROOT / 'scripts/spdx'
+        listed = dict(re.findall(r'(?m)^\| `([^`]+)` \| `([0-9a-f]{64})` \|$', (folder / 'README.md').read_text()))
+        texts = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.glob('*.txt')}
+        self.assertEqual(listed, texts)
+        self.assertTrue({'MIT.txt', 'Apache-2.0.txt'} <= set(texts))
+
+    def test_notices_list_linked_crates_with_their_texts_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            packages, nodes = [], []
+
+            def package(name, files=(), kind='lib', member=False, licence='MIT'):
+                folder = root / name
+                folder.mkdir()
+                (folder / 'Cargo.toml').write_text('')
+                for file, text in files:
+                    (folder / file).parent.mkdir(parents=True, exist_ok=True)
+                    (folder / file).write_text(text)
+                pid = f'{name} 1.0.0'
+                packages.append({'id': pid, 'name': name, 'version': '1.0.0', 'license': licence,
+                                 'license_file': None, 'repository': f'https://example.org/{name}',
+                                 'source': None if member else 'registry+https://github.com/rust-lang/crates.io-index',
+                                 'manifest_path': str(folder / 'Cargo.toml'), 'targets': [{'kind': [kind]}]})
+                return pid
+
+            def deps(pid, *edges):
+                nodes.append({'id': pid, 'deps': [{'pkg': to, 'dep_kinds': [{'kind': k, 'target': None}]}
+                                                  for to, k in edges]})
+
+            apache = 'A crate copy of the Apache licence\n'
+            daemon = package('pinakesd', member=True)
+            core = package('pinakes-core', member=True)
+            linked = package('linked', [('LICENSE-APACHE', apache), ('LICENSE-MIT', 'MIT linked'),
+                                        ('vendor/clib/COPYING', 'bundled C text'),
+                                        ('LICENSES/BSD-3-Clause.txt', 'reuse text'),
+                                        ('tests/data/LICENSE', 'test data text'),
+                                        ('src/license.rs', 'fn code() {}')])
+            shared = package('shared', [('LICENSE-APACHE', apache), ('NOTICE', 'notice text')], licence='MPL-2.0')
+            bare = package('bare')
+            either = package('either', licence='MIT/Apache-2.0')
+            grouped = package('grouped', licence='(MIT OR Apache-2.0) AND BSD-3-Clause')
+            dev = package('dev-only', [('LICENSE', 'dev text')])
+            build = package('build-only', [('LICENSE', 'build text')])
+            macro = package('a-macro', [('LICENSE', 'macro text')], kind='proc-macro')
+            behind = package('behind-macro', [('LICENSE', 'behind text')])
+            deps(daemon, (core, None), (dev, 'dev'))
+            deps(core, (linked, None), (build, 'build'), (macro, None))
+            deps(linked, (shared, None), (bare, None), (either, None), (grouped, None))
+            for pid in [shared, bare, either, grouped, dev, build, behind]:
+                deps(pid)
+            deps(macro, (behind, None))
+            meta = root / 'metadata.json'
+            meta.write_text(json.dumps({'packages': packages, 'resolve': {'nodes': nodes},
+                                        'workspace_members': [daemon, core]}))
+            out = root / 'NOTICES'
+            p = subprocess.run(['python3', '-I', str(ROOT / 'scripts/third-party-notices'), str(out),
+                                '--metadata', str(meta)], capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            text = out.read_text()
+            self.assertTrue(text.startswith('Third-party notices for pinakesd\n'))
+            listed = re.findall(r'(?m)^(\S+) 1\.0\.0$', text)
+            self.assertEqual(listed, ['bare', 'either', 'grouped', 'linked', 'shared'])
+            self.assertIn('shared 1.0.0\n  Licence: MPL-2.0\n  Source: https://crates.io/crates/shared/1.0.0\n', text)
+            # A crate without a licence file gets the canonical text of each licence it names.
+            spdx = {i: (ROOT / f'scripts/spdx/{i}.txt').read_text().strip() for i in ['MIT', 'Apache-2.0']}
+            self.assertRegex(text, r'bare 1\.0\.0\n(  .*\n)*  Files: none in the crate; the licence texts: SPDX MIT \(text \d+\)\n')
+            self.assertRegex(text, r'either 1\.0\.0\n(  .*\n)*  Files: none in the crate; the licence texts: '
+                                   r'SPDX MIT \(text \d+\), SPDX Apache-2\.0 \(text \d+\)\n')
+            self.assertRegex(text, r'grouped 1\.0\.0\n(  .*\n)*  Files: none in the crate; the licence texts: '
+                                   r'SPDX MIT \(text \d+\), SPDX Apache-2\.0 \(text \d+\), SPDX BSD-3-Clause \(text \d+\)\n')
+            for spdx_text in spdx.values():
+                self.assertEqual(text.count(spdx_text), 1)
+            # A licence without a canonical text, an exception or no licence at all stops the run.
+            for licence, named in [('WTFPL', "'WTFPL'"), ('MIT OR Apache-2.0 WITH LLVM-exception', 'exception'),
+                                   (None, 'declares no licence')]:
+                next(p for p in packages if p['name'] == 'bare')['license'] = licence
+                meta.write_text(json.dumps({'packages': packages, 'resolve': {'nodes': nodes},
+                                            'workspace_members': [daemon, core]}))
+                failed = subprocess.run(['python3', '-I', str(ROOT / 'scripts/third-party-notices'),
+                                         str(root / 'FAILED'), '--metadata', str(meta)], capture_output=True, text=True)
+                self.assertNotEqual(failed.returncode, 0, licence)
+                self.assertIn(named, failed.stderr)
+                self.assertFalse((root / 'FAILED').exists())
+            self.assertEqual(text.count(apache.strip()), 1)
+            self.assertIn('vendor/clib/COPYING (text', text)
+            for kept in ['MIT linked', 'notice text', 'bundled C text', 'reuse text']:
+                self.assertIn(kept, text)
+            for left_out in ['dev text', 'build text', 'macro text', 'behind text', 'test data text', 'fn code']:
+                self.assertNotIn(left_out, text)
 
 
 class Release(unittest.TestCase):

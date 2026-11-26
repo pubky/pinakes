@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""third-party-notices OUT: write the licence notices of every crate built into pinakesd.
+
+The crates come from `cargo metadata --locked --offline` for the host platform (the image build
+runs `cargo fetch --locked` for the host first, so every manifest is on disk): the normal
+dependencies of pinakesd, followed from crate to crate. Build and development dependencies and
+procedural macros run only while compiling and are left out. For each crate OUT names its
+version, its declared licence, where its source is, and the text of every licence, notice or
+copyright file the crate ships, also those of the C libraries and data it bundles in its own
+folders (tests, benches, examples and fuzzing folders aside); a text shipped by several crates
+is written once. A crate that ships no such file gets the canonical text of each licence its
+SPDX expression names, from scripts/spdx/; an expression without a text there (or no declared
+licence) stops the run.
+
+--metadata FILE reads the `cargo metadata` JSON from FILE instead of running cargo.
+"""
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT_PACKAGE = 'pinakesd'
+# Canonical SPDX licence texts, one `<id>.txt` per licence (scripts/spdx/README.md).
+SPDX = Path(__file__).resolve().parent / 'spdx'
+# File names that hold licence terms or notices, matched case-insensitively anywhere in a crate,
+# and every file of a LICENSES folder (REUSE layout).
+NOTICE_FILE = re.compile(r'^(licen[cs]e|copying|copyright|notice|unlicen[cs]e)([-._].*)?$', re.I)
+# Folders whose files are not built into a library.
+NOT_SHIPPED = {'tests', 'test', 'benches', 'examples', 'fuzz', 'target', '.git', '.github'}
+# Code that only has a licence-like name (`license.rs`, `license-check.sh`).
+CODE = {'.rs', '.sh', '.py', '.c', '.h', '.cc', '.cpp', '.js', '.ts', '.toml', '.yml', '.yaml', '.json', '.in', '.am', '.pl'}
+
+
+def metadata(path):
+    if path:
+        return json.loads(Path(path).read_text())
+    host = subprocess.run(['rustc', '--print', 'host-tuple'], check=True, capture_output=True,
+                          text=True).stdout.strip()
+    out = subprocess.run(['cargo', 'metadata', '--format-version', '1', '--locked', '--offline',
+                          '--filter-platform', host], capture_output=True, text=True)
+    if out.returncode:
+        sys.exit(f'third-party-notices: cargo metadata failed (run `cargo fetch --locked` for the host '
+                 f'first):\n{out.stderr}')
+    return json.loads(out.stdout)
+
+
+def shipped(meta):
+    """The packages linked into ROOT_PACKAGE, sorted by name and version."""
+    packages = {p['id']: p for p in meta['packages']}
+    nodes = {n['id']: n for n in meta['resolve']['nodes']}
+    root = next(p['id'] for p in meta['packages']
+                if p['name'] == ROOT_PACKAGE and p['id'] in meta['workspace_members'])
+    seen, todo = set(), [root]
+    while todo:
+        node = nodes[todo.pop()]
+        for dep in node['deps']:
+            if not any(k['kind'] is None for k in dep['dep_kinds']):
+                continue
+            package = packages[dep['pkg']]
+            if any('proc-macro' in t['kind'] for t in package['targets']):
+                continue
+            if dep['pkg'] not in seen:
+                seen.add(dep['pkg'])
+                todo.append(dep['pkg'])
+    found = [packages[i] for i in seen if i not in meta['workspace_members']]
+    return sorted(found, key=lambda p: (p['name'], p['version']))
+
+
+def notice_files(package):
+    folder = Path(package['manifest_path']).parent
+    files = {}
+    for p in folder.rglob('*'):
+        inner = p.relative_to(folder).parts
+        if not p.is_file() or NOT_SHIPPED.intersection(part.lower() for part in inner[:-1]):
+            continue
+        if p.suffix.lower() in CODE:
+            continue
+        if NOTICE_FILE.match(p.name) or (len(inner) > 1 and inner[-2] == 'LICENSES'):
+            files['/'.join(inner)] = p
+    # A crate's `license-file` may sit below its root (crates.io keeps it inside the package).
+    named = folder / (package.get('license_file') or '')
+    if package.get('license_file') and named.is_file():
+        files.setdefault(package['license_file'], named)
+    return [(name, files[name].read_text(errors='replace')) for name in sorted(files)]
+
+
+def licence_texts(package):
+    """The canonical text of every licence a crate's SPDX expression names.
+
+    Old crates separate alternatives with `/`; `OR`, `AND` and parentheses only combine the ids.
+    """
+    expression = package.get('license')
+    if not expression:
+        raise LookupError(f"{package['name']} {package['version']} declares no licence and ships no licence file")
+    if re.search(r'\bWITH\b', expression):
+        raise LookupError(f"{package['name']} {package['version']}: no text for the exception in {expression!r}")
+    ids = [i for i in re.split(r'[()\s/]+', expression) if i and i not in ('OR', 'AND')]
+    found = []
+    for spdx_id in dict.fromkeys(ids):
+        path = SPDX / f'{spdx_id}.txt'
+        if not path.is_file():
+            raise LookupError(f"{package['name']} {package['version']}: no text for {spdx_id!r} "
+                              f'(add scripts/spdx/{spdx_id}.txt)')
+        found.append((f'SPDX {spdx_id}', path.read_text()))
+    return found
+
+
+def source(package):
+    if (package.get('source') or '').startswith('registry+'):
+        return f"https://crates.io/crates/{package['name']}/{package['version']}"
+    return package.get('repository') or package.get('source') or 'this repository'
+
+
+def render(packages):
+    texts, entries = {}, []
+    for package in packages:
+        refs, shipped = [], notice_files(package)
+        for name, text in shipped or licence_texts(package):
+            key = hashlib.sha256(text.strip().encode()).hexdigest()
+            number = texts.setdefault(key, (len(texts) + 1, text))[0]
+            refs.append(f'{name} (text {number})')
+        lines = [f"{package['name']} {package['version']}",
+                 f"  Licence: {package.get('license') or 'not declared'}",
+                 f'  Source: {source(package)}']
+        if package.get('repository'):
+            lines.append(f"  Repository: {package['repository']}")
+        lines.append(('  Files: ' if shipped else
+                      '  Files: none in the crate; the licence texts: ') + ', '.join(refs))
+        entries.append('\n'.join(lines))
+    head = ('Third-party notices for pinakesd\n\n'
+            'pinakesd is MIT-licensed (LICENSE in this directory). It is built from the crates below,\n'
+            'at the versions in its Cargo.lock. Each entry names the crate\'s declared licence, where\n'
+            'its source code is, and the licence and notice files it ships (for a crate that ships\n'
+            'none, the canonical SPDX texts of its declared licence); their texts follow the list,\n'
+            'each written once.\n')
+    body = '\n\n'.join(entries)
+    tail = '\n'.join(f"\n==== Text {number} ====\n\n{text.rstrip()}\n"
+                     for number, text in sorted(texts.values(), key=lambda t: t[0]))
+    return f'{head}\n{len(packages)} crates\n\n{body}\n{tail}'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('out')
+    parser.add_argument('--metadata')
+    args = parser.parse_args()
+    packages = shipped(metadata(args.metadata))
+    if not packages:
+        sys.exit('third-party-notices: no dependency of pinakesd found')
+    try:
+        notices = render(packages)
+    except LookupError as e:
+        sys.exit(f'third-party-notices: {e}')
+    Path(args.out).write_text(notices)
+
+
+if __name__ == '__main__':
+    main()

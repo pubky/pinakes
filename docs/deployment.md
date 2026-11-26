@@ -127,8 +127,12 @@ match `v*.*.*`. Rust is 1.98.1 in CI, in the image build and in `rust-toolchain.
 
 `scripts/ci/container-smoke` starts the release daemon and checks that `/v1/info` and
 `/v1/search?limit=1` answer, the ODbL dump downloads, the process runs as UID 10001, the health
-check passes, the image exposes only port 8090, and port 9090 is bound to loopback only. It needs
-no public provider and no test identity.
+check passes, the image exposes only port 8090, port 9090 is bound to loopback only, and the
+licence notices are in `/usr/share/doc/pinakes/`. It needs no public provider and no test identity.
+
+The image ships `/usr/share/doc/pinakes/`: Pinakes' `LICENSE`, the licences of the data sets built
+into the binary, and `THIRD-PARTY-NOTICES`, written at build time from the locked crates linked
+into `pinakesd` (`scripts/third-party-notices`).
 
 Pull request and `main` runs of this workflow don't log in to a registry, and their token can't
 write packages: only the two publishing jobs ask for `packages: write`. The workflow creates no
