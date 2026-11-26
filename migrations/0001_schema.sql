@@ -85,7 +85,7 @@ CREATE INDEX resource_category_idx ON resource USING btree (category);
 CREATE INDEX resource_catalogue_card_idx ON resource USING btree (catalogue_card) WHERE catalogue_card IS NOT NULL;
 -- The labels of the cards built from catalogue cards, which a search's `tags=` matches.
 CREATE INDEX resource_backed_labels_idx ON resource USING gin ((doc -> 'labels')) WHERE catalogue_card IS NOT NULL;
-CREATE INDEX resource_claim_priority_idx ON resource USING btree (resolver, priority_at DESC NULLS LAST, next_attempt_at) WHERE NOT dead_letter AND NOT final;
+CREATE INDEX resource_claim_order_idx ON resource USING btree (resolver, priority_at DESC NULLS LAST, (resolved_at IS NULL) DESC, next_attempt_at, id) WHERE NOT dead_letter AND NOT final;
 CREATE INDEX resource_geography_idx ON resource USING gist ((point::geography));
 CREATE INDEX resource_host_idx ON resource USING btree (host);
 CREATE INDEX resource_name_trgm_idx ON resource USING gin (name gin_trgm_ops);
