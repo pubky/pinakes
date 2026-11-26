@@ -1734,7 +1734,7 @@ tracking rule above), so a client can remove them before it writes a link:
 
 | Field | Meaning |
 | --- | --- |
-| `param` | The parameter's name, percent-decoded, in its letter case |
+| `param` | The parameter's name, percent-decoded, matched in its letter case (`FBCLID` is kept) |
 | `match` | `exact`: the name is `param`; `prefix`: the name starts with it (`utm_`) |
 | `hosts` | The hosts it tracks on, each with its subdomains; empty for every host |
 
@@ -1778,8 +1778,8 @@ Each entry is one identifier and what Pinakes answers for it:
   card's page and a source's page are aliases of the card's root ([Aliases](#aliases)). Open
   Library's ISBN page redirects to the edition with that ISBN when Open Library has one. The
   source's page may differ from the page the card's `open_in` names after a read (the Federal
-  Register's dated page
-  with its title, a Figshare portal's page, a Hugging Face repository in its own letter case);
+  Register's dated page with its title, a Figshare portal's page, a Hugging Face repository in
+  its own letter case);
   both are aliases of the same root. An LEI's page is its gleif.org address
   (`https://www.gleif.org/lei/{LEI}`), which redirects to the record page `open_in` names: that
   page names the LEI only in its fragment, which a link drops. A `%`, `?` or `#` in a DOI is

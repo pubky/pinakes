@@ -631,6 +631,18 @@ mod tests {
         ] {
             assert_eq!(r(uri), None, "{uri}");
         }
+        // A host matches with its subdomains only: never a lookalike or a longer name.
+        for uri in [
+            "https://evil-x.com/a?s=1",
+            "https://x.com.evil.org/a?s=1",
+            "https://netflix.com/a?s=1&t=2",
+        ] {
+            assert_eq!(untracked(uri), None, "{uri}");
+        }
+        assert_eq!(
+            untracked("https://x.com/a?s=1&lang=en").as_deref(),
+            Some("https://x.com/a?lang=en")
+        );
         // Every tracking parameter is dropped where it tracks (with another value kept), and a
         // host-scoped one is kept on any other host.
         for t in TRACKING {

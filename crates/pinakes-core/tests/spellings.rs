@@ -294,14 +294,23 @@ fn every_page_rule_has_vectors() {
 #[test]
 fn every_tracking_parameter_has_a_vector() {
     let file = file();
-    // A link `url` cannot parse (a vector of an invalid port, a non-web scheme) has none.
+    // A link's host and its parameters' names as `untracked` reads them: the raw query split at
+    // `&`, each name before its first `=`, percent-decoded. A link `url` cannot parse (a vector of
+    // an invalid port, a non-web scheme) has none.
     let params = |link: &str| -> Vec<(String, String)> {
         let Ok(u) = url::Url::parse(link) else {
             return vec![];
         };
         let host = u.host_str().unwrap_or_default().to_owned();
-        u.query_pairs()
-            .map(|(k, _)| (host.clone(), k.into_owned()))
+        u.query()
+            .unwrap_or_default()
+            .split('&')
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let name = p.split('=').next().unwrap_or_default();
+                let name = percent_encoding::percent_decode_str(name).decode_utf8_lossy();
+                (host.clone(), name.into_owned())
+            })
             .collect()
     };
     for t in alias::TRACKING {
@@ -317,14 +326,15 @@ fn every_tracking_parameter_has_a_vector() {
         assert!(shown, "no vector drops the tracking parameter {t:?}");
     }
     for v in file.vectors.iter().filter(|v| v.rule == "tracking") {
-        let kept = params(&v.root);
-        for (host, name) in params(&v.link) {
-            assert!(
-                kept.contains(&(host.clone(), name.clone()))
-                    || alias::TRACKING.iter().any(|t| t.matches(&host, &name)),
-                "{v:?}: drops {name}, no tracking parameter"
-            );
-        }
+        let kept: Vec<(String, String)> = params(&v.link)
+            .into_iter()
+            .filter(|(host, name)| !alias::TRACKING.iter().any(|t| t.matches(host, name)))
+            .collect();
+        assert_eq!(
+            kept,
+            params(&v.root),
+            "{v:?}: drops only tracking parameters"
+        );
     }
 }
 

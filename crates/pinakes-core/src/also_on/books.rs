@@ -99,7 +99,7 @@ fn named(uri: &str) -> Option<Book> {
         ["isbn", n] => {
             let page = n
                 .strip_suffix(".json")
-                .map_or_else(|| uri.to_owned(), cards::isbn_page);
+                .map_or_else(|| uri.to_owned(), |n| format!("{OPEN_LIBRARY}/isbn/{n}"));
             cards::isbn_of_page(&page).map(|n| Book::Isbn(cards::isbn13(&n)))
         }
         ["books", id, ..] => ol_id(id.strip_suffix(".json").unwrap_or(id), 'M').map(Book::Edition),
