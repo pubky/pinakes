@@ -229,6 +229,9 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
             return Some((page, Named::Source(source)));
         }
     }
+    // A MusicBrainz entity has one spelling here, as written (`release-group`), whatever forms the
+    // stored key accepts.
+    let given_entity = key.split(':').nth(1).map(str::to_owned);
     let key = crate::catalogue::stored_key(&key)?;
     let (kind, value) = key.split_once(':')?;
     let (page, rule) = match kind {
@@ -238,7 +241,8 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
         ),
         "mb" => {
             let (written, mbid) = value.split_once(':')?;
-            let kind = crate::hubs::MbKind::parse(written).filter(|k| k.as_str() == written)?;
+            let kind = crate::hubs::MbKind::parse(written)
+                .filter(|k| given_entity.as_deref() == Some(k.as_str()))?;
             let mbid = crate::hubs::mbid(mbid)?;
             (
                 crate::hubs::musicbrainz::entity_page(kind, &mbid),
