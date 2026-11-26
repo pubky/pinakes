@@ -4113,6 +4113,49 @@ mod tests {
         );
     }
 
+    /// A free turn goes to a client under its share (half the turns, at least one) before one past
+    /// it, while both wait; with nobody else waiting, the one past its share takes it. A waiting
+    /// search holds nothing.
+    #[tokio::test]
+    async fn turns_go_to_a_client_under_its_share_first() {
+        let turns = Turns::new(2);
+        let at = |a: &str| Some(share_key(a.parse().unwrap()));
+        let deadline = || tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let own = turns.take(at("2001:db8::1"), deadline()).await.unwrap();
+        let other = turns.take(None, deadline()).await.unwrap();
+        let past = {
+            let turns = turns.clone();
+            tokio::spawn(async move { turns.take(at("2001:db8::2"), deadline()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let under = {
+            let turns = turns.clone();
+            tokio::spawn(async move { turns.take(at("192.0.2.3"), deadline()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!past.is_finished() && !under.is_finished());
+        drop(other);
+        let turn = tokio::time::timeout(std::time::Duration::from_secs(10), under)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!past.is_finished(), "every turn is taken");
+        drop(turn);
+        let last = tokio::time::timeout(std::time::Duration::from_secs(10), past)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            last.is_ok(),
+            "alone, past its share, it takes the free turn"
+        );
+        drop(own);
+        let state = turns.state.lock().unwrap();
+        assert!(state.waiting.is_empty());
+    }
+
     /// A client's share is counted by its IPv4 address or its IPv6 address's /64; an IPv4 address
     /// written as IPv6 is that address.
     #[test]

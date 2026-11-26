@@ -831,8 +831,9 @@ async fn a_client_alone_takes_every_free_turn(pool: PgPool) {
     drop(held);
 }
 
-/// Past its share (half the turns, at least one), a client's search waits while another
-/// client's does: the other is answered first, then it (a turn free and nobody else waiting). A
+/// Past its share (half the turns, at least one), a client's search waits instead of answering
+/// 503 at once, and is answered once a turn is free, as another client's is (which of them takes
+/// a free turn first: `search_index::tests::turns_go_to_a_client_under_its_share_first`). A
 /// waiting search holds nothing: a turn of its own taken, it does not wait for its own search.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_client_past_its_share_waits_for_the_others(pool: PgPool) {
@@ -867,7 +868,7 @@ async fn a_client_past_its_share_waits_for_the_others(pool: PgPool) {
     assert!(!waiting.is_finished() && !another.is_finished());
     drop(other);
     let within = |task| tokio::time::timeout(Duration::from_secs(20), task);
-    assert_eq!(within(another).await.unwrap().unwrap(), (200, 0));
-    assert_eq!(within(waiting).await.unwrap().unwrap(), (200, 1));
+    assert_eq!(within(another).await.unwrap().unwrap().0, 200);
+    assert_eq!(within(waiting).await.unwrap().unwrap().0, 200);
     drop(own);
 }
