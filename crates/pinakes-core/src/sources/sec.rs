@@ -486,8 +486,8 @@ fn cik_of(value: &str) -> Option<u64> {
 }
 
 /// The card of an SRO release, from its link alone: a `Report` named by its release number. The
-/// Federal Register document that publishes it joins it through that source's also-on half,
-/// which finds it by its docket id.
+/// Federal Register's also-on half links it to the document that publishes it (found by its
+/// docket ids) as possibly the same, never by a key: joins never cross publishers.
 pub fn release_card(mut doc: ResourceMeta, release: &str, file: &str) -> ResourceMeta {
     doc.set_type("Report");
     doc.name = Some(format!("Release No. {release}"));

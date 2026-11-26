@@ -35,7 +35,7 @@
             ]
           },
           "kind": {
-            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`), or `maybe`: a match by metadata (artist, title, length), possibly the same\nthing, never by an exact ID; it joins no group.",
+            "description": "For a derived link, a qualifier (`archived`, `work`, `source`, `submitted`, `published`,\n`pdf`), or `maybe`: possibly the same thing, a match by metadata (artist, title, length)\nor another publisher's record naming it, never by the thing's own exact ID; it joins no\ngroup.",
             "type": [
               "string",
               "null"
