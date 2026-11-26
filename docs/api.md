@@ -159,8 +159,9 @@ card found in search does not open this way yet: its link and ID answer 404.
 - `uris`: links, each read as `by-uri` reads it, static alias rules included.
 
 A catalogue card nobody shared is answered by either list, as `by-uri` and
-`GET /v1/resources/{id}` answer it ([Catalogue cards](#catalogue-cards)). The answer lists the
-cards in request order. Duplicates are kept and unknown entries are skipped. Sending both lists, or neither, is a 400.
+`GET /v1/resources/{id}` answer it ([Catalogue cards](#catalogue-cards)), with a lookup card's
+`also_on` and `maybe_same`; one request answers at most 20 of them, and the entries past those
+are skipped. The answer lists the cards in request order. Duplicates are kept and unknown entries are skipped. Sending both lists, or neither, is a 400.
 
 ### Info
 
@@ -1123,7 +1124,7 @@ letters and digits; anything else, such as a URL, gets a general message. Other 
 | 400 | `collapse=group` while groups are off (`groups.enabled = false`) |
 | 501 | `reach=wot_2` or `boost=wot_2` on an instance whose Nexus serves no reach set |
 | 502 | Nexus failed, or did not answer in time, while reading a `reach` or `boost` set |
-| 503 | A text search found no free turn of the text index, or ran past its time ([Text search](#text-search)); `Retry-After` says when to ask again |
+| 503 | A text search found no free turn of the text index, ran past its time, or its client runs its share of turns already ([Text search](#text-search)); `Retry-After: 1` |
 
 ### Text search
 
@@ -1159,13 +1160,16 @@ distance. `q` matches like this:
 - A `q` of one character that is found inside names (a sign such as `(` or `€`, or a letter of
   Hebrew or Arabic) is matched in Postgres alone, as below.
 
-The index reads at most 32 items of `q` (words, phrases, words to leave out, `or`), proposes names
-by at most 64 of its three-letter pieces (the rarest), and expands the start of a word to at most
-10,000 words per index segment (those the most names hold); Postgres checks every candidate
-against the whole `q`. At most `limits.search_index_searches` text searches use the index at
-once (one per CPU core by default), and each has `limits.search_index_budget_ms` (2 s) for its
-index stage, its wait for a turn included. A search that finds no free turn within that time, or
-that runs past it, answers `503` with `Retry-After`; its work in the index stops there.
+The index reads at most 32 items of `q` (words, phrases, words to leave out, `or`) and a phrase by
+its first 8 words (by all its words, in any order, when every one is in more than 10,000 names and
+5% of the index), proposes names by at most 64 of its three-letter pieces (the rarest), and
+expands the start of a word to at most 1,000 words (of the first 20,000 per index segment in
+dictionary order, those the most names hold); Postgres checks every candidate against the whole
+`q`. At most `limits.search_index_searches` text searches use the index at once (one per CPU core
+by default), a quarter of them at most for one client address, and each has
+`limits.search_index_budget_ms` (2 s) for its index stage, its wait for a turn included. A search
+that finds no free turn within that time, runs past it, or whose client already runs its share,
+answers `503` with `Retry-After: 1`; its work in the index stops there.
 
 People's tags and catalogue labels add to a card's relevance but never match `q` alone. A post
 whose author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's
@@ -1225,7 +1229,8 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near` or
   `bbox`, those are the best known of the eight times `limits.search_text_candidates` cards
   nearest to the circle's centre (or to each box's centre) inside it, so a large area reads a
-  bounded number of cards; with `type`, the best known of each type and subtype;
+  bounded number of cards; with `type` (at most 32 types with their subtypes, and no `tags` or
+  `host`), the best known of each type and subtype merged;
 - a catalogue switched off leaves every search at once.
 
 ### Search by key

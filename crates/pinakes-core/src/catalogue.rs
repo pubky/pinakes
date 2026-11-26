@@ -381,22 +381,32 @@ pub fn label(raw: &str) -> Option<String> {
     }
     (!out.is_empty() && out.chars().count() <= LABEL_MAX_CHARS).then_some(out)
 }
-/// A format character (Unicode category Cf) that shows nothing, but the two joiners
-/// ([`joiner`]): a soft hyphen, the zero-width space, direction marks and overrides, word joiners,
-/// invisible operators, the byte order mark, interlinear annotation marks, tag characters. A label
-/// or name holding one looks like another (`jazz` and `jazz` with a zero-width space are two
-/// tags) or reads in another order (U+202E).
+/// A character that shows nothing, but the two joiners ([`joiner`]): the format characters
+/// (Unicode category Cf: a soft hyphen, the zero-width space, direction marks and overrides, word
+/// joiners, invisible operators, the byte order mark, interlinear annotation marks, tag
+/// characters) and the other default-ignorable ones (the combining grapheme joiner, variation
+/// selectors, the Hangul fillers, Khmer's inherent vowels). A label or name holding one looks like
+/// another (`jazz` and `jazz` with a zero-width space are two tags) or reads in another order
+/// (U+202E).
 pub fn invisible(c: char) -> bool {
     matches!(
         u32::from(c),
-        0x00AD
+        0x034F
+            | 0x115F..=0x1160
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x3164
+            | 0xFE00..=0xFE0F
+            | 0xFFA0
+            | 0xFFF0..=0xFFF8
+            | 0xE0000..=0xE0FFF
+            | 0x00AD
             | 0x0600..=0x0605
             | 0x061C
             | 0x06DD
             | 0x070F
             | 0x0890..=0x0891
             | 0x08E2
-            | 0x180E
             | 0x200B
             | 0x200E..=0x200F
             | 0x202A..=0x202E
@@ -409,8 +419,6 @@ pub fn invisible(c: char) -> bool {
             | 0x13430..=0x1343F
             | 0x1BCA0..=0x1BCA3
             | 0x1D173..=0x1D17A
-            | 0xE0001
-            | 0xE0020..=0xE007F
     )
 }
 /// ZWNJ and ZWJ: format characters a word is written with (Persian, the Indic scripts, emoji),
@@ -469,8 +477,8 @@ fn own_key(root: &str) -> String {
     format!("url:{}", crate::identity::resource_id(root))
 }
 /// A join key in the stored form: `kind:value`, the kind lower case (`wikidata`, `mb`, `isrc`,
-/// `osm`, `doi`, `url`), the value non-empty, no whitespace or control character, at most
-/// [`KEY_CAP`] bytes.
+/// `osm`, `doi`, `url`), the value non-empty, no whitespace, control or invisible character
+/// ([`invisible`]), at most [`KEY_CAP`] bytes.
 pub fn valid_key(key: &str) -> bool {
     let Some((kind, value)) = key.split_once(':') else {
         return false;
@@ -482,7 +490,9 @@ pub fn valid_key(key: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         && !value.is_empty()
-        && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || invisible(c) || joiner(c))
 }
 
 /// A key as it is stored: [`valid_key`], in the form a resource's keys take and a link's derived
@@ -672,7 +682,10 @@ impl Card {
         }
         if self.source_id.is_empty()
             || self.source_id.len() > KEY_CAP
-            || self.source_id.chars().any(char::is_control)
+            || self
+                .source_id
+                .chars()
+                .any(|c| c.is_control() || invisible(c) || joiner(c))
         {
             return Err(Reject::SourceId);
         }
@@ -687,6 +700,12 @@ impl Card {
             }
             _ => return Err(Reject::Uri),
         };
+        // A link a source of people's own posts reads (a post, a profile) is never built from a
+        // card (`join::social_link`), so it is no card's own link either: search would list a
+        // card that opens as nothing.
+        if join::social_link(&uri) {
+            return Err(Reject::Uri);
+        }
         // Stored by its bare name (`Person`, never `schema:Person`), as resources store theirs.
         let Some(r#type) = model::type_path(&self.r#type).pop() else {
             return Err(Reject::Type);

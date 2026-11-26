@@ -2136,9 +2136,11 @@ async fn a_social_link_a_card_names_is_fetched_from_its_first_reference(pool: Pg
     );
     assert_eq!(backed(&pool, &id).await.catalogue_card, None);
     assert!(catalogue_keys(&pool, &id).await.is_empty());
-    import(
+    // A card whose own link is such a link is refused: no card stands for it.
+    let report = store::upsert(
         &pool,
         Catalogue::Musicbrainz,
+        1,
         &[Card {
             source_id: "artist/x".into(),
             uri: profile.into(),
@@ -2146,13 +2148,80 @@ async fn a_social_link_a_card_names_is_fetched_from_its_first_reference(pool: Pg
             name: "Douglas Adams".into(),
             ..Default::default()
         }],
+        None,
     )
-    .await;
+    .await
+    .unwrap();
+    assert_eq!((report.inserted, report.rejected), (0, 1));
     let (own, _, _) = model::identity(profile).unwrap();
     assert_eq!(
         join::unshared(&pool, &cfg.catalogues, &own).await.unwrap(),
         None
     );
+}
+
+/// An event card that ties with another card of its catalogue (both hold the link's `url:`
+/// key) still leaves the link to neither: the tie is no join, and the event card backs nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_event_card_that_ties_with_another_still_makes_no_join(pool: PgPool) {
+    let cfg = queue_cfg();
+    let page = "https://example.org/the-festival";
+    let card = |id: &str, r#type: &str| Card {
+        source_id: id.into(),
+        uri: format!("https://en.wikipedia.org/wiki/{id}"),
+        r#type: r#type.into(),
+        name: id.into(),
+        keys: vec![link_key(page).unwrap()],
+        ..Default::default()
+    };
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card("Q1", "Festival"), card("Q2", "Organization")],
+    )
+    .await;
+    let id = tagged(&pool, page).await;
+    assert_eq!(
+        join::join(&pool, &cfg, &id, None).await.unwrap(),
+        join::Outcome::Nothing
+    );
+    assert_eq!(backed(&pool, &id).await.catalogue_card, None);
+}
+
+/// While a large removal is under way (more than a thousand join checks due), a link whose card
+/// is removed is read again within the hour, not all at once; a single removal gives it back due
+/// at once (`a_removed_card_or_a_catalogue_off_gives_the_link_back_to_fetching`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_large_removal_spreads_its_links_over_the_hour(pool: PgPool) {
+    let cfg = queue_cfg();
+    import(&pool, Catalogue::Wikidata, &[adams()]).await;
+    let ids = [tagged(&pool, ARTICLE).await, tagged(&pool, SPOTIFY).await];
+    join::referenced(&pool, &cfg, &ids).await;
+    // 1,001 other checks due.
+    sqlx::query("INSERT INTO resource(id,uri,host,resolver,name,doc,status) SELECT substr(md5('b'||n),1,32),'https://example.org/b/'||n,'example.org','web','B','{}'::jsonb,'ok' FROM generate_series(1,1001) n")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalogue_join_due(resource_id,due_at) SELECT substr(md5('b'||n),1,32),now()-interval '1 minute' FROM generate_series(1,1001) n")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::remove(&pool, Catalogue::Wikidata, &["Q42".to_owned()], None)
+        .await
+        .unwrap();
+    for id in &ids {
+        join::join(&pool, &cfg, id, None).await.unwrap();
+    }
+    let waits: Vec<f64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=ANY($1) AND catalogue_card IS NULL ORDER BY id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(waits.len(), 2);
+    assert!(waits.iter().all(|w| (0.0..3600.0).contains(w)), "{waits:?}");
+    assert!(waits.iter().any(|w| *w > 1.0), "{waits:?}");
 }
 
 /// A link built from a card of a catalogue that is dropped (its cards and state row deleted) goes
@@ -2228,4 +2297,34 @@ async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: Pg
     .await
     .unwrap();
     assert_eq!(left, [("musicbrainz".to_owned(), 700)]);
+}
+
+/// One lookup answers at most twenty catalogue cards nobody shared (the rest are skipped as
+/// unknown entries are), each with a lookup card's caps.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_lookup_answers_a_bounded_number_of_cards_nobody_shared(pool: PgPool) {
+    let cards: Vec<Card> = (1..=25)
+        .map(|n| Card {
+            source_id: format!("Q{n}"),
+            uri: format!("https://en.wikipedia.org/wiki/Item_{n}"),
+            r#type: "Thing".into(),
+            name: format!("Item {n}"),
+            ..Default::default()
+        })
+        .collect();
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let uris: Vec<String> = cards.iter().map(|c| c.uri.clone()).collect();
+    let (status, looked) = send(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({ "uris": uris })),
+    )
+    .await;
+    assert_eq!(status, 200, "{looked}");
+    let looked = looked.as_array().unwrap();
+    assert_eq!(looked.len(), api::LOOKUP_UNSHARED);
+    assert_eq!(looked[0]["name"], "Item 1");
+    assert_eq!(looked[19]["name"], "Item 20");
 }

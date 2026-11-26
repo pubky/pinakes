@@ -603,6 +603,15 @@ async fn catalogue_command(
             let states = store::states(pool).await?;
             writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
         }
+        CatalogueCommand::AllowShrink(catalogue) => {
+            if !store::allow_shrink(pool, catalogue).await? {
+                bail!("catalogue {catalogue} has no state yet: it has never run");
+            }
+            writeln!(
+                out,
+                "the next full import of catalogue {catalogue} removes the cards it does not read, whatever their share; a run that failed as shrunk goes through at its next try"
+            )?;
+        }
         CatalogueCommand::Drop(catalogue) => {
             let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
                 bail!("an importer of catalogue {catalogue} is running (a pinakesd started with it enabled): switch it off and restart that daemon, then drop");
@@ -884,6 +893,8 @@ enum CatalogueCommand {
         /// A `--limit` below the cards stored (`--force`).
         force: bool,
     },
+    /// `catalogue allow-shrink NAME`: the next full import may remove what it did not read.
+    AllowShrink(Catalogue),
 }
 /// How long `pinakesd healthcheck` waits for the admin listener's answer, all of it.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -943,14 +954,21 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 let what = args.next().unwrap_or_default();
                 catalogue = Some(match what.as_str() {
                     "status" => CatalogueCommand::Status,
-                    "drop" => {
-                        let name = args.next().context("catalogue drop requires a catalogue name")?;
-                        CatalogueCommand::Drop(Catalogue::parse(&name).with_context(|| {
+                    "drop" | "allow-shrink" => {
+                        let name = args
+                            .next()
+                            .with_context(|| format!("catalogue {what} requires a catalogue name"))?;
+                        let catalogue = Catalogue::parse(&name).with_context(|| {
                             format!(
                                 "unknown catalogue {name:?}: one of {}",
                                 Catalogue::ALL.map(Catalogue::name).join(", ")
                             )
-                        })?)
+                        })?;
+                        if what == "drop" {
+                            CatalogueCommand::Drop(catalogue)
+                        } else {
+                            CatalogueCommand::AllowShrink(catalogue)
+                        }
                     }
                     "import" => {
                         let name = args.next().context("catalogue import requires a catalogue name")?;
@@ -1001,7 +1019,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             force,
                         }
                     }
-                    _ => bail!("catalogue takes status, drop NAME or import NAME"),
+                    _ => bail!("catalogue takes status, drop NAME, import NAME or allow-shrink NAME"),
                 });
             }
             "--config" => {
@@ -1027,7 +1045,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | catalogue import NAME --request | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | catalogue import NAME --request | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -1147,6 +1165,11 @@ mod tests {
             command,
             Command::Catalogue(CatalogueCommand::Status)
         ));
+        let (_, command) = parse(&["catalogue", "allow-shrink", "musicbrainz"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::AllowShrink(Catalogue::Musicbrainz))
+        ));
         for bad in [
             &["reextract"][..],
             &["reextract", "nonsense"],
@@ -1156,6 +1179,7 @@ mod tests {
             &["catalogue"],
             &["catalogue", "drop"],
             &["catalogue", "drop", "wikipedia"],
+            &["catalogue", "allow-shrink"],
             &["catalogue", "list"],
             &["catalogue", "status", "--migrate"],
             &["catalogue", "status", "reextract", "all"],
@@ -1513,7 +1537,11 @@ mod tests {
                     std::process::id()
                 ))
             })
-            .find(|dir| std::fs::create_dir(dir).is_ok())
+            .find(|dir| match std::fs::create_dir(dir) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => panic!("{}: {error}", dir.display()),
+            })
             .unwrap();
         let mut config = Config::default();
         config.catalogues.dir = root.to_string_lossy().into_owned();

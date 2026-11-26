@@ -255,11 +255,18 @@ pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found
     let (fetched, cards): (Vec<CardRow>, Vec<CardRow>) = cards
         .into_iter()
         .partition(|c| FETCHED.contains(&c.catalogue.as_str()));
-    // A card typed as an event backs no link: an event keeps its own schedule and card.
-    let cards: Vec<CardRow> = cards.into_iter().filter(|c| !event_card(c)).collect();
+    // A card typed as an event backs no link (an event keeps its own schedule and card): the next
+    // card that holds it does. One that ties with another card of its catalogue still leaves the
+    // link to neither.
+    let card = match pick(cards.clone(), uri) {
+        Some(card) if event_card(&card) => {
+            pick(cards.into_iter().filter(|c| !event_card(c)).collect(), uri)
+        }
+        picked => picked,
+    };
     // So many cards hold the link that one of them may be missing: no join, unless one is the
     // card whose link it is.
-    let card = pick(cards, uri).filter(|c| !full || c.uri == uri);
+    let card = card.filter(|c| !full || c.uri == uri);
     // The cards that relate the link, at most 64 (`id+0`: read through the GIN index, never by
     // walking a catalogue in order); `related_keys` keeps one per catalogue.
     let mut related: Vec<(String, String)> = sqlx::query_as(
@@ -508,14 +515,22 @@ pub async fn join(
     }
     let Some(card) = found.card else {
         // Built from a catalogue that is off now, or dropped: its next read is spread over a day,
-        // as the start's sweep spreads them (no burst of fetches); a card removed upstream gives
-        // its link back at once.
-        let spread = !row.built_state
+        // as the start's sweep spreads them (no burst of fetches). A card removed upstream gives
+        // its link back at once, but while more than RELEASE_BURST checks are due (a large
+        // removal), within the hour.
+        let off = !row.built_state
             || row
                 .built_catalogue
                 .as_deref()
                 .is_some_and(|c| !cfg.catalogues.contains(&c));
-        let released = row.catalogue_card.is_some() && release(pool, id, spread).await?;
+        let when = if off {
+            Some(DAY)
+        } else if row.catalogue_card.is_some() && burst(pool).await? {
+            Some(HOUR)
+        } else {
+            None
+        };
+        let released = row.catalogue_card.is_some() && release(pool, id, when).await?;
         set_keys(pool, id, &row.keys, &found.related).await?;
         return Ok(if released {
             Outcome::Released
@@ -558,7 +573,7 @@ async fn build(
         // A card that makes no valid card: the link is fetched (a row built from an earlier
         // version of it goes back to the queue).
         crate::telemetry::catalogue_join(&card.catalogue, "invalid");
-        release(pool, id, false).await?;
+        release(pool, id, None).await?;
         set_keys(pool, id, &[], &[]).await.ok();
         return Ok(Outcome::Invalid);
     };
@@ -656,18 +671,20 @@ async fn build(
     }
     Ok(Outcome::Built)
 }
-/// Give a catalogue-backed resource back to the fetch queue: due now, or with `spread` at a time
-/// within the next day its ID picks (the start's sweep's spread), its catalogue's labels and mark
-/// taken off its card, which stays until the fetch replaces it. Whether it was backed.
-async fn release(pool: &PgPool, id: &str, spread: bool) -> Result<bool> {
+/// Give a catalogue-backed resource back to the fetch queue: due now, or with `within` (seconds)
+/// at a time within that span its ID picks (the start's sweep's spread over a day), its
+/// catalogue's labels and mark taken off its card, which stays until the fetch replaces it.
+/// Whether it was backed.
+async fn release(pool: &PgPool, id: &str, within: Option<i64>) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    let catalogue: Option<Option<String>> = sqlx::query_scalar(&format!(
-        "WITH old AS (SELECT id,doc#>>'{{catalogue,catalogue}}' AS catalogue FROM resource WHERE id=$1 AND catalogue_card IS NOT NULL FOR UPDATE)
-         UPDATE resource r SET catalogue_card=NULL,final=false,dead_letter=false,attempts=0,timeout_streak=0,refresh_at=CASE WHEN $2 THEN {SPREAD} ELSE now() END,next_attempt_at=CASE WHEN $2 THEN {SPREAD} ELSE now() END,priority_at=NULL,generation=r.generation+1
-         FROM old WHERE r.id=old.id RETURNING old.catalogue",
-    ))
+    let catalogue: Option<Option<String>> = sqlx::query_scalar(
+        "WITH old AS (SELECT id,doc#>>'{catalogue,catalogue}' AS catalogue FROM resource WHERE id=$1 AND catalogue_card IS NOT NULL FOR UPDATE),
+         due AS (SELECT CASE WHEN $2::bigint IS NULL THEN now() ELSE now()+(('x'||substr($1,1,8))::bit(32)::bigint%$2::bigint)*interval '1 second' END AS at)
+         UPDATE resource r SET catalogue_card=NULL,final=false,dead_letter=false,attempts=0,timeout_streak=0,refresh_at=due.at,next_attempt_at=due.at,priority_at=NULL,generation=r.generation+1
+         FROM old,due WHERE r.id=old.id RETURNING old.catalogue",
+    )
     .bind(id)
-    .bind(spread)
+    .bind(within)
     .fetch_optional(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM catalogue_extras WHERE resource_id=$1")
@@ -864,6 +881,22 @@ const SWEEP_ROWS: i64 = 1000;
 /// When a link given back by a catalogue switched off or dropped is read again: a time within the
 /// next day its resource ID picks, so the links of a large catalogue are not fetched at once.
 const SPREAD: &str = "now()+(('x'||substr(r.id,1,8))::bit(32)::bigint%86400)*interval '1 second'";
+/// A day and an hour, in seconds: the spans released links' next reads are spread over.
+const DAY: i64 = 86400;
+const HOUR: i64 = 3600;
+/// More join checks due than this is a large removal under way: the links it gives back are read
+/// again within the hour, not all at once.
+const RELEASE_BURST: i64 = 1000;
+/// Whether more than [`RELEASE_BURST`] join checks are due (read no further than that).
+async fn burst(pool: &PgPool) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM (SELECT 1 FROM catalogue_join_due WHERE due_at<=now() LIMIT $1) x",
+    )
+    .bind(RELEASE_BURST + 1)
+    .fetch_one(pool)
+    .await?
+        > RELEASE_BURST)
+}
 /// After the daemon's start, in the background, for the catalogues that are off and have ever been
 /// imported (a state row; OpenStreetMap is never joined): give every resource built from one of
 /// their cards back to the fetch queue, due at times spread over the next day (no burst of
@@ -928,9 +961,23 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
     // The related links' keys of those catalogues (`catalogue:<name>:…`): the catalogue keys in
     // the order of their index, a page at a time from where the last ended (never from the start
     // again), each page's keys of those catalogues deleted.
-    let prefixes: Vec<String> = off.iter().map(|c| format!("catalogue:{c}:")).collect();
+    let mut prefixes: Vec<String> = vec![];
+    for catalogue in &off {
+        // A first look from the prefix on: a catalogue whose keys are all gone (a later start)
+        // costs one read.
+        let prefix = format!("catalogue:{catalogue}:");
+        let first: Option<String> = sqlx::query_scalar(
+            "SELECT key FROM resource_key WHERE source='catalogue' AND key>=$1 ORDER BY key LIMIT 1",
+        )
+        .bind(&prefix)
+        .fetch_optional(pool)
+        .await?;
+        if first.is_some_and(|k| k.starts_with(&prefix)) {
+            prefixes.push(prefix);
+        }
+    }
     let mut after = (String::new(), String::new());
-    loop {
+    while !prefixes.is_empty() {
         let page: Vec<(String, String)> = sqlx::query_as(
             "SELECT key,resource_id FROM resource_key WHERE source='catalogue' AND key>=$1 AND (key,resource_id)>($1,$2) ORDER BY key,resource_id LIMIT $3",
         )
@@ -1224,7 +1271,7 @@ mod tests {
     /// knows, and a homepage key comes only from a `/` link without a query.
     #[test]
     fn any_link_gives_valid_stored_keys() {
-        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut state: u64 = super::super::testgen::seed("any link", 0x9e37_79b9_7f4a_7c15).max(1);
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;

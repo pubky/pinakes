@@ -98,10 +98,6 @@ impl AppState {
     pub fn new(pool: PgPool, mut config: Config) -> anyhow::Result<Self> {
         config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
         let config_catalogues = config.catalogues.enabled_names();
-        let search_bounds = (
-            config.search.index_searches,
-            std::time::Duration::from_millis(config.search.index_budget_ms),
-        );
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
         let metrics = Arc::new(crate::telemetry::Metrics::new()?);
@@ -127,7 +123,6 @@ impl AppState {
             search_index: {
                 let index = crate::search_index::SearchIndex::in_memory();
                 index.set_catalogues(&config_catalogues);
-                index.set_bounds(search_bounds.0, search_bounds.1);
                 index
             },
         })
@@ -2608,6 +2603,9 @@ async fn card_units(
 /// before it takes the best known of them: a place search reads a bounded number of cards however
 /// many lie in its circle or box.
 pub const NEAREST_CARDS: usize = 8;
+/// The most types (a type and its subtypes) a search without text reads in one ordered branch
+/// each ([`best_known_cards`]).
+const TYPE_BRANCHES: usize = 32;
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
 /// the filters let in, at most `cap`. Every read is bounded: with `near` or `bbox`, the
 /// [`NEAREST_CARDS`] times `cap` cards nearest to the circle's or each box's centre in it (through
@@ -2709,9 +2707,13 @@ async fn best_known_cards(
                 .push(")");
         }
         sql.push(") n");
-    } else if let Some(types) = &types {
+    } else if let Some(types) = types
+        .as_ref()
+        .filter(|t| t.len() <= TYPE_BRANCHES && tags.is_empty() && hosts.is_none())
+    {
         // The best known of each type, each in the `(type, fame, id)` index's order: merged in that
-        // order, the read stops after `cap` rows whatever the number of types.
+        // order, the read stops after `cap` rows. (With more types, or a label or host to match,
+        // the `fame` order with the filters, or the `labels` and host indexes, serve best.)
         for (i, t) in types.iter().enumerate() {
             if i > 0 {
                 sql.push(" UNION ALL ");
@@ -3252,11 +3254,12 @@ fn scope(
 /// seen a change never carries the revision that includes it.
 pub const REVISION: &str = "jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1))";
 
-#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResponse),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable"),(status=503,description="Text search is busy: the text index had no turn for the search, or the search ran past its time (`limits.search_index_budget_ms`)",headers(("Retry-After"=u64,description="Seconds to wait before asking again")))))]
+#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResponse),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable"),(status=503,description="Text search is busy: the text index had no turn for the search, the search ran past its time (`limits.search_index_budget_ms`), or its client runs its share of turns already",headers(("Retry-After"=u64,description="Seconds to wait before asking again: 1")))))]
 pub async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
     headers: HeaderMap,
+    client: Option<axum::Extension<ClientAddr>>,
 ) -> Result<Response, ApiError> {
     let tags = validate_search(&q)?;
     let key = q.key.as_deref().map(key_filter).transpose()?;
@@ -3398,15 +3401,26 @@ pub async fn search(
             } else {
                 state.config.search.text_candidates
             };
-            match state.search_index.candidates(&state.pool, query, cap).await {
+            let client = client.map(|axum::Extension(ClientAddr(ip))| ip);
+            match state
+                .search_index
+                .candidates_for(&state.pool, query, cap, client)
+                .await
+            {
                 Ok(found) => found,
-                // Every turn was taken for the search's whole budget, or it ran past it: a 503,
-                // not a read of Postgres, which the same load would hold up next.
+                // Every turn was taken for the search's whole budget, it ran past it, or its client
+                // runs its share of turns already: a 503, not a read of Postgres, which the same load
+                // would hold up next. Asked again a second later, a turn is likely free.
                 Err(error) if error.is::<crate::search_index::Busy>() => {
-                    return Err(ApiError(
+                    let mut response = ApiError(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "text search is busy, try again shortly".into(),
-                    ));
+                    )
+                    .into_response();
+                    response
+                        .headers_mut()
+                        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+                    return Ok(response);
                 }
                 Err(error) => {
                     tracing::warn!(error=%crate::resolver::log_error(&error),"text index unavailable; this search reads Postgres");
@@ -4247,6 +4261,22 @@ async fn read_unshared(
     id: &str,
     config: &Config,
 ) -> Result<Option<ResourceDetail>, ApiError> {
+    read_unshared_with(pool, id, config, UNSHARED_READ_CAPS).await
+}
+/// The caps of an unshared card's `maybe_same` and `also_on`: a read's (10 and 256) and a lookup
+/// card's (3 and 8), as for stored cards.
+const UNSHARED_READ_CAPS: (i64, i64) = (10, 256);
+const UNSHARED_LOOKUP_CAPS: (i64, i64) = (3, 8);
+/// The most catalogue cards nobody shared one lookup answers; the entries past them are skipped
+/// as unknown ones are.
+pub const LOOKUP_UNSHARED: usize = 20;
+/// [`read_unshared`] with `caps`: at most `caps.0` `maybe_same` and `caps.1` `also_on` entries.
+async fn read_unshared_with(
+    pool: &PgPool,
+    id: &str,
+    config: &Config,
+    caps: (i64, i64),
+) -> Result<Option<ResourceDetail>, ApiError> {
     let catalogues = crate::catalogue::join::joinable(&config.catalogues);
     let Some(card) = crate::catalogue::join::unshared(pool, &catalogues, id).await? else {
         return Ok(None);
@@ -4263,8 +4293,9 @@ async fn read_unshared(
     let member = crate::catalogue::join::member(pool, &card).await?;
     let value: Value = sqlx::query_scalar(&[
         "SELECT jsonb_build_object('id',$1::text,'uri',$5::text,'host',$6::text,'type',$7::text,'type_path',to_jsonb($2::text[]),'name',$8::text,'category',NULL,'doc',$9::jsonb,'resolver',NULL,'resolved_at',NULL,'refresh_at',NULL,'status','ok','osm_type',NULL,'osm_id',NULL)||jsonb_build_object('group',CASE WHEN $12 AND $11::text IS NOT NULL THEN group_hint($11) END,'maybe_same',",
-        &maybe_same_sql("$1::text", "$2::text[]", 10, "$3", "$4"),
-        ",'also_on',CASE WHEN $11::text IS NULL OR NOT $12 THEN '[]'::jsonb ELSE coalesce((SELECT jsonb_agg(e) FROM jsonb_array_elements(also_on((SELECT u.unit_id FROM group_unit u JOIN group_unit me ON me.group_id=u.group_id WHERE me.unit_id=$11 AND u.unit_id<>$11 AND u.group_id IS NOT NULL ORDER BY u.unit_id LIMIT 1),'',256,true)) e WHERE e->>'id'=$11),'[]'::jsonb)||also_on($11,'',256,$12) END,'aliases','[]'::jsonb,'keys',to_jsonb($10::text[]),'facts',NULL)",
+        &maybe_same_sql("$1::text", "$2::text[]", caps.0 as u32, "$3", "$4"),
+        // The member first, as another member lists it, then the member's own; `caps.1` in all.
+        &format!(",'also_on',CASE WHEN $11::text IS NULL OR NOT $12 THEN '[]'::jsonb ELSE (SELECT coalesce(jsonb_agg(e ORDER BY n),'[]'::jsonb) FROM (SELECT e,n FROM jsonb_array_elements(coalesce((SELECT jsonb_agg(e) FROM jsonb_array_elements(also_on((SELECT u.unit_id FROM group_unit u JOIN group_unit me ON me.group_id=u.group_id WHERE me.unit_id=$11 AND u.unit_id<>$11 AND u.group_id IS NOT NULL ORDER BY u.unit_id LIMIT 1),'',{0},true)) e WHERE e->>'id'=$11),'[]'::jsonb)||also_on($11,'',{0},$12)) WITH ORDINALITY AS a(e,n) ORDER BY n LIMIT {0}) x) END,'aliases','[]'::jsonb,'keys',to_jsonb($10::text[]),'facts',NULL)", caps.1),
     ]
     .concat())
     .bind(id)
@@ -4392,10 +4423,35 @@ pub async fn lookup(
         .collect::<Result<Vec<_>, ApiError>>()?;
     with_refs(&state.pool, cards.iter_mut().map(|(_, card)| card)).await?;
     // A catalogue card nobody shared answers as `by-uri` and `/v1/resources/{id}` answer it, in
-    // its place (nothing is stored); with no catalogue on, nothing is read for it.
-    for (n, id) in (1..).zip(&ids) {
-        if !found.contains(&n) {
-            if let Some(detail) = read_unshared(&state.pool, id, &state.config).await? {
+    // its place (nothing is stored), with a lookup card's caps; at most LOOKUP_UNSHARED of them
+    // (the rest are skipped as unknown entries are); with no catalogue on, nothing is read for
+    // them.
+    let missed: Vec<(i64, &String)> = (1..)
+        .zip(&ids)
+        .filter(|(n, _)| !found.contains(n))
+        .collect();
+    if !missed.is_empty() && !crate::catalogue::join::joinable(&state.config.catalogues).is_empty()
+    {
+        // The misses that are a card's own link, in one read; only those are built.
+        let wanted: Vec<String> = missed.iter().map(|(_, id)| format!("url:{id}")).collect();
+        let held: std::collections::HashSet<String> = sqlx::query_scalar(
+            "SELECT DISTINCT substr(k,5) FROM catalogue_card c CROSS JOIN LATERAL unnest(c.keys) k WHERE c.keys && $1 AND c.catalogue=ANY($2) AND k=ANY($1)",
+        )
+        .bind(&wanted)
+        .bind(crate::catalogue::join::joinable(&state.config.catalogues))
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .collect();
+        let mut read = 0;
+        for (n, id) in missed {
+            if read == LOOKUP_UNSHARED || !held.contains(id.as_str()) {
+                continue;
+            }
+            read += 1;
+            if let Some(detail) =
+                read_unshared_with(&state.pool, id, &state.config, UNSHARED_LOOKUP_CAPS).await?
+            {
                 cards.push((n, detail.card));
             }
         }

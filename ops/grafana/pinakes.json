@@ -407,11 +407,6 @@
           "refId": "A",
           "expr": "time() - pinakes_search_index_last_pass_timestamp_seconds and pinakes_search_index_last_pass_timestamp_seconds > 0",
           "legendFormat": "since last pass"
-        },
-        {
-          "refId": "B",
-          "expr": "pinakes_search_index_open",
-          "legendFormat": "open"
         }
       ],
       "fieldConfig": {
@@ -433,7 +428,7 @@
     },
     {
       "id": 11,
-      "title": "Text index queues and re-read",
+      "title": "Text index queues",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -449,12 +444,7 @@
         {
           "refId": "A",
           "expr": "pinakes_search_index_queue",
-          "legendFormat": "queue {{queue}}"
-        },
-        {
-          "refId": "B",
-          "expr": "pinakes_search_index_reread_cards > 0",
-          "legendFormat": "re-read {{catalogue}}"
+          "legendFormat": "{{queue}}"
         }
       ],
       "fieldConfig": {
@@ -462,7 +452,8 @@
           "min": 0,
           "color": {
             "mode": "palette-classic"
-          }
+          },
+          "unit": "short"
         },
         "overrides": []
       },
@@ -556,7 +547,7 @@
     },
     {
       "id": 14,
-      "title": "Catalogue join and extras backlog",
+      "title": "Catalogue join and extras checks due",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -572,12 +563,7 @@
         {
           "refId": "A",
           "expr": "pinakes_catalogue_backlog",
-          "legendFormat": "{{queue}} due"
-        },
-        {
-          "refId": "B",
-          "expr": "pinakes_catalogue_backlog_age_seconds",
-          "legendFormat": "{{queue}} oldest (s)"
+          "legendFormat": "{{queue}}"
         }
       ],
       "fieldConfig": {
@@ -585,7 +571,8 @@
           "min": 0,
           "color": {
             "mode": "palette-classic"
-          }
+          },
+          "unit": "short"
         },
         "overrides": []
       },
@@ -624,6 +611,82 @@
             "mode": "palette-classic"
           },
           "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Oldest catalogue check due",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pinakes_catalogue_backlog_age_seconds",
+          "legendFormat": "{{queue}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "title": "Text index: cards read again",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pinakes_search_index_reread_cards",
+          "legendFormat": "{{catalogue}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
         },
         "overrides": []
       },

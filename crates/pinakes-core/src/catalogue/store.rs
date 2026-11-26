@@ -63,9 +63,15 @@ pub struct State {
     pub upstream_version: Option<String>,
     pub last_import_at: Option<DateTime<Utc>>,
     pub last_update_at: Option<DateTime<Utc>>,
-    /// The scope of the last finished full import (`CataloguesConfig::scope`): a full import of
-    /// another scope may remove more cards than `run::SHRINK_FLOOR` lets one of the same scope.
+    /// The scope of the last finished full import (`CataloguesConfig::scope`): a full import of a
+    /// narrower scope may remove more cards than `run::SHRINK_FLOOR` lets one of the same scope.
     pub scope: Option<serde_json::Value>,
+    /// The cards the full import of `generation` has read so far (written, changed or stamped):
+    /// what `run::SHRINK_FLOOR` compares with `cards`.
+    pub generation_cards: i64,
+    /// The operator let the next full import remove the cards it did not read, whatever their
+    /// share (`pinakesd catalogue allow-shrink`); cleared when that import ends.
+    pub shrink_allowed: bool,
     /// Why an update asked for a full import (its importer's fixed words), until that import
     /// begins; none when none is asked for.
     pub import_requested: Option<String>,
@@ -282,15 +288,19 @@ async fn write_part(
         .map(|r| r.source_id.as_str())
         .filter(|id| !refused.iter().any(|r| r == id))
         .collect();
-    sqlx::query("UPDATE catalogue_card SET seen_generation=$2 WHERE catalogue=$1 AND source_id=ANY($3) AND seen_generation<$2")
+    let stamped = sqlx::query("UPDATE catalogue_card SET seen_generation=$2 WHERE catalogue=$1 AND source_id=ANY($3) AND seen_generation<$2")
         .bind(catalogue.name())
         .bind(generation)
         .bind(&ids)
         .execute(&mut **tx)
-        .await?;
-    sqlx::query("UPDATE catalogue_state SET cards=cards+$2,updated_at=now() WHERE catalogue=$1")
+        .await?
+        .rows_affected() as i64;
+    // The cards this generation has read: new ones, changed ones and stamped ones (a resumed run
+    // writing a part again counts its changed cards twice, never its unchanged ones).
+    sqlx::query("UPDATE catalogue_state SET cards=cards+$2,generation_cards=generation_cards+$3,updated_at=now() WHERE catalogue=$1")
         .bind(catalogue.name())
         .bind(inserted)
+        .bind(inserted + changed + stamped)
         .execute(&mut **tx)
         .await?;
     Ok(WriteReport {
@@ -350,6 +360,19 @@ pub async fn remove(
     Ok(removed)
 }
 
+/// Let the next full import of `catalogue` remove the cards it does not read, whatever their share
+/// of the catalogue (`pinakesd catalogue allow-shrink`): a run that failed `shrunk` then goes
+/// through at its next try. Whether the catalogue has a state row to set it on.
+pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE catalogue_state SET shrink_allowed=true,updated_at=now() WHERE catalogue=$1",
+    )
+    .bind(catalogue.name())
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0)
+}
 /// The end of a full import of `generation`: remove the cards of `catalogue` it did not read
 /// (`seen_generation` below it), so an item removed upstream leaves with the import that no
 /// longer finds it. Reads the catalogue's rows in `source_id` order, [`SWEEP_ROWS`] per
@@ -549,6 +572,8 @@ mod tests {
             last_update_at: None,
             current_as_of: Some("2026-11-23T00:00:00Z".parse().unwrap()),
             scope: None,
+            generation_cards: 0,
+            shrink_allowed: false,
             import_requested: None,
             waiting: None,
             last_error: Some("timed\nout".into()),
@@ -596,6 +621,8 @@ mod tests {
             last_update_at: None,
             current_as_of: None,
             scope: None,
+            generation_cards: 0,
+            shrink_allowed: false,
             import_requested: Some("the change stream is gone".into()),
             waiting: Some("osm's full import is under way".into()),
             last_error: None,

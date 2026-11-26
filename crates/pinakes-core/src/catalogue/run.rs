@@ -18,7 +18,8 @@
 //! - after a full import, removes the cards it did not read ([`store::finish_import`]), unless the
 //!   import read fewer than half the cards the catalogue holds ([`SHRINK_FLOOR`]): then the run
 //!   fails (`shrunk`) and removes nothing, until the importer says the drop is expected
-//!   ([`Job::expect_shrink`]) or the import's scope changed (`limit`, `region`,
+//!   ([`Job::expect_shrink`]), the operator allows it (`pinakesd catalogue allow-shrink`,
+//!   [`store::allow_shrink`]) or the import's scope is narrower (`limit`, `region`,
 //!   `min_citations`; [`CataloguesConfig::scope`](super::CataloguesConfig::scope));
 //! - keeps how current the cards are (`current_as_of`, the upstream data time the importer
 //!   states with [`Job::set_current_as_of`]), which the update lag metric measures.
@@ -684,7 +685,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         .await?;
         (state.generation, state.cursor.clone())
     } else {
-        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,generation_cards=CASE WHEN $2='import' THEN 0 ELSE generation_cards END,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(catalogue.name())
             .bind(run.name())
             .fetch_one(pool)
@@ -780,26 +781,40 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         // A full import that read far fewer cards than the catalogue holds (a dump cut at a clean
         // boundary, an empty answer, a filter gone wrong) removes nothing: it fails (`shrunk`) with
         // its cursor kept, and is tried again; it goes through once the importer says the drop is
-        // expected, or the import's scope (`limit`, `region`, `min_citations`) is another than the
-        // last finished import's.
-        let same_scope = job.state.scope.as_ref() == Some(&scope);
-        if same_scope && !job.shrink_expected && job.state.last_import_at.is_some() {
-            let (held, read): (i64, i64) = sqlx::query_as(
-                "SELECT (SELECT cards FROM catalogue_state WHERE catalogue=$1),(SELECT count(*) FROM catalogue_card WHERE catalogue=$1 AND seen_generation>=$2)",
-            )
-            .bind(catalogue.name())
-            .bind(generation)
-            .fetch_one(pool)
-            .await?;
-            if shrunk(held, read) {
+        // expected, the operator allows it (`pinakesd catalogue allow-shrink`), or the import's
+        // scope is narrower than the last finished import's (a lower `limit`, a higher
+        // `min_citations`, another `region`). No scope recorded counts as the same one.
+        let (held, read, allowed): (i64, i64, bool) = sqlx::query_as(
+            "SELECT cards,generation_cards,shrink_allowed FROM catalogue_state WHERE catalogue=$1",
+        )
+        .bind(catalogue.name())
+        .fetch_one(pool)
+        .await?;
+        let narrower = job
+            .state
+            .scope
+            .as_ref()
+            .is_some_and(|old| narrower(old, &scope));
+        let expected = job.shrink_expected || allowed || narrower;
+        if job.state.last_import_at.is_some() && shrunk(held, read) {
+            if !expected {
                 tracing::warn!(
                     catalogue = catalogue.name(),
                     held,
                     read,
-                    "catalogue full import read far fewer cards than the catalogue holds; nothing is removed"
+                    "catalogue full import read far fewer cards than the catalogue holds; nothing is removed (pinakesd catalogue allow-shrink lets the next try remove them)"
                 );
                 return Err(Failure::new("shrunk").into());
             }
+            tracing::warn!(
+                catalogue = catalogue.name(),
+                held,
+                read,
+                importer = job.shrink_expected,
+                operator = allowed,
+                narrower,
+                "catalogue full import removes the cards it did not read, more than half the catalogue"
+            );
         }
         report.removed += store::finish_import(pool, catalogue, generation).await?;
     }
@@ -809,7 +824,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
          import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,\
          last_update_at=CASE WHEN $2='update' THEN now() ELSE last_update_at END,\
          current_as_of=CASE WHEN $2='import' THEN coalesce($4,now()) ELSE coalesce($4,current_as_of) END,\
-         scope=CASE WHEN $2='import' THEN $5 ELSE scope END,\
+         scope=CASE WHEN $2='import' THEN $5 ELSE scope END,shrink_allowed=CASE WHEN $2='import' THEN false ELSE shrink_allowed END,\
          updated_at=now() WHERE catalogue=$1",
     )
     .bind(catalogue.name())
@@ -971,6 +986,22 @@ pub const SHRINK_FLOOR: f64 = 0.5;
 /// Whether a full import that read `read` of the `held` cards reads too few to remove the rest.
 fn shrunk(held: i64, read: i64) -> bool {
     (read as f64) < SHRINK_FLOOR * held as f64
+}
+/// Whether the scope `new` holds fewer items than `old` ([`CataloguesConfig::scope`](super::CataloguesConfig::scope)):
+/// a `limit` set or lowered, a higher `min_citations`, another `region` (which may be smaller).
+fn narrower(old: &serde_json::Value, new: &serde_json::Value) -> bool {
+    let limit = |v: &serde_json::Value| v.get("limit").map(|l| l.as_u64());
+    let narrower_limit = match (limit(old), limit(new)) {
+        (Some(None), Some(Some(_))) => true,
+        (Some(Some(was)), Some(Some(now))) => now < was,
+        _ => false,
+    };
+    let citations = |v: &serde_json::Value| v.get("min_citations").and_then(|c| c.as_u64());
+    let narrower_citations =
+        matches!((citations(old), citations(new)), (Some(was), Some(now)) if now > was);
+    let region = |v: &serde_json::Value| v.get("region").cloned();
+    let other_region = region(new).is_some() && region(old) != region(new);
+    narrower_limit || narrower_citations || other_region
 }
 /// The catalogue's lock was lost while a run went on (its session ended).
 #[derive(Debug)]

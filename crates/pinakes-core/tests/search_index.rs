@@ -69,9 +69,18 @@ fn ids_of(page: &Value) -> Vec<String> {
         .collect()
 }
 /// An index directory that does not exist yet, inside a new directory of this test's own
-/// (`common::unique_dir`).
-fn scratch(name: &str) -> PathBuf {
-    common::unique_dir(&format!("index-test-{name}")).join("index")
+/// (`common::unique_dir`), with a guard that removes that directory when the test ends, a panic
+/// included.
+fn scratch(name: &str) -> (PathBuf, Scratch) {
+    let root = common::unique_dir(&format!("index-test-{name}"));
+    (root.join("index"), Scratch(root))
+}
+/// Removes a test's scratch directory when dropped.
+struct Scratch(PathBuf);
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 fn query(text: &str, tags: &[&str]) -> TextQuery {
     TextQuery {
@@ -114,7 +123,7 @@ async fn within<F: std::future::Future<Output = bool>>(mut check: impl FnMut() -
 async fn the_disk_index_follows_writes_within_a_pass(pool: PgPool) {
     let aurora = card(&pool, 1, "Aurora", "Northern lights.", "sky", 1).await;
     card(&pool, 2, "Aurora borealis photos", "A gallery.", "sky", 2).await;
-    let dir = scratch("follows");
+    let (dir, _scratch) = scratch("follows");
     let index = SearchIndex::on_disk(&dir);
     let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
     state.search_index = index.clone();
@@ -315,7 +324,7 @@ async fn an_ordinary_pass_merges_nothing(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_index_of_another_database_is_rebuilt(pool: PgPool) {
     card(&pool, 1, "Aurora", "A page.", "sky", 1).await;
-    let dir = scratch("other-db");
+    let (dir, _scratch) = scratch("other-db");
     let run = |pool: PgPool| {
         let index = SearchIndex::on_disk(&dir);
         let passed = prometheus::IntGauge::new("passed", "test").unwrap();
@@ -337,7 +346,15 @@ async fn an_index_of_another_database_is_rebuilt(pool: PgPool) {
     task.await.unwrap();
     // A second database on the same cluster, with its own card; one left by a run that failed
     // is dropped first, and this one when the test ends, whatever happens.
-    let name = format!("pinakes_index_other_{}", std::process::id());
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).unwrap();
+    let name = format!(
+        "pinakes_index_other_{}",
+        random
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
     sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
         .execute(&pool)
         .await
@@ -501,7 +518,7 @@ async fn an_emptied_post_is_not_found_by_its_old_words(pool: PgPool) {
     for n in 3..60 {
         card(&pool, n, &format!("Sunset {n}"), "A page.", "sky", 1).await;
     }
-    let dir = scratch("emptied");
+    let (dir, _scratch) = scratch("emptied");
     let index = SearchIndex::on_disk(&dir);
     let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
     state.search_index = index.clone();
@@ -575,7 +592,7 @@ async fn a_closed_index_keeps_the_queue_short_and_no_partial_generation(pool: Pg
     };
     assert!(queued().await > 0);
     // A file where the directory should be: the index cannot be built.
-    let file = scratch("closed");
+    let (file, _scratch) = scratch("closed");
     std::fs::write(&file, "not a directory").unwrap();
     let index = SearchIndex::on_disk(&file);
     let passed = prometheus::IntGauge::new("passed", "test").unwrap();
@@ -595,7 +612,7 @@ async fn a_closed_index_keeps_the_queue_short_and_no_partial_generation(pool: Pg
     task.await.unwrap();
     let _ = std::fs::remove_file(&file);
 
-    let dir = scratch("partial");
+    let (dir, _scratch) = scratch("partial");
     std::fs::create_dir_all(dir.join("gen-5")).unwrap();
     std::fs::write(dir.join("CURRENT"), "gen-1\n").unwrap();
     // A database that goes away during the build.
@@ -620,7 +637,7 @@ async fn a_closed_index_keeps_the_queue_short_and_no_partial_generation(pool: Pg
 /// read: every card written meanwhile is found, and the queue ends empty.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_daemon_drains_the_queue_batch_after_batch(pool: PgPool) {
-    let dir = scratch("drain");
+    let (dir, _scratch) = scratch("drain");
     let index = SearchIndex::on_disk_with_batch(&dir, 2);
     let passed = prometheus::IntGauge::new("passed", "test").unwrap();
     let opened = prometheus::IntGauge::new("opened", "test").unwrap();
@@ -759,7 +776,7 @@ async fn passes_that_fail_from_the_start_leave_the_last_pass_at_the_open(pool: P
     .execute(&pool)
     .await
     .unwrap();
-    let dir = scratch("stalled");
+    let (dir, _scratch) = scratch("stalled");
     let index = SearchIndex::on_disk(&dir);
     let passed = prometheus::IntGauge::new("passed", "test").unwrap();
     let opened = prometheus::IntGauge::new("opened", "test").unwrap();
@@ -779,4 +796,27 @@ async fn passes_that_fail_from_the_start_leave_the_last_pass_at_the_open(pool: P
     stop.send(true).unwrap();
     task.await.unwrap();
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+/// One client holds at most a quarter of the turns (at least one) at once: past its share its
+/// text search answers 503 with `Retry-After: 1`, while another client's is answered.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_client_past_its_share_of_turns_is_busy_alone(pool: PgPool) {
+    card(&pool, 1, "Aurora", "Northern lights.", "sky", 1).await;
+    let index = SearchIndex::in_memory();
+    index.set_bounds(4, Duration::from_secs(30));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let shares = pinakes_core::telemetry::search_index_busy_count("share");
+    let held = index
+        .hold_share("127.0.0.2".parse().unwrap())
+        .expect("a share");
+    let (status, retry) = status_of(&app, "/v1/search?q=aurora").await;
+    assert_eq!((status, retry.as_deref()), (503, Some("1")));
+    assert!(pinakes_core::telemetry::search_index_busy_count("share") > shares);
+    let (status, _) = common::get_from(&app, "127.0.0.3:1234", "/v1/search?q=aurora").await;
+    assert_eq!(status, 200);
+    drop(held);
+    assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
 }

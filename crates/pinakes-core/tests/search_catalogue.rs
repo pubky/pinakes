@@ -1226,3 +1226,77 @@ async fn card_paths_by_host_activity_cursor_and_drop(pool: PgPool) {
     );
     assert_eq!(held.len(), 5);
 }
+
+/// A later full import of a catalogue the index has read reaches it through the queue and is not
+/// read again; a first import after a drop (its generation starts at 1 again) is read in full.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_later_import_is_not_read_again_but_a_first_one_after_a_drop_is(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Matterhorn", "Mountain", &[], None, 0.9)],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&["wikidata"]);
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=matterhorn").await),
+        ["Matterhorn"]
+    );
+    // A re-import: a new card and the old one gone, then its end.
+    sqlx::query("UPDATE catalogue_state SET run='import',generation=2 WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        2,
+        &[card(2, "Weisshorn", "Mountain", &[], None, 0.5)],
+        None,
+    )
+    .await
+    .unwrap();
+    store::finish_import(&pool, Catalogue::Wikidata, 2)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now()+interval '1 second' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=weisshorn").await),
+        ["Weisshorn"]
+    );
+    assert!(items(&common::get(&app, "/v1/search?q=matterhorn").await).is_empty());
+    common::get(&app, "/v1/search?q=weisshorn").await;
+    assert_eq!(index.rereads(), 0, "read through the queue, not again");
+    // Dropped while the index still holds it, then imported anew: generation 1 again.
+    store::drop_catalogue(&pool, Catalogue::Wikidata, |_| {})
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalogue_state(catalogue,run,phase,generation) VALUES('wikidata','import','import',1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        1,
+        &[card(3, "Dom", "Mountain", &[], None, 0.4)],
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now()+interval '2 seconds' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(names(&common::get(&app, "/v1/search?q=dom").await), ["Dom"]);
+    assert_eq!(index.rereads(), 1);
+    let held = index.documents();
+    assert_eq!(held.len(), 1, "only the new import's card: {held:?}");
+}

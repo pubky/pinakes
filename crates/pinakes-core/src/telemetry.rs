@@ -241,7 +241,7 @@ impl Metrics {
         for catalogue in crate::catalogue::Catalogue::ALL {
             SEARCH_INDEX_REREAD.with_label_values(&[catalogue.name()]);
         }
-        for reason in ["turn", "budget"] {
+        for reason in ["turn", "budget", "share"] {
             SEARCH_INDEX_BUSY.with_label_values(&[reason]);
         }
         for catalogue in crate::catalogue::Catalogue::ALL {
@@ -830,13 +830,13 @@ pub fn search_index_reread(catalogue: Option<&str>, read: u64) {
         }
     }
 }
-/// Text searches the text index answered 503, by why: no turn within the budget (`turn`), or
-/// the search ran past it (`budget`).
+/// Text searches the text index answered 503, by why: no turn within the budget (`turn`), the
+/// search ran past it (`budget`), or its client ran its share of turns already (`share`).
 static SEARCH_INDEX_BUSY: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
     IntCounterVec::new(
         Opts::new(
             "pinakes_search_index_busy_total",
-            "Text searches answered 503 because the text index was busy: no turn within the budget (turn) or past the budget (budget)",
+            "Text searches answered 503 because the text index was busy: no turn within the budget (turn), past the budget (budget), or the client's share of turns taken (share)",
         ),
         &["reason"],
     )

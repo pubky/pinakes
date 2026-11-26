@@ -23,6 +23,7 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue import NAME [--from DIR\|URL] [--limit N] [--update] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz` only in this version. |
 | `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
+| `pinakesd [--config PATH] catalogue allow-shrink NAME` | Lets the catalogue's next full import remove the cards it did not read, however many: a run that failed as `shrunk` goes through at its next try. Runs beside the daemon ([catalogues](#a-full-import-that-shrinks-the-catalogue)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
 | `pinakesd --openapi` | Prints the OpenAPI document. |
 | `pinakesd --help` | Prints the usage line. |
@@ -1720,17 +1721,22 @@ rebuild needs room for two generations, and a generation `CURRENT` doesn't name 
 a build. `pinakes_search_index_open` is 1 once the index is open, and
 `pinakes_search_index_last_pass_timestamp_seconds` is the open's time, then the last pass that read
 its queues without an error, so passes that fail from the start stall it ([alerts](#alerts)).
-`pinakes_search_index_queue{queue}` is the rows each queue holds (`resources`, `catalogue`), read
-at each metrics refresh.
+`pinakes_search_index_queue{queue}` is the span of sequence numbers each queue holds (`resources`,
+`catalogue`), read at each metrics refresh: the rows not read yet, or more where rows were read
+out of order.
 
 A text search waits for one of `limits.search_index_searches` turns (one per CPU core by
 default) and has `limits.search_index_budget_ms` (2 s) for its index stage, the wait included;
 the turn goes with the search, so one whose client has gone still holds it until it stops. Past
 the budget a search stops in the index and answers `503` ([API](api.md#text-search));
 `pinakes_search_index_busy_total{reason}` counts them (`turn`: no free turn in time; `budget`:
-past the budget), alert `TextSearchBusy`. A word's start expands to at most 10,000 words per
-segment, a text to 32 items and 64 three-letter pieces, and a text of one character found inside
-names is left to Postgres, so no search reads the index's whole dictionary.
+past the budget; `share`: its client address already runs a quarter of the turns), alert
+`TextSearchBusy`. Every word, word set and filter of a search checks the budget as it reads its
+lists, so a part that matches nothing for long stops too. A word's start expands to at most 1,000
+words in all (those the most names hold of the first 20,000 per segment in dictionary order), a
+text to 32 items, a phrase to its first 8 words (all of its words when every one is common), and
+64 three-letter pieces; a text of one character found inside names is left to Postgres, so no
+search reads the index's whole dictionary.
 
 ## Catalogues
 
@@ -1746,19 +1752,20 @@ this version, and hold no cards.
 | Field | Holds |
 | --- | --- |
 | `catalogue`, `source`, `source_id` | The catalogue, its sub-source (the registry for `software`, else the catalogue) and the item's ID there, unique per catalogue |
-| `uri` | The item's canonical link: an `http` or `https` link, normalized as a referenced link is and stored as its root by the spelling rules (`https://doi.org/10.1/X` as `doi:10.1/x`, a tracked link without its tracking parameters), as a resource of the same link is. A link of another scheme, or one that carries a credential as written (a password in it), is refused |
+| `uri` | The item's canonical link: an `http` or `https` link, normalized as a referenced link is and stored as its root by the spelling rules (`https://doi.org/10.1/X` as `doi:10.1/x`, a tracked link without its tracking parameters), as a resource of the same link is. A link of another scheme, one that carries a credential as written (a password in it), or a link of a source of people's own posts (a Bluesky profile, a Mastodon post) is refused |
 | `type` | The schema.org type, by its bare name (`Person`) |
 | `name`, `other_names`, `description` | Texts, without control characters or invisible format characters (a zero-width space, direction marks; names keep the joiners Persian and emoji are written with), each read up to four times its cap. An other name or a description that carries a credential is left out; a name that does refuses the card |
 | `labels` | The source's labels as valid Pubky tag labels: lower case, at most 20 characters, no spaces, commas, colons or invisible characters. A label that can't be made one (or whose text is over 256 bytes) is left out. |
-| `keys` | Join keys in the form a link's own key takes ([shared links](#shared-links-a-catalogue-holds)), whatever the importer's spelling: `wikidata:Q42`, `mb:<entity>:<mbid>` in lower case, `doi:` in lower case, `isbn:` as ISBN-13, `crate:` in lower case with `-` for `_` (`crate:serde-json` for `serde_json`), `arxiv:` without a version, `openalex:W…`, `homepage:` in lower case and punycode without `www.`; a key not valid in its kind is left out. Then the card's own link's `url:<resource id>`, and `url:<resource id>` for each link the catalogue itself names as the item (a Wikipedia sitelink, a MusicBrainz URL relation): such a link is built from the card ([shared links](#shared-links-a-catalogue-holds)), so an importer keys only links its catalogue vouches for |
+| `keys` | Join keys (no whitespace, control or invisible character) in the form a link's own key takes ([shared links](#shared-links-a-catalogue-holds)), whatever the importer's spelling: `wikidata:Q42`, `mb:<entity>:<mbid>` in lower case, `doi:` in lower case, `isbn:` as ISBN-13, `crate:` in lower case with `-` for `_` (`crate:serde-json` for `serde_json`), `arxiv:` without a version, `openalex:W…`, `homepage:` in lower case and punycode without `www.`; a key not valid in its kind is left out. Then the card's own link's `url:<resource id>`, and `url:<resource id>` for each link the catalogue itself names as the item (a Wikipedia sitelink, a MusicBrainz URL relation): such a link is built from the card ([shared links](#shared-links-a-catalogue-holds)), so an importer keys only links its catalogue vouches for |
 | `related_uris` | Links in the item's group that are not the item, such as an official website: `http` or `https` links, each stored as its root |
 | `point`, `fame`, `details` | A point, a 0–1 fame from the source's own signal, and the catalogue's own extras |
 
 `catalogue_state` holds one row per catalogue: its phase (`idle`, `import`, `update`, `failed`,
 `disabled`), the run under way and where it resumes, where the next update starts, its cards, the
 upstream version, when the last full import and update finished, how current its cards are
-(`current_as_of`: the upstream time of the data the last finished run left), why it waits, and its
-errors.
+(`current_as_of`: the upstream time of the data the last finished run left), why it waits, its
+errors, the last finished full import's scope (`scope`), the cards the full import under way has
+read (`generation_cards`) and an operator's allowance to shrink (`shrink_allowed`).
 
 ### Turn a catalogue off
 
@@ -1805,9 +1812,9 @@ before its catalogue was imported joins at its next refresh. A card holds a link
 | A Flathub app page | `flathub:<id>` |
 | A site's homepage (path `/`, no query) | `homepage:<host without www.>` |
 
-Two cards of one catalogue that hold a link equally join neither. A card typed as an event (an
-`Event` or one of its subtypes, such as a festival) backs no link: the next card that holds it
-does, or the link is fetched. A matching name or any other
+Two cards of one catalogue that hold a link equally join neither, an event card among them too. A
+card typed as an event (an `Event` or one of its subtypes, such as a festival) backs no link: the
+next card that holds it does, or the link is fetched. A matching name or any other
 metadata never joins. OpenStreetMap cards back no link, and an OpenStreetMap link keeps its OSM
 route. A Podcast Index card backs no link either: a show's feed is fetched for its episodes, and
 joins the card's group as a related link. An event (dated or not) and a calendar (the event
@@ -1834,8 +1841,9 @@ A catalogue-backed card:
   after the last read (`catalogue_extras`). A summary that carries a credential, or that would not
   fit the card, is not taken;
 - is built again when its card changes. When the card is removed upstream, or no longer holds
-  the link, the link goes back to the fetch queue: it is due at once and keeps its card until the
-  fetch replaces it. The references people made stay on the link.
+  the link, the link goes back to the fetch queue: it is due at once (within the hour while more
+  than 1,000 join checks are due, a large removal) and keeps its card until the fetch replaces it.
+  The references people made stay on the link.
 
 A card names the links it holds when it is written: its own link, its `url:` keys, the canonical
 link of each of its keys (`catalogue_key_links`: the musicbrainz.org entity and ISRC pages, wikidata.org, `doi:`,
@@ -1915,7 +1923,7 @@ is on (in this version: `musicbrainz`), and follows these rules:
 | Abandoned runs | An importer may abandon a run whose data can't be applied (MusicBrainz: a refused dump). The run is recorded as failed, but its cursor goes and no card is removed for it; what the importer keeps about the refusal stays in its position, and the task waits for something new rather than trying again. |
 | Requests | A finished full import clears `import_requested`, also one asked for while it ran. |
 | Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `shrunk`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
-| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, or when the import's scope is another than the last finished one's (`limit`, `region`, `min_citations`, kept in `catalogue_state.scope`). |
+| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, the operator allows it (`catalogue allow-shrink`, [below](#a-full-import-that-shrinks-the-catalogue)), or the import's scope is narrower than the last finished one's (a lower `limit`, a higher `min_citations`, another `region`; kept in `catalogue_state.scope`). |
 
 ### Allowed update lag
 
@@ -1931,6 +1939,19 @@ publication rhythm allows (`pinakes_catalogue_max_update_lag_seconds`, fixed per
 | `musicbrainz` | Dumps twice a week | 5 days |
 | `podcastindex` | A weekly database | 9 days |
 | `openalex` | A quarterly snapshot | 100 days |
+
+### A full import that shrinks the catalogue
+
+A full import that read fewer than half the cards the catalogue holds fails as `shrunk`, removes
+nothing and is tried again every ten minutes from its last cursor (`CatalogueImportFailed` fires;
+`catalogue status` shows `shrunk`). The catalogue's cards stay as they were.
+
+1. Check upstream: a cut-off or empty download, or a filter that let too little through, shows
+   in the importer's log lines.
+2. If upstream really holds that few items, run `pinakesd --config <path> catalogue allow-shrink
+   <name>`. The next try removes the cards it did not read, and the allowance is used up.
+3. A narrower scope (a lower `limit`, a higher `min_citations`, another `region`) needs no
+   allowance: its first full import removes the rest on its own.
 
 ### A large import that keeps failing
 

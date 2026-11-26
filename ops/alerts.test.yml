@@ -199,7 +199,7 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, instance: a, job: pinakes}
             exp_annotations:
-              summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches) or searches ran past limits.search_index_budget_ms"
+              summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches), searches ran past limits.search_index_budget_ms, or one client held its share of turns"
   # Refused cards: on a, 300 of 1,000 read an hour (fires); on b, 150 of 10,000 (a few, fires not).
   - interval: 1m
     input_series:

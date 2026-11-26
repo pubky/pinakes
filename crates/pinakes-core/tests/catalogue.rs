@@ -148,18 +148,22 @@ impl Importer for Fixture {
     }
 }
 
-/// A directory of a test's own, removed when it is dropped.
+/// A directory of a test's own (a new one with a random name: `create_dir` refuses one that
+/// exists), removed when it is dropped.
 struct TempDir(std::path::PathBuf);
 impl TempDir {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "pinakes-catalogue-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        loop {
+            let mut random = [0u8; 8];
+            getrandom::fill(&mut random).unwrap();
+            let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+            let dir = std::env::temp_dir().join(format!("pinakes-catalogue-test-{name}"));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Self(dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("{}: {e}", dir.display()),
+            }
+        }
     }
 }
 impl Drop for TempDir {
@@ -1533,6 +1537,54 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
         state(&pool, Catalogue::Wikidata).await.scope,
         Some(json!({"limit": 1}))
     );
+    // A wider scope (no `limit` again) is no reason: an import reading nothing fails again.
+    let none = Fixture::new(Catalogue::Wikidata, vec![]);
+    assert_eq!(
+        pinakes_core::catalogue::failure::shown(&run::step(&none, &ctx).await.unwrap_err()),
+        "shrunk"
+    );
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 1);
+    // The operator lets it through, once.
+    assert!(store::allow_shrink(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap());
+    assert!(state(&pool, Catalogue::Wikidata).await.shrink_allowed);
+    assert_eq!(run::step(&none, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 0);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert!(!s.shrink_allowed, "cleared by the import it let through");
+    assert!(!store::allow_shrink(&pool, Catalogue::Openalex)
+        .await
+        .unwrap());
+}
+
+/// No scope recorded (a state row from before scopes were kept) counts as the same scope: the
+/// floor holds. The count it compares is the import's own (`generation_cards`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_catalogue_without_a_recorded_scope_keeps_the_floor(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let sites: Vec<Card> = cards(8)
+        .into_iter()
+        .map(|mut c| {
+            c.source_id = c.source_id.replace('Q', "site-");
+            c
+        })
+        .collect();
+    let fixture = Fixture::new(Catalogue::Tranco, sites);
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(state(&pool, Catalogue::Tranco).await.generation_cards, 8);
+    sqlx::query("UPDATE catalogue_state SET scope=NULL WHERE catalogue='tranco'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    fixture.items.lock().unwrap().truncate(3);
+    *fixture.next.lock().unwrap() = Some(Run::Import);
+    assert_eq!(
+        pinakes_core::catalogue::failure::shown(&run::step(&fixture, &ctx).await.unwrap_err()),
+        "shrunk"
+    );
+    let s = state(&pool, Catalogue::Tranco).await;
+    assert_eq!((s.cards, s.generation_cards, s.generation), (8, 3, 2));
 }
 
 /// The search revision (search pages' ETags) moves with cards inserted, removed or changed, never
@@ -1578,14 +1630,10 @@ async fn only_changed_cards_move_the_search_revision_and_every_write_is_counted(
         .await
         .unwrap();
     assert_eq!(revision().await, inserted);
-    assert_eq!(
-        (
-            counted("inserted"),
-            counted("unchanged"),
-            counted("rejected")
-        ),
-        (before.0 + 5, before.1 + 5, before.2 + 1)
-    );
+    // Other tests of this binary write Tranco cards too: at least these.
+    assert!(counted("inserted") >= before.0 + 5);
+    assert!(counted("unchanged") >= before.1 + 5);
+    assert!(counted("rejected") > before.2);
     // A write that changes nothing moves nothing either; a changed card does.
     store::upsert(&pool, Catalogue::Tranco, 2, &cards[..1], None)
         .await

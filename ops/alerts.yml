@@ -18,7 +18,7 @@ groups:
         expr: sum by (instance, job) (increase(pinakes_search_index_busy_total[10m])) > 10
         for: 10m
         labels: {severity: warning}
-        annotations: {summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches) or searches ran past limits.search_index_budget_ms"}
+        annotations: {summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches), searches ran past limits.search_index_budget_ms, or one client held its share of turns"}
       - alert: MetricsMissing
         expr: absent(pinakes_ingest_last_success_timestamp_seconds)
         for: 5m

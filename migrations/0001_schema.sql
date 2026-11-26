@@ -1329,8 +1329,11 @@ CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 -- the last finished run left, which the update lag counts from), why an update asked for a full
 -- import (`import_requested`, until that import begins as a new one), why it waits (`waiting`:
 -- free disk, another large import), its errors, and the scope of its last finished full import
--- (`scope`: its `limit`, `region` or `min_citations`; a full import of the same scope that read
--- under half the cards fails instead of removing the rest).
+-- (`scope`: its `limit`, `region` or `min_citations`), the cards the full import of `generation`
+-- has read so far (`generation_cards`; one of the same or a wider scope that read under half the
+-- cards fails instead of removing the rest) and whether the operator let the next full import
+-- remove what it did not read whatever its share (`shrink_allowed`, `pinakesd catalogue
+-- allow-shrink`).
 -- `pinakesd catalogue drop` deletes the row with the cards.
 CREATE TABLE catalogue_state (
     catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
@@ -1349,7 +1352,9 @@ CREATE TABLE catalogue_state (
     last_error text,
     error_count bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_error_count_check CHECK (error_count >= 0),
     updated_at timestamp with time zone NOT NULL DEFAULT now(),
-    scope jsonb
+    scope jsonb,
+    generation_cards bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_generation_cards_check CHECK (generation_cards >= 0),
+    shrink_allowed boolean NOT NULL DEFAULT false
 );
 
 
@@ -1407,12 +1412,13 @@ CREATE TRIGGER catalogue_card_search_index_insert AFTER INSERT ON catalogue_card
 CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card FOR EACH ROW WHEN (OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.catalogue IS DISTINCT FROM NEW.catalogue) EXECUTE FUNCTION queue_search_index_catalogue_card();
 CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
 -- Search pages without text read the cards: their ETag moves when a card is inserted, removed, or
--- changes what a page shows (its point compared as bytes, so a dump restores the trigger), never
--- with a stamp or a write that changed nothing.
+-- changes what a page shows or how cards merge there (its content, keys and point; the point
+-- compared as bytes, so a dump restores the trigger), never with a stamp or a write that changed
+-- nothing.
 CREATE TRIGGER catalogue_card_revision_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_cards FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision_for_cards();
 CREATE TRIGGER catalogue_card_revision_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_cards FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision_for_cards();
 CREATE TRIGGER catalogue_card_revision_update AFTER UPDATE ON catalogue_card FOR EACH ROW
-    WHEN ((OLD.catalogue, OLD.uri, OLD.type, OLD.name, OLD.other_names, OLD.description, OLD.labels, OLD.fame) IS DISTINCT FROM (NEW.catalogue, NEW.uri, NEW.type, NEW.name, NEW.other_names, NEW.description, NEW.labels, NEW.fame)
+    WHEN ((OLD.content_hash, OLD.catalogue, OLD.source, OLD.uri, OLD.type, OLD.name, OLD.other_names, OLD.description, OLD.labels, OLD.keys, OLD.fame) IS DISTINCT FROM (NEW.content_hash, NEW.catalogue, NEW.source, NEW.uri, NEW.type, NEW.name, NEW.other_names, NEW.description, NEW.labels, NEW.keys, NEW.fame)
         OR OLD.point::bytea IS DISTINCT FROM NEW.point::bytea)
     EXECUTE FUNCTION bump_search_revision();
 CREATE TRIGGER catalogue_card_revision_truncate BEFORE TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();

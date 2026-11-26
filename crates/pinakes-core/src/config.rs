@@ -1447,10 +1447,14 @@ impl Config {
             || !(1.0..=200_000.0).contains(&self.search.max_radius_m)
             || !(50..=10_000).contains(&self.search.text_candidates)
             || !(1..=60).contains(&self.search.index_commit_secs)
-            || self.search.index_searches > 256
-            || !(100..=30_000).contains(&self.search.index_budget_ms)
         {
             bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
+        }
+        if self.search.index_searches > 256 {
+            bail!("limits.search_index_searches must be 0 (one per CPU core) to 256");
+        }
+        if !(100..=30_000).contains(&self.search.index_budget_ms) {
+            bail!("limits.search_index_budget_ms must be 100 to 30000");
         }
         // A search's reach reads share this one deadline (`Nexus::reach_by`). Reads that
         // outlast the request are a 504 where they would be the reach's own answer, and
