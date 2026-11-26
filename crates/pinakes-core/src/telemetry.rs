@@ -856,9 +856,9 @@ static CATALOGUE_CARDS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock
     IntCounterVec::new(
         Opts::new(
             "pinakes_catalogue_cards_total",
-            "Cards each catalogue's imports and updates wrote, by outcome: inserted, changed, unchanged (stamped only), rejected (refused as invalid) or removed",
+            "Cards each catalogue's imports and updates wrote, by result: inserted, changed, unchanged (stamped only), rejected (refused as invalid) or removed",
         ),
-        &["catalogue", "outcome"],
+        &["catalogue", "result"],
     )
     .expect("static metric")
 });

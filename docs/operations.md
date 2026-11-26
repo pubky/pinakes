@@ -1861,7 +1861,7 @@ catalogue off nothing is looked up.
 | `pinakes_catalogue_join_errors_total{stage}` | Failed joins (`referenced`, `before_fetch`, `drain`) and extras reads (`extras`), each tried again; `CatalogueJoinErrors` past ten joins an hour for an hour |
 | `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Join checks (`joins`) and extras reads (`extras`) due now, and the oldest one's wait; `CatalogueJoinsBehind` past six hours of joins. Extras follow Wikipedia's pace (a request a second at most), so after a first import they lag for hours by design |
 | `pinakes_catalogue_join_errors_total{stage="extras"}` | Also counts a summary Wikipedia didn't answer. A check that keeps failing backs off (to an hour for joins, a day for extras) and waits outside the backlog |
-| `pinakes_catalogue_cards_total{catalogue,outcome}` | The cards each catalogue's writes read: `inserted`, `changed`, `unchanged` (stamped only), `rejected` (refused as invalid) and `removed`; `CatalogueCardsRejected` past a tenth refused in an hour, `CatalogueCardsRemoved` past a tenth of the catalogue removed in a day |
+| `pinakes_catalogue_cards_total{catalogue,result}` | The cards each catalogue's writes read: `inserted`, `changed`, `unchanged` (stamped only), `rejected` (refused as invalid) and `removed`; `CatalogueCardsRejected` past a tenth refused in an hour, `CatalogueCardsRemoved` past a tenth of the catalogue removed in a day |
 
 To see the queues: `SELECT count(*), count(*) FILTER (WHERE due_at<=now()) AS due, min(due_at),
 max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, whose rows without a
