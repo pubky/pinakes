@@ -1500,7 +1500,21 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn the_drop_command_takes_the_lock_and_removes_the_directory(pool: sqlx::PgPool) {
         use pinakes_core::catalogue::{run::SessionLock, store, Card};
-        let root = std::env::temp_dir().join(format!("pinakesd-drop-test-{}", std::process::id()));
+        // A directory of the test's own: `create_dir` refuses one that exists (a name another
+        // user made first, or a link), and another name is tried.
+        let root = (0u32..)
+            .map(|n| {
+                let at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                std::env::temp_dir().join(format!(
+                    "pinakesd-drop-test-{}-{at}-{n}",
+                    std::process::id()
+                ))
+            })
+            .find(|dir| std::fs::create_dir(dir).is_ok())
+            .unwrap();
         let mut config = Config::default();
         config.catalogues.dir = root.to_string_lossy().into_owned();
         config.catalogues.wikidata.enabled = false;

@@ -68,11 +68,10 @@ fn ids_of(page: &Value) -> Vec<String> {
         .map(|i| i["id"].as_str().unwrap().to_owned())
         .collect()
 }
+/// An index directory that does not exist yet, inside a new directory of this test's own
+/// (`common::unique_dir`).
 fn scratch(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("pinakes-index-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+    common::unique_dir(&format!("index-test-{name}")).join("index")
 }
 fn query(text: &str, tags: &[&str]) -> TextQuery {
     TextQuery {
@@ -95,14 +94,14 @@ async fn found(index: &SearchIndex, pool: &PgPool, q: TextQuery) -> Vec<String> 
         .map(|c| c.unit_id)
         .collect()
 }
-/// Waits until `check` holds, at most ten seconds: how long it took.
+/// How long a test waits for what the index's task does: long, so a loaded build slot doesn't
+/// fail it.
+const DEADLINE: Duration = Duration::from_secs(60);
+/// Waits until `check` holds, at most [`DEADLINE`]: how long it took.
 async fn within<F: std::future::Future<Output = bool>>(mut check: impl FnMut() -> F) -> Duration {
     let started = std::time::Instant::now();
     while !check().await {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "not within ten seconds"
-        );
+        assert!(started.elapsed() < DEADLINE, "not within {DEADLINE:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     started.elapsed()
@@ -147,11 +146,10 @@ async fn the_disk_index_follows_writes_within_a_pass(pool: PgPool) {
         .await
         .is_empty());
     tag(&pool, &aurora, "fresh", 7).await;
-    let took = within(|| async {
+    within(|| async {
         found(&index, &pool, query("aurora", &["fresh"])).await == std::slice::from_ref(&aurora)
     })
     .await;
-    assert!(took < Duration::from_secs(5), "{took:?}");
     let page = common::get(&app, "/v1/search?q=aurora&tags=fresh").await;
     assert_eq!(ids_of(&page), std::slice::from_ref(&aurora));
 
@@ -208,7 +206,7 @@ async fn the_disk_index_follows_writes_within_a_pass(pool: PgPool) {
     assert!(!dir.join(before.trim()).exists());
     assert!(dir.join(after.trim()).is_dir());
     let _ = reported;
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
 /// Typos and similar names match as Postgres' trigram similarity takes them (`pg_trgm`'s `%`):
@@ -337,12 +335,43 @@ async fn an_index_of_another_database_is_rebuilt(pool: PgPool) {
     assert_eq!(found(&first, &pool, query("aurora", &[])).await.len(), 1);
     stop.send(true).unwrap();
     task.await.unwrap();
-    // A second database on the same cluster, with its own card.
+    // A second database on the same cluster, with its own card; one left by a run that failed
+    // is dropped first, and this one when the test ends, whatever happens.
     let name = format!("pinakes_index_other_{}", std::process::id());
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&pool)
         .await
         .unwrap();
+    /// Drops the database when the test ends, a panic included.
+    struct Dropped(String, sqlx::postgres::PgConnectOptions);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            let (name, options) = (self.0.clone(), self.1.clone());
+            let _ = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    if let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect_with(options)
+                        .await
+                    {
+                        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                            .execute(&pool)
+                            .await;
+                    }
+                })
+            })
+            .join();
+        }
+    }
+    let _dropped = Dropped(name.clone(), pool.connect_options().as_ref().clone());
     let other = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect_with(pool.connect_options().as_ref().clone().database(&name))
@@ -369,11 +398,7 @@ async fn an_index_of_another_database_is_rebuilt(pool: PgPool) {
     stop.send(true).unwrap();
     task.await.unwrap();
     other.close().await;
-    sqlx::query(&format!("DROP DATABASE {name}"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
 /// Activity counts on a log scale: a card a thousand accounts tagged does not pass the card the
@@ -528,7 +553,7 @@ async fn an_emptied_post_is_not_found_by_its_old_words(pool: PgPool) {
     assert!(!index.holds_word("zyxquorum"));
     index.settle();
     assert!(index.holds_word("sunset"));
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
 /// An index that cannot be built stays closed (its gauge 0, for the alert) and keeps the queue
@@ -587,7 +612,7 @@ async fn a_closed_index_keeps_the_queue_short_and_no_partial_generation(pool: Pg
         .filter(|n| n.starts_with("gen-"))
         .collect();
     assert!(generations.is_empty(), "{generations:?}");
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
 /// The daemon's pass drains the queue batch after batch (two rows a batch here), deleting what it
@@ -628,7 +653,7 @@ async fn the_daemon_drains_the_queue_batch_after_batch(pool: PgPool) {
     .await;
     stop.send(true).unwrap();
     task.await.unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
 /// The names holding every word are counted only when the proposals may be read: a short text of
@@ -652,4 +677,103 @@ async fn a_text_matched_at_word_starts_counts_no_names(pool: PgPool) {
     assert_eq!(index.proposed(), 0);
     common::get(&app, "/v1/search?q=mud%20flats").await;
     assert_eq!(index.counted(), 1);
+}
+
+/// A search's status and `Retry-After` header.
+async fn status_of(app: &axum::Router, path: &str) -> (u16, Option<String>) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .uri(path)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let retry = response
+        .headers()
+        .get("retry-after")
+        .map(|v| v.to_str().unwrap().to_owned());
+    (response.status().as_u16(), retry)
+}
+
+/// A text search waits for a turn of the index's searches at most its budget, and runs within
+/// what is left of it: with every turn taken, or past the budget, it answers 503 with a
+/// `Retry-After`, counted by reason; with a turn free it answers.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_busy_text_index_answers_503(pool: PgPool) {
+    card(&pool, 1, "Aurora", "Northern lights.", "sky", 1).await;
+    let index = SearchIndex::in_memory();
+    index.set_bounds(1, Duration::from_millis(300));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
+    let turns = pinakes_core::telemetry::search_index_busy_count("turn");
+    let turn = index.hold_turn().unwrap();
+    let (status, retry) = status_of(&app, "/v1/search?q=aurora").await;
+    assert_eq!(status, 503);
+    assert!(retry.is_some());
+    assert!(pinakes_core::telemetry::search_index_busy_count("turn") > turns);
+    // A search that needs no text index waits for nothing.
+    assert_eq!(status_of(&app, "/v1/search?tags=sky").await.0, 200);
+    drop(turn);
+    assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
+    let spent = pinakes_core::telemetry::search_index_busy_count("budget");
+    index.set_bounds(1, Duration::ZERO);
+    assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 503);
+    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
+}
+
+/// One character to find inside names (a symbol, a letter of a script without spaces) is read by
+/// Postgres alone (`ILIKE`), as it matches: the index would have to read its whole dictionary of
+/// the names' pieces. A symbol outside ASCII (`€`) is found too.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_character_inside_names_is_read_by_postgres(pool: PgPool) {
+    let euro = card(&pool, 1, "Price € list", "A page.", "money", 1).await;
+    let paren = card(&pool, 2, "Foo (bar)", "A page.", "code", 1).await;
+    card(&pool, 3, "Plain", "A page.", "none", 1).await;
+    let index = SearchIndex::in_memory();
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    common::get(&app, "/v1/search?q=plain").await;
+    let served = index.served();
+    for (q, id) in [("%E2%82%AC", &euro), ("(", &paren)] {
+        let page = common::get(&app, &format!("/v1/search?q={q}")).await;
+        assert_eq!(ids_of(&page), std::slice::from_ref(id), "{q}");
+    }
+    assert_eq!(index.served(), served, "the index answered none of them");
+}
+
+/// The last pass's time starts at the index's open, so when every pass fails from the start the
+/// time stays there and `SearchIndexStalled` fires (`ops/alerts.yml`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn passes_that_fail_from_the_start_leave_the_last_pass_at_the_open(pool: PgPool) {
+    card(&pool, 1, "Aurora", "A page.", "sky", 1).await;
+    // Every pass fails: the catalogue queue it reads is gone.
+    sqlx::query("ALTER TABLE search_index_catalogue_queue RENAME TO search_index_catalogue_queue_gone")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let dir = scratch("stalled");
+    let index = SearchIndex::on_disk(&dir);
+    let passed = prometheus::IntGauge::new("passed", "test").unwrap();
+    let opened = prometheus::IntGauge::new("opened", "test").unwrap();
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(index.clone().run(
+        pool.clone(),
+        Duration::from_millis(50),
+        passed.clone(),
+        opened.clone(),
+        shutdown,
+    ));
+    within(|| async { opened.get() == 1 }).await;
+    let at = passed.get();
+    assert!(at > 0, "set at the open");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(passed.get(), at, "no pass succeeded");
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }

@@ -49,6 +49,8 @@ struct Fixture {
     panic_once: AtomicBool,
     /// Fail once, in the next import, when its gate opens.
     fail_at_gate: AtomicBool,
+    /// Say the next import may read far fewer cards than the catalogue holds.
+    expect_shrink: AtomicBool,
     need: u64,
 }
 impl Fixture {
@@ -67,6 +69,7 @@ impl Fixture {
             current: Mutex::default(),
             panic_once: AtomicBool::new(false),
             fail_at_gate: AtomicBool::new(false),
+            expect_shrink: AtomicBool::new(false),
             need: 1000,
         }
     }
@@ -92,6 +95,9 @@ impl Importer for Fixture {
             .push(job.cursor().cloned());
         if self.panic_once.swap(false, Ordering::SeqCst) {
             panic!("the fixture importer panicked");
+        }
+        if self.expect_shrink.swap(false, Ordering::SeqCst) {
+            job.expect_shrink();
         }
         let start = job.cursor().and_then(|c| c["next"].as_u64()).unwrap_or(0) as usize;
         let items = self.items.lock().unwrap().clone();
@@ -1427,4 +1433,164 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
     assert_eq!(needs(&metrics), 0);
+/// A failure the importer meets once the catalogue lock's session has ended too (a database
+/// restart ends every session, and the large-import turn's watch may see it first) is not written
+/// to the state row, which may be another daemon's by then: only logged, as a lost lock is. The
+/// task takes the lock again and resumes from the cursor.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failure_after_the_catalogue_lock_is_gone_is_not_recorded(pool: PgPool) {
+    let (mut ctx, _dir) = context(&pool, plenty());
+    // The lock's own watch checks rarely here: the failure comes first.
+    ctx.pace.lock_check = Duration::from_secs(30);
+    let mut fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    *fixture.fail_after.lock().unwrap() = Some(1);
+    let fixture = Arc::new(fixture);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    let ended: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+    )
+    .bind(Catalogue::Wikidata.lock_key())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(ended);
+    // The importer now fails (the dump breaks off), with the lock already gone.
+    gate.notify_one();
+    until("the resumed run", || async {
+        fixture.started_from.lock().unwrap().len() == 2
+    })
+    .await;
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.last_error), (0, None));
+    gate.notify_one();
+    until("the resumed import", || async {
+        state(&pool, Catalogue::Wikidata)
+            .await
+            .last_import_at
+            .is_some()
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.cards, s.error_count), (25, 0));
+}
+
+/// A full import that reads under half the cards the catalogue holds (a dump cut at a clean
+/// boundary, an empty answer) removes nothing: it fails (`shrunk`) with its cursor kept, and the
+/// next try fails again. It goes through when the importer says the drop is expected, or when the
+/// import's scope (here Wikidata's `limit`) is another than the last finished import's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(s.scope, Some(json!({"limit": null})));
+    let removed = pinakes_core::telemetry::catalogue_cards_counted("wikidata", "removed");
+    // The dump now holds 12 of the 25 (just under half).
+    fixture.items.lock().unwrap().truncate(12);
+    for _ in 0..2 {
+        *fixture.next.lock().unwrap() = Some(Run::Import);
+        let failed = run::step(&fixture, &ctx).await.unwrap_err();
+        assert_eq!(
+            pinakes_core::catalogue::failure::shown(&failed),
+            "shrunk"
+        );
+        assert_eq!(count(&pool, Catalogue::Wikidata).await, 25);
+        let s = state(&pool, Catalogue::Wikidata).await;
+        assert_eq!((s.run.as_deref(), s.cards), (Some("import"), 25));
+        assert!(s.cursor.is_some(), "the cursor is kept");
+    }
+    // The run resumes with a 13th card: 13 of 25 is not under half, and the rest is removed.
+    let again = Fixture::new(Catalogue::Wikidata, cards(13));
+    assert_eq!(run::step(&again, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 13);
+    // The importer says the drop is expected: 3 of 13 goes through.
+    let fewer = Fixture::new(Catalogue::Wikidata, cards(3));
+    fewer.expect_shrink.store(true, Ordering::SeqCst);
+    assert_eq!(run::step(&fewer, &ctx).await.unwrap(), Next::Again);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 3);
+    assert!(
+        pinakes_core::telemetry::catalogue_cards_counted("wikidata", "removed") >= removed + 22
+    );
+    // Another scope (a `limit` now): 1 of 3 goes through too, and the new scope is kept.
+    let mut config = (*ctx.config).clone();
+    config.catalogues.wikidata.limit = Some(1);
+    let limited = Context {
+        config: Arc::new(config),
+        ..ctx.clone()
+    };
+    let one = Fixture::new(Catalogue::Wikidata, cards(1));
+    assert_eq!(run::step(&one, &limited).await.unwrap(), Next::Again);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 1);
+    assert_eq!(
+        state(&pool, Catalogue::Wikidata).await.scope,
+        Some(json!({"limit": 1}))
+    );
+}
+
+/// The search revision (search pages' ETags) moves with cards inserted, removed or changed, never
+/// with a re-import that only stamps unchanged cards; every write is counted by outcome
+/// (`pinakes_catalogue_cards_total`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn only_changed_cards_move_the_search_revision_and_every_write_is_counted(pool: PgPool) {
+    let revision = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT revision FROM search_revision")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let counted = |outcome| pinakes_core::telemetry::catalogue_cards_counted("tranco", outcome);
+    let before = (counted("inserted"), counted("unchanged"), counted("rejected"));
+    let mut invalid = card(99);
+    invalid.uri = "javascript:alert(1)".into();
+    let mut cards: Vec<Card> = cards(5);
+    for c in &mut cards {
+        c.source_id = c.source_id.replace('Q', "site-");
+    }
+    let first = revision().await;
+    store::upsert(&pool, Catalogue::Tranco, 1, &[cards.clone(), vec![invalid]].concat(), None)
+        .await
+        .unwrap();
+    let inserted = revision().await;
+    assert!(inserted > first);
+    // A re-import of the same cards: stamps only.
+    store::upsert(&pool, Catalogue::Tranco, 2, &cards, None)
+        .await
+        .unwrap();
+    assert_eq!(revision().await, inserted);
+    assert_eq!(
+        (counted("inserted"), counted("unchanged"), counted("rejected")),
+        (before.0 + 5, before.1 + 5, before.2 + 1)
+    );
+    // A write that changes nothing moves nothing either; a changed card does.
+    store::upsert(&pool, Catalogue::Tranco, 2, &cards[..1], None)
+        .await
+        .unwrap();
+    assert_eq!(revision().await, inserted);
+    cards[0].name = "Renamed".into();
+    store::upsert(&pool, Catalogue::Tranco, 2, &cards[..1], None)
+        .await
+        .unwrap();
+    let changed = revision().await;
+    assert!(changed > inserted);
+    // Removing nothing moves nothing; a removal does.
+    store::remove(&pool, Catalogue::Tranco, &["nothing".into()], None)
+        .await
+        .unwrap();
+    assert_eq!(revision().await, changed);
+    store::remove(&pool, Catalogue::Tranco, &["site-1".into()], None)
+        .await
+        .unwrap();
+    assert!(revision().await > changed);
 }

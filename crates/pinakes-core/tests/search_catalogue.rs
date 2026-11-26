@@ -792,8 +792,8 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
             .await
             .unwrap()
     };
-    let dir = std::env::temp_dir().join(format!("pinakes-index-bench-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let root = common::unique_dir("index-bench");
+    let dir = root.join("index");
     let index = search_index::SearchIndex::on_disk(&dir);
     index.set_catalogues(&["wikidata"]);
     let passed = prometheus::IntGauge::new("passed", "test").unwrap();
@@ -965,7 +965,7 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
         walk(&dir) / 1_000_000
     );
     assert!(gone);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
 }
 fn walk(dir: &std::path::Path) -> u64 {
     std::fs::read_dir(dir)

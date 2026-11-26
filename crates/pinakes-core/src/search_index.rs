@@ -1490,6 +1490,12 @@ impl SearchIndex {
         self.served.fetch_add(1, Ordering::SeqCst);
         Ok(Some(Candidates { units, revision }))
     }
+    /// Take one turn of the text searches and keep it until the permit is dropped (tests: a busy
+    /// index).
+    #[doc(hidden)]
+    pub fn hold_turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.bounds().0.try_acquire_owned().ok()
+    }
     /// Run at most `searches` text searches at once (0: one per CPU core), each within `budget`
     /// (`limits.search_index_searches`, `limits.search_index_budget_ms`).
     pub fn set_bounds(&self, searches: usize, budget: Duration) {
@@ -3429,6 +3435,176 @@ mod tests {
             }
             assert_eq!(got, expected, "{text:?}");
         }
+    }
+
+    /// Searchable documents named `names`, as the index holds a referenced unit's: IDs, the name
+    /// in every name field, one commit.
+    fn named(open: &Open, names: &[String]) {
+        let f = open.fields;
+        let mut writer = open.writer.lock().unwrap();
+        for (n, name) in names.iter().enumerate() {
+            let id = format!("{n:032x}");
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.unit_id, &id);
+            doc.add_text(f.resource_id, &id);
+            for field in [f.name, f.name_exact, f.name_grams, f.name_pieces] {
+                doc.add_text(field, name);
+            }
+            doc.add_u64(f.referenced, 1);
+            doc.add_u64(f.has_text, 1);
+            writer.add_document(doc).unwrap();
+        }
+        commit(&mut writer, &open.stamp(0)).unwrap();
+        drop(writer);
+        open.reader.reload().unwrap();
+    }
+
+    /// Property (fuzz): any text up to the API's 256 bytes (many words, phrases, `-`, `or` chains,
+    /// one character, symbols, scripts written without spaces) is searched over a seeded index
+    /// within its budget: candidates, or `None` (Postgres reads it alone), or `Busy` once the budget
+    /// ran out; never a panic, never more than the candidates asked for from each part.
+    #[test]
+    fn any_text_of_256_bytes_is_searched_within_its_budget() {
+        let mut gen = crate::catalogue::testgen::Gen::new("text search fuzz", 0x2f8a_51c3_77e1_0b9d);
+        let open = Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default())
+            .unwrap();
+        let syllables = ["a", "an", "ar", "ba", "bo", "ca", "de", "el", "ka", "lo", "ma", "ra", "st", "th", "zu"];
+        let names: Vec<String> = (0..20_000)
+            .map(|_| {
+                (0..1 + gen.below(4))
+                    .map(|_| (0..1 + gen.below(4)).map(|_| *gen.pick(&syllables)).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        named(&open, &names);
+        let pieces = [
+            "or", "OR", "-", "\"", "a", "ab", "an", "ar", "bo", "ca", "the", "ka lo", "-ma", "\"ra st\"",
+            "東", "京", "ภา", "€", "(", "!!!", "c++", "é", "zürich", "x", "0", "\u{301}", "😀", "a-b",
+        ];
+        for round in 0..300 {
+            let mut text = String::new();
+            while text.len() < 256 {
+                text.push_str(gen.pick(&pieces));
+                if gen.chance(3) {
+                    text.push(' ');
+                }
+            }
+            let mut cut = if gen.chance(4) { 1 + gen.below(4) } else { 256 };
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            let q = TextQuery {
+                text: text.clone(),
+                at: chrono::Utc::now(),
+                inside_words: gen.chance(2),
+                order: Some(*gen.pick(&[TextOrder::Relevance, TextOrder::Activity, TextOrder::Recent])),
+                ..Default::default()
+            };
+            let started = std::time::Instant::now();
+            let budget = Budget::new(started + std::time::Duration::from_secs(2));
+            match open.search(&q, 500, &budget) {
+                Ok(Some(found)) => assert!(found.len() <= 1000, "{round}: {text:?}"),
+                Ok(None) => assert_eq!(text.trim().chars().count(), 1, "{text:?}"),
+                Err(error) => assert!(error.is::<Busy>(), "{round}: {text:?}: {error}"),
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(4),
+                "{round}: {text:?} took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    /// A budget that has run out stops the search: `Busy`, not candidates.
+    #[test]
+    fn a_search_past_its_budget_is_busy() {
+        let open = Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default())
+            .unwrap();
+        named(&open, &["aurora borealis".to_owned()]);
+        let q = TextQuery {
+            text: "aurora".into(),
+            ..Default::default()
+        };
+        let live = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        assert_eq!(open.search(&q, 10, &live).unwrap().unwrap().len(), 1);
+        let spent = Budget::new(std::time::Instant::now());
+        assert!(open.search(&q, 10, &spent).unwrap_err().is::<Busy>());
+    }
+
+    /// A word start expands to at most PREFIX_TERMS words per segment, those the most names hold
+    /// first; a text holds at most MAX_ITEMS items; a count stops at the number asked for.
+    #[test]
+    fn expansions_items_and_counts_are_bounded() {
+        let open = Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default())
+            .unwrap();
+        let mut names: Vec<String> = (0..PREFIX_TERMS + 500).map(|n| format!("a{n}")).collect();
+        names.extend((0..50).map(|_| "apple".to_owned()));
+        named(&open, &names);
+        let searcher = open.reader.searcher();
+        let terms = open.prefix_terms(&searcher, open.fields.name, "a");
+        assert_eq!(terms.len(), PREFIX_TERMS);
+        assert!(terms.contains(&Term::from_field_text(open.fields.name, "apple")));
+        assert_eq!(open.prefix_terms(&searcher, open.fields.name, "apple").len(), 1);
+        assert_eq!(items(&open.index, &"word ".repeat(100)).len(), MAX_ITEMS);
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let all = tantivy::query::AllQuery;
+        assert_eq!(count_up_to(&searcher, &all, 10, &budget).unwrap(), 10);
+        assert_eq!(
+            count_up_to(&searcher, &all, 1_000_000, &budget).unwrap(),
+            names.len()
+        );
+    }
+
+    /// A merge owed for a removal is recorded by the commit that deletes the document, so an index
+    /// opened again (a restart before the merge ran) merges it; the merge then records that nothing
+    /// is owed.
+    #[test]
+    fn an_owed_merge_outlives_a_restart() {
+        let index = index();
+        let open = Arc::new(
+            Open::new(index.clone(), 0, BTreeMap::new(), String::new(), Default::default())
+                .unwrap(),
+        );
+        docs(&open, &[("a", "aurora", ""), ("b", "borealis", "")]);
+        docs(&open, &[("c", "cosmos", "")]);
+        open.reader.reload().unwrap();
+        // Another merge runs: this removal's merge is owed, not started.
+        open.purging.lock().unwrap().running = true;
+        open.replace(&["a".to_owned()], &[], 0).unwrap();
+        let payload = |index: &Index| -> Payload {
+            serde_json::from_str(index.load_metas().unwrap().payload.as_deref().unwrap()).unwrap()
+        };
+        let recorded = payload(&index);
+        assert_eq!((recorded.owed.clone(), recorded.owed_all), (vec!["a".to_owned()], false));
+        assert!(holds(&open, "aurora"), "its words are still in the files");
+        drop(open);
+        // The restart: opened from the files, the merge is owed and runs at the next pass.
+        let open = Arc::new(
+            Open::new(
+                index.clone(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                (recorded.owed, recorded.owed_all),
+            )
+            .unwrap(),
+        );
+        assert!(open.purge_owed());
+        {
+            let mut writer = open.writer.lock().unwrap();
+            open.purge(&mut writer, vec![], false).unwrap();
+        }
+        if let Some(waiting) = open.merging.lock().unwrap().take() {
+            waiting.join().unwrap();
+        }
+        open.reader.reload().unwrap();
+        assert!(!holds(&open, "aurora"));
+        assert!(holds(&open, "cosmos"));
+        let cleared = payload(&index);
+        assert!(cleared.owed.is_empty() && !cleared.owed_all);
+        assert!(!open.purge_owed());
     }
 
     #[test]

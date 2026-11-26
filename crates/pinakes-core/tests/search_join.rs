@@ -641,3 +641,120 @@ async fn the_etag_of_a_search_over_links_built_from_cards_names_the_catalogues(p
     assert_ne!(etag(&on, path).await, etag(&fewer, path).await);
     assert_eq!(etag(&on, path).await, etag(&on, path).await);
 }
+
+/// A key two cards of one catalogue hold (two MusicBrainz recordings, studio and live, of one
+/// ISRC) names neither: a Wikidata item holding it merges with neither card, and a link built from
+/// that item stands for neither. With one recording holding it, the item and the recording are one
+/// row again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_key_two_cards_of_one_catalogue_hold_merges_nothing(pool: PgPool) {
+    let recording = |n: usize, name: &str| Card {
+        source_id: format!("recording/{n}"),
+        uri: format!("https://musicbrainz.org/recording/0a1b2c3d-0000-4000-8000-00000000000{n}"),
+        r#type: "MusicRecording".into(),
+        name: name.into(),
+        keys: vec![
+            format!("mb:recording:0a1b2c3d-0000-4000-8000-00000000000{n}"),
+            "isrc:GBUM71029604".into(),
+        ],
+        fame: 0.3,
+        ..Default::default()
+    };
+    let song = "https://en.wikipedia.org/wiki/Starman_(song)";
+    let item = Card {
+        source_id: "Q1361000".into(),
+        uri: song.into(),
+        r#type: "MusicRecording".into(),
+        name: "Starman".into(),
+        keys: vec!["wikidata:Q1361000".into(), "isrc:GBUM71029604".into()],
+        fame: 0.8,
+        ..Default::default()
+    };
+    import(&pool, Catalogue::Wikidata, 1, &[item.clone()]).await;
+    import(
+        &pool,
+        Catalogue::Musicbrainz,
+        1,
+        &[recording(1, "Starman"), recording(2, "Starman (live)")],
+    )
+    .await;
+    let (app, _) = app(&pool);
+    for path in ["/v1/search?q=starman", "/v1/search?type=MusicRecording"] {
+        let page = common::get(&app, path).await;
+        assert_eq!(items(&page).len(), 3, "{path}: {page}");
+    }
+    // A link built from the Wikidata item stands for the item alone.
+    let id = tagged(&pool, song, "music", 1).await;
+    assert_eq!(
+        join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await,
+        1
+    );
+    for path in ["/v1/search?q=starman", "/v1/search?type=MusicRecording"] {
+        let mut listed = urls(&common::get(&app, path).await);
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                song,
+                "https://musicbrainz.org/recording/0a1b2c3d-0000-4000-8000-000000000001",
+                "https://musicbrainz.org/recording/0a1b2c3d-0000-4000-8000-000000000002",
+            ],
+            "{path}"
+        );
+    }
+    // The live recording loses the ISRC: the item and the studio recording are one thing.
+    let mut live = recording(2, "Starman (live)");
+    live.keys.truncate(1);
+    import(
+        &pool,
+        Catalogue::Musicbrainz,
+        1,
+        &[recording(1, "Starman"), live],
+    )
+    .await;
+    let mut listed = urls(&common::get(&app, "/v1/search?type=MusicRecording").await);
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            song,
+            "https://musicbrainz.org/recording/0a1b2c3d-0000-4000-8000-000000000002",
+        ]
+    );
+}
+
+/// In the index too, a card's labels match `tags` only where catalogue cards may be listed: a
+/// search that reads referenced links alone (`referenced=true`, a social filter) gives no
+/// candidate place to a link only its card's labels match.
+#[sqlx::test(migrations = "../../migrations")]
+async fn labels_count_as_tags_in_the_index_only_where_cards_may_be_listed(pool: PgPool) {
+    import(&pool, Catalogue::Wikidata, 1, &[adams()]).await;
+    let id = tagged(&pool, SPOTIFY, "books", 1).await;
+    join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await;
+    let (app, index) = app(&pool);
+    common::get(&app, "/v1/search?q=adams").await;
+    let found = |labels: bool| {
+        let (pool, index) = (pool.clone(), index.clone());
+        async move {
+            let q = pinakes_core::search_index::TextQuery {
+                text: "adams".into(),
+                at: chrono::Utc::now(),
+                tags: vec!["science-fiction".into()],
+                inside_words: true,
+                labels,
+                ..Default::default()
+            };
+            index
+                .candidates(&pool, q, 500)
+                .await
+                .unwrap()
+                .unwrap()
+                .units
+                .into_iter()
+                .map(|c| c.resource_id)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert!(found(true).await.contains(&id));
+    assert!(!found(false).await.contains(&id));
+}
