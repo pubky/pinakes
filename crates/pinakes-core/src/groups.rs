@@ -463,16 +463,10 @@ fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
         + a.0.to_radians().cos() * b.0.to_radians().cos() * (dlon / 2.).sin().powi(2);
     6371000. * 2. * h.sqrt().min(1.).asin()
 }
-async fn load_edges(
-    tx: &mut Transaction<'_, Postgres>,
-    units: &[String],
-    keys: &[String],
-    previous: &[String],
-    cfg: &GroupConfig,
-) -> Result<Vec<Edge>> {
-    use futures_util::TryStreamExt;
-    let max_edges = cfg.max_graph_units.saturating_mul(20);
-    let mut stream=sqlx::query_as::<_,Edge>(r#"WITH wanted AS (
+/// The evidence of the affected units: their keys, revisions and documented start and place.
+/// The document (`group_member_document`) is read per unit (`LATERAL … OFFSET 0`): joined
+/// whole, the planner builds the view for every unit there is before it keeps the few asked.
+const LOAD_EDGES: &str = r#"WITH wanted AS (
       SELECT DISTINCT picked.unit_id,picked.group_id FROM unnest($2::text[]) wanted(key) CROSS JOIN LATERAL
       (SELECT k.unit_id,k.group_id FROM resource_group k WHERE k.key=wanted.key ORDER BY k.admitted_at,k.unit_id LIMIT $4) picked
     ), affected AS (SELECT unnest($1::text[]) AS unit_id UNION SELECT unit_id FROM group_unit WHERE group_id=ANY($3)
@@ -482,9 +476,24 @@ async fn load_edges(
       u.occurrence IS NOT NULL AS occurrence,s.start_at,u.group_id,o.group_id AS override_id,ST_Y(s.point) AS lat,ST_X(s.point) AS lon,
       CASE WHEN u.occurrence IS NULL THEN r.uri ELSE '' END AS uri
     FROM affected a JOIN group_unit u USING(unit_id) LEFT JOIN resource_group k USING(unit_id) JOIN resource r ON r.id=u.resource_id
-    LEFT JOIN group_override o USING(unit_id) LEFT JOIN group_member_document s USING(unit_id)
-    ORDER BY u.unit_id,key LIMIT $5"#)
-        .bind(units).bind(keys).bind(previous).bind(cfg.max_members as i64).bind((max_edges+1) as i64).fetch(&mut **tx);
+    LEFT JOIN group_override o USING(unit_id) LEFT JOIN LATERAL (SELECT g.start_at,g.point FROM group_member_document g WHERE g.unit_id=u.unit_id OFFSET 0) s ON true
+    ORDER BY u.unit_id,key LIMIT $5"#;
+async fn load_edges(
+    tx: &mut Transaction<'_, Postgres>,
+    units: &[String],
+    keys: &[String],
+    previous: &[String],
+    cfg: &GroupConfig,
+) -> Result<Vec<Edge>> {
+    use futures_util::TryStreamExt;
+    let max_edges = cfg.max_graph_units.saturating_mul(20);
+    let mut stream = sqlx::query_as::<_, Edge>(LOAD_EDGES)
+        .bind(units)
+        .bind(keys)
+        .bind(previous)
+        .bind(cfg.max_members as i64)
+        .bind((max_edges + 1) as i64)
+        .fetch(&mut **tx);
     let mut edges = Vec::new();
     let mut bytes = 0usize;
     while let Some(edge) = stream.try_next().await? {
@@ -1371,6 +1380,71 @@ async fn remember_namespaces(pool: &PgPool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The rows a plan's scans of `relation` give, over all their loops.
+    fn rows_read(plan: &serde_json::Value, relation: &str) -> f64 {
+        let own = if plan["Relation Name"] == relation {
+            plan["Actual Rows"].as_f64().unwrap_or_default()
+                * plan["Actual Loops"].as_f64().unwrap_or(1.0)
+        } else {
+            0.0
+        };
+        own + plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|child| rows_read(child, relation))
+            .sum::<f64>()
+    }
+
+    /// A grouping run's evidence reads the documents of the units it is about, not of every
+    /// unit there is: of 4,000 grouped units, one group of three asks three documents.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn load_edges_reads_only_the_affected_units_documents(pool: PgPool) {
+        for statement in [
+            "INSERT INTO resource(id,uri,host,resolver,type,type_path,name,status,start_at,doc) SELECT md5('e'||i),'https://edges.example/'||i,'edges.example','web','Event',ARRAY['Thing','Event'],'Event '||i,'ok',now()+i*interval '1 hour',jsonb_build_object('type','Event','type_path',jsonb_build_array('Thing','Event'),'name','Event '||i,'source','web','url','https://edges.example/'||i,'status','ok','site','edges.example','fetched_at',0,'ttl_secs',3600,'attributes','{}'::jsonb) FROM generate_series(1,4000) i",
+            "INSERT INTO \"group\"(id) SELECT md5('g'||i) FROM generate_series(0,1333) i",
+            "INSERT INTO group_unit(unit_id,resource_id,group_id) SELECT md5('e'||i),md5('e'||i),md5('g'||(i/3)) FROM generate_series(1,4000) i",
+            "VACUUM ANALYZE",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let unit: String = sqlx::query_scalar("SELECT md5('e3000')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let group: String = sqlx::query_scalar("SELECT md5('g1000')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let plan: serde_json::Value =
+            sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {LOAD_EDGES}"))
+                .bind(vec![unit])
+                .bind(Vec::<String>::new())
+                .bind(vec![group])
+                .bind(256_i64)
+                .bind(400_001_i64)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let plan = &plan[0]["Plan"];
+        // The group's three units, each read once for its revision and once for its document.
+        let read = rows_read(plan, "resource");
+        assert!(read <= 12.0, "{read} resource rows: {plan}");
+        let edges: Vec<Edge> = sqlx::query_as(LOAD_EDGES)
+            .bind(vec!["x".to_owned()])
+            .bind(Vec::<String>::new())
+            .bind(vec![sqlx::query_scalar::<_, String>("SELECT md5('g1000')")
+                .fetch_one(&pool)
+                .await
+                .unwrap()])
+            .bind(256_i64)
+            .bind(400_001_i64)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(edges.len(), 3);
+        assert!(edges.iter().all(|e| e.start_at.is_some()), "documents read");
+    }
     #[test]
     fn every_catalogue_card_key_names_one_object() {
         for catalogue in crate::catalogue::Catalogue::ALL {
