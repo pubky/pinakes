@@ -10,7 +10,7 @@ MusicBrainz relates to an item gets its card from the catalogue without a fetch.
 | Catalogue | `musicbrainz` |
 | Reads | `https://data.metabrainz.org/pub/musicbrainz/data/json-dumps/`: `LATEST`, then the newest dump's `release.tar.xz`, `release-group.tar.xz`, `artist.tar.xz`, `recording.tar.xz` and `SHA256SUMS` |
 | Credentials | None |
-| Rate | `LATEST` at most once an hour; one file at a time, streamed; nothing is kept but sorted runs under `catalogues.dir/musicbrainz` |
+| Rate | `LATEST` polled once an hour (and asked again by the run it starts); one file at a time, streamed; nothing is kept but sorted runs under `catalogues.dir/musicbrainz` |
 | Refresh | A new dump is read when `LATEST` names one; MusicBrainz publishes two a week |
 | Needs | `http.contact`: without it the importer does not start (every request names the operator's contact) |
 | Card types | `Person` or `MusicGroup` (artists), `MusicAlbum` (release groups), `MusicRecording` (recordings) |
@@ -39,7 +39,8 @@ most 256 before any card is written.
   `SHA256SUMS` is read unchecked, and so are the files a `limit` stops reading early.
 - **Bounds.** A line longer than 128 MiB is skipped and counted. Each list of a line is read up to
   a cap (4,096 tracks a medium, 512 media, 2,048 relations, 256 aliases and genres, 64 ISRCs and
-  credited artists) and the rest skipped. Of one item's records at most 8,192 holding 64 MiB make
+  credited artists) and the rest skipped; all the lists of one line together build at most
+  500,000 entries. Under a `limit`, a release of more than 50,000 records is skipped. Of one item's records at most 8,192 holding 64 MiB make
   its card (every one counts for its fame). More than 100 lines that don't parse, and more than
   one in a thousand of the lines read, stop the run (`parse`).
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range`
@@ -115,23 +116,39 @@ A dump is refused, and no card is removed for it, when:
 - an update would remove more than a tenth of the cards (counted after the first pass, before any
   card is written, and again before the removals, counting the refused cards too; the new and
   changed cards are written by then);
-- a full import that was not asked for by hand would remove more than a tenth of the cards (an
-  empty dump, or one whose cards are mostly refused);
+- a full import of the importer's own (not asked for by hand, nor by an update handing over for a
+  changed `limit`) would remove more than a tenth of the cards (one whose cards are mostly refused);
+- a full import reads no record at all while cards are stored, even one asked for (`empty`;
+  `catalogue drop` empties a catalogue);
 - its files don't match their checksums, don't parse, or hold more than a file may (`checksum`,
   `parse`, `archive`, `size`, `record_size`, `isrc_shared`).
 
 The run then ends as a failure: `catalogue status` shows the phase `failed` and the reason with its
-counts (`last_error`), and `CatalogueImportFailed` fires. The refused dump is not read again from
-the same source (`refused` in the state's position): the importer waits for `LATEST` to name
-another dump, which it reads after the usual disk check. If the dump is right, ask for a full import
+counts and the dump (`last_error`), `waiting` shows `dump <version> refused`, and
+`CatalogueImportFailed` fires. The run is abandoned rather than resumed: its cursor and its sorted
+runs go. The refused dump is not read again from the same source with the same `limit` (`refused`,
+`refused_source` and `refused_limit` in the state's position): the importer waits for `LATEST` to
+name another dump, which it reads after the usual disk check; another `limit` reads it again, as a
+new subset. An update by hand (`--update`) of the refused dump fails at once (`refused`), and so
+does a run whose `LATEST` names the refused dump again by the time it starts, unless a full import
+was asked for. A full import refused at its end has written its new and changed cards by then, as
+an update has; they stay until the next update corrects them. To read the refused dump again as
+an update (a checksum failure while the mirror was still copying a file, say), clear the refusal
+with the daemon stopped: `UPDATE catalogue_state SET position = position - 'refused' -
+'refused_source' - 'refused_limit' WHERE catalogue = 'musicbrainz'`. If the dump is right, ask for a full import
 of it, which removes every card it does not read: `pinakesd catalogue import musicbrainz --request`
 beside the running daemon, or `pinakesd catalogue import musicbrainz` with the daemon stopped.
-There is no removal check under a `limit`, nor for a full import asked for by hand. A `LATEST`
-naming a dump dated after tomorrow is refused as no dump (`version`).
+There is no removal check under a `limit`, nor for a full import asked for; one asked for and cut
+off is still the one asked for when it resumes (`forced` in its cursor). A finished full import
+clears the request. A `LATEST`
+naming a dump dated after tomorrow is refused as no dump (`version`): a host clock more than a day
+behind refuses every dump so (a first import fails on it at every try; once cards are stored, the
+hourly poll logs it and `CatalogueUpdateLag` fires in time).
 
 ### Runs cut off
 
-A run cut off by a restart or a failure resumes after the last item it wrote. Once its read has
+A run cut off by a restart or a failure resumes after the last item it wrote; one cut off in its
+read resumes as the same run (its cursor is written when it starts). Once its read has
 merged its runs, it resumes from them, so the dump is not read again; a read cut off keeps the
 files it had read whole and checked (with a manifest each) and reads the others. A run cut off
 after its writes reads nothing again. When the dump a cut-off run needs again is gone from the

@@ -979,3 +979,36 @@ fn recording_card(mbid: &str, recs: Vec<Rec>, tracks_seen: u64, shared: &Shared)
         ..Card::default()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Outer {
+        #[serde(deserialize_with = "capped::<_, _, 100>")]
+        inner: Vec<Inner>,
+    }
+    #[derive(Deserialize)]
+    struct Inner {
+        #[serde(deserialize_with = "capped::<_, _, 100>")]
+        items: Vec<u32>,
+    }
+
+    /// Nested lists build no more entries than the line's budget (give or take one per level):
+    /// once it is spent, the rest of every list is skipped unbuilt.
+    #[test]
+    fn nested_lists_build_within_the_line_budget() {
+        let inner = format!(r#"{{"items":[{}]}}"#, ["1"; 8].join(","));
+        let line = format!(r#"{{"inner":[{}]}}"#, vec![inner; 3].join(","));
+        BUDGET.with(|b| b.set(10));
+        let outer: Outer = serde_json::from_str(&line).unwrap();
+        let built = outer.inner.len() + outer.inner.iter().map(|i| i.items.len()).sum::<usize>();
+        assert!(built <= 12, "{built} entries built");
+        assert_eq!(budget_left(), 0);
+        // A full budget builds them all.
+        line_budget();
+        let outer: Outer = serde_json::from_str(&line).unwrap();
+        assert_eq!(outer.inner.iter().map(|i| i.items.len()).sum::<usize>(), 24);
+    }
+}

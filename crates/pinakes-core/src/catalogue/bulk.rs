@@ -539,10 +539,8 @@ impl Download {
         }
         self.broke_at = self.offset;
         loop {
-            if self.retries >= Self::RETRIES
-                || self.validator.is_none()
-                || self.started.elapsed() > Self::DEADLINE
-            {
+            // (Without a validator `connect` refuses to resume.)
+            if self.retries >= Self::RETRIES || self.started.elapsed() > Self::DEADLINE {
                 return Err(io::Error::other(self.failure("download")));
             }
             self.retries += 1;

@@ -392,10 +392,21 @@ async fn sweep(
     }
 }
 
-/// The table's `waiting` cell: a full import an update asked for, with its reason, and why the
-/// importer waits.
+/// The table's `waiting` cell: a full import an update asked for, with its reason, a dump its
+/// importer refused (`refused` in its position), and why the importer waits.
 fn waiting_cell(state: Option<&State>) -> String {
+    let refused = state
+        .and_then(|s| s.position.as_ref())
+        .and_then(|p| p.get("refused"))
+        .and_then(|v| v.as_str())
+        .map(|v| format!("dump {v} refused"));
     let waiting = state.and_then(|s| s.waiting.as_deref());
+    let waiting = match (refused, waiting) {
+        (Some(r), Some(w)) if !w.trim().is_empty() => Some(format!("{r}; {w}")),
+        (Some(r), _) => Some(r),
+        (None, w) => w.map(str::to_owned),
+    };
+    let waiting = waiting.as_deref();
     match state.and_then(|s| s.import_requested.as_deref()) {
         Some(reason) => {
             let requested = format!("full import requested: {reason}");

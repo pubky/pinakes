@@ -784,14 +784,54 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
         (Some(B), Some(A))
     );
     assert_eq!(rows(&pool).await, before);
-    // Again, its files gone: nothing is read, nothing more recorded.
+    // Again by hand, its files gone: nothing is read; the run fails as refused before.
     for e in ENTITIES {
         std::fs::remove_file(b.join(format!("{e}.tar.xz"))).unwrap();
     }
-    let state = run(&s, &b, Run::Update).await.unwrap();
-    assert_eq!(state.error_count, 1);
+    let again = run(&s, &b, Run::Update).await.unwrap_err();
+    assert!(
+        again
+            .to_string()
+            .contains(&format!("dump {B} was refused before")),
+        "{again}"
+    );
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.error_count, state.run.as_deref()), (2, None));
+    assert_eq!(
+        state.position.as_ref().unwrap()["refused"].as_str(),
+        Some(B)
+    );
     assert_eq!(rows(&pool).await, before);
-    // A newer dump is read, but only once the disk allows.
+    // Nor does a full import of the importer's own that finds it named (one cut off before its
+    // first cursor): abandoned unread.
+    sqlx::query("UPDATE catalogue_state SET run='import',phase='import',cursor=NULL WHERE catalogue='musicbrainz'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let again = run::step(&importer(&s, Source::Dir(b.clone())), &s.ctx)
+        .await
+        .unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.run.as_deref(), state.cursor.as_ref()), (None, None));
+    assert_eq!(rows(&pool).await, before);
+    // The task's plan waits for another dump.
+    {
+        use pinakes_core::catalogue::run::{Importer, Plan};
+        let plan = importer(&s, Source::Dir(b.clone()))
+            .plan(&state)
+            .await
+            .unwrap();
+        assert!(matches!(plan, Plan::Wait(_)), "{plan:?}");
+    }
+    // A newer dump is read, but only once the disk allows. (Test dumps are never dated after
+    // the day the suite was written: one after tomorrow is no dump, `version`.)
     let c = dump(s.root.path(), "20261126-001001", unchanged);
     let tight = Context {
         free_disk: Arc::new(|_| Ok(0)),
@@ -875,6 +915,86 @@ async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
     assert_eq!(state.cards, (CARDS - 4) as i64);
 }
 
+/// A full import asked for and cut off in its read is still the one asked for when it resumes:
+/// it removes what its dump no longer has, however much.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_import_asked_for_stays_asked_for_when_cut_off(pool: PgPool) {
+    let s = setup(&pool, None);
+    let a = dump(s.root.path(), A, unchanged);
+    run(&s, &a, Run::Import).await.unwrap();
+    let shrunk = dump(s.root.path(), B, |entity, lines| {
+        if matches!(entity, "artist" | "release-group") {
+            lines.clear();
+        }
+    });
+    let m = mirror(served(&shrunk, B), B, Breaks::ArtistBusyOnce).await;
+    let source = Source::parse(&m.url).unwrap();
+    run::request_import(
+        &pool,
+        Catalogue::Musicbrainz,
+        pinakes_core::catalogue::musicbrainz::REQUESTED,
+    )
+    .await
+    .unwrap();
+    let failed = run::step(&importer(&s, source.clone()), &s.ctx).await;
+    assert!(failed.is_err());
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.run.as_deref(), Some("import"));
+    assert_eq!(state.cursor.as_ref().unwrap()["forced"], json!(true));
+    run::step(&importer(&s, source), &s.ctx).await.unwrap();
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.cards, state.run), (9, None));
+    assert_eq!(rows(&pool).await.len(), 9);
+}
+
+/// A full import that reads no record never empties the catalogue, even one asked for: it is
+/// refused (`empty`) and the cards stay.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_empty_dump_never_empties_the_catalogue(pool: PgPool) {
+    let s = setup(&pool, None);
+    let a = dump(s.root.path(), A, unchanged);
+    run(&s, &a, Run::Import).await.unwrap();
+    let before = rows(&pool).await;
+    let empty = dump(s.root.path(), B, |_, lines| lines.clear());
+    run::request_import(
+        &pool,
+        Catalogue::Musicbrainz,
+        pinakes_core::catalogue::musicbrainz::REQUESTED,
+    )
+    .await
+    .unwrap();
+    let failed = run(&s, &empty, Run::Import).await.unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains(&format!("no record read in dump {B}")),
+        "{failed}"
+    );
+    assert_eq!(rows(&pool).await, before);
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.last_error.unwrap().starts_with("empty"));
+    assert_eq!(state.position.unwrap()["refused"].as_str(), Some(B));
+}
+
+/// A dump named after a day after tomorrow is no dump: nothing is read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_dump_named_in_the_future_is_not_read(pool: PgPool) {
+    let s = setup(&pool, None);
+    let future = dump(s.root.path(), "99991231-000000", unchanged);
+    let failed = run(&s, &future, Run::Import).await.unwrap_err();
+    assert!(failed.to_string().contains("version"), "{failed}");
+    assert!(rows(&pool).await.is_empty());
+}
+
 /// A run cut off after it wrote and removed everything reads and writes nothing again; a cursor
 /// of another source is not resumed (the run starts over); an update cut off, then asked to be a
 /// full import, hands over to it.
@@ -943,6 +1063,7 @@ async fn finished_foreign_and_handed_over_cursors(pool: PgPool) {
         .unwrap();
     let state = run(&s, &b, Run::Update).await.unwrap();
     assert!(state.last_import_at > before.last_import_at);
+    assert_eq!(state.last_update_at, before.last_update_at);
     assert_eq!((state.import_requested, state.run), (None, None));
 }
 
@@ -1489,8 +1610,8 @@ fn source_id(source: &Source) -> String {
 }
 
 /// `plan` reads `LATEST` at most once an hour; it asks for an update when `LATEST` names a newer
-/// dump than the cards' and than one it refused, or the limit changed; a `LATEST` it can't read
-/// is a wait, not a failure.
+/// dump than the cards' and than one it refused with this limit, or the limit changed; a `LATEST`
+/// it can't read is a wait, not a failure.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_plan_polls_latest_hourly(pool: PgPool) {
     use pinakes_core::catalogue::run::{Importer, Plan};
@@ -1534,20 +1655,36 @@ async fn the_plan_polls_latest_hourly(pool: PgPool) {
         fresh().plan(&refused).await.unwrap(),
         Plan::Wait(_)
     ));
-    // A changed limit: an update (which hands over to a full import), without asking.
-    let before = m.requests.lock().unwrap().len();
+    // Refused with another limit: read again, as the new subset it is.
+    let other_limit = state(
+        json!({"version": A, "limit": null, "refused": B, "refused_source": m.url, "refused_limit": 5}),
+    );
+    assert_eq!(
+        fresh().plan(&other_limit).await.unwrap(),
+        Plan::Run(Run::Update)
+    );
+    // A changed limit: an update (which hands over to a full import); not of a dump refused with
+    // this limit.
     let limited = state(json!({"version": B, "limit": 5}));
     assert_eq!(
         fresh().plan(&limited).await.unwrap(),
         Plan::Run(Run::Update)
     );
-    assert_eq!(m.requests.lock().unwrap().len(), before);
-    // Never imported: a full import; one whose first dump was refused waits for another.
+    let limited_refused =
+        state(json!({"version": A, "limit": 5, "refused": B, "refused_source": m.url}));
+    assert!(matches!(
+        fresh().plan(&limited_refused).await.unwrap(),
+        Plan::Wait(_)
+    ));
+    // Never imported: a full import; one whose first dump was refused waits for another, and
+    // imports that.
     let mut never = state(json!({}));
     never.last_import_at = None;
     assert_eq!(fresh().plan(&never).await.unwrap(), Plan::Run(Run::Import));
     never.position = Some(json!({"refused": B, "refused_source": m.url}));
     assert!(matches!(fresh().plan(&never).await.unwrap(), Plan::Wait(_)));
+    never.position = Some(json!({"refused": A, "refused_source": m.url}));
+    assert_eq!(fresh().plan(&never).await.unwrap(), Plan::Run(Run::Import));
     // Refused from another source: not this one's refusal.
     let elsewhere =
         state(json!({"version": A, "limit": null, "refused": B, "refused_source": "elsewhere"}));

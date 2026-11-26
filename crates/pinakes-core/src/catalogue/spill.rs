@@ -566,6 +566,19 @@ mod tests {
         assert!(reduce(&dir.path().join("q"), runs.clone(), 2, &room(), &stop).is_err());
         assert!(runs.iter().all(|r| r.exists()));
         assert_eq!(std::fs::read_dir(dir.path().join("q")).unwrap().count(), 0);
+        // Asked to stop within a pass (from the third ask: past the pass's start and its first
+        // 65,536 records), it stops there: no pass ends, every input is kept.
+        let mut spill = Spill::new(&dir.path().join("long"), 8 << 20, room()).unwrap();
+        for k in 0..600_000u32 {
+            spill.push(&k.to_be_bytes(), b"v").unwrap();
+        }
+        let runs = spill.finish().unwrap();
+        assert!(runs.len() > 3, "{} runs", runs.len());
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let stop = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2;
+        assert!(reduce(&dir.path().join("r"), runs.clone(), 2, &room(), &stop).is_err());
+        assert!(runs.iter().all(|r| r.exists()));
+        assert_eq!(std::fs::read_dir(dir.path().join("r")).unwrap().count(), 0);
     }
 
     #[test]

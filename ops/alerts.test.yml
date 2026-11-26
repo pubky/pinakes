@@ -45,7 +45,7 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: wikidata}
             exp_annotations:
-              summary: "A wikidata catalogue import or update failed in the last hour; pinakesd catalogue status shows the error, and the run resumes from its cursor"
+              summary: "A wikidata catalogue import or update failed in the last hour; pinakesd catalogue status shows the error; the run resumes from its cursor, or, abandoned for its dump, waits for another"
   # OpenStreetMap waits for the large-import turn on both instances; only on a does a large
   # catalogue's import keep failing.
   - interval: 1m

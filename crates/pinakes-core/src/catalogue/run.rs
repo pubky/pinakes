@@ -508,7 +508,11 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             }
             Err(failed) => {
                 let shown = failure::shown(&failed);
-                tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue import failed; it resumes from its cursor");
+                if failed.is::<Abandoned>() {
+                    tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue run abandoned: what it read can't be applied; the importer waits for something new");
+                } else {
+                    tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue import failed; it resumes from its cursor");
+                }
                 if let Err(unrecorded) = record_failure(&ctx.pool, catalogue, &shown).await {
                     tracing::warn!(catalogue = catalogue.name(), error = %failure::shown(&unrecorded), "catalogue failure not recorded");
                 }
@@ -713,6 +717,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     sqlx::query(
         "UPDATE catalogue_state SET run=NULL,cursor=NULL,phase='idle',waiting=NULL,position=coalesce($3,position),\
          last_import_at=CASE WHEN $2='import' THEN now() ELSE last_import_at END,\
+         import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,\
          last_update_at=CASE WHEN $2='update' THEN now() ELSE last_update_at END,\
          current_as_of=CASE WHEN $2='import' THEN coalesce($4,now()) ELSE coalesce($4,current_as_of) END,\
          updated_at=now() WHERE catalogue=$1",

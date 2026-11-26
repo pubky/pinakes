@@ -178,16 +178,18 @@ config true
 psql() { command psql -X -q -v ON_ERROR_STOP=1 -At -d "$db" "$@"; }
 # pinakesd without any PINAKES__ override of the configuration (a database URL or a contact
 # exported for another instance must never reach this throwaway one).
-pk() {
-  local unset=()
-  while IFS='=' read -r name _; do
-    [[ $name == PINAKES__* ]] && unset+=(-u "$name")
-  done < <(env)
-  env "${unset[@]}" "$pinakesd" "$@"
-}
-# pk as a program measure can run.
+unset_overrides=()
+while IFS='=' read -r name _; do
+  [[ $name == PINAKES__* ]] && unset_overrides+=(-u "$name")
+done < <(env)
+pk() { env "${unset_overrides[@]}" "$pinakesd" "$@"; }
+# The same as a program measure can run (env runs pinakesd in its own place: its pid is the
+# daemon's).
 pk_bin=$run/pk
-{ echo '#!/usr/bin/env bash'; declare -f pk; echo "pinakesd=$(printf %q "$pinakesd")"; echo 'pk "$@"'; } > "$pk_bin"
+{
+  echo '#!/usr/bin/env bash'
+  printf 'exec env'; printf ' %q' "${unset_overrides[@]}" "$pinakesd"; echo ' "$@"'
+} > "$pk_bin"
 chmod +x "$pk_bin"
 pk --config "$run/pinakes.toml" --migrate
 # A query with one value bound as :'v' (read from stdin, where psql interpolates).
@@ -257,7 +259,8 @@ print(found or "")' "${rec_id#recording/}")
 daemon() {
   # Without the operator's contact (a PINAKES__ override of the configuration's): its own
   # importer, which would read the official mirror, does not start.
-  pk --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
+  # Started as the program itself (not a shell function), so $! is the daemon.
+  "$pk_bin" --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
   daemon_pid=$!
   for _ in $(seq 1 120); do
     curl -sf "http://127.0.0.1:$admin/healthz" > /dev/null && return

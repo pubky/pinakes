@@ -71,8 +71,8 @@ const TRAILING_CAP: u64 = 16 << 20;
 /// update (the dump's records and the stored cards' hashes, measured on a sample: see
 /// `docs/deployment.md`) with room to spare.
 pub const DISK_NEED: u64 = 40_000_000_000;
-/// The disk a read of a local dump needs per byte of its files (the sorted runs took about half
-/// the compressed files' bytes on a sample of the real dump: `docs/deployment.md`).
+/// The disk a read of a local dump needs per byte of its files (the sorted runs took 0.6 of the
+/// downloaded files' bytes on a sample of the real dump: `docs/deployment.md`).
 const DISK_PER_DUMP_BYTE: u64 = 4;
 /// The disk a read needs per card of `limit`, and at least.
 const DISK_PER_LIMITED_CARD: u64 = 16_384;
@@ -379,6 +379,16 @@ impl MusicBrainz {
         if !valid_version(&version) {
             bail!(Failure::new("version"));
         }
+        // `LATEST` may name another dump than the one the run was planned on: a refused one is
+        // read again only when a full import is asked for.
+        if resumed.is_none()
+            && job.state().import_requested.is_none()
+            && self.refused(job.state(), &version)
+        {
+            bail!(super::run::Abandoned(
+                Failure::new("refused").at(format!("dump {version} was refused before"))
+            ));
+        }
         // A run cut off whose dump the mirror no longer has, and that must read it again, starts
         // over on the newest dump.
         let spill_of = |v: &str| job.dir().join(format!("spill-{v}"));
@@ -420,6 +430,12 @@ impl MusicBrainz {
             })
         };
         let phase = resumed.as_ref().map(|c| c.phase);
+        if resumed.is_none() {
+            // A cursor from the start: a run cut off in its read is resumed as itself (an import
+            // asked for stays asked for), keeping the files it read whole.
+            job.write_rows(&[], 0, cursor(Phase::Write, None, 0, None)?)
+                .await?;
+        }
         if phase.is_none_or(|p| p == Phase::Write) {
             let done = match self
                 .read(job, mode, &version, &spill_dir, resumed.is_some(), &stop)
@@ -428,15 +444,9 @@ impl MusicBrainz {
                 Ok(done) => done,
                 Err(error) if dump_failure(&error).is_some() => {
                     let class = dump_failure(&error).unwrap_or("refused");
+                    let note = format!("{}, dump {version}", failure_note(&error));
                     return self
-                        .refuse(
-                            job,
-                            mode,
-                            &version,
-                            class,
-                            &failure_note(&error),
-                            &spill_dir,
-                        )
+                        .refuse(job, mode, &version, class, &note, &spill_dir)
                         .await;
                 }
                 Err(error) => return Err(error),
@@ -467,21 +477,23 @@ impl MusicBrainz {
                 Ok(()) => {}
                 Err(error) if dump_failure(&error).is_some() => {
                     let class = dump_failure(&error).unwrap_or("refused");
+                    let note = format!("{}, dump {version}", failure_note(&error));
                     return self
-                        .refuse(
-                            job,
-                            mode,
-                            &version,
-                            class,
-                            &failure_note(&error),
-                            &spill_dir,
-                        )
+                        .refuse(job, mode, &version, class, &note, &spill_dir)
                         .await;
                 }
                 Err(error) => return Err(error),
             }
+            // A full import that read nothing never empties the catalogue, even one asked for
+            // (`catalogue drop` empties it).
+            if mode == Run::Import && done.records == 0 && cards > 0 {
+                let note = format!("no record read in dump {version}");
+                return self
+                    .refuse(job, mode, &version, "empty", &note, &spill_dir)
+                    .await;
+            }
             // A full import of the importer's own removes at most a tenth of the cards: a dump
-            // that is empty, or whose cards are mostly refused, never empties the catalogue.
+            // whose cards are mostly refused never empties the catalogue.
             if mode == Run::Import && !forced && job.limit().is_none() {
                 let (gone, all): (i64, i64) = sqlx::query_as(
                     "SELECT count(*) FILTER (WHERE seen_generation<$2),count(*) FROM catalogue_card WHERE catalogue=$1",
@@ -570,6 +582,7 @@ impl MusicBrainz {
         if let Some(p) = position.as_object_mut() {
             p.insert("refused".into(), version.into());
             p.insert("refused_source".into(), self.source_id().into());
+            p.insert("refused_limit".into(), job.limit().into());
         }
         job.set_position(position);
         bail!(super::run::Abandoned(failure));
@@ -1821,7 +1834,7 @@ fn cursor_of(state: &State) -> Option<Cursor> {
     serde_json::from_value(state.cursor.clone()?).ok()
 }
 /// The dump a run refused and the source it read it from (`refused`, `refused_source` in the
-/// position).
+/// position; `refused_limit` the limit it read with).
 fn position_refused(state: &State) -> (String, String) {
     let get = |name: &str| {
         state
@@ -1836,10 +1849,16 @@ fn position_refused(state: &State) -> (String, String) {
 }
 
 impl MusicBrainz {
-    /// Whether `latest` is the dump a run refused from this source: not read again.
+    /// Whether `latest` is the dump a run refused from this source with this limit: not read
+    /// again (another limit reads it once more, as a new subset).
     fn refused(&self, state: &State, latest: &str) -> bool {
         let (version, source) = position_refused(state);
-        version == latest && source == self.source_id()
+        let limit = state
+            .position
+            .as_ref()
+            .and_then(|p| p.get("refused_limit"))
+            .and_then(|v| v.as_u64());
+        version == latest && source == self.source_id() && limit == self.limit
     }
 }
 #[async_trait]
@@ -1849,7 +1868,7 @@ impl Importer for MusicBrainz {
     }
     /// A read's disk ([`DISK_NEED`], or what a `limit` takes), less what the catalogue's
     /// directory already holds (a cut-off run's runs, which it reuses or removes first); a run
-    /// cut off in its removals, or refused, needs none.
+    /// of this source and limit cut off after its read, in its removals or after them needs none.
     fn disk_need(&self, _run: Run, state: &State) -> u64 {
         if state.run.is_some() {
             if let Some(c) =
@@ -1878,9 +1897,6 @@ impl Importer for MusicBrainz {
         if never && position_refused(state).0.is_empty() {
             return Ok(Plan::Run(Run::Import));
         }
-        if !never && position_limit(state) != self.limit {
-            return Ok(Plan::Run(Run::Update));
-        }
         {
             let mut polled = self.polled.lock().expect("the poll time");
             if let Some(at) = *polled {
@@ -1894,6 +1910,8 @@ impl Importer for MusicBrainz {
         match self.latest().await {
             Ok(latest) if self.refused(state, &latest) => Ok(Plan::Wait(POLL)),
             Ok(_) if never => Ok(Plan::Run(Run::Import)),
+            // A changed limit: an update, which hands over to a full import of the new subset.
+            Ok(_) if position_limit(state) != self.limit => Ok(Plan::Run(Run::Update)),
             Ok(latest) if latest > position_version(state) => Ok(Plan::Run(Run::Update)),
             Ok(_) => Ok(Plan::Wait(POLL)),
             Err(error) => {
@@ -1911,14 +1929,22 @@ impl Importer for MusicBrainz {
         if job.state().import_requested.is_some() {
             return Ok(UpdateEnd::NeedsImport(REQUESTED));
         }
-        if position_limit(job.state()) != job.limit() {
-            return Ok(UpdateEnd::NeedsImport("the limit changed"));
-        }
         if job.cursor().is_none() {
             let latest = self.latest().await?;
-            if latest <= position_version(job.state()) || self.refused(job.state(), &latest) {
+            if self.refused(job.state(), &latest) {
+                // Only a run by hand asks for it (the task's plan waits): it reads nothing.
+                bail!(super::run::Abandoned(
+                    Failure::new("refused").at(format!("dump {latest} was refused before"))
+                ));
+            }
+            if position_limit(job.state()) != job.limit() {
+                return Ok(UpdateEnd::NeedsImport("the limit changed"));
+            }
+            if latest <= position_version(job.state()) {
                 return Ok(UpdateEnd::Done);
             }
+        } else if position_limit(job.state()) != job.limit() {
+            return Ok(UpdateEnd::NeedsImport("the limit changed"));
         }
         self.read_and_write(job, Run::Update).await?;
         Ok(UpdateEnd::Done)
@@ -2034,6 +2060,18 @@ mod tests {
             );
         }
         assert!(relative(&dir, &[root.path().join("outside.lz4")]).is_err());
+        // Nor through a link, to a directory or to a file.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir(root.path().join("elsewhere")).unwrap();
+            std::fs::write(root.path().join("elsewhere/run.lz4"), b"x").unwrap();
+            std::os::unix::fs::symlink(root.path().join("elsewhere"), dir.join("linked")).unwrap();
+            std::os::unix::fs::symlink(root.path().join("outside.lz4"), dir.join("link.lz4"))
+                .unwrap();
+            for bad in ["linked/run.lz4", "link.lz4"] {
+                assert_eq!(resolved(&dir, &[PathBuf::from(bad)]), None, "{bad}");
+            }
+        }
         let done = FileDone {
             runs: vec![run],
             ..FileDone::default()
@@ -2195,6 +2233,12 @@ mod tests {
         assert_eq!(
             importer.disk_need(Run::Import, &state(Some("import"), Some(finished))),
             0
+        );
+        // One read with another limit is not this importer's to resume either.
+        let other_limit = serde_json::json!({"version": "20261125-001001", "phase": "remove", "after": null, "removed": 3, "as_of": null, "source": MIRROR, "limit": 5});
+        assert_eq!(
+            importer.disk_need(Run::Update, &state(Some("update"), Some(other_limit))),
+            DISK_NEED - 5000
         );
         // A cursor this importer can't read (another kind) needs the disk as any read.
         let refused = serde_json::json!({"version": "20261125-001001", "phase": "other", "after": null, "removed": 0, "as_of": null});
