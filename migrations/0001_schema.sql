@@ -775,10 +775,19 @@ CREATE FUNCTION mark_group_dirty() RETURNS trigger
  END IF;
  RETURN NULL;
 END $$;
+-- A resource's revision moves when a column grouping reads changes value (its document as
+-- `mark_group_dirty` compares it): a write that only names one (a refresh's new `fetched_at`, a
+-- failure that keeps the status) leaves a grouping run's fence alone.
 CREATE FUNCTION bump_group_resource_revision() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
- NEW.group_revision=OLD.group_revision+1;
+ IF NEW.status IS DISTINCT FROM OLD.status OR NEW.uri IS DISTINCT FROM OLD.uri OR NEW.host IS DISTINCT FROM OLD.host
+    OR NEW.point::bytea IS DISTINCT FROM OLD.point::bytea OR NEW.start_at IS DISTINCT FROM OLD.start_at
+    OR NEW.end_at IS DISTINCT FROM OLD.end_at OR NEW.type IS DISTINCT FROM OLD.type OR NEW.name IS DISTINCT FROM OLD.name
+    OR NEW.osm_version IS DISTINCT FROM OLD.osm_version
+    OR (NEW.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') IS DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') THEN
+  NEW.group_revision=OLD.group_revision+1;
+ END IF;
  RETURN NEW;
 END $$;
 CREATE FUNCTION bump_group_child_revision() RETURNS trigger
@@ -811,8 +820,6 @@ CREATE FUNCTION group_hint(unit text) RETURNS jsonb
 $$;
 
 CREATE TRIGGER group_resource_dirty AFTER INSERT OR UPDATE OF doc ON resource FOR EACH ROW EXECUTE FUNCTION mark_group_dirty();
--- alias::assign's UPDATE of the alias names `doc` and `osm_version` so that this fires: keep those
--- columns in both places.
 CREATE TRIGGER group_resource_revision BEFORE UPDATE OF doc, status, uri, host, point, start_at, end_at, type, name, osm_version ON resource FOR EACH ROW EXECUTE FUNCTION bump_group_resource_revision();
 CREATE TRIGGER group_occurrence_dirty AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION mark_group_dirty();
 CREATE TRIGGER group_occurrence_revision AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION bump_group_child_revision();

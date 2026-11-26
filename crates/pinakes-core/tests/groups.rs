@@ -2784,6 +2784,86 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
     assert_eq!(left, 0);
 }
 
+/// The revision moves when a grouping input changes value, not when a write only names one: a
+/// refresh's new `fetched_at`, a status written as it was, a failure that keeps it. So such a
+/// write in a grouping run's window does not fail the run's fence.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_write_that_changes_no_grouping_input_keeps_the_revision(pool: PgPool) {
+    let (id, _) = save(&pool, "fence", &[], None).await;
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT group_revision FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let start = revision().await;
+    for same in [
+        "UPDATE resource SET doc=doc||'{\"fetched_at\":5,\"ttl_secs\":60}' WHERE id=$1",
+        "UPDATE resource SET status=status,uri=uri,host=host,point=point,name=name WHERE id=$1",
+        "UPDATE resource SET timeout_streak=1,status=CASE WHEN false THEN 'error' ELSE status END,last_error='connect' WHERE id=$1",
+    ] {
+        sqlx::query(same).bind(&id).execute(&pool).await.unwrap();
+        assert_eq!(revision().await, start, "{same}");
+    }
+    for (n, change) in [
+        "UPDATE resource SET name=coalesce(name,'')||' x' WHERE id=$1",
+        "UPDATE resource SET doc=doc||'{\"description\":\"changed\"}' WHERE id=$1",
+        "UPDATE resource SET status='error' WHERE id=$1",
+        "UPDATE resource SET point=ST_SetSRID(ST_MakePoint(8,47),4326) WHERE id=$1",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::query(change).bind(&id).execute(&pool).await.unwrap();
+        assert_eq!(revision().await, start + 1 + n as i64, "{change}");
+    }
+}
+
+/// A spelling that becomes another link's alias moves its group revision, though the write
+/// changes no grouping input of its own (no OSM envelope to drop): a grouping run that read it
+/// before fails its fence.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_new_alias_moves_its_group_revision(pool: PgPool) {
+    let root = store::ensure_resource(&pool, "https://example.org/root")
+        .await
+        .unwrap();
+    let alias = store::ensure_resource(&pool, "https://example.org/spelling")
+        .await
+        .unwrap();
+    let revision = || async {
+        sqlx::query_scalar::<_, i64>("SELECT group_revision FROM resource WHERE id=$1")
+            .bind(&alias)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = revision().await;
+    let mut tx = pool.begin().await.unwrap();
+    let line = pinakes_core::alias::assign(
+        &mut tx,
+        &alias,
+        &pinakes_core::alias::Alias {
+            root: "https://example.org/root".into(),
+            basis: "identifier",
+        },
+    )
+    .await
+    .unwrap();
+    pinakes_core::alias::record(&mut tx, line.into_iter().collect())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let rooted: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(&alias)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rooted.as_deref(), Some(root.as_str()));
+    assert!(revision().await > before);
+}
+
 /// A reference is no grouping input: grouping reads a resource's document, occurrences and hub
 /// keys, never who referenced it. So a tag put or removed neither marks the resource dirty nor
 /// bumps its revision, while a hub key does both.

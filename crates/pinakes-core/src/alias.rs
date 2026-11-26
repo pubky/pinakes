@@ -480,11 +480,10 @@ pub async fn assign(
     .fetch_all(&mut **tx)
     .await?;
     // An OSM spelling drops its OSM envelope: only the root holds the object. The generation
-    // bump fences any job still running on the alias. This statement must keep naming a column
-    // of the `group_resource_revision` trigger (`doc`, `osm_version`): the trigger fires on the
-    // columns an UPDATE names, not on changed values, and its `group_revision` bump is what fails
-    // a concurrent grouping run's fence on the alias.
-    sqlx::query("UPDATE resource SET generation=generation+1,resolver=NULL,lease_until=NULL,priority_at=NULL,osm_type=NULL,osm_id=NULL,osm_version=NULL,doc=CASE WHEN osm_id IS NULL THEN doc ELSE '{}'::jsonb END,type_path=CASE WHEN osm_id IS NULL THEN type_path ELSE '{}'::text[] END WHERE id=$1")
+    // bump fences any job still running on the alias, and the `group_revision` bump a concurrent
+    // grouping run's fence on it (the revision trigger moves it only when a grouping input
+    // changes, and an alias may change none).
+    sqlx::query("UPDATE resource SET generation=generation+1,group_revision=group_revision+1,resolver=NULL,lease_until=NULL,priority_at=NULL,osm_type=NULL,osm_id=NULL,osm_version=NULL,doc=CASE WHEN osm_id IS NULL THEN doc ELSE '{}'::jsonb END,type_path=CASE WHEN osm_id IS NULL THEN type_path ELSE '{}'::text[] END WHERE id=$1")
         .bind(id)
         .execute(&mut **tx)
         .await?;
