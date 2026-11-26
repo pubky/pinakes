@@ -587,11 +587,45 @@ async fn a_card_nobody_shared_opens_by_its_link_and_its_id(pool: PgPool) {
     )
     .await;
     assert_eq!(status, 404);
+    // A lookup reads it as by-uri does, in its place among the links asked for.
+    let known = tagged(&pool, "https://example.org/known").await;
+    let (status, looked) = send(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(
+            json!({"uris": ["https://example.org/known", ARTICLE, "https://example.org/unknown"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{looked}");
+    let looked = looked.as_array().unwrap();
+    assert_eq!(looked.len(), 2);
+    assert_eq!(looked[0]["id"], known.as_str());
+    assert_eq!(looked[1]["id"], id.as_str());
+    assert_eq!(looked[1]["name"], "Douglas Adams");
+    assert_eq!(looked[1]["labels"], by_uri["labels"]);
+    let (_, by_id) = send(
+        &app,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"ids": [id.clone()]})),
+    )
+    .await;
+    assert_eq!(by_id[0]["name"], "Douglas Adams");
     // With the catalogue off, nothing answers.
     let mut config = Config::default();
     config.catalogues.wikidata.enabled = false;
     let off = api::router(AppState::new(pool.clone(), config).unwrap());
     assert_eq!(get(&off, &format!("/v1/resources/{id}")).await.0, 404);
+    let (_, none) = send(
+        &off,
+        "POST",
+        "/v1/resources/lookup",
+        Some(json!({"ids": [id.clone()]})),
+    )
+    .await;
+    assert_eq!(none, json!([]));
     // `POST /v1/resolve` stores it, built from the card at once.
     let (status, resolved) = send(&app, "POST", "/v1/resolve", Some(json!({"uri": ARTICLE}))).await;
     assert_eq!(status, 200, "{resolved}");
@@ -2165,8 +2199,12 @@ async fn a_dropped_catalogue_gives_its_links_back_spread_over_a_day(pool: PgPool
 /// each page after the last (more keys than a page), and keeps those of a catalogue still on.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: PgPool) {
-    store::ensure_state(&pool, Catalogue::Wikidata).await.unwrap();
-    store::ensure_state(&pool, Catalogue::Musicbrainz).await.unwrap();
+    store::ensure_state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap();
+    store::ensure_state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap();
     let a = tagged(&pool, "https://example.org/a").await;
     let b = tagged(&pool, "https://example.org/b").await;
     for (id, from) in [(&a, 0), (&b, 1300)] {
@@ -2191,4 +2229,3 @@ async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: Pg
     .unwrap();
     assert_eq!(left, [("musicbrainz".to_owned(), 700)]);
 }
-

@@ -260,6 +260,8 @@ resolver limits apply to pubky and to each card route.
 | `max_radius_m` | `200000.0` | 1–200000 | Largest `near` radius (metres). |
 | `search_text_candidates` | `500` | 50–10000 | The best units a search with `q` reads from the text index ([Text index](#text-index)). |
 | `search_index_commit_secs` | `2` | 1–60 | Seconds between two passes that commit queued changes to the text index. |
+| `search_index_searches` | `0` | 0–256 | Text searches the text index runs at once; `0` is one per CPU core. One more waits for a turn ([Text index](#text-index)). |
+| `search_index_budget_ms` | `2000` | 100–30000 | The most a text search's index stage takes, its wait for a turn included; past it the search answers 503. |
 | `api_cache_capacity` | `10000` | 100–100000 | Entries the rate limiter's table holds when an API request adds a client address. Past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
 | `preview_cache_capacity` | `10000` | 100–100000 | The same table's size when a preview adds its client address and link. Keep it equal to `api_cache_capacity`. |
 | `preview_requests_per_minute` | `30` | 1 or more | Preview requests per minute per client. |
@@ -1671,20 +1673,25 @@ The index is derived data, rebuilt from the database when it is missing.
   documents, current or deleted, so its words leave the index files too. The merge runs in the
   background: the pass, later commits and searches don't wait for it. One merge runs at a time;
   a removal meanwhile, or a merge that failed (a merge of Tantivy's own took a segment first,
-  started up to 5 times in all), is merged at a later pass. Any other pass merges nothing, and
+  started up to 5 times in all), is merged at a later pass. The commit that removes the text
+  records the merge it owes, and a commit after the merge records that nothing is owed, so a
+  daemon restarted before the merge finished merges at its first pass. Any other pass merges nothing, and
   segments with 5% deleted documents merge on their own (as a changed or removed catalogue card's
   old words do). A card built from a catalogue card is read again when its card changes: the
   join rebuilds it (its document holds the card's content hash), so its other names and fame
   follow the card's.
-- **Catalogue cards.** A catalogue's full import queues only the cards whose texts it changes; the
-  cards it adds or removes are not queued: once it has finished (`catalogue_state.last_import_at`),
-  the daemon reads all the catalogue's cards again, 20,000 per pass (in source-ID order) after the
-  pass's queues, and when it has read the last one removes the documents of earlier imports, so
-  millions of imported cards never pass through a queue and referenced links keep their 2 s
-  meanwhile. Until then a removed card stays in the index, and Postgres, which checks every
-  candidate, leaves it out. An update run queues the cards it adds, changes or removes
-  (`search_index_catalogue_queue`, by triggers on `catalogue_card`), 20,000 rows per pass, so a run
-  that writes faster than the index reads holds back neither referenced links nor the re-read. A
+- **Catalogue cards.** Every card whose content changes is queued (`search_index_catalogue_queue`,
+  by triggers on `catalogue_card`; a full import's stamp of an unchanged card queues nothing), and
+  so is every card an update run adds or removes, and every card a later full import adds or
+  removes (one that runs after the catalogue's first full import has finished), 20,000 rows per
+  pass, so a run that writes faster than the index reads holds back neither referenced links nor a
+  re-read. A catalogue's first full import queues only the cards it changes in place: once it has
+  finished (`catalogue_state.last_import_at`), the daemon reads all the catalogue's cards again,
+  20,000 per pass (in source-ID order) after the pass's queues, and when it has read the last one
+  removes the documents of cards gone since, so millions of first-imported cards never pass
+  through a queue and referenced links keep their 2 s meanwhile. Until then a removed card stays
+  in the index, and Postgres, which checks every candidate, leaves it out. The re-read logs its
+  start and end, and `pinakes_search_index_reread_cards{catalogue}` counts the cards it has read; a
   daemon restarted during a re-read starts it again from the catalogue's first card. A catalogue
   switched off leaves every search at once (searches read only the catalogues that are on) and the
   index at the daemon's next pass, which removes its documents (also those of a re-read under way)
@@ -1697,6 +1704,9 @@ The index is derived data, rebuilt from the database when it is missing.
   or a second database on the cluster is another one), it logs a warning and builds the
   index from the database in the background (about a second per 2,000 units on the development
   data; catalogue cards at Tantivy's bulk rate); until then text searches read Postgres alone. A
+  build reads the whole database in one read-only snapshot (`REPEATABLE READ`), held for as long as
+  the build runs (minutes at catalogue size), and vacuum keeps every row version that snapshot can
+  see until it ends: start a rebuild when the write load is low. A
   build that fails is retried every minute; meanwhile the rows of finished transactions in both
   queues are deleted (the next build reads everything), and a failed build leaves no partial
   generation.
@@ -1708,8 +1718,19 @@ The index is derived data, rebuilt from the database when it is missing.
 The directory holds one generation (`gen-<milliseconds>`) and a `CURRENT` file naming it; a
 rebuild needs room for two generations, and a generation `CURRENT` doesn't name is removed before
 a build. `pinakes_search_index_open` is 1 once the index is open, and
-`pinakes_search_index_last_pass_timestamp_seconds` is the last pass that read its queues without
-an error ([alerts](#alerts)).
+`pinakes_search_index_last_pass_timestamp_seconds` is the open's time, then the last pass that read
+its queues without an error, so passes that fail from the start stall it ([alerts](#alerts)).
+`pinakes_search_index_queue{queue}` is the rows each queue holds (`resources`, `catalogue`), read
+at each metrics refresh.
+
+A text search waits for one of `limits.search_index_searches` turns (one per CPU core by
+default) and has `limits.search_index_budget_ms` (2 s) for its index stage, the wait included;
+the turn goes with the search, so one whose client has gone still holds it until it stops. Past
+the budget a search stops in the index and answers `503` ([API](api.md#text-search));
+`pinakes_search_index_busy_total{reason}` counts them (`turn`: no free turn in time; `budget`:
+past the budget), alert `TextSearchBusy`. A word's start expands to at most 10,000 words per
+segment, a text to 32 items and 64 three-letter pieces, and a text of one character found inside
+names is left to Postgres, so no search reads the index's whole dictionary.
 
 ## Catalogues
 
@@ -1725,12 +1746,12 @@ this version, and hold no cards.
 | Field | Holds |
 | --- | --- |
 | `catalogue`, `source`, `source_id` | The catalogue, its sub-source (the registry for `software`, else the catalogue) and the item's ID there, unique per catalogue |
-| `uri` | The item's canonical link, normalized as a referenced link is |
+| `uri` | The item's canonical link: an `http` or `https` link, normalized as a referenced link is and stored as its root by the spelling rules (`https://doi.org/10.1/X` as `doi:10.1/x`, a tracked link without its tracking parameters), as a resource of the same link is. A link of another scheme, or one that carries a credential as written (a password in it), is refused |
 | `type` | The schema.org type, by its bare name (`Person`) |
-| `name`, `other_names`, `description` | Texts, without control characters |
-| `labels` | The source's labels as valid Pubky tag labels: lower case, at most 20 characters, no spaces, commas or colons. A label that can't be made one is left out. |
-| `keys` | Join keys in the forms resources carry (`wikidata:Q42`, `mb:recording:<mbid>`, `doi:` in lower case, `isbn:` as ISBN-13), the card's own link's `url:<resource id>`, and `url:<resource id>` for each link the catalogue itself names as the item (a Wikipedia sitelink, a MusicBrainz URL relation): such a link is built from the card ([shared links](#shared-links-a-catalogue-holds)), so an importer keys only links its catalogue vouches for |
-| `related_uris` | Links in the item's group that are not the item, such as an official website |
+| `name`, `other_names`, `description` | Texts, without control characters or invisible format characters (a zero-width space, direction marks; names keep the joiners Persian and emoji are written with), each read up to four times its cap. An other name or a description that carries a credential is left out; a name that does refuses the card |
+| `labels` | The source's labels as valid Pubky tag labels: lower case, at most 20 characters, no spaces, commas, colons or invisible characters. A label that can't be made one (or whose text is over 256 bytes) is left out. |
+| `keys` | Join keys in the form a link's own key takes ([shared links](#shared-links-a-catalogue-holds)), whatever the importer's spelling: `wikidata:Q42`, `mb:<entity>:<mbid>` in lower case, `doi:` in lower case, `isbn:` as ISBN-13, `crate:` in lower case with `-` for `_` (`crate:serde-json` for `serde_json`), `arxiv:` without a version, `openalex:W…`, `homepage:` in lower case and punycode without `www.`; a key not valid in its kind is left out. Then the card's own link's `url:<resource id>`, and `url:<resource id>` for each link the catalogue itself names as the item (a Wikipedia sitelink, a MusicBrainz URL relation): such a link is built from the card ([shared links](#shared-links-a-catalogue-holds)), so an importer keys only links its catalogue vouches for |
+| `related_uris` | Links in the item's group that are not the item, such as an official website: `http` or `https` links, each stored as its root |
 | `point`, `fame`, `details` | A point, a 0–1 fame from the source's own signal, and the catalogue's own extras |
 
 `catalogue_state` holds one row per catalogue: its phase (`idle`, `import`, `update`, `failed`,
@@ -1754,7 +1775,11 @@ Set `[catalogues.<name>] enabled = false`, or `[catalogues] enabled = false` for
   first start with the catalogue off, the daemon gives the links built from its cards back to the
   fetch queue in the background, due at times spread over the next day, and takes its keys off
   every link, each label removal with a change line ([shared links](#shared-links-a-catalogue-holds)).
-  Later starts find nothing left to do.
+  Later starts find nothing left to do. A link a later check finds built from a catalogue that is
+  off, or that was dropped, is given back the same way, its read spread over the next day.
+- reads nothing for its cards: no Wikipedia summary is asked for a card built from it. With every
+  catalogue off, the daemon's joins task gives the links back and checks what is queued once at
+  start, then reads nothing more, and the extras task reads nothing.
 
 ### Shared links a catalogue holds
 
@@ -1780,13 +1805,16 @@ before its catalogue was imported joins at its next refresh. A card holds a link
 | A Flathub app page | `flathub:<id>` |
 | A site's homepage (path `/`, no query) | `homepage:<host without www.>` |
 
-Two cards of one catalogue that hold a link equally join neither. A matching name or any other
+Two cards of one catalogue that hold a link equally join neither. A card typed as an event (an
+`Event` or one of its subtypes, such as a festival) backs no link: the next card that holds it
+does, or the link is fetched. A matching name or any other
 metadata never joins. OpenStreetMap cards back no link, and an OpenStreetMap link keeps its OSM
 route. A Podcast Index card backs no link either: a show's feed is fetched for its episodes, and
 joins the card's group as a related link. An event (dated or not) and a calendar (the event
 routes), a Pubky object, a `geo:` point,
-an alias, a link that carries a credential and social content (a post, even a gone one) are never
-built from a card and join no card's group. A page on an OpenStreetMap host may join a group but
+an alias, a link that carries a credential and social content (a post, even a gone one; and before
+its first read, any link of a source of people's own posts, such as Bluesky, Mastodon, Reddit or X)
+are never built from a card and join no card's group. A page on an OpenStreetMap host may join a group but
 is never built from a card.
 
 A catalogue-backed card:
@@ -1811,8 +1839,9 @@ A catalogue-backed card:
 
 A card names the links it holds when it is written: its own link, its `url:` keys, the canonical
 link of each of its keys (`catalogue_key_links`: the musicbrainz.org entity and ISRC pages, wikidata.org, `doi:`,
-arxiv.org abstract and PDF, openalex.org, crates.io, docs.rs, lib.rs, F-Droid (English) and Flathub pages, and a homepage with
-or without `www.`) and its related links. The card table's triggers mark those links' rows in
+arxiv.org abstract and PDF, openalex.org, crates.io, docs.rs, lib.rs (a crate's name with `-` and with `_`), F-Droid
+(English) and Flathub pages, and a homepage with or without `www.`) and its related links. The card table's triggers
+mark those links' rows in
 `catalogue_join_due`, so a link shared before the import joins then; a background task checks
 them, a hundred at a time. Another spelling of a key's link joins at its next fetch. A card never
 names a link that carries a credential, or a Pubky object: the importer refuses it. With every
@@ -1824,6 +1853,7 @@ catalogue off nothing is looked up.
 | `pinakes_catalogue_join_errors_total{stage}` | Failed joins (`referenced`, `before_fetch`, `drain`) and extras reads (`extras`), each tried again; `CatalogueJoinErrors` past ten joins an hour for an hour |
 | `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Join checks (`joins`) and extras reads (`extras`) due now, and the oldest one's wait; `CatalogueJoinsBehind` past six hours of joins. Extras follow Wikipedia's pace (a request a second at most), so after a first import they lag for hours by design |
 | `pinakes_catalogue_join_errors_total{stage="extras"}` | Also counts a summary Wikipedia didn't answer. A check that keeps failing backs off (to an hour for joins, a day for extras) and waits outside the backlog |
+| `pinakes_catalogue_cards_total{catalogue,outcome}` | The cards each catalogue's writes read: `inserted`, `changed`, `unchanged` (stamped only), `rejected` (refused as invalid) and `removed`; `CatalogueCardsRejected` past a tenth refused in an hour, `CatalogueCardsRemoved` past a tenth of the catalogue removed in a day |
 
 To see the queues: `SELECT count(*), count(*) FILTER (WHERE due_at<=now()) AS due, min(due_at),
 max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, whose rows without a
@@ -1881,11 +1911,11 @@ is on (in this version: `musicbrainz`), and follows these rules:
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
 | Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
 | Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |
-| Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is one whose importer panicked. A run whose catalogue lock's database session has ended stops, is logged and resumes once the task holds the lock again; nothing about it is written to the state row, which another daemon may hold by then. Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
+| Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is one whose importer panicked. A run whose catalogue lock's database session has ended stops, is logged and resumes once the task holds the lock again; nothing about it is written to the state row, which another daemon may hold by then. So is a failure the run meets once that session has ended (a database restart ends every session).  Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
 | Abandoned runs | An importer may abandon a run whose data can't be applied (MusicBrainz: a refused dump). The run is recorded as failed, but its cursor goes and no card is removed for it; what the importer keeps about the refusal stays in its position, and the task waits for something new rather than trying again. |
 | Requests | A finished full import clears `import_requested`, also one asked for while it ran. |
-| Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
-| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). |
+| Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `shrunk`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
+| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, or when the import's scope is another than the last finished one's (`limit`, `region`, `min_citations`, kept in `catalogue_state.scope`). |
 
 ### Allowed update lag
 
@@ -1939,7 +1969,9 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
 | `CatalogueJoinsBehind` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): the oldest join check has waited over six hours. |
 | `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |
-| `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10; the log says why. Text searches read Postgres alone, or miss newer changes. |
+| `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10 (counted from its open, so passes that fail from the start fire it too); the log says why. Text searches read Postgres alone, or miss newer changes. |
+| `TextSearchBusy` | warning | [Text index](#text-index): over ten text searches an instance answered 503 in ten minutes, for ten minutes. Raise `limits.search_index_searches` on a host with more cores, or find what makes searches slow. |
+| `CatalogueCardsRejected`, `CatalogueCardsRemoved` | warning | [Importer rules](#importer-rules): a catalogue's runs refused over a tenth of the cards they read in an hour (a dump format change, an importer bug: the debug log names the refused cards), or removed over a tenth of the catalogue in a day (check upstream; a full import under half its cards fails instead). |
 
 A new key needs a restart.
 

@@ -573,6 +573,7 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
                 if let Err(unrecorded) = record_failure(&ctx.pool, catalogue, &shown).await {
                     tracing::warn!(catalogue = catalogue.name(), error = %failure::shown(&unrecorded), "catalogue failure not recorded");
                 }
+                ctx.pace.retry
             }
         };
         tokio::select! {

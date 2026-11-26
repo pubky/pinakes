@@ -1120,7 +1120,13 @@ impl SearchIndex {
             secs = started.elapsed().as_secs(),
             "text index built"
         );
-        self.set(Open::new(index, boundary, markers, database, Default::default())?);
+        self.set(Open::new(
+            index,
+            boundary,
+            markers,
+            database,
+            Default::default(),
+        )?);
         // The build read every transaction below its boundary, and every catalogue card.
         sqlx::query("DELETE FROM search_index_queue WHERE xid<$1::text::xid8")
             .bind(boundary.to_string())
@@ -1351,14 +1357,19 @@ impl SearchIndex {
             _ => {
                 let markers = import_markers(pool, &enabled).await?;
                 let mut reread = None;
-                for c in enabled.iter().filter(|c| recorded.get(*c) != markers.get(*c)) {
+                for c in enabled
+                    .iter()
+                    .filter(|c| recorded.get(*c) != markers.get(*c))
+                {
                     let marker = markers.get(c).cloned().unwrap_or_default();
                     let read_before = recorded.get(c).is_some_and(|m| !m.is_empty());
                     if read_before && !marker.is_empty() {
                         let recording = open.clone();
                         let (catalogue, at) = (c.clone(), marker.clone());
-                        tokio::task::spawn_blocking(move || recording.record_marker(&catalogue, &at))
-                            .await??;
+                        tokio::task::spawn_blocking(move || {
+                            recording.record_marker(&catalogue, &at)
+                        })
+                        .await??;
                         tracing::info!(catalogue = %c, "a catalogue's later full import reached the text index through its queue");
                     } else if reread.is_none() {
                         tracing::info!(catalogue = %c, "the text index reads a catalogue's cards again after its first full import");
@@ -2505,7 +2516,12 @@ impl Open {
     /// The best `cap` units for `q`, within `budget`: `None` when the index does not serve the
     /// text (one character it would have to find inside names: Postgres reads it alone), an error
     /// ([`Busy`]) when the budget ran out.
-    fn search(&self, q: &TextQuery, cap: usize, budget: &Arc<Budget>) -> Result<Option<Vec<Candidate>>> {
+    fn search(
+        &self,
+        q: &TextQuery,
+        cap: usize,
+        budget: &Arc<Budget>,
+    ) -> Result<Option<Vec<Candidate>>> {
         let searcher = self.reader.searcher();
         let order = q.order.unwrap_or(TextOrder::Relevance);
         let now = q.at.timestamp() as f64;
@@ -2519,18 +2535,20 @@ impl Open {
             return Ok(None);
         }
         // Each document's IDs from the fast fields (no stored document is read).
-        let ids: Vec<(Option<tantivy::columnar::StrColumn>, Option<tantivy::columnar::StrColumn>)> =
-            searcher
-                .segment_readers()
-                .iter()
-                .map(|segment| {
-                    let fast = segment.fast_fields();
-                    (
-                        fast.str("unit_id").ok().flatten(),
-                        fast.str("resource_id").ok().flatten(),
-                    )
-                })
-                .collect();
+        let ids: Vec<(
+            Option<tantivy::columnar::StrColumn>,
+            Option<tantivy::columnar::StrColumn>,
+        )> = searcher
+            .segment_readers()
+            .iter()
+            .map(|segment| {
+                let fast = segment.fast_fields();
+                (
+                    fast.str("unit_id").ok().flatten(),
+                    fast.str("resource_id").ok().flatten(),
+                )
+            })
+            .collect();
         let id_of = |column: &Option<tantivy::columnar::StrColumn>, doc: DocId| -> Result<String> {
             let column = column.as_ref().context("an ID column")?;
             let ord = column.term_ords(doc).next().context("an ID")?;
@@ -2606,7 +2624,9 @@ fn count_up_to(
     budget: &Arc<Budget>,
 ) -> Result<usize> {
     use tantivy::DocSet;
-    let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(searcher))?;
+    let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(
+        searcher,
+    ))?;
     let mut count = 0;
     for segment in searcher.segment_readers() {
         budget.check()?;
@@ -2986,8 +3006,7 @@ impl Open {
             match item {
                 Item::Or => joined = true,
                 Item::Words(words, whole) => {
-                    let query =
-                        self.item_query(searcher, words, position == last_words && *whole);
+                    let query = self.item_query(searcher, words, position == last_words && *whole);
                     match (joined, groups.last_mut()) {
                         (true, Some(group)) => group.push(query),
                         _ => groups.push(vec![query]),
@@ -3190,7 +3209,16 @@ mod tests {
     /// after a removal finds the document's words in the new segment, not nothing.
     #[test]
     fn a_merge_after_a_removal_reads_the_segments_as_they_are_now() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
         docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
         open.reader.reload().unwrap();
@@ -3220,7 +3248,16 @@ mod tests {
     /// a switch-off whose merge runs is not removed again at the next pass.
     #[test]
     fn deleted_documents_of_a_catalogue_are_not_documents() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         docs(
             &open,
             &[("catalogue:1", "peak", "wikidata"), ("r", "page", "")],
@@ -3246,7 +3283,16 @@ mod tests {
     /// pass would then join under the writer lock).
     #[test]
     fn a_merge_stays_running_until_its_thread_ends() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
         docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
         open.reader.reload().unwrap();
@@ -3283,7 +3329,16 @@ mod tests {
     /// the removed document's words leave the files.
     #[test]
     fn a_removal_while_a_merge_runs_is_merged_at_the_next_pass() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         let f = open.fields;
         {
             let mut writer = open.writer.lock().unwrap();
@@ -3465,22 +3520,61 @@ mod tests {
     /// ran out; never a panic, never more than the candidates asked for from each part.
     #[test]
     fn any_text_of_256_bytes_is_searched_within_its_budget() {
-        let mut gen = crate::catalogue::testgen::Gen::new("text search fuzz", 0x2f8a_51c3_77e1_0b9d);
-        let open = Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default())
-            .unwrap();
-        let syllables = ["a", "an", "ar", "ba", "bo", "ca", "de", "el", "ka", "lo", "ma", "ra", "st", "th", "zu"];
+        let mut gen =
+            crate::catalogue::testgen::Gen::new("text search fuzz", 0x2f8a_51c3_77e1_0b9d);
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let syllables = [
+            "a", "an", "ar", "ba", "bo", "ca", "de", "el", "ka", "lo", "ma", "ra", "st", "th", "zu",
+        ];
         let names: Vec<String> = (0..20_000)
             .map(|_| {
                 (0..1 + gen.below(4))
-                    .map(|_| (0..1 + gen.below(4)).map(|_| *gen.pick(&syllables)).collect::<String>())
+                    .map(|_| {
+                        (0..1 + gen.below(4))
+                            .map(|_| *gen.pick(&syllables))
+                            .collect::<String>()
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             })
             .collect();
         named(&open, &names);
         let pieces = [
-            "or", "OR", "-", "\"", "a", "ab", "an", "ar", "bo", "ca", "the", "ka lo", "-ma", "\"ra st\"",
-            "東", "京", "ภา", "€", "(", "!!!", "c++", "é", "zürich", "x", "0", "\u{301}", "😀", "a-b",
+            "or",
+            "OR",
+            "-",
+            "\"",
+            "a",
+            "ab",
+            "an",
+            "ar",
+            "bo",
+            "ca",
+            "the",
+            "ka lo",
+            "-ma",
+            "\"ra st\"",
+            "東",
+            "京",
+            "ภา",
+            "€",
+            "(",
+            "!!!",
+            "c++",
+            "é",
+            "zürich",
+            "x",
+            "0",
+            "\u{301}",
+            "😀",
+            "a-b",
         ];
         for round in 0..300 {
             let mut text = String::new();
@@ -3499,7 +3593,11 @@ mod tests {
                 text: text.clone(),
                 at: chrono::Utc::now(),
                 inside_words: gen.chance(2),
-                order: Some(*gen.pick(&[TextOrder::Relevance, TextOrder::Activity, TextOrder::Recent])),
+                order: Some(*gen.pick(&[
+                    TextOrder::Relevance,
+                    TextOrder::Activity,
+                    TextOrder::Recent,
+                ])),
                 ..Default::default()
             };
             let started = std::time::Instant::now();
@@ -3520,8 +3618,14 @@ mod tests {
     /// A budget that has run out stops the search: `Busy`, not candidates.
     #[test]
     fn a_search_past_its_budget_is_busy() {
-        let open = Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default())
-            .unwrap();
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
         named(&open, &["aurora borealis".to_owned()]);
         let q = TextQuery {
             text: "aurora".into(),
@@ -3537,8 +3641,14 @@ mod tests {
     /// first; a text holds at most MAX_ITEMS items; a count stops at the number asked for.
     #[test]
     fn expansions_items_and_counts_are_bounded() {
-        let open = Open::new(index(), 0, BTreeMap::new(), String::new(), Default::default())
-            .unwrap();
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
         let mut names: Vec<String> = (0..PREFIX_TERMS + 500).map(|n| format!("a{n}")).collect();
         names.extend((0..50).map(|_| "apple".to_owned()));
         named(&open, &names);
@@ -3546,7 +3656,11 @@ mod tests {
         let terms = open.prefix_terms(&searcher, open.fields.name, "a");
         assert_eq!(terms.len(), PREFIX_TERMS);
         assert!(terms.contains(&Term::from_field_text(open.fields.name, "apple")));
-        assert_eq!(open.prefix_terms(&searcher, open.fields.name, "apple").len(), 1);
+        assert_eq!(
+            open.prefix_terms(&searcher, open.fields.name, "apple")
+                .len(),
+            1
+        );
         assert_eq!(items(&open.index, &"word ".repeat(100)).len(), MAX_ITEMS);
         let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(5));
         let all = tantivy::query::AllQuery;
@@ -3564,8 +3678,14 @@ mod tests {
     fn an_owed_merge_outlives_a_restart() {
         let index = index();
         let open = Arc::new(
-            Open::new(index.clone(), 0, BTreeMap::new(), String::new(), Default::default())
-                .unwrap(),
+            Open::new(
+                index.clone(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
         );
         docs(&open, &[("a", "aurora", ""), ("b", "borealis", "")]);
         docs(&open, &[("c", "cosmos", "")]);
@@ -3577,7 +3697,10 @@ mod tests {
             serde_json::from_str(index.load_metas().unwrap().payload.as_deref().unwrap()).unwrap()
         };
         let recorded = payload(&index);
-        assert_eq!((recorded.owed.clone(), recorded.owed_all), (vec!["a".to_owned()], false));
+        assert_eq!(
+            (recorded.owed.clone(), recorded.owed_all),
+            (vec!["a".to_owned()], false)
+        );
         assert!(holds(&open, "aurora"), "its words are still in the files");
         drop(open);
         // The restart: opened from the files, the merge is owed and runs at the next pass.

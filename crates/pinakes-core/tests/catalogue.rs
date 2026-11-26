@@ -1433,6 +1433,8 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
     assert_eq!(needs(&metrics), 0);
+}
+
 /// A failure the importer meets once the catalogue lock's session has ended too (a database
 /// restart ends every session, and the large-import turn's watch may see it first) is not written
 /// to the state row, which may be another daemon's by then: only logged, as a lost lock is. The
@@ -1499,10 +1501,7 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
     for _ in 0..2 {
         *fixture.next.lock().unwrap() = Some(Run::Import);
         let failed = run::step(&fixture, &ctx).await.unwrap_err();
-        assert_eq!(
-            pinakes_core::catalogue::failure::shown(&failed),
-            "shrunk"
-        );
+        assert_eq!(pinakes_core::catalogue::failure::shown(&failed), "shrunk");
         assert_eq!(count(&pool, Catalogue::Wikidata).await, 25);
         let s = state(&pool, Catalogue::Wikidata).await;
         assert_eq!((s.run.as_deref(), s.cards), (Some("import"), 25));
@@ -1551,7 +1550,11 @@ async fn only_changed_cards_move_the_search_revision_and_every_write_is_counted(
         }
     };
     let counted = |outcome| pinakes_core::telemetry::catalogue_cards_counted("tranco", outcome);
-    let before = (counted("inserted"), counted("unchanged"), counted("rejected"));
+    let before = (
+        counted("inserted"),
+        counted("unchanged"),
+        counted("rejected"),
+    );
     let mut invalid = card(99);
     invalid.uri = "javascript:alert(1)".into();
     let mut cards: Vec<Card> = cards(5);
@@ -1559,9 +1562,15 @@ async fn only_changed_cards_move_the_search_revision_and_every_write_is_counted(
         c.source_id = c.source_id.replace('Q', "site-");
     }
     let first = revision().await;
-    store::upsert(&pool, Catalogue::Tranco, 1, &[cards.clone(), vec![invalid]].concat(), None)
-        .await
-        .unwrap();
+    store::upsert(
+        &pool,
+        Catalogue::Tranco,
+        1,
+        &[cards.clone(), vec![invalid]].concat(),
+        None,
+    )
+    .await
+    .unwrap();
     let inserted = revision().await;
     assert!(inserted > first);
     // A re-import of the same cards: stamps only.
@@ -1570,7 +1579,11 @@ async fn only_changed_cards_move_the_search_revision_and_every_write_is_counted(
         .unwrap();
     assert_eq!(revision().await, inserted);
     assert_eq!(
-        (counted("inserted"), counted("unchanged"), counted("rejected")),
+        (
+            counted("inserted"),
+            counted("unchanged"),
+            counted("rejected")
+        ),
         (before.0 + 5, before.1 + 5, before.2 + 1)
     );
     // A write that changes nothing moves nothing either; a changed card does.

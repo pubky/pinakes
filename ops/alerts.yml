@@ -14,6 +14,11 @@ groups:
         for: 30m
         labels: {severity: warning}
         annotations: {summary: "The Pinakes text index has not opened for 30 minutes (unwritable search.index_dir or a failing build): text searches read Postgres alone"}
+      - alert: TextSearchBusy
+        expr: sum by (instance, job) (increase(pinakes_search_index_busy_total[10m])) > 10
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches) or searches ran past limits.search_index_budget_ms"}
       - alert: MetricsMissing
         expr: absent(pinakes_ingest_last_success_timestamp_seconds)
         for: 5m
@@ -132,3 +137,11 @@ groups:
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue's cards are further behind upstream than its source's publication rhythm allows (pinakes_catalogue_max_update_lag_seconds): no import or update has brought newer data"}
+      - alert: CatalogueCardsRejected
+        expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="rejected"}[1h])) > 100) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="rejected"}[1h])) > 0.1 * sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome=~"inserted|changed|unchanged|rejected"}[1h])))
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's runs refused over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the refused cards"}
+      - alert: CatalogueCardsRemoved
+        expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d])) > 1000) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d])) > 0.1 * (sum by (instance, job, catalogue) (pinakes_catalogue_cards) + sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d]))))
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue removed over a tenth of its cards in a day: check that upstream removed them (pinakesd catalogue status; a full import under half its cards fails instead)"}

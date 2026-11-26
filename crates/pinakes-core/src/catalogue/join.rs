@@ -282,9 +282,7 @@ pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found
 /// Whether `card` is typed as an event (`Event` or one of its subtypes, `Festival`,
 /// `SportsEvent`, …): such a card backs no link.
 pub fn event_card(card: &CardRow) -> bool {
-    model::type_path(&card.r#type)
-        .iter()
-        .any(|t| t == "Event")
+    model::type_path(&card.r#type).iter().any(|t| t == "Event")
 }
 /// The types a source's card of people's own posts has (`Source::social`): a post, a comment, a
 /// profile or page (its bio is its owner's own text), a video.
@@ -1459,7 +1457,11 @@ mod tests {
             let root = crate::alias::root(&normal).map_or(normal, |a| a.root);
             for (key, _) in link_keys(&s.link) {
                 let named = &links[&key];
-                assert!(named.contains(&root), "{}: {root} not among {key}'s {named:?}", s.link);
+                assert!(
+                    named.contains(&root),
+                    "{}: {root} not among {key}'s {named:?}",
+                    s.link
+                );
             }
         }
     }

@@ -362,9 +362,10 @@ async fn an_index_of_another_database_is_rebuilt(pool: PgPool) {
                         .connect_with(options)
                         .await
                     {
-                        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                            .execute(&pool)
-                            .await;
+                        let _ =
+                            sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                                .execute(&pool)
+                                .await;
                     }
                 })
             })
@@ -752,10 +753,12 @@ async fn one_character_inside_names_is_read_by_postgres(pool: PgPool) {
 async fn passes_that_fail_from_the_start_leave_the_last_pass_at_the_open(pool: PgPool) {
     card(&pool, 1, "Aurora", "A page.", "sky", 1).await;
     // Every pass fails: the catalogue queue it reads is gone.
-    sqlx::query("ALTER TABLE search_index_catalogue_queue RENAME TO search_index_catalogue_queue_gone")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "ALTER TABLE search_index_catalogue_queue RENAME TO search_index_catalogue_queue_gone",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let dir = scratch("stalled");
     let index = SearchIndex::on_disk(&dir);
     let passed = prometheus::IntGauge::new("passed", "test").unwrap();

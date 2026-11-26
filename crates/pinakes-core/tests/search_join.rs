@@ -670,7 +670,7 @@ async fn a_key_two_cards_of_one_catalogue_hold_merges_nothing(pool: PgPool) {
         fame: 0.8,
         ..Default::default()
     };
-    import(&pool, Catalogue::Wikidata, 1, &[item.clone()]).await;
+    import(&pool, Catalogue::Wikidata, 1, std::slice::from_ref(&item)).await;
     import(
         &pool,
         Catalogue::Musicbrainz,

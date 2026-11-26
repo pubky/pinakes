@@ -148,7 +148,8 @@ otherwise), so a client shows their tags with it. Nothing is stored and no other
 asked, so the answer has no Also on links and no Wikipedia summary. A client that opens such a card
 for a person to read calls `POST /v1/resolve` with its link: that stores it, answers with the built
 card at once, and reads its Also on and its Wikipedia summary in the background; a read of the card
-a moment later shows them. With its catalogue off, the link is unknown again.
+a moment later shows them. With its catalogue off, the link is unknown again. An OpenStreetMap
+card found in search does not open this way yet: its link and ID answer 404.
 
 ### Lookup
 
@@ -157,8 +158,9 @@ a moment later shows them. With its catalogue off, the link is unknown again.
 - `ids` (or `resource_ids`): resource IDs. An alias's ID answers with its root's card.
 - `uris`: links, each read as `by-uri` reads it, static alias rules included.
 
-The answer lists the cards in request order. Duplicates are kept and unknown entries are
-skipped. Sending both lists, or neither, is a 400.
+A catalogue card nobody shared is answered by either list, as `by-uri` and
+`GET /v1/resources/{id}` answer it ([Catalogue cards](#catalogue-cards)). The answer lists the
+cards in request order. Duplicates are kept and unknown entries are skipped. Sending both lists, or neither, is a 400.
 
 ### Info
 
@@ -1121,6 +1123,7 @@ letters and digits; anything else, such as a URL, gets a general message. Other 
 | 400 | `collapse=group` while groups are off (`groups.enabled = false`) |
 | 501 | `reach=wot_2` or `boost=wot_2` on an instance whose Nexus serves no reach set |
 | 502 | Nexus failed, or did not answer in time, while reading a `reach` or `boost` set |
+| 503 | A text search found no free turn of the text index, or ran past its time ([Text search](#text-search)); `Retry-After` says when to ask again |
 
 ### Text search
 
@@ -1153,6 +1156,16 @@ distance. `q` matches like this:
   words: `ai`, `lol`, `btc`) matches a name only at the start of a word (`Airbnb`, not `Rain`; a
   sign such as `/` or `™` starts a word too) and the description by whole words. Several short
   words match in order, each at a word start (`a s` finds `A slow song`, not `As lop`).
+- A `q` of one character that is found inside names (a sign such as `(` or `€`, or a letter of
+  Hebrew or Arabic) is matched in Postgres alone, as below.
+
+The index reads at most 32 items of `q` (words, phrases, words to leave out, `or`), proposes names
+by at most 64 of its three-letter pieces (the rarest), and expands the start of a word to at most
+10,000 words per index segment (those the most names hold); Postgres checks every candidate
+against the whole `q`. At most `limits.search_index_searches` text searches use the index at
+once (one per CPU core by default), and each has `limits.search_index_budget_ms` (2 s) for its
+index stage, its wait for a turn included. A search that finds no free turn within that time, or
+that runs past it, answers `503` with `Retry-After`; its work in the index stops there.
 
 People's tags and catalogue labels add to a card's relevance but never match `q` alone. A post
 whose author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's
@@ -1181,8 +1194,8 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
 - `id` is the resource ID its `uri` would have, the same once someone references the link; `uri`
   is the card's canonical link; `labels` are its source's labels; `refs` is `[]`, `collections`
   0, `status` `ok`; `group`, `also_on` and `maybe_same` are empty. OpenStreetMap cards carry the
-  ODbL `attribution`. `GET /v1/resources/{id}` answers 404 for it until someone references the
-  link;
+  ODbL `attribution`. It opens by its `uri` and its `id` ([Catalogue cards](#catalogue-cards)),
+  but for an OpenStreetMap card, whose link and ID answer 404;
 - each thing is one row:
   - a card whose `uri` a listed resource has is listed once, as that resource; a card whose
     resource the search leaves out (not referenced any more, or not yet read) is listed as the
@@ -1191,7 +1204,9 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
     that catalogue card, and for every card of another catalogue that is on and shares one of its
     keys. Where the referenced card is listed (it passes every filter of the search), those cards
     are not; where it is not (a label, a type or a host only the other card has), the card is
-    listed. It stands for a card only while it has a reference that counts and is not an alias.
+    listed. It stands for a card only while it has a reference that counts and is not an alias,
+    and stands for another catalogue's card only through a key that names one card in each of the
+    two catalogues;
     People's tags and the catalogue's labels both match `tags` and count in `facet=tags`, its
     `labels` are the catalogue's, and the text index finds and ranks it by its card's other names
     and `fame` as it would the card;
@@ -1200,12 +1215,17 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
     `osm`, `openalex`, `podcastindex`, `tranco`, `software` order among those the search found,
     at the better relevance of theirs, wherever that card is listed. Where it is not (a filter
     only the other card passes, such as its label or its exact distance), the other card is
-    listed. Two cards of one catalogue are always two things;
+    listed. Two cards of one catalogue are always two things, and a key two cards of one catalogue
+    hold names neither: two MusicBrainz recordings of one ISRC stay two rows beside the Wikidata
+    item that holds the ISRC;
 - never listed with `referenced=true`, a social filter (`author`, `reach`, `related`,
   `in_collection`), `key`, `venue`, `category`, `remote`, `ingredient`, `from` or `to`, nor with
   `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;
 - without text, the best known first (by its source's fame) after every referenced unit, at most
-  `limits.search_text_candidates` per search (by distance with `sort=distance`);
+  `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near` or
+  `bbox`, those are the best known of the eight times `limits.search_text_candidates` cards
+  nearest to the circle's centre (or to each box's centre) inside it, so a large area reads a
+  bounded number of cards; with `type`, the best known of each type and subtype;
 - a catalogue switched off leaves every search at once.
 
 ### Search by key

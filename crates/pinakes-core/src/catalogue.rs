@@ -461,10 +461,8 @@ fn link_root(uri: &str) -> Option<String> {
         _ if crate::alias::web_page(&normal).is_some() => normal,
         _ => return None,
     };
-    (root.len() <= 2048
-        && !crate::capability::is_capability(uri)
-        && publishable(&root))
-    .then_some(root)
+    (root.len() <= 2048 && !crate::capability::is_capability(uri) && publishable(&root))
+        .then_some(root)
 }
 /// `url:` and the resource ID of a stored link (`model::identity` already applied).
 fn own_key(root: &str) -> String {
@@ -519,8 +517,9 @@ pub fn stored_key(key: &str) -> Option<String> {
                 None => crate::hubs::mbid(mbid).map(|mbid| format!("mb:{entity}:{mbid}")),
             }
         }
-        "crate" => packages::Package::new(packages::Registry::Crates, value)
-            .map(|p| p.key().to_string()),
+        "crate" => {
+            packages::Package::new(packages::Registry::Crates, value).map(|p| p.key().to_string())
+        }
         "arxiv" => papers::arxiv_id(value).map(|id| papers::arxiv_key(&id).to_string()),
         "android" => crate::app_ids::android_package(value).then(|| key.to_owned()),
         "flathub" => crate::app_ids::flathub_id(value).then(|| key.to_owned()),
@@ -705,7 +704,9 @@ impl Card {
             .iter()
             .map(|n| clean(n, NAME_CAP))
             .filter(|n| {
-                !n.is_empty() && !crate::capability::contains_credential(n) && seen.insert(n.clone())
+                !n.is_empty()
+                    && !crate::capability::contains_credential(n)
+                    && seen.insert(n.clone())
             })
             .take(OTHER_NAMES_CAP)
             .collect();
@@ -728,7 +729,8 @@ impl Card {
             .related_uris
             .iter()
             .filter(|u| {
-                model::identity(u).is_ok_and(|(_, _, scheme)| matches!(scheme.as_str(), "http" | "https"))
+                model::identity(u)
+                    .is_ok_and(|(_, _, scheme)| matches!(scheme.as_str(), "http" | "https"))
             })
             .filter_map(|u| link_root(u))
             .filter(|u| seen.insert(u.clone()))
@@ -884,7 +886,11 @@ pub(crate) mod testgen {
                 } else {
                     gen.cased(entity)
                 };
-                let link_id = if canonical { id.clone() } else { gen.cased(&id) };
+                let link_id = if canonical {
+                    id.clone()
+                } else {
+                    gen.cased(&id)
+                };
                 Spelled {
                     spelling: format!("mb:{written}:{}", gen.cased(&id)),
                     link: format!("https://musicbrainz.org/{entity}/{link_id}"),
@@ -1066,8 +1072,16 @@ pub(crate) mod testgen {
                     .to_owned();
                 let www = if gen.chance(2) { "www." } else { "" };
                 let dot = if !canonical && gen.chance(4) { "." } else { "" };
-                let written = if canonical { host.clone() } else { gen.cased(&host) };
-                let scheme = if canonical || gen.chance(2) { "https" } else { "http" };
+                let written = if canonical {
+                    host.clone()
+                } else {
+                    gen.cased(&host)
+                };
+                let scheme = if canonical || gen.chance(2) {
+                    "https"
+                } else {
+                    "http"
+                };
                 Spelled {
                     spelling: format!("homepage:{www}{written}{dot}"),
                     link: format!("{scheme}://{www}{written}{dot}/"),
@@ -1103,8 +1117,23 @@ pub(crate) mod testgen {
         for _ in 0..gen.below(5) {
             out.push('/');
             out.push_str(gen.pick(&[
-                "a", "B", "wiki", "Douglas_Adams", "%41b", "%2F", "%7euser", "%zz", ".", "..",
-                "caf%C3%A9", "café", "a b", "10.1000", "abc", "watch", "",
+                "a",
+                "B",
+                "wiki",
+                "Douglas_Adams",
+                "%41b",
+                "%2F",
+                "%7euser",
+                "%zz",
+                ".",
+                "..",
+                "caf%C3%A9",
+                "café",
+                "a b",
+                "10.1000",
+                "abc",
+                "watch",
+                "",
             ]));
         }
         if gen.chance(3) {
@@ -1115,7 +1144,13 @@ pub(crate) mod testgen {
             let params: Vec<&str> = (0..1 + gen.below(3))
                 .map(|_| {
                     *gen.pick(&[
-                        "utm_source=x", "fbclid=1", "v=dQw4w9WgXcQ", "q=a+b", "page=2", "x", "a=%20",
+                        "utm_source=x",
+                        "fbclid=1",
+                        "v=dQw4w9WgXcQ",
+                        "q=a+b",
+                        "page=2",
+                        "x",
+                        "a=%20",
                         "si=abc",
                     ])
                 })
@@ -1127,7 +1162,6 @@ pub(crate) mod testgen {
         }
         out
     }
-
 }
 
 #[cfg(test)]
@@ -1388,7 +1422,10 @@ mod tests {
             ("arxiv:nonsense", None),
             ("openalex:w2741809807", Some("openalex:W2741809807")),
             ("wikidata:Q042", None),
-            ("android:org.fdroid.fdroid", Some("android:org.fdroid.fdroid")),
+            (
+                "android:org.fdroid.fdroid",
+                Some("android:org.fdroid.fdroid"),
+            ),
             ("android:nodots", None),
             ("flathub:org.gnome.Maps", Some("flathub:org.gnome.Maps")),
             ("flathub:org.gnome", None),
@@ -1680,14 +1717,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(row.related_uris, ["https://example.org/c"]);
-        let row = with("https://doi.org/10.1000/ABC", &["https://dx.doi.org/10.1000/xyz"]).unwrap();
+        let row = with(
+            "https://doi.org/10.1000/ABC",
+            &["https://dx.doi.org/10.1000/xyz"],
+        )
+        .unwrap();
         assert_eq!(row.uri, "doi:10.1000/abc");
         assert_eq!(row.related_uris, ["doi:10.1000/xyz"]);
         assert_eq!(
             row.keys[0],
             format!("url:{}", crate::identity::resource_id("doi:10.1000/abc"))
         );
-        assert_eq!(link_key("https://doi.org/10.1000/abc"), Some(row.keys[0].clone()));
+        assert_eq!(
+            link_key("https://doi.org/10.1000/abc"),
+            Some(row.keys[0].clone())
+        );
         assert_eq!(link_key("doi:10.1000/abc"), Some(row.keys[0].clone()));
         // A tracked spelling is its root.
         assert_eq!(
@@ -1751,7 +1795,10 @@ mod tests {
         assert_eq!(c.checked(Catalogue::Wikidata).unwrap_err(), Reject::Uri);
         let mut c = card();
         c.source_id = "1".repeat(1 << 20);
-        assert_eq!(c.checked(Catalogue::Wikidata).unwrap_err(), Reject::SourceId);
+        assert_eq!(
+            c.checked(Catalogue::Wikidata).unwrap_err(),
+            Reject::SourceId
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "{:?}",

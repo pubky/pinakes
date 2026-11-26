@@ -507,10 +507,12 @@ async fn an_update_run_and_a_later_import_change_the_index_through_its_queue(poo
         .await
         .unwrap();
     assert_eq!(queued().await, later);
-    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now() WHERE catalogue='musicbrainz'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE catalogue_state SET run=NULL,last_import_at=now() WHERE catalogue='musicbrainz'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         names(&common::get(&app, "/v1/search?q=hornli").await),
         ["Hörnli Song"]
@@ -1030,4 +1032,197 @@ async fn switching_off_an_empty_catalogue_merges_nothing(pool: PgPool) {
     // does; either way the words leave the files.
     assert!(merged_out(&index, &pool, "matterhorn").await);
     assert!(!index.holds_word("guide"));
+}
+
+/// Card reads without text are bounded: by place, the eight times `cap` cards nearest to the
+/// circle's centre (or to each box's) are read and the best known of those listed, however many
+/// lie in it; by type, the best known of each type and subtype. A box across the antimeridian
+/// holds the cards on both sides.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_reads_without_text_are_bounded_by_place_and_type(pool: PgPool) {
+    // 450 peaks going north from 46,7, about 111 m apart, the farther the better known.
+    let peaks: Vec<Card> = (0..450)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Peak {n}"),
+                "Mountain",
+                &[],
+                Some((46.0 + 0.001 * n as f64, 7.0)),
+                n as f32 / 450.0,
+            )
+        })
+        .collect();
+    import(&pool, Catalogue::Wikidata, &peaks).await;
+    let mut config = Config::default();
+    config.search.text_candidates = 50;
+    let app = app(&pool, config);
+    // Every peak is in the circle; the 400 nearest are read, and the best known of those listed.
+    let page = names(&common::get(&app, "/v1/search?near=46.0,7.0&radius=100000&limit=50").await);
+    assert_eq!(
+        page.first().map(String::as_str),
+        Some("Peak 399"),
+        "{page:?}"
+    );
+    assert!(!page.iter().any(|n| n == "Peak 449"), "{page:?}");
+    // Nearest first: the nearest 50.
+    let page = names(
+        &common::get(
+            &app,
+            "/v1/search?near=46.0,7.0&radius=100000&sort=distance&limit=50",
+        )
+        .await,
+    );
+    assert_eq!(page.first().map(String::as_str), Some("Peak 0"));
+    assert_eq!(page.len(), 50);
+    // A box: the nearest to its centre (46.225) in it.
+    let page = names(&common::get(&app, "/v1/search?bbox=6.9,45.99,7.1,46.46&limit=50").await);
+    assert_eq!(page.len(), 50);
+    assert!(
+        !page.iter().any(|n| n == "Peak 449" || n == "Peak 0"),
+        "{page:?}"
+    );
+    // By type: the best known of each subtype of Place come first, whichever type they are.
+    import(
+        &pool,
+        Catalogue::Musicbrainz,
+        &(0..3)
+            .map(|n| {
+                let mut c = card(
+                    1000 + n,
+                    &format!("Glacier {n}"),
+                    "Landform",
+                    &[],
+                    None,
+                    1.0,
+                );
+                c.source_id = format!("place/{n}");
+                c
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    let page = names(&common::get(&app, "/v1/search?type=Place&limit=5").await);
+    assert_eq!(page[..3].len(), 3);
+    assert!(
+        page[..3].iter().all(|n| n.starts_with("Glacier")),
+        "{page:?}"
+    );
+    assert_eq!(page[3], "Peak 449");
+    // Across the antimeridian.
+    import(
+        &pool,
+        Catalogue::Openalex,
+        &[
+            card(
+                2001,
+                "East of the line",
+                "Place",
+                &[],
+                Some((0.0, 179.9)),
+                0.1,
+            ),
+            card(
+                2002,
+                "West of the line",
+                "Place",
+                &[],
+                Some((0.0, -179.9)),
+                0.2,
+            ),
+            card(2003, "Far away", "Place", &[], Some((0.0, 0.0)), 0.3),
+        ]
+        .map(|mut c| {
+            c.source_id = c.source_id.replace('Q', "W");
+            c
+        }),
+    )
+    .await;
+    let mut page = names(&common::get(&app, "/v1/search?bbox=179,-1,-179,1").await);
+    page.sort();
+    assert_eq!(page, ["East of the line", "West of the line"]);
+}
+
+/// The card paths a search takes besides text, label, type and place: a host, with and without
+/// text; text ranked by activity (cards nobody referenced after every referenced link, the best
+/// known first); pages through a cursor over cards and links together, each unit once; a dropped
+/// catalogue's documents leave the index.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_paths_by_host_activity_cursor_and_drop(pool: PgPool) {
+    let mut cards: Vec<Card> = (1..=30)
+        .map(|n| {
+            card(
+                n,
+                &format!("Ridge {n}"),
+                "Mountain",
+                &["alps"],
+                None,
+                n as f32 / 30.0,
+            )
+        })
+        .collect();
+    for c in cards.iter_mut().take(5) {
+        c.uri = c.uri.replace("en.wikipedia.org", "www.example.net");
+    }
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    for n in 0..5 {
+        referenced(
+            &pool,
+            &format!("https://example.org/ridge-{n}"),
+            &format!("Ridge guide {n}"),
+            "alps",
+            1 + n,
+        )
+        .await;
+    }
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    for path in [
+        "/v1/search?host=www.example.net",
+        "/v1/search?q=ridge&host=www.example.net",
+    ] {
+        let mut page = names(&common::get(&app, path).await);
+        page.sort();
+        assert_eq!(
+            page,
+            ["Ridge 1", "Ridge 2", "Ridge 3", "Ridge 4", "Ridge 5"],
+            "{path}"
+        );
+    }
+    let page = names(&common::get(&app, "/v1/search?q=ridge&sort=activity&limit=7").await);
+    assert!(
+        page[..5].iter().all(|n| n.starts_with("Ridge guide")),
+        "{page:?}"
+    );
+    assert_eq!(&page[5..], ["Ridge 30", "Ridge 29"]);
+    // Every unit once across the pages.
+    let mut seen = vec![];
+    let mut path = "/v1/search?tags=alps&limit=8".to_owned();
+    loop {
+        let page = common::get(&app, &path).await;
+        seen.extend(names(&page));
+        match page["cursor"].as_str() {
+            Some(cursor) => path = format!("/v1/search?tags=alps&limit=8&cursor={cursor}"),
+            None => break,
+        }
+    }
+    let count = seen.len();
+    seen.sort();
+    seen.dedup();
+    assert_eq!((count, seen.len()), (35, 35));
+    // Dropped while off: its documents leave the index.
+    index.set_catalogues(&["musicbrainz"]);
+    store::drop_catalogue(&pool, Catalogue::Wikidata, |_| {})
+        .await
+        .unwrap();
+    index.sync(&pool).await.unwrap();
+    let held = index.documents();
+    assert!(
+        !held.iter().any(|d| d.starts_with("catalogue:")),
+        "{held:?}"
+    );
+    assert_eq!(held.len(), 5);
 }

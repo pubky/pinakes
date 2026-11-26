@@ -1308,15 +1308,16 @@ CREATE TABLE catalogue_card (
     updated_at timestamp with time zone NOT NULL DEFAULT now(),
     CONSTRAINT catalogue_card_source_id_key UNIQUE (catalogue, source_id)
 )
--- A fifth of each page free, so a full import's stamp of an unchanged card (`seen_generation`, in
--- no index) is a heap-only update: no new index entries, no copy of the row.
+-- A fifth of each page free: a full import's stamp of an unchanged card (`seen_generation`, in no
+-- index) that finds room on its page is a heap-only update, with no new index entries (about one
+-- stamp in four when a whole catalogue is stamped).
 WITH (fillfactor = 80);
-CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (fame DESC);
+CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (fame DESC, id);
 CREATE INDEX catalogue_card_keys_idx ON catalogue_card USING gin (keys);
 CREATE INDEX catalogue_card_labels_idx ON catalogue_card USING gin (labels);
 CREATE INDEX catalogue_card_point_idx ON catalogue_card USING gist (point);
 CREATE INDEX catalogue_card_related_uris_idx ON catalogue_card USING gin (related_uris);
-CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (type, fame DESC);
+CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (type, fame DESC, id);
 CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 
 -- Each catalogue's import: what it does now (`phase`: idle, import (a full import, the first or
