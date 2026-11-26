@@ -75,7 +75,7 @@ this order:
 
 1. An IANA name (`Europe/Zurich`), also inside a longer prefixed name such as Outlook's
    `/freeassociation.sourceforge.net/Tzfile/Europe/Zurich`. The IANA rules come from
-   `chrono-tz = 0.10.4` in `Cargo.lock`.
+   the `chrono-tz` version in `Cargo.lock`.
 2. A Windows name (`W. Europe Standard Time`), from `windows-zones.json`.
 3. A Rails name (`Eastern Time (US & Canada)`), from `rails-zones.json`.
 
@@ -154,7 +154,7 @@ and stops when it cannot. Review the diff, then run `scripts/test`.
 
 When Pinakes asks whether two links come from the same publisher (`group_keys::same_origin`),
 it compares their registrable domains. The public suffix list for that is compiled into
-`psl = 2.1.241` (pinned in `Cargo.lock`, private suffixes included). The crate declares
+the `psl` version in `Cargo.lock` (private suffixes included). The crate declares
 MIT/Apache-2.0 and ships its source and licence. No suffix data is fetched at runtime.
 
 Before the suffix list applies, `multi-tenant-hosts.json` splits a shared host into its

@@ -1,6 +1,7 @@
 # Build each requested platform in its own Rust image. Do not select a Rust target
 # from TARGETARCH: the shared publishing action supplies a non-Docker value there.
-FROM rust:1.98.1-slim-bookworm AS build
+# Base images by digest; Dependabot moves the digests (.github/dependabot.yml).
+FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
@@ -9,9 +10,10 @@ COPY migrations/ migrations/
 RUN cargo build --locked --release -p pinakesd \
     && strip target/release/pinakesd
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS runtime
 LABEL org.opencontainers.image.source="https://github.com/pubky/pinakes"
-# Security updates come from the distribution when the image is rebuilt.
+# Security updates: Dependabot moves the base digest, and the packages installed here come
+# from the distribution when the image is rebuilt.
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 \

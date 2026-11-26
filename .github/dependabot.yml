@@ -1,0 +1,43 @@
+# Weekly update pull requests for every locked dependency set: the crates (Cargo.lock), the e2e
+# driver's packages, the actions' commit pins and the Dockerfile's base image digests. Each one
+# runs the full CI gate like any other change.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Exact on purpose (crates/pinakes-core/Cargo.toml says why): moved by hand.
+      - dependency-name: tzf-rs
+      - dependency-name: pubky-social-specs
+      # scraper's parser and tree: a 0.x minor release of these moves only with scraper's own, so
+      # one alone would break the build and hold back the weekly group.
+      - dependency-name: html5ever
+        update-types: [version-update:semver-minor]
+      - dependency-name: markup5ever
+        update-types: [version-update:semver-minor]
+      - dependency-name: ego-tree
+        update-types: [version-update:semver-minor]
+    groups:
+      # Dependabot's minor and patch releases (for a 0.x crate a minor one may break) in one
+      # pull request a week; a major release gets its own.
+      cargo-compatible:
+        update-types: [minor, patch]
+  - package-ecosystem: npm
+    directory: /e2e
+    schedule:
+      interval: weekly
+    groups:
+      e2e-compatible:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  # A new rust tag must match rust-toolchain.toml and CI's RUSTUP_TOOLCHAIN (a workflow contract
+  # checks it); a new digest for the same tag passes alone.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

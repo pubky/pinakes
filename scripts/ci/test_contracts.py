@@ -409,6 +409,62 @@ elif url.endswith('.ndjson.gz'):
                     self.assertEqual(calls[stop + 1], ['inspect', '--format', '{{.State.ExitCode}}', name])
 
 class SupplyChain(unittest.TestCase):
+    def test_base_images_are_pinned_by_digest(self):
+        tracked = subprocess.run(['git', 'ls-files'], cwd=ROOT, check=True, capture_output=True,
+                                 text=True).stdout.splitlines()
+        dockerfiles = [p for p in tracked if re.search(r'(^|/)(Dockerfile|Containerfile)[^/]*$|\.Dockerfile$', p)]
+        self.assertIn('Dockerfile', dockerfiles)
+        for path in dockerfiles:
+            stages = set()
+            for line in re.findall(r'(?im)^FROM\s+(.+)$', (ROOT / path).read_text()):
+                image, *rest = line.split()
+                if image.lower() not in stages:
+                    # A tag for people, a digest for the build: the tag alone moves under us.
+                    self.assertRegex(image, r'^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$', path)
+                if len(rest) == 2 and rest[0].upper() == 'AS':
+                    stages.add(rest[1].lower())
+
+    def test_image_builds_with_the_tested_toolchain(self):
+        channel = tomllib.loads((ROOT / 'rust-toolchain.toml').read_text())['toolchain']['channel']
+        self.assertEqual(workflow()['env']['RUSTUP_TOOLCHAIN'], channel)
+        self.assertEqual(re.findall(r'(?m)^FROM rust:([\d.]+)-', (ROOT / 'Dockerfile').read_text()), [channel])
+
+    def test_dependabot_updates_every_locked_set(self):
+        config = yaml.safe_load((ROOT / '.github/dependabot.yml').read_text())
+        self.assertEqual(config['version'], 2)
+        updates = {(u['package-ecosystem'], u['directory']) for u in config['updates']}
+        cargo = next(u for u in config['updates'] if u['package-ecosystem'] == 'cargo')
+        # The exact pins move by hand, with what names their versions.
+        ignored = {i['dependency-name']: i.get('update-types') for i in cargo['ignore']}
+        self.assertEqual(ignored, {'pubky-social-specs': None, 'tzf-rs': None,
+                                   # scraper's parser and tree move with scraper, not in the weekly group.
+                                   'html5ever': ['version-update:semver-minor'],
+                                   'markup5ever': ['version-update:semver-minor'],
+                                   'ego-tree': ['version-update:semver-minor']})
+        self.assertEqual(updates, {('cargo', '/'), ('npm', '/e2e'), ('github-actions', '/'), ('docker', '/')})
+        for path in ['Cargo.lock', 'e2e/package-lock.json', '.github/workflows/ci.yml', 'Dockerfile']:
+            self.assertTrue((ROOT / path).is_file(), path)
+        for update in config['updates']:
+            self.assertIn(update['schedule']['interval'], ['daily', 'weekly'])
+
+    def test_exact_requirements_say_why(self):
+        # Cargo.lock pins every build; an `=` requirement also stops updates, so it needs a reason.
+        manifests = ['Cargo.toml'] + [f'{m}/Cargo.toml' for m in tomllib.loads(
+            (ROOT / 'Cargo.toml').read_text())['workspace']['members']]
+        exact = []
+        for path in manifests:
+            lines = (ROOT / path).read_text().splitlines()
+            for i, line in enumerate(lines):
+                if re.match(r'^[\w-]+\s*=\s*(\{[^}]*version\s*=\s*)?"=', line):
+                    comment = []
+                    for above in reversed(lines[:i]):
+                        if not above.startswith('#'):
+                            break
+                        comment.insert(0, above)
+                    self.assertIn('Exact version:', ' '.join(comment), f'{path}: {line}')
+                    exact.append(line.split()[0])
+        self.assertEqual(sorted(exact), ['pubky-social-specs', 'tzf-rs'])
+
     def test_no_crate_is_publishable(self):
         workspace = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']
         self.assertIs(workspace['package']['publish'], False)
