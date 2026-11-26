@@ -476,4 +476,78 @@ mod tests {
         )
         .is_err());
     }
+
+    /// A consolidated version is a work of its own: its CELEX carries the version's date, its
+    /// ELI the date too, and the endpoint names no in-force flag for it. A Cellar link's card
+    /// is its act's, rooted at the act's CELEX page. Both queries are the recorded ones.
+    #[test]
+    fn consolidated_and_cellar_cards() {
+        let recorded: serde_json::Value = serde_json::from_slice(&read("queries.json")).unwrap();
+        let consolidated = Key::Celex("02016R0679-20160504".into());
+        let cellar = Key::Cellar("01d55833-0660-11ee-b12e-01aa75ed71a1".into());
+        for (key, name) in [
+            (&consolidated, "celex_02016R0679-20160504_consolidated"),
+            (&cellar, "cellar_01d55833-0660-11ee-b12e-01aa75ed71a1"),
+        ] {
+            assert_eq!(
+                key.query().split_whitespace().collect::<Vec<_>>(),
+                recorded[name]
+                    .as_str()
+                    .unwrap()
+                    .split_whitespace()
+                    .collect::<Vec<_>>(),
+                "{name}"
+            );
+        }
+        let doc = card(
+            base(),
+            &consolidated,
+            200,
+            &read("celex_02016R0679-20160504_consolidated.json"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("CELEX 02016R0679-20160504 · 2016-05-04")
+        );
+        let a = &doc.attributes;
+        assert_eq!(a["celex"], "02016R0679-20160504");
+        assert_eq!(
+            a["eli"],
+            "http://data.europa.eu/eli/reg/2016/679/2016-05-04"
+        );
+        assert_eq!(a["resource_type"], "CONS_TEXT");
+        assert!(!a.contains_key("in_force"));
+        assert_eq!(
+            doc.source_root.as_deref(),
+            Some(root("02016R0679-20160504").as_str())
+        );
+        let doc = card(
+            base(),
+            &cellar,
+            200,
+            &read("cellar_01d55833-0660-11ee-b12e-01aa75ed71a1.json"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(doc
+            .name
+            .as_deref()
+            .unwrap()
+            .starts_with("Regulation (EU) 2023/1114"));
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("CELEX 32023R1114 · 2023-05-31")
+        );
+        assert_eq!(
+            doc.attributes["eli"],
+            "http://data.europa.eu/eli/reg/2023/1114/oj"
+        );
+        assert_eq!(doc.attributes["in_force"], "true");
+        assert_eq!(
+            doc.source_root.as_deref(),
+            Some(root("32023R1114").as_str())
+        );
+    }
 }

@@ -281,17 +281,7 @@ impl Transport for Recorded {
                 answer(200, body, "text/javascript")
             }
             ("api.deezer.com", path) => {
-                let name = format!(
-                    "deezer-{}.json",
-                    path.trim_start_matches('/').replace(['/', ':'], "-")
-                );
-                let recorded = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
-                let none = br#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
-                answer(
-                    200,
-                    std::fs::read(recorded).unwrap_or_else(|_| none.to_vec()),
-                    "application/json",
-                )
+                answer(200, super::deezer_answer(path), "application/json")
             }
             _ => panic!("unexpected request {url}"),
         })

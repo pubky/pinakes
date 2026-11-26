@@ -492,19 +492,7 @@ impl Transport for Recorded {
             }
             "/lookup" => (200, fixture("itunes-upc-many.json")),
             // Deezer's API: its own records, and its lookups by ISRC and barcode.
-            path if url.host_str() == Some("api.deezer.com") => {
-                let name = format!(
-                    "deezer-{}.json",
-                    path.trim_start_matches('/').replace(['/', ':'], "-")
-                );
-                let recorded = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
-                // What Deezer answers for anything it has no data for.
-                let none = br#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
-                (
-                    200,
-                    std::fs::read(recorded).unwrap_or_else(|_| none.to_vec()),
-                )
-            }
+            path if url.host_str() == Some("api.deezer.com") => (200, common::deezer_answer(path)),
             // A Wikipedia's own API: the article's Wikidata item.
             "/w/api.php" if url.host_str() != Some("www.wikidata.org") => {
                 match (url.host_str().unwrap_or(""), query("titles").as_str()) {

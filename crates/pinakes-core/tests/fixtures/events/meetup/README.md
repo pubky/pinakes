@@ -7,8 +7,7 @@ trimmed to what Pinakes reads:
 | --- | --- |
 | `316908442.html`, `316908445.html` | `https://www.meetup.com/bitcoin-meetup-switzerland/events/{id}/` |
 | `frxnbvyjcqbmb.html` | the same date as `316908442`, under its token: `…/events/frxnbvyjcqbmb/` |
-| `316908442.ics`, `316908445.ics` | `…/events/{id}/ical/{id}.ics`, the date's own calendar file |
-| `frxnbvyjcqbmb.ics` | `…/events/frxnbvyjcqbmb/ical/frxnbvyjcqbmb.ics` (it names the number's UID) |
+| `316908442.ics`, `316908445.ics` | `…/events/{id}/ical/{id}.ics`, the date's own calendar file; the tests serve `316908442.ics` under the token too (`…/events/frxnbvyjcqbmb/ical/frxnbvyjcqbmb.ics`), where Meetup answers the same calendar (the number's UID) |
 | `group.ics` | `…/events/ical/`, the group's calendar (ten dates) |
 
 Kept: the head canonical, `og:` URL and title, the JSON-LD Event and site Organization, and the

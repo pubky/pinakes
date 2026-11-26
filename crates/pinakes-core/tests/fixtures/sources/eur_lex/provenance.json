@@ -10,17 +10,6 @@
     "status": 200,
     "url": "https://publications.europa.eu/webapi/rdf/sparql?query=PREFIX%20cdm%3A%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fontology%2Fcdm%23%3E%0APREFIX%20xsd%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2001%2FXMLSchema%23%3E%0APREFIX%20owl%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2002%2F07%2Fowl%23%3E%0ASELECT%20%3Fwork%20%3Fcelex%20%3Feli%20%3Ftype%20%3Fdate%20%3Finforce%20%3Ftitle%20WHERE%20%7B%0A%20%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%2202016R0679-20160504%22%5E%5Exsd%3Astring%20.%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%3Fcelex%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_eli%20%3Feli%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_has_resource-type%20%3Ftype%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_date_document%20%3Fdate%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_in-force%20%3Finforce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20cdm%3Aexpression_belongs_to_work%20%3Fwork%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_uses_language%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fresource%2Fauthority%2Flanguage%2FENG%3E%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_title%20%3Ftitle%20%7D%0A%7D"
   },
-  "celex_32015L2366": {
-    "accept": "application/sparql-results+json",
-    "bytes": 1256,
-    "content_type": "application/sparql-results+json",
-    "file": "celex_32015L2366.json",
-    "note": "SPARQL GET; query= is the URL-encoded text in queries.json",
-    "recorded_at": "2026-10-19T16:19:31+00:00",
-    "sha256": "7906aff56af5c782c6f883796b0e295cf36fdadf73a9272ec1d41fd29b4c023a",
-    "status": 200,
-    "url": "https://publications.europa.eu/webapi/rdf/sparql?query=PREFIX%20cdm%3A%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fontology%2Fcdm%23%3E%0APREFIX%20xsd%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2001%2FXMLSchema%23%3E%0APREFIX%20owl%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2002%2F07%2Fowl%23%3E%0ASELECT%20%3Fwork%20%3Fcelex%20%3Feli%20%3Ftype%20%3Fdate%20%3Finforce%20%3Ftitle%20WHERE%20%7B%0A%20%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%2232015L2366%22%5E%5Exsd%3Astring%20.%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%3Fcelex%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_eli%20%3Feli%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_has_resource-type%20%3Ftype%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_date_document%20%3Fdate%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_in-force%20%3Finforce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20cdm%3Aexpression_belongs_to_work%20%3Fwork%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_uses_language%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fresource%2Fauthority%2Flanguage%2FENG%3E%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_title%20%3Ftitle%20%7D%0A%7D"
-  },
   "celex_32016R0679": {
     "accept": "application/sparql-results+json",
     "bytes": 1218,
@@ -43,17 +32,6 @@
     "status": 200,
     "url": "https://publications.europa.eu/webapi/rdf/sparql?query=PREFIX%20cdm%3A%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fontology%2Fcdm%23%3E%0APREFIX%20xsd%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2001%2FXMLSchema%23%3E%0APREFIX%20owl%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2002%2F07%2Fowl%23%3E%0ASELECT%20%3Fwork%20%3Fcelex%20%3Feli%20%3Ftype%20%3Fdate%20%3Finforce%20%3Ftitle%20WHERE%20%7B%0A%20%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%2232016R0679R%2802%29%22%5E%5Exsd%3Astring%20.%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%3Fcelex%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_eli%20%3Feli%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_has_resource-type%20%3Ftype%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_date_document%20%3Fdate%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_in-force%20%3Finforce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20cdm%3Aexpression_belongs_to_work%20%3Fwork%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_uses_language%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fresource%2Fauthority%2Flanguage%2FENG%3E%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_title%20%3Ftitle%20%7D%0A%7D"
   },
-  "celex_32023R1114": {
-    "accept": "application/sparql-results+json",
-    "bytes": 1182,
-    "content_type": "application/sparql-results+json",
-    "file": "celex_32023R1114.json",
-    "note": "SPARQL GET; query= is the URL-encoded text in queries.json",
-    "recorded_at": "2026-10-19T16:19:29+00:00",
-    "sha256": "35ef1eadfe65e1a8c2518e4dafa635bb4b84038f42ca3570884c71d45b8ff236",
-    "status": 200,
-    "url": "https://publications.europa.eu/webapi/rdf/sparql?query=PREFIX%20cdm%3A%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fontology%2Fcdm%23%3E%0APREFIX%20xsd%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2001%2FXMLSchema%23%3E%0APREFIX%20owl%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2002%2F07%2Fowl%23%3E%0ASELECT%20%3Fwork%20%3Fcelex%20%3Feli%20%3Ftype%20%3Fdate%20%3Finforce%20%3Ftitle%20WHERE%20%7B%0A%20%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%2232023R1114%22%5E%5Exsd%3Astring%20.%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%3Fcelex%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_eli%20%3Feli%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_has_resource-type%20%3Ftype%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_date_document%20%3Fdate%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_in-force%20%3Finforce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20cdm%3Aexpression_belongs_to_work%20%3Fwork%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_uses_language%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fresource%2Fauthority%2Flanguage%2FENG%3E%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_title%20%3Ftitle%20%7D%0A%7D"
-  },
   "celex_missing_32099R9999": {
     "accept": "application/sparql-results+json",
     "bytes": 167,
@@ -75,17 +53,6 @@
     "sha256": "35ef1eadfe65e1a8c2518e4dafa635bb4b84038f42ca3570884c71d45b8ff236",
     "status": 200,
     "url": "https://publications.europa.eu/webapi/rdf/sparql?query=PREFIX%20cdm%3A%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fontology%2Fcdm%23%3E%0APREFIX%20xsd%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2001%2FXMLSchema%23%3E%0APREFIX%20owl%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2002%2F07%2Fowl%23%3E%0ASELECT%20%3Fwork%20%3Fcelex%20%3Feli%20%3Ftype%20%3Fdate%20%3Finforce%20%3Ftitle%20WHERE%20%7B%0A%20%20BIND%28%3Chttp%3A%2F%2Fpublications.europa.eu%2Fresource%2Fcellar%2F01d55833-0660-11ee-b12e-01aa75ed71a1%3E%20AS%20%3Fwork%29%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%5B%5D%20.%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%3Fcelex%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_eli%20%3Feli%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_has_resource-type%20%3Ftype%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_date_document%20%3Fdate%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_in-force%20%3Finforce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20cdm%3Aexpression_belongs_to_work%20%3Fwork%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_uses_language%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fresource%2Fauthority%2Flanguage%2FENG%3E%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_title%20%3Ftitle%20%7D%0A%7D"
-  },
-  "eli_dir_2015_2366_oj": {
-    "accept": "application/sparql-results+json",
-    "bytes": 1256,
-    "content_type": "application/sparql-results+json",
-    "file": "eli_dir_2015_2366_oj.json",
-    "note": "SPARQL GET; query= is the URL-encoded text in queries.json",
-    "recorded_at": "2026-10-19T16:19:38+00:00",
-    "sha256": "7906aff56af5c782c6f883796b0e295cf36fdadf73a9272ec1d41fd29b4c023a",
-    "status": 200,
-    "url": "https://publications.europa.eu/webapi/rdf/sparql?query=PREFIX%20cdm%3A%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fontology%2Fcdm%23%3E%0APREFIX%20xsd%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2001%2FXMLSchema%23%3E%0APREFIX%20owl%3A%20%3Chttp%3A%2F%2Fwww.w3.org%2F2002%2F07%2Fowl%23%3E%0ASELECT%20%3Fwork%20%3Fcelex%20%3Feli%20%3Ftype%20%3Fdate%20%3Finforce%20%3Ftitle%20WHERE%20%7B%0A%20%20%3Fwork%20cdm%3Aresource_legal_eli%20%22http%3A%2F%2Fdata.europa.eu%2Feli%2Fdir%2F2015%2F2366%2Foj%22%5E%5Exsd%3AanyURI%20.%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_id_celex%20%3Fcelex%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_eli%20%3Feli%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_has_resource-type%20%3Ftype%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Awork_date_document%20%3Fdate%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fwork%20cdm%3Aresource_legal_in-force%20%3Finforce%20%7D%0A%20%20OPTIONAL%20%7B%20%3Fexpr%20cdm%3Aexpression_belongs_to_work%20%3Fwork%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_uses_language%20%3Chttp%3A%2F%2Fpublications.europa.eu%2Fresource%2Fauthority%2Flanguage%2FENG%3E%20%3B%0A%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20cdm%3Aexpression_title%20%3Ftitle%20%7D%0A%7D"
   },
   "eli_reg_2016_679_oj": {
     "accept": "application/sparql-results+json",

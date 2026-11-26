@@ -64,16 +64,20 @@ impl Transport for Recorded {
                 .unwrap_or_default()
         };
         Ok(match (host, url.path()) {
+            // Its own Deezer recordings (`media/itunes_song`, by the same names), else the shared
+            // ones.
             ("api.deezer.com", path) => {
-                // `track/67238735` is `deezer-track-67238735.json`.
                 let name = format!(
                     "deezer-{}.json",
                     path.trim_start_matches('/').replace(['/', ':'], "-")
                 );
-                let none = br#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
+                let own = std::fs::read(format!(
+                    "{}/tests/fixtures/media/itunes_song/{name}",
+                    env!("CARGO_MANIFEST_DIR")
+                ));
                 answer(
                     200,
-                    fixture(&name).unwrap_or_else(|| none.to_vec()),
+                    own.unwrap_or_else(|_| common::deezer_answer(path)),
                     "application/json",
                 )
             }

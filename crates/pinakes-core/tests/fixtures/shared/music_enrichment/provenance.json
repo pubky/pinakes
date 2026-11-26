@@ -312,16 +312,6 @@
     "status": 200,
     "url": "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q93341&props=claims%7Csitelinks%2Furls&format=json"
   },
-  "wd-p18-Q11510350": {
-    "bytes": 13,
-    "content_type": "application/json",
-    "file": "wd-p18-Q11510350.json",
-    "note": "The work Get Lucky: no image claim.",
-    "recorded_at": "2026-11-04T15:49:30+00:00",
-    "sha256": "91eaeaac96fb538eb1fab799f99cb93ace0544197840dbe49c745766fadbfdcb",
-    "status": 200,
-    "url": "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=Q11510350&property=P18&format=json"
-  },
   "wd-p18-Q139827657": {
     "bytes": 13,
     "content_type": "application/json",

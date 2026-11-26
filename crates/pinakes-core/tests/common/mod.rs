@@ -603,3 +603,32 @@ pub fn unique_dir(name: &str) -> std::path::PathBuf {
         }
     }
 }
+
+/// Deezer's API as recorded in `tests/fixtures/hubs`: the answers its fakes serve, each named by
+/// the path it answers (`track/67238735` is `deezer-track-67238735.json`). A path with no
+/// recording here gets Deezer's own answer for something it has no data for.
+pub const DEEZER_RECORDED: &[&str] = &[
+    "deezer-album-41839661.json",
+    "deezer-album-upc-4018939306052.json",
+    "deezer-track-2271581007.json",
+    "deezer-track-3750996073.json",
+    "deezer-track-67238735.json",
+    "deezer-track-isrc-GBUM71029604.json",
+    "deezer-track-isrc-GBUM72103841.json",
+];
+/// Deezer's answer to an API `path` (`/track/67238735`, `/track/isrc:…`), from
+/// [`DEEZER_RECORDED`].
+pub fn deezer_answer(path: &str) -> Vec<u8> {
+    let name = format!(
+        "deezer-{}.json",
+        path.trim_start_matches('/').replace(['/', ':'], "-")
+    );
+    if !DEEZER_RECORDED.contains(&name.as_str()) {
+        return br#"{"error":{"type":"DataException","message":"no data","code":800}}"#.to_vec();
+    }
+    std::fs::read(format!(
+        "{}/tests/fixtures/hubs/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}

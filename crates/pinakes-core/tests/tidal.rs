@@ -1,6 +1,6 @@
-//! The `tidal` also-on source through Egress, against recorded TIDAL, iTunes and Deezer answers
-//! (`tests/fixtures/hubs`): HYDRA 3D's barcode from TIDAL's own record joins Apple Music and
-//! Deezer.
+//! The `tidal` also-on source through Egress, against recorded TIDAL answers
+//! (`tests/fixtures/media/tidal`) and iTunes and Deezer answers (`tests/fixtures/hubs`): HYDRA
+//! 3D's barcode from TIDAL's own record joins Apple Music and Deezer.
 use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     also_on::{self, SourceOptions},
@@ -17,10 +17,19 @@ use common::{
     strings as rows,
 };
 
+/// A recorded TIDAL answer: the file `name` of `tests/fixtures/media/tidal`.
+fn tidal_fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/tests/fixtures/media/tidal/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
 /// The recorded batch of two albums, as TIDAL answers for one of them alone.
 fn album(id: &str) -> Option<Vec<u8>> {
     let batch: serde_json::Value =
-        serde_json::from_slice(&fixture("tidal-albums-199574241-495402659.json")).unwrap();
+        serde_json::from_slice(&tidal_fixture("tidal-albums-199574241-495402659.json")).unwrap();
     let item = batch["data"].as_array()?.iter().find(|i| i["id"] == id)?;
     Some(serde_json::to_vec(&serde_json::json!({ "data": item })).unwrap())
 }
@@ -141,15 +150,15 @@ impl Transport for Recorded {
                 }
                 let body = match path {
                     "/v2/albums" if filters == ["199574241", "495402659"] => {
-                        Some(fixture("tidal-albums-199574241-495402659.json"))
+                        Some(tidal_fixture("tidal-albums-199574241-495402659.json"))
                     }
                     // HYDRA 3D's title track, in a batch of any size (the others TIDAL lacks).
                     "/v2/tracks" if filters.iter().any(|f| f == "199574242") => {
-                        Some(fixture("tidal-tracks-199574242.json"))
+                        Some(tidal_fixture("tidal-tracks-199574242.json"))
                     }
                     "/v2/tracks/199574242" => {
                         let batch: serde_json::Value =
-                            serde_json::from_slice(&fixture("tidal-tracks-199574242.json"))
+                            serde_json::from_slice(&tidal_fixture("tidal-tracks-199574242.json"))
                                 .unwrap();
                         Some(
                             serde_json::to_vec(&serde_json::json!({"data": batch["data"][0]}))
@@ -185,19 +194,7 @@ impl Transport for Recorded {
                 };
                 json(200, body, "text/javascript")
             }
-            ("api.deezer.com", path) => {
-                let name = format!(
-                    "deezer-{}.json",
-                    path.trim_start_matches('/').replace(['/', ':'], "-")
-                );
-                let recorded = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
-                let none = br#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
-                json(
-                    200,
-                    std::fs::read(recorded).unwrap_or_else(|_| none.to_vec()),
-                    "application/json",
-                )
-            }
+            ("api.deezer.com", path) => json(200, common::deezer_answer(path), "application/json"),
             _ => panic!("unexpected request {url}"),
         })
     }
