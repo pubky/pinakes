@@ -119,6 +119,104 @@ fn check(body: &str, nodes: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// No production code but this module names `roxmltree`'s parser: every other caller goes
+    /// through [`parse`]. Test code (a file's test modules on) may parse a fixture
+    /// directly.
+    #[test]
+    fn only_this_module_parses_xml() {
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = vec![];
+        for krate in ["pinakes-core", "pinakesd"] {
+            rust_files(&crates.join(krate).join("src"), &mut files);
+        }
+        assert!(files.len() > 50, "the source tree is read");
+        let entry = ["Document::", "parse"].concat();
+        let mut found = vec![];
+        for path in files {
+            if path.ends_with("resolver/xml.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for line in production_lines(&text)
+                .into_iter()
+                .filter(|l| l.contains(&entry))
+            {
+                found.push(format!("{}: {}", path.display(), line.trim()));
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// A file's lines but its test modules (`#[cfg(test)]` on a `mod`, to its closing brace):
+    /// code after a test module is production code too.
+    fn production_lines(text: &str) -> Vec<&str> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut kept = vec![];
+        let mut i = 0;
+        while i < lines.len() {
+            let test_mod = lines[i].trim() == "#[cfg(test)]"
+                && lines
+                    .get(i + 1)
+                    .is_some_and(|l| l.trim_start().starts_with("mod "));
+            if !test_mod {
+                kept.push(lines[i]);
+                i += 1;
+                continue;
+            }
+            // Past the module's braces (to the end of the file if they never close).
+            let mut depth = 0i64;
+            let mut opened = false;
+            i += 1;
+            while i < lines.len() {
+                for c in lines[i].chars() {
+                    match c {
+                        '{' => {
+                            depth += 1;
+                            opened = true;
+                        }
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                i += 1;
+                if opened && depth <= 0 {
+                    break;
+                }
+            }
+        }
+        kept
+    }
+
+    /// The guard reads production code before and after a test module, and skips the module.
+    #[test]
+    fn the_guard_skips_only_test_modules() {
+        let entry = ["Document::", "parse"].concat();
+        let file = format!(
+            "fn a() {{ {entry}(x); }}\n#[cfg(test)]\nmod tests {{\n    fn t() {{\n        {entry}(y);\n    }}\n}}\nfn b() {{ {entry}(z); }}\n"
+        );
+        let found: Vec<&str> = production_lines(&file)
+            .into_iter()
+            .filter(|l| l.contains(&entry))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                format!("fn a() {{ {entry}(x); }}"),
+                format!("fn b() {{ {entry}(z); }}")
+            ]
+        );
+    }
+
     #[test]
     fn a_feed_parses_and_its_namespaces_resolve() {
         let body = r#"<?xml version="1.0"?>

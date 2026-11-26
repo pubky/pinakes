@@ -280,7 +280,7 @@ pub fn card(
         400 | 404 => return Ok(None),
         s => anyhow::bail!("GovInfo answered {s}"),
     }
-    let xml = roxmltree::Document::parse(std::str::from_utf8(body)?)?;
+    let xml = crate::resolver::xml::parse(std::str::from_utf8(body)?)?;
     let mods = xml.root_element();
     anyhow::ensure!(mods.has_tag_name((MODS, "mods")), "not a MODS record");
     // A record may hold several extension blocks: look in each, in order.
@@ -537,6 +537,25 @@ mod tests {
         Target::Law {
             package: "PLAW-117publ58".into(),
         }
+    }
+
+    /// A body nested 5,000 levels deep is refused by the XML guard (`resolver::xml`), on a
+    /// worker's 2 MiB stack: parsed without it, the recursion overflows the stack and aborts the
+    /// process.
+    #[test]
+    fn deeply_nested_xml_is_refused_not_a_stack_overflow() {
+        let body = format!("{}{}", "<a>".repeat(5_000), "</a>".repeat(5_000)).into_bytes();
+        let error = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                card(base(&law()), &law(), 200, "/metadata", &body)
+                    .unwrap_err()
+                    .to_string()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(error, "XML: elements nest deeper than 64");
     }
 
     /// A record over the page cap gives the card its link names: the read sets a cap of its
