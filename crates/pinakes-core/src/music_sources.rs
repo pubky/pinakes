@@ -231,10 +231,15 @@ pub(crate) async fn isrc_match(
 }
 /// The recording an ISRC alone names, keyed as every producer keys a recording: the one
 /// recording MusicBrainz gives it (through [`recording_key`]), or the one that stands for the
-/// duplicates it is on; `None` when MusicBrainz does not know it or its recordings disagree.
+/// duplicates it is on; `None` when MusicBrainz does not know it, its recordings disagree, or
+/// its lookup is over MusicBrainz's cap.
 pub(crate) async fn isrc_recording(cx: &Context, isrc: &str) -> Result<Option<String>> {
     let base = cx.config.also_on.musicbrainz_base();
-    Ok(match isrc_match(cx, isrc, None).await? {
+    // A lookup over MusicBrainz's cap names no recording: the ISRC gives no key.
+    let Some(found) = secondary(isrc_match(cx, isrc, None).await)? else {
+        return Ok(None);
+    };
+    Ok(match found {
         IsrcMatch::One(mbid) => Some(recording_key(&cx.egress, base, &mbid).await?),
         IsrcMatch::Duplicates { standing, .. } => Some(standing),
         IsrcMatch::Unknown | IsrcMatch::Picked { .. } | IsrcMatch::Shared => None,
@@ -405,9 +410,10 @@ pub(crate) async fn standing(
     };
     standing_of(egress, base, entity).await
 }
-/// A read the duplicate walk makes besides the subject's own (another recording's record, an
-/// ISRC's recordings): over MusicBrainz's cap it settles nothing (`None`, so the walk is
-/// [`Standing::Unclear`] and each recording stands for itself), never an error that would empty the
+/// A read a run makes besides the subject's own (another recording's record, an ISRC's
+/// recordings, a recording's original album): over MusicBrainz's cap it settles nothing (`None`:
+/// the duplicate walk is [`Standing::Unclear`] and each recording stands for itself, an ISRC that
+/// cannot be checked gives no key, the album fact is absent), never an error that would empty the
 /// source's run. Any other error is the read's own.
 fn secondary<T>(read: Result<T>) -> Result<Option<T>> {
     match read {
@@ -612,7 +618,10 @@ pub(crate) async fn duplicates_found(
             }
         }
     }
-    if let Some(album) = musicbrainz::original_album(&cx.egress, base, &first.mbid).await? {
+    // Over MusicBrainz's cap, the original album is not known: no fact, the rest stands.
+    if let Some(Some(album)) =
+        secondary(musicbrainz::original_album(&cx.egress, base, &first.mbid).await)?
+    {
         found
             .facts
             .push(crate::also_on::Fact::new("original_album", album));
@@ -946,7 +955,10 @@ pub(crate) async fn entities_found(
     }
     // A recording's original album ranks the card's links of one service (the track there).
     if kind == MbKind::Recording {
-        if let Some(album) = musicbrainz::original_album(&cx.egress, base, &entity.mbid).await? {
+        // Over MusicBrainz's cap, the original album is not known: no fact, the rest stands.
+        if let Some(Some(album)) =
+            secondary(musicbrainz::original_album(&cx.egress, base, &entity.mbid).await)?
+        {
             found
                 .facts
                 .push(crate::also_on::Fact::new("original_album", album));
@@ -1288,6 +1300,78 @@ pub(crate) fn item_found(item: &wikidata::Item, level: Level) -> Found {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read a run makes besides the subject's own, over MusicBrainz's cap, leaves out only its
+    /// own part: a duplicate set's other ISRC that cannot be checked gives no key and its
+    /// original album no fact, while the set's ISRC, its standing MBID and its facts stand; an
+    /// ISRC whose lookup is over the cap names no recording.
+    #[tokio::test(start_paused = true)]
+    async fn a_secondary_read_over_the_cap_leaves_out_its_own_part() {
+        let base = "https://musicbrainz.org/ws/2";
+        let (standing, member) = (
+            "00000000-0000-4000-8000-000000000081",
+            "00000000-0000-4000-8000-000000000082",
+        );
+        let record = |id: &str, isrcs: &[&str]| {
+            serde_json::to_vec(&serde_json::json!({
+                "id": id, "title": "Capped", "length": 200000, "isrcs": isrcs, "video": false,
+                "artist-credit": [{"name": "Someone", "joinphrase": "",
+                    "artist": {"id": "00000000-0000-4000-8000-0000000000a1", "name": "Someone"}}],
+                "relations": [],
+            }))
+            .unwrap()
+        };
+        let entity = |id: &str| hubs::musicbrainz::entity_lookup(base, MbKind::Recording, id);
+        let (standing_url, member_url) = (entity(standing), entity(member));
+        let album = format!("{base}/release?recording={standing}&type=album&status=official&inc=release-groups&limit=100&fmt=json");
+        let other = format!("{base}/isrc/ZZCAP2600082?fmt=json");
+        let (egress, recorded) = crate::sources::fixture::egress(vec![
+            (
+                &standing_url,
+                200,
+                "application/json",
+                record(standing, &["ZZCAP2600081"]),
+            ),
+            (
+                &member_url,
+                200,
+                "application/json",
+                record(member, &["ZZCAP2600081", "ZZCAP2600082"]),
+            ),
+            (&album, 200, "!too-large", vec![]),
+            (&other, 200, "!too-large", vec![]),
+        ]);
+        let cx = Context {
+            egress,
+            config: Default::default(),
+        };
+        assert_eq!(isrc_recording(&cx, "ZZCAP2600082").await.unwrap(), None);
+        let found = duplicates_found(
+            &cx,
+            base,
+            standing,
+            &[member.to_owned()],
+            "ZZCAP2600081",
+            Level::Track,
+        )
+        .await
+        .unwrap();
+        let keys: Vec<&str> = found.keys.iter().map(|k| k.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["isrc:ZZCAP2600081", &format!("mb:recording:{standing}")]
+        );
+        assert!(found
+            .facts
+            .iter()
+            .any(|f| f.name == "mbid" && f.value == standing));
+        assert!(!found.facts.iter().any(|f| f.name == "original_album"));
+        let asked = recorded.asked();
+        assert!(
+            asked.contains(&album) && asked.contains(&other),
+            "{asked:?}"
+        );
+    }
 
     /// The four lookups by ISRC or barcode cover the same cards: another service's track or
     /// video by its ISRC, its album or YouTube album playlist by its barcode, a MusicBrainz
