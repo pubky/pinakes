@@ -239,7 +239,7 @@ docker buildx imagetools inspect "ghcr.io/pubky/pinakes:$VERSION"
 | Service | What Pinakes uses it for | Requirements |
 | --- | --- | --- |
 | `pinakesd` | The public API and a separate private admin listener | One daemon per database; the instance lock enforces it. Request budgets are per process: several instances behind one address share the services' limits. Load-test your own mix of links for sizing. |
-| PostgreSQL 16 to 18 | Documents, references, queues, groups and the change journal | PostGIS 3.4 or newer and `pg_trgm`. Size it from the [storage model](#storage-model). |
+| PostgreSQL 16 (tested in CI; 17 tested once manually; 18 expected to work, untested) | Documents, references, queues, groups and the change journal | PostGIS 3.4 or newer and `pg_trgm`. Size it from the [storage model](#storage-model). |
 | Nominatim | Venue geocoding and OpenStreetMap place details (`osm.nominatim_url`) | Self-hosted or hosted ([Nominatim](#nominatim)). For hardware, see [Nominatim's installation guide](https://nominatim.org/release-docs/5.2/admin/Installation/). |
 | Nexus | The reference feed and social and reach reads (`nexus_url`) | A Nexus that serves the `/v1` routes Pinakes reads ([README](../README.md)). It is a fixed, trusted upstream; optional authorization comes from the environment. |
 | Dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | Persistent and writable, with room for two copies of the file ([ODbL dump](operations.md#odbl-dump)). A CDN can cache the file by its `ETag`. |

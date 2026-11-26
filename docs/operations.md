@@ -334,7 +334,8 @@ resolver limits apply to pubky and to each card route.
 
 ## Database
 
-Supported: PostgreSQL 16–18 with PostGIS 3.4+ and `pg_trgm`. The daemon opens at most 20
+Supported: PostgreSQL 16 (tested in CI; 17 tested once manually; 18 expected to work, untested)
+with PostGIS 3.4+ and `pg_trgm`. The daemon opens at most 20
 connections for its workers and background passes and at most 10 for the API, whose statements
 time out after five seconds.
 

@@ -92,7 +92,8 @@ a backup. [How Pinakes works](docs/design.md) explains every step and its rules.
 You need:
 
 - Rust 1.98.1 (`rust-toolchain.toml` selects it);
-- PostgreSQL 16 to 18 with PostGIS 3.4 or newer and `pg_trgm`. On Ubuntu, install
+- PostgreSQL 16 (tested in CI; 17 tested once manually; 18 expected to work, untested) with
+  PostGIS 3.4 or newer and `pg_trgm`. On Ubuntu, install
   `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16`, from the
   [PGDG repository](https://www.postgresql.org/download/linux/ubuntu/) if your distribution lacks
   version 16;
