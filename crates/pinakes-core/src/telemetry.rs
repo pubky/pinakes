@@ -231,6 +231,12 @@ impl Metrics {
         for stage in ["referenced", "before_fetch", "drain", "extras"] {
             CATALOGUE_JOIN_ERRORS.with_label_values(&[stage]);
         }
+        // Every catalogue's joins from 0, so a dashboard and a rate see them before the first.
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            for outcome in ["built", "released", "invalid"] {
+                CATALOGUE_JOINS.with_label_values(&[catalogue.name(), outcome]);
+            }
+        }
         registry.register(Box::new(CATALOGUE_CARDS.clone()))?;
         registry.register(Box::new(SEARCH_INDEX_QUEUE.clone()))?;
         registry.register(Box::new(SEARCH_INDEX_REREAD.clone()))?;

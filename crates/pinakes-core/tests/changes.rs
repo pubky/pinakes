@@ -972,7 +972,8 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
     }
     let dashboard: Value =
         serde_json::from_str(include_str!("../../../ops/grafana/pinakes.json")).unwrap();
-    assert_eq!(dashboard["panels"].as_array().unwrap().len(), 9);
+    // The service panels, then the text index's, the catalogue joins' and card writes'.
+    assert_eq!(dashboard["panels"].as_array().unwrap().len(), 17);
     for panel in dashboard["panels"].as_array().unwrap() {
         for target in panel["targets"].as_array().unwrap() {
             for name in target["expr"]
