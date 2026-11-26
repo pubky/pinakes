@@ -550,13 +550,7 @@ fn hash(bytes: &[u8]) -> String {
 /// calendar file with its path's percent encodings decoded. Any other link, whatever it holds
 /// (a `webcal://` in its query, `/apps/calendar/` in a blog's path), is left as written.
 pub fn canonical_feed(uri: &str) -> String {
-    let normalized = match uri
-        .strip_prefix("webcals://")
-        .or_else(|| uri.strip_prefix("webcal://"))
-    {
-        Some(rest) => format!("https://{rest}"),
-        None => uri.to_owned(),
-    };
+    let normalized = crate::capability::webcal_as_https(uri).unwrap_or_else(|| uri.to_owned());
     let Ok(mut u) = Url::parse(&normalized) else {
         return normalized;
     };

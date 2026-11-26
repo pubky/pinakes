@@ -15,7 +15,19 @@
     "https://google.com/calendar/ical/test/private-SECRET/basic.ics",
     "https://calendar.example.org/index.php/apps/calendar/p/SECRET",
     "https://calendar.example.org/nextcloud/remote.php/dav/public-calendars/SECRET/",
-    "https://outlook.office365.com/%6Fwa/calendar/SECRET/calendar.ics"
+    "https://outlook.office365.com/%6Fwa/calendar/SECRET/calendar.ics",
+    "webcal://p29-caldav.icloud%2Ecom/published/SECRET",
+    "webcals://p29-caldav.icloud%2ecom/published/SECRET",
+    "webcal://p29-caldav.icloud%E3%80%82com/published/SECRET",
+    "webcal://p29-caldav.icloud。com/published/SECRET",
+    "webcal://p29-caldav.icloud．com/published/SECRET",
+    "webcal://p29-caldav.ｉcloud.com/published/SECRET",
+    "webcal://calendar.google%2Ecom/calendar/ical/test/private-SECRET/basic.ics",
+    "webcal://outlook.office365%2Ecom/owa/calendar/SECRET/calendar.ics",
+    "webcals://outlook.live%E3%80%82com/owa/calendar/SECRET/calendar.ics",
+    "webcal://calendar.proton%2Eme/share/SECRET",
+    "https://p29-caldav.icloud%2Ecom/published/SECRET",
+    "https://p29-caldav.icloud。com/published/SECRET"
   ],
   "query": [
     "https://events.example.org/feed.ics?token=SECRET",

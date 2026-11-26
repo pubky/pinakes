@@ -7,6 +7,7 @@ from urllib.parse import unquote
 from pathlib import Path
 import re
 import sys
+import unicodedata
 import os
 import subprocess
 
@@ -30,6 +31,9 @@ SYNTHETIC = (
 # "providers" probe is a capability to both, so neither can drop a pattern the other keeps.
 PROBES = Path(__file__).resolve().parent.parent / "crates/pinakes-core/tests/fixtures/capability_urls.json"
 GUARD_PROBES = tuple(json.loads(PROBES.read_text())["providers"])
+def dotted(text):
+    """`text` with its compatibility forms folded (fullwidth letters and stops) and its full stops as dots."""
+    return unicodedata.normalize("NFKC", text).replace("\u3002", ".")
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
 args = parser.parse_args()
@@ -64,8 +68,9 @@ for path in paths:
         allowed.extend(GUARD_PROBES)
     for value in allowed:
         text = re.sub(re.escape(value) + r"(?=[\s\"'<>]|$)", "", text)
-    # A percent-encoded path (`/%6Fwa/calendar/`) is the same link to its provider.
-    if PATTERN.search(text) or PATTERN.search(unquote(text)):
+    # A percent-encoded path (`/%6Fwa/calendar/`) is the same link to its provider, and so is a
+    # host spelled with `%2E`, a fullwidth letter or an ideographic full stop.
+    if PATTERN.search(text) or PATTERN.search(unquote(text)) or PATTERN.search(dotted(unquote(text))):
         print(f"Capability URL pattern in {relative} (value redacted)", file=sys.stderr)
         failed = True
 sys.exit(int(failed))

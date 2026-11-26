@@ -102,6 +102,10 @@ pub fn is_capability(uri: &str) -> bool {
 /// a hash router's `#/reset?token=…` or `#/reset;token=…`, an OAuth answer after a route,
 /// `#/cb#access_token=…`; a key may start with an old hash router's `/` or `!/`, as in
 /// `#/access_token=…`; a plain anchor such as `#key` is a place in the page).
+///
+/// A `webcal:` or `webcals:` link is read as it is fetched, an https URL
+/// ([`webcal_as_https`]): its host decoded and mapped as an https URL's (`%2E`, an ideographic full
+/// stop, IDNA), so no spelling of a provider's host passes as another host.
 pub fn is_capability_url(url: &Url) -> bool {
     if url.password().is_some() {
         return true;
@@ -109,11 +113,16 @@ pub fn is_capability_url(url: &Url) -> bool {
     if !matches!(url.scheme(), "http" | "https" | "webcal" | "webcals") {
         return false;
     }
-    let host = url
-        .host_str()
-        .unwrap_or_default()
+    if let Some(fetched) = webcal_as_https(url.as_str()).and_then(|u| Url::parse(&u).ok()) {
+        return is_capability_url(&fetched);
+    }
+    // Decoded, with its full stops as dots: an opaque host (a `webcal:` link that is no URL
+    // over https) is read as the provider would.
+    let host = percent_encoding::percent_decode_str(url.host_str().unwrap_or_default())
+        .decode_utf8_lossy()
+        .replace(['\u{3002}', '\u{ff0e}', '\u{ff61}'], ".")
         .trim_end_matches('.')
-        .to_ascii_lowercase();
+        .to_lowercase();
     // `/%6Fwa/calendar/` is `/owa/calendar/` to the provider.
     let path = percent_encoding::percent_decode_str(url.path())
         .decode_utf8_lossy()
@@ -127,6 +136,14 @@ pub fn is_capability_url(url: &Url) -> bool {
         || url
             .fragment()
             .is_some_and(|fragment| fragment_credential(fragment, &credential_key))
+}
+
+/// The https URL a `webcal://` or `webcals://` link is fetched as, the scheme replaced and the
+/// rest as written (`event::calendar::canonical_feed` reads it so); `None` for any other link.
+pub fn webcal_as_https(uri: &str) -> Option<String> {
+    uri.strip_prefix("webcals://")
+        .or_else(|| uri.strip_prefix("webcal://"))
+        .map(|rest| format!("https://{rest}"))
 }
 
 /// Whether `fragment`, as a form and in each part of it after a `?`, `#` or `;`, has a key that
