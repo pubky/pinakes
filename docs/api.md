@@ -170,7 +170,7 @@ skipped. Sending both lists, or neither, is a 400.
 | `api_shape` | `2`: one flat object per card |
 | `user_agent` | The User-Agent this instance's requests to other services carry: its version and the operator's contact (`http.contact`), when set |
 | `resolves` | The kinds of links this instance resolves: `web`, `pubky`, `geo`, `osm`, `event`, `calendar` and the card kinds `media`, `isbn`, `doi`, `nostr`, `activitypub` and `official`, those that are on |
-| `spelling_rules` | The version of the URI-only spelling rules and identifier pages: the first 16 hex characters of the BLAKE3 hash of `data/spellings.json` ([Spelling vectors](#spelling-vectors), [Identifier pages](#identifier-pages)) |
+| `spelling_rules` | The version of the URI-only spelling rules, tracking parameters and identifier pages: the first 16 hex characters of the BLAKE3 hash of `data/spellings.json` ([Spelling vectors](#spelling-vectors), [Identifier pages](#identifier-pages)) |
 | `limits` | The sizes and budgets a client must respect: `lookup`, `change_lookup` and `occurrence_lookup` (500 each), `search_page` (500), the `related_*` limits ([Related](#related)), `collapse_refs_per_member`, `requests_per_minute`, `previews_per_minute` and `previews_per_uri_per_minute` |
 | `osm_licence` | `{licence, attribution, url, dump, updated_at}`: the ODbL licence of OSM-derived values, the dump's path, and when the dump was last written (`null` before the first) |
 | `attributions` | What a client must show while it shows values from a service, `[{provider, notice, logo, url}]` ([Credits](#credits)). Absent when there are none. |
@@ -1595,11 +1595,16 @@ Aliases follow these rules:
 
 - **Tracking parameters**: `utm_*`, `fbclid`, `gclid`, `dclid`, `msclkid`, `igshid`, `mc_cid`,
   `mc_eid` and `_gl` on every host; `recId`, `recSource`, `searchId` and `eventOrigin` on
-  meetup.com; and `tk` on luma.com and lu.ma. They are dropped from the raw query, and every
-  other value keeps its encoding. A URI that had any is an alias of the URI without them.
+  meetup.com; `tk` on luma.com and lu.ma; `si` on spotify.com, youtube.com, youtu.be and
+  soundcloud.com; `feature` on youtube.com and youtu.be; `igsh` on instagram.com; and `s`, `t`,
+  `ref_src` and `ref_url` on x.com and twitter.com (each host with its subdomains). They are
+  dropped from the raw query, and every other value keeps its encoding. A URI that had any is an
+  alias of the URI without them, as `data/spellings.json` `tracking` lists them ([Spelling
+  vectors](#spelling-vectors)).
 - **OSM spellings and object shortlinks** are aliases of
   `https://www.openstreetmap.org/{type}/{id}` ([OpenStreetMap and locations](#openstreetmap-and-locations)).
-- **Identifiers**: an ISBN-10 or hyphenated ISBN is an alias of `isbn:` and its ISBN-13.
+- **Identifiers**: an ISBN-10 or hyphenated ISBN is an alias of `isbn:` and its ISBN-13, and so
+  is Open Library's ISBN page (`https://openlibrary.org/isbn/{ISBN}`, any ISBN spelling).
   `https://doi.org/…`, `https://dx.doi.org/…` and any letter case are aliases of `doi:` in lower
   case.
 - **Official-API spellings**: every address of an object a [source](#sources) reads is an alias
@@ -1724,6 +1729,27 @@ Pinakes answers for it:
   canonical or permanent redirect, a Meetup date's number and token, an official API's answer,
   and a podcast feed naming its episode's page (alias bases `canonical` and `source`).
 
+The file also lists, under `tracking`, every query parameter Pinakes drops as tracking (the
+tracking rule above), so a client can remove them before it writes a link:
+
+| Field | Meaning |
+| --- | --- |
+| `param` | The parameter's name, percent-decoded, matched in its letter case (`FBCLID` is kept) |
+| `match` | `exact`: the name is `param`; `prefix`: the name starts with it (`utm_`) |
+| `hosts` | The hosts it tracks on, each with its subdomains; empty for every host |
+
+- Only `http` and `https` links are cleaned. A host matches an entry when, in lower case (a
+  non-ASCII name in its punycode form), it equals one of `hosts` or ends with `.` and one of
+  them: `x.com` matches `mobile.x.com`, never `netflix.com`.
+- A parameter is dropped from the raw query string (split at `&`, the name before the first
+  `=`); every other parameter keeps its place and encoding, and a query left empty goes with its
+  `?`. Nothing else in the link changes.
+- Only parameters that never change the page are listed. Read-side folds that change the
+  address (`www.`, a trailing slash, a service's other URL forms) are rules, not tracking.
+- A test holds the list equal to the code that drops them and gives each parameter a vector of
+  the tracking rule, and `spelling_rules` covers it. A client with an older list writes a link
+  that keeps a parameter added since; Pinakes folds that link to the same root.
+
 ### Identifier pages
 
 `data/spellings.json` also lists, under `pages`, the web page Pinakes links for an identifier,
@@ -1736,7 +1762,7 @@ Each entry is one identifier and what Pinakes answers for it:
 | --- | --- |
 | `id` | The identifier as written |
 | `page` | The web page, `null` when Pinakes has no single page for it |
-| `rule` | What builds the page: `wikidata`, `musicbrainz`, `osm` or `doi`, or `source/{name}` for an official source's own scheme; `none` when there is no page |
+| `rule` | What builds the page: `wikidata`, `musicbrainz`, `osm`, `doi` or `isbn`, or `source/{name}` for an official source's own scheme; `none` when there is no page |
 
 | Identifier | Page |
 | --- | --- |
@@ -1745,20 +1771,23 @@ Each entry is one identifier and what Pinakes answers for it:
 | `isrc:{ISRC}` | MusicBrainz's ISRC page, `https://musicbrainz.org/isrc/{ISRC}` |
 | `osm:{node\|way\|relation}/{id}` | `https://www.openstreetmap.org/{type}/{id}` |
 | `doi:{DOI}` | `https://doi.org/{DOI}`, the DOI in lower case |
+| `isbn:{ISBN}` | Open Library's ISBN page, `https://openlibrary.org/isbn/{ISBN-13}` (an ISBN-10 maps to its ISBN-13) |
 | A source's own scheme (`artic:`, `btc:`, `ln:`, `uniprot:`, `fr:`, …) | The object's page on the service, as the source builds it from the root |
 
-- A join key's page (Wikidata, MusicBrainz, OSM) is a card's `uri` itself. A `doi:` card's page
-  and a source's page are aliases of the card's root ([Aliases](#aliases)). The source's page may
-  differ from the page the card's `open_in` names after a read (the Federal Register's dated page
-  with its title, a Figshare portal's page, a Hugging Face repository in its own letter case);
+- A join key's page (Wikidata, MusicBrainz, OSM) is a card's `uri` itself. A `doi:` or `isbn:`
+  card's page and a source's page are aliases of the card's root ([Aliases](#aliases)). Open
+  Library's ISBN page redirects to the edition with that ISBN when Open Library has one. The
+  source's page may differ from the page the card's `open_in` names after a read (the Federal
+  Register's dated page with its title, a Figshare portal's page, a Hugging Face repository in
+  its own letter case);
   both are aliases of the same root. An LEI's page is its gleif.org address
   (`https://www.gleif.org/lei/{LEI}`), which redirects to the record page `open_in` names: that
   page names the LEI only in its fragment, which a link drops. A `%`, `?` or `#` in a DOI is
   percent-encoded in its page.
-- No single page (`null`): an MBID without its entity (`mbid:`), an ISBN (an `isbn:` card has no
-  web page of its own), a barcode (`upc:`, `gtin:`) and the podcast keys. The keys of the also-on
-  lookups (`imdb:`, `crate:`, `arxiv:`, `steam:`, …) have none here either: their pages are the
-  links those lookups list in [Also on](#also-on). A web link is its own page.
+- No single page (`null`): an MBID without its entity (`mbid:`), a barcode (`upc:`, `gtin:`) and
+  the podcast keys. The keys of the also-on lookups (`imdb:`, `crate:`, `arxiv:`, `steam:`, …)
+  have none here either: their pages are the links those lookups list in [Also on](#also-on). A
+  web link is its own page.
 - A test runs every entry through the code that builds the pages and checks that each page is an
   address of its card. Every source with roots of its own scheme has entries, and every such root
   among the spelling vectors has its page. `spelling_rules` covers the pages as it covers the

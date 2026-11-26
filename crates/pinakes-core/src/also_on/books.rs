@@ -95,9 +95,12 @@ fn named(uri: &str) -> Option<Book> {
     }
     let s: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     match s.as_slice() {
+        // The ISBN page as the alias rule reads it (`cards::isbn_of_page`), or its record.
         ["isbn", n] => {
-            let n = n.strip_suffix(".json").unwrap_or(n);
-            cards::isbn(&format!("isbn:{n}")).map(|n| Book::Isbn(cards::isbn13(&n)))
+            let page = n
+                .strip_suffix(".json")
+                .map_or_else(|| uri.to_owned(), |n| format!("{OPEN_LIBRARY}/isbn/{n}"));
+            cards::isbn_of_page(&page).map(|n| Book::Isbn(cards::isbn13(&n)))
         }
         ["books", id, ..] => ol_id(id.strip_suffix(".json").unwrap_or(id), 'M').map(Book::Edition),
         ["works", id, ..] => ol_id(id.strip_suffix(".json").unwrap_or(id), 'W').map(Book::Work),

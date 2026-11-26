@@ -193,15 +193,16 @@ def own_paths(kind, name):
 
 
 def spellings_text(doc):
-    """`data/spellings.json` in its one layout (`render` in tests/spellings.rs): one vector per
-    line, then one identifier page per line."""
+    """`data/spellings.json` in its one layout (`render` in tests/spellings.rs): one tracking
+    parameter per line, then one vector per line, then one identifier page per line."""
 
     def lines(all):
         lines = ["    " + json.dumps(v, ensure_ascii=False, separators=(",", ":")) for v in all]
         return "".join(l + (",\n" if i + 1 < len(lines) else "\n") for i, l in enumerate(lines))
 
-    return '{\n  "about": %s,\n  "vectors": [\n%s  ],\n  "pages": [\n%s  ]\n}\n' % (
+    return '{\n  "about": %s,\n  "tracking": [\n%s  ],\n  "vectors": [\n%s  ],\n  "pages": [\n%s  ]\n}\n' % (
         json.dumps(doc["about"], ensure_ascii=False),
+        lines(doc["tracking"]),
         lines(doc["vectors"]),
         lines(doc["pages"]),
     )
@@ -638,6 +639,9 @@ PINAKES_DELTA_KEY=
     # other's, one core rule; the identifier pages: the official source's and a core rule's.
     SPELLINGS: """{
   "about": "Test vectors.",
+  "tracking": [
+    {"param":"utm_","match":"prefix","hosts":[]}
+  ],
   "vectors": [
     {"link":"https://alpha-beta.example/d/1","root":"ab:1","basis":"identifier","rule":"source/alpha_beta"},
     {"link":"ab:1","root":"ab:1","basis":null,"rule":"none"},
@@ -702,6 +706,8 @@ def self_test():
                 assert spellings == spellings_text(json.loads(spellings)), spellings
                 assert len(json.loads(spellings)["vectors"]) == 2, spellings
                 assert [p["id"] for p in json.loads(spellings)["pages"]] == ["gamma:2", "wikidata:Q1"], spellings
+                # The tracking parameters are core rules: no removal touches them.
+                assert json.loads(spellings)["tracking"] == [{"param": "utm_", "match": "prefix", "hosts": []}], spellings
             if name == "gamma":
                 spellings = open(os.path.join(wt, SPELLINGS), encoding="utf-8").read()
                 vectors = json.loads(spellings)["vectors"]

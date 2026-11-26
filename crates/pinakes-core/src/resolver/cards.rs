@@ -288,6 +288,36 @@ pub fn isbn13(number: &str) -> String {
         .sum();
     format!("{body}{}", (10 - sum % 10) % 10)
 }
+/// An ISBN's page, Open Library's ISBN page `https://openlibrary.org/isbn/{ISBN}` (it redirects to
+/// the edition with that ISBN when Open Library has one): an alias of the `isbn:` card
+/// ([`isbn_of_page`]).
+pub fn isbn_page(isbn13: &str) -> String {
+    format!("https://openlibrary.org/isbn/{isbn13}")
+}
+/// The ISBN an Open Library ISBN page names (`openlibrary.org/isbn/{ISBN}`, any ISBN spelling,
+/// with `www.`, `http` or a trailing slash), as [`isbn`] reads it. Its record (`….json`) and
+/// any other path name none.
+pub fn isbn_of_page(uri: &str) -> Option<String> {
+    let u = Url::parse(uri).ok()?;
+    if !matches!(u.scheme(), "https" | "http")
+        || !matches!(u.host_str()?, "openlibrary.org" | "www.openlibrary.org")
+        || u.port().is_some()
+        || !u.username().is_empty()
+        || u.password().is_some()
+    {
+        return None;
+    }
+    // `/isbn/{ISBN}`, with one trailing slash at most.
+    let path = u.path().strip_prefix("/isbn/")?;
+    let number = path.strip_suffix('/').unwrap_or(path);
+    if number.is_empty() || number.contains('/') {
+        return None;
+    }
+    let number = percent_encoding::percent_decode_str(number)
+        .decode_utf8()
+        .ok()?;
+    isbn(&format!("isbn:{number}"))
+}
 /// A DOI's page on the DOI proxy, `https://doi.org/{DOI}`: an alias of the `doi:` card. A `%`,
 /// `?` or `#` in the DOI is percent-encoded, so the page's path reads back as the DOI ([`doi`]).
 pub fn doi_page(number: &str) -> String {

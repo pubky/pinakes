@@ -8,17 +8,81 @@ use anyhow::Result;
 use sqlx::{PgPool, Postgres, Transaction};
 use url::Url;
 
-/// Query parameters that only track how a link was shared, on every host (with `utm_*`).
-const TRACKING: &[&str] = &[
-    "fbclid", "gclid", "dclid", "msclkid", "igshid", "mc_cid", "mc_eid", "_gl",
-];
-/// Parameters that track only on these platforms; elsewhere they may carry identity or access.
-const PLATFORM_TRACKING: &[(&[&str], &[&str])] = &[
-    (
-        &["meetup.com"],
-        &["recId", "recSource", "searchId", "eventOrigin"],
-    ),
-    (&["luma.com", "lu.ma"], &["tk"]),
+/// A query parameter Pinakes drops from a link as tracking ([`untracked`]): one that only tracks
+/// how the link was shared and never changes the page. It matches a parameter whose name,
+/// percent-decoded, is `param` (or starts with it, `prefix`), on every host when `hosts` is empty,
+/// else only on those hosts and their subdomains (elsewhere the name may carry identity or
+/// access). `data/spellings.json` lists them (`tracking`), in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tracking {
+    pub param: &'static str,
+    pub prefix: bool,
+    pub hosts: &'static [&'static str],
+}
+impl Tracking {
+    const fn any(param: &'static str) -> Self {
+        Self {
+            param,
+            prefix: false,
+            hosts: &[],
+        }
+    }
+    const fn on(hosts: &'static [&'static str], param: &'static str) -> Self {
+        Self {
+            param,
+            prefix: false,
+            hosts,
+        }
+    }
+    /// Whether a parameter of this name on this host is this tracking parameter.
+    pub fn matches(&self, host: &str, name: &str) -> bool {
+        let named = if self.prefix {
+            name.starts_with(self.param)
+        } else {
+            name == self.param
+        };
+        named
+            && (self.hosts.is_empty()
+                || self
+                    .hosts
+                    .iter()
+                    .any(|h| host == *h || host.ends_with(&format!(".{h}"))))
+    }
+}
+const MEETUP: &[&str] = &["meetup.com"];
+const LUMA: &[&str] = &["luma.com", "lu.ma"];
+const SHARE_ID: &[&str] = &["spotify.com", "youtube.com", "youtu.be", "soundcloud.com"];
+const YOUTUBE: &[&str] = &["youtube.com", "youtu.be"];
+const INSTAGRAM: &[&str] = &["instagram.com"];
+const X: &[&str] = &["x.com", "twitter.com"];
+/// Every tracking parameter Pinakes drops: `utm_*` and the click and mail ids on every host, and
+/// the share parameters of the platforms that add them to a shared link.
+pub const TRACKING: &[Tracking] = &[
+    Tracking {
+        param: "utm_",
+        prefix: true,
+        hosts: &[],
+    },
+    Tracking::any("fbclid"),
+    Tracking::any("gclid"),
+    Tracking::any("dclid"),
+    Tracking::any("msclkid"),
+    Tracking::any("igshid"),
+    Tracking::any("mc_cid"),
+    Tracking::any("mc_eid"),
+    Tracking::any("_gl"),
+    Tracking::on(MEETUP, "recId"),
+    Tracking::on(MEETUP, "recSource"),
+    Tracking::on(MEETUP, "searchId"),
+    Tracking::on(MEETUP, "eventOrigin"),
+    Tracking::on(LUMA, "tk"),
+    Tracking::on(SHARE_ID, "si"),
+    Tracking::on(YOUTUBE, "feature"),
+    Tracking::on(INSTAGRAM, "igsh"),
+    Tracking::on(X, "s"),
+    Tracking::on(X, "t"),
+    Tracking::on(X, "ref_src"),
+    Tracking::on(X, "ref_url"),
 ];
 #[derive(Debug, PartialEq)]
 pub struct Alias {
@@ -87,7 +151,9 @@ pub fn rooted(uri: &str) -> Option<(Alias, Named)> {
         Some((root, "cursor", Core(Rule::Cursor)))
     } else if let Some(osm) = crate::resolver::osm::parse_id(&uri) {
         Some((osm.uri(), "osm", Core(Rule::Osm)))
-    } else if let Some(isbn) = crate::resolver::cards::isbn(&uri) {
+    } else if let Some(isbn) =
+        crate::resolver::cards::isbn(&uri).or_else(|| crate::resolver::cards::isbn_of_page(&uri))
+    {
         Some((
             format!("isbn:{}", crate::resolver::cards::isbn13(&isbn)),
             "identifier",
@@ -121,11 +187,11 @@ pub fn rooted(uri: &str) -> Option<(Alias, Named)> {
 }
 /// The web page Pinakes links for an identifier, built from the identifier alone, with the rule
 /// that builds it: a join key's page (`wikidata:{Q-id}`, `mb:{kind}:{mbid}`, `isrc:{ISRC}`,
-/// `osm:{type}/{id}`), or the page of a card whose root is no web link (`doi:…`, a source's own
-/// scheme such as `artic:…` or `btc:…`), in any spelling of that root, whichever sources are on.
-/// `data/spellings.json` (`pages`) lists examples of each. `None` for a web link (its own page)
-/// and for an identifier with no single page of its own (an MBID without its entity, an ISBN, a
-/// barcode, …).
+/// `osm:{type}/{id}`), or the page of a card whose root is no web link (`doi:…`, `isbn:…`, a
+/// source's own scheme such as `artic:…` or `btc:…`), in any spelling of that root, whichever
+/// sources are on. `data/spellings.json` (`pages`) lists examples of each. `None` for a web link
+/// (its own page) and for an identifier with no single page of its own (an MBID without its
+/// entity, a barcode, …).
 pub fn web_page(identifier: &str) -> Option<(String, Named)> {
     use Named::Core;
     let identifier = identifier.trim();
@@ -148,6 +214,16 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
                 crate::model::identity(&crate::resolver::cards::doi_page(&number)).ok()?;
             return (crate::resolver::cards::doi(&page).as_deref() == Some(number.as_str()))
                 .then_some((page, Core(Rule::Doi)));
+        }
+        // An ISBN's page is Open Library's ISBN page, under its ISBN-13, which folds back to it.
+        if let Some(number) = written
+            .strip_prefix("isbn:")
+            .and_then(|_| crate::resolver::cards::isbn(&written))
+        {
+            return Some((
+                crate::resolver::cards::isbn_page(&crate::resolver::cards::isbn13(&number)),
+                Core(Rule::Isbn),
+            ));
         }
         if let Some((source, page)) = crate::sources::root_page_by(&written) {
             return Some((page, Named::Source(source)));
@@ -184,8 +260,9 @@ pub fn web_page(identifier: &str) -> Option<(String, Named)> {
     Some((page, Core(rule)))
 }
 /// The version of the URI-only spelling rules (`/v1/info` `spelling_rules`): the first 16 hex
-/// characters of the BLAKE3 hash of `data/spellings.json`, the rules' test vectors and the
-/// identifier pages, which a test holds equal to what [`rooted`] and [`web_page`] answer.
+/// characters of the BLAKE3 hash of `data/spellings.json`, the tracking parameters, the rules'
+/// test vectors and the identifier pages, which a test holds equal to [`TRACKING`] and to what
+/// [`rooted`] and [`web_page`] answer.
 pub fn spelling_rules() -> &'static str {
     static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         blake3::hash(include_bytes!("../../../data/spellings.json")).to_hex()[..16].to_owned()
@@ -200,21 +277,10 @@ pub(crate) fn untracked(uri: &str) -> Option<String> {
         return None;
     }
     let host = u.host_str().unwrap_or_default().to_owned();
-    let platform: Vec<&str> = PLATFORM_TRACKING
-        .iter()
-        .filter(|(hosts, _)| {
-            hosts
-                .iter()
-                .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-        })
-        .flat_map(|(_, names)| names.iter().copied())
-        .collect();
     let tracking = |piece: &str| {
         let name = piece.split('=').next().unwrap_or_default();
         let name = percent_encoding::percent_decode_str(name).decode_utf8_lossy();
-        name.starts_with("utm_")
-            || TRACKING.contains(&name.as_ref())
-            || platform.contains(&name.as_ref())
+        TRACKING.iter().any(|t| t.matches(&host, &name))
     };
     let pieces: Vec<&str> = u.query()?.split('&').collect();
     let kept: Vec<&str> = pieces.iter().copied().filter(|p| !tracking(p)).collect();
@@ -560,8 +626,44 @@ mod tests {
             "https://example.org/a?tk=secret",
             "https://example.org/a?recId=1",
             "https://lu.ma/party?recId=1",
+            "https://example.org/a?si=1&s=2&t=3&feature=4&igsh=5",
+            "https://example.org/a?xutm_source=1&FBCLID=2",
         ] {
             assert_eq!(r(uri), None, "{uri}");
+        }
+        // A host matches with its subdomains only: never a lookalike or a longer name.
+        for uri in [
+            "https://evil-x.com/a?s=1",
+            "https://x.com.evil.org/a?s=1",
+            "https://netflix.com/a?s=1&t=2",
+        ] {
+            assert_eq!(untracked(uri), None, "{uri}");
+        }
+        assert_eq!(
+            untracked("https://x.com/a?s=1&lang=en").as_deref(),
+            Some("https://x.com/a?lang=en")
+        );
+        // Every tracking parameter is dropped where it tracks (with another value kept), and a
+        // host-scoped one is kept on any other host.
+        for t in TRACKING {
+            let name = if t.prefix {
+                format!("{}campaign", t.param)
+            } else {
+                t.param.to_owned()
+            };
+            for host in t.hosts.iter().copied().chain(["example.org"]) {
+                let link = format!("https://sub.{host}/a/b?keep=1&{name}=x");
+                let dropped = untracked(&link);
+                if t.hosts.is_empty() || host != "example.org" {
+                    assert_eq!(
+                        dropped.as_deref(),
+                        Some(format!("https://sub.{host}/a/b?keep=1").as_str()),
+                        "{link}"
+                    );
+                } else {
+                    assert_eq!(dropped, None, "{link}");
+                }
+            }
         }
         let (e9, e8) = (
             r("https://example.org/s?q=%E9&utm_source=x"),
@@ -606,6 +708,40 @@ mod tests {
             Some(("isbn:9780140328721".into(), "identifier"))
         );
         assert_eq!(r("isbn:9780140328721"), None);
+        // Open Library's ISBN page, in any ISBN spelling, is the book's card.
+        for uri in [
+            "https://openlibrary.org/isbn/9780140328721",
+            "https://openlibrary.org/isbn/0140328726/",
+            "https://www.openlibrary.org/isbn/978-0-14-032872-1",
+            "http://openlibrary.org/isbn/0-14-032872-6",
+        ] {
+            assert_eq!(
+                r(uri),
+                Some(("isbn:9780140328721".into(), "identifier")),
+                "{uri}"
+            );
+        }
+        for uri in [
+            "https://openlibrary.org/isbn/9780140328721.json",
+            "https://openlibrary.org/isbn/9780140328722",
+            "https://openlibrary.org/isbn/9780140328721/x",
+            "https://openlibrary.example/isbn/9780140328721",
+            "https://openlibrary.org//isbn//9780140328721",
+            "https://openlibrary.org/isbn/9780140328721//",
+        ] {
+            assert_ne!(
+                r(uri).map(|a| a.0),
+                Some("isbn:9780140328721".into()),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            web_page("isbn:0-14-032872-6").map(|(p, n)| (p, n.name())),
+            Some((
+                "https://openlibrary.org/isbn/9780140328721".into(),
+                "isbn".into()
+            ))
+        );
         assert_eq!(
             r("https://doi.org/10.1038/NATURE12373"),
             Some(("doi:10.1038/nature12373".into(), "identifier"))
