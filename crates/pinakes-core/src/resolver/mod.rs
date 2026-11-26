@@ -710,7 +710,9 @@ mod tests {
     fn no_fetch_path_logs_an_error_s_text() {
         let own = [
             "/api.rs",
+            "/changes.rs",
             "/groups.rs",
+            "/hints.rs",
             "/maintenance.rs",
             "/osm_dump.rs",
             "/queue.rs",

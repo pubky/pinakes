@@ -2832,8 +2832,10 @@ async fn a_reference_is_no_grouping_input_and_a_hub_key_is(pool: PgPool) {
 }
 
 /// Removing a resource's child row that grouping reads (here a hub key) marks the resource dirty
-/// and bumps its revision; a save holds the resource's row, then marks it dirty. The removal locks
-/// the resource's row before marking it, as a save does, so the two never deadlock.
+/// and bumps its revision; a save holds the resource's row (`FOR NO KEY UPDATE`), then marks it
+/// dirty. The removal locks the resource's row before marking it, as a save does, so the two never
+/// deadlock. (Marking first, then waiting for the row to bump the revision, the removal would hold
+/// the mark the save's trigger waits for.)
 #[sqlx::test(migrations = "../../migrations")]
 async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool: PgPool) {
     let (id, _) = save(&pool, "child-order", &[], None).await;
@@ -2848,7 +2850,7 @@ async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool
         .unwrap();
     // A save: the resource's row first.
     let mut saving = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
         .bind(&id)
         .execute(&mut *saving)
         .await
@@ -2881,9 +2883,11 @@ async fn removing_a_hub_key_and_saving_its_resource_take_locks_in_one_order(pool
     assert!(dirty);
 }
 
-/// Removing a unit from a group marks every member dirty; a save holds its member's row, then
-/// marks it dirty. The removal locks the members' rows before marking them, as a save does, so
-/// the two never deadlock.
+/// Removing a unit from a group marks every member dirty; a save holds its member's row (`FOR NO
+/// KEY UPDATE`), then marks it dirty. The removal locks the members' rows the same way before
+/// marking them, so it waits for the save and the two never deadlock. (Marking first, then
+/// waiting for the member's row in a later step of its transaction, the removal would hold the
+/// mark the save's trigger waits for.)
 #[sqlx::test(migrations = "../../migrations")]
 async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool: PgPool) {
     let (card, page) = pair(&pool, "member-order", None).await;
@@ -2894,7 +2898,7 @@ async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool:
         .unwrap();
     // A save of the page: its row first.
     let mut saving = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
         .bind(&page)
         .execute(&mut *saving)
         .await
@@ -2922,6 +2926,61 @@ async fn removing_a_group_unit_and_saving_a_member_take_locks_in_one_order(pool:
     let dirty: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1)")
             .bind(&page)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(dirty);
+}
+
+/// Removing a keyed derived link marks the resource it names dirty and bumps its revision; a save
+/// of that resource holds its row (`FOR NO KEY UPDATE`), then marks it dirty. The removal locks the
+/// named row before marking it, so it waits for the save and the two never deadlock. (Marking
+/// first, then waiting for the row to bump the revision, the removal would hold the mark the
+/// save's trigger waits for.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn removing_a_keyed_link_and_saving_the_resource_it_names_take_locks_in_one_order(
+    pool: PgPool,
+) {
+    let (named, _) = save(&pool, "link-order", &[], None).await;
+    let (holder, _) = save(&pool, "link-holder", &[], None).await;
+    sqlx::query("INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,key,expires_at) VALUES($1,$2,'https://example.org/link-order','example.org','test','test','wikidata:Q1',now()+interval '1 day')")
+        .bind(&holder)
+        .bind(&named)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM group_dirty")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A save of the named resource: its row first.
+    let mut saving = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(&named)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    let removal = tokio::spawn({
+        let pool = pool.clone();
+        let holder = holder.clone();
+        async move {
+            sqlx::query("DELETE FROM derived_link WHERE resource_id=$1")
+                .bind(&holder)
+                .execute(&pool)
+                .await
+        }
+    });
+    common::lock_waiters_reach(&pool, 1, "the link's removal").await;
+    sqlx::query("UPDATE resource SET doc=jsonb_set(doc,'{name}','\"Saved\"') WHERE id=$1")
+        .bind(&named)
+        .execute(&mut *saving)
+        .await
+        .unwrap();
+    saving.commit().await.unwrap();
+    removal.await.unwrap().unwrap();
+    let dirty: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_dirty WHERE resource_id=$1)")
+            .bind(&named)
             .fetch_one(&pool)
             .await
             .unwrap();

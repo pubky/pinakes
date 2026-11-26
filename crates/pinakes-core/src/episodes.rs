@@ -1093,7 +1093,7 @@ pub(crate) async fn join_page(
     // The alias's row first, then its root's, as `alias::assign` locks them. A page not read yet
     // is left: its address alone says nothing of what it is.
     let known: Option<String> =
-        sqlx::query_scalar("SELECT id FROM resource WHERE id=$1 FOR UPDATE")
+        sqlx::query_scalar("SELECT id FROM resource WHERE id=$1 FOR NO KEY UPDATE")
             .bind(&page_id)
             .fetch_optional(&mut *tx)
             .await?;
@@ -1143,7 +1143,7 @@ pub(crate) async fn join_page(
         return Ok(());
     }
     let current: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM resource r WHERE id=$1 AND generation=$2 AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) FOR UPDATE",
+        "SELECT id FROM resource r WHERE id=$1 AND generation=$2 AND NOT EXISTS (SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) FOR NO KEY UPDATE",
     )
     .bind(id)
     .bind(generation)
@@ -1208,25 +1208,26 @@ pub(crate) async fn release_pages(
     // The aliases' rows first (the pages, and the spellings that followed them here), then their
     // root's, as `alias::assign` locks them.
     let pages: Vec<(String, String)> = sqlx::query_as(
-        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE r.id=ANY($1) AND a.root_id=$2 AND a.basis='source' ORDER BY r.id FOR UPDATE OF r",
+        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE r.id=ANY($1) AND a.root_id=$2 AND a.basis='source' ORDER BY r.id FOR NO KEY UPDATE OF r",
     )
     .bind(&joined)
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
     let spellings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE a.root_id=$1 AND a.basis<>'source' AND ($2::text IS NULL OR r.id<>$2) ORDER BY r.id FOR UPDATE OF r",
+        "SELECT r.id,r.uri FROM resource r JOIN resource_alias a ON a.alias_id=r.id WHERE a.root_id=$1 AND a.basis<>'source' AND ($2::text IS NULL OR r.id<>$2) ORDER BY r.id FOR NO KEY UPDATE OF r",
     )
     .bind(id)
     .bind(&keep)
     .fetch_all(&mut *tx)
     .await?;
-    let current: Option<String> =
-        sqlx::query_scalar("SELECT status FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
-            .bind(id)
-            .bind(generation)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE",
+    )
+    .bind(id)
+    .bind(generation)
+    .fetch_optional(&mut *tx)
+    .await?;
     let settled = current
         .as_deref()
         .is_some_and(|status| !gone || status == "missing");

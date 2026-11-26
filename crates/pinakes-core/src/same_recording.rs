@@ -84,9 +84,11 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
 
 /// Marks the recordings never read (one saved while the hint was off), the stored units whose
 /// resource is no longer a recording root (an alias, a page that is not ok, a retyped page) and
-/// those still waiting for a refill (see `refill`).
-/// Returns the resources marked.
+/// those still waiting for a refill (see `refill`), and drops the refill marks of units that
+/// went. Returns the resources marked.
 pub async fn sweep(pool: &PgPool) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+    crate::hints::lock(&mut tx, crate::locks::SAME_RECORDING).await?;
     let entered = sqlx::query(
         "INSERT INTO same_recording_dirty(resource_id) SELECT r.id FROM resource r \
          WHERE r.type_path @> ARRAY['MusicRecording'] AND r.status='ok' \
@@ -94,16 +96,21 @@ pub async fn sweep(pool: &PgPool) -> Result<u64> {
          AND NOT EXISTS(SELECT 1 FROM same_recording_unit u WHERE u.resource_id=r.id) \
          ON CONFLICT DO NOTHING",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     let stale = sqlx::query(
         "INSERT INTO same_recording_dirty(resource_id) SELECT u.resource_id FROM same_recording_unit u JOIN resource r ON r.id=u.resource_id \
          WHERE EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) OR r.status<>'ok' OR NOT coalesce(r.type_path @> ARRAY['MusicRecording'],false) \
-         OR u.fingerprint LIKE 'refill:%' \
+         OR u.fingerprint LIKE 'refill:%' OR EXISTS(SELECT 1 FROM same_recording_refill f WHERE f.resource_id=u.resource_id) \
          ON CONFLICT DO NOTHING",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    // A mark whose unit went with it.
+    sqlx::query("DELETE FROM same_recording_refill f WHERE NOT EXISTS(SELECT 1 FROM same_recording_unit u WHERE u.resource_id=f.resource_id)")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(entered.rows_affected() + stale.rows_affected())
 }
 
@@ -135,7 +142,9 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
     }
     let due = claim(pool, CLAIMED.min(budget.max(1)), LEASE).await?;
     for (id, claimed) in &due {
-        match resource(pool, id).await {
+        // A deadlock (a cycle with a writer outside the hint's lock) is read once more; a second
+        // leaves the entry for a later pass.
+        match crate::hints::once_more_if_deadlocked("same_recording", || resource(pool, id)).await {
             Ok(_) => settle(pool, id, claimed).await?,
             Err(error) => {
                 tracing::warn!(resource_id = %id, error = %crate::resolver::log_error(&error), "same-recording pairs will retry");
@@ -216,16 +225,19 @@ async fn resource(pool: &PgPool, id: &str) -> Result<Read> {
 /// read that stopped short, from where it stopped). A recording without a title (no name, or one
 /// that compares as nothing) keeps a unit with an empty title key that pairs with nothing, so
 /// the sweep does not mark it as never read. The caller commits a read that `changed` with
-/// `commit_changed`. Its candidates are taken `FOR KEY SHARE … SKIP LOCKED`,
-/// so it never waits for a unit another transaction holds (an orphan being deleted, whose
-/// `before_delete` may be waiting for this unit in turn). Exposed for the lock test.
+/// `commit_changed`. It takes the hint's write lock first (`hints::lock`): the orphan cleanup
+/// and the sweep never write the hint's rows at the same time. Its candidates are taken `FOR KEY
+/// SHARE … SKIP LOCKED`, so it never waits for a unit another transaction holds. Exposed for the
+/// lock tests.
 pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -> Result<Read> {
+    crate::hints::lock(tx, crate::locks::SAME_RECORDING).await?;
     let row = sqlx::query(
         "SELECT r.name,(r.type_path @> ARRAY['MusicRecording'] AND r.status='ok' AND NOT EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id)) AS recording,\
          r.doc#>>'{attributes,artist}' AS page_artist,r.doc#>>'{attributes,duration}' AS page_duration,\
          (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='artist' AND f.expires_at>now() AND f.source NOT IN (SELECT source FROM also_on_source_off)) AS artist,\
          (SELECT min(f.value) FROM resource_fact f WHERE f.resource_id=r.id AND f.name='duration' AND f.expires_at>now() AND f.source NOT IN (SELECT source FROM also_on_source_off)) AS duration,\
-         u.fingerprint,u.scan_after AS stopped_at,u.scan_after_length AS stopped_at_length \
+         u.fingerprint,u.scan_after AS stopped_at,u.scan_after_length AS stopped_at_length,\
+         EXISTS(SELECT 1 FROM same_recording_refill f WHERE f.resource_id=r.id) AS refill_marked \
          FROM resource r LEFT JOIN same_recording_unit u ON u.resource_id=r.id WHERE r.id=$1",
     )
     .bind(id)
@@ -255,17 +267,34 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
         )
     });
     let stored: Option<String> = row.try_get("fingerprint")?;
+    // A refill mark a refill left in `same_recording_refill` (it could not mark the unit) reads
+    // as a `refill:` fingerprint.
+    let refill_marked: bool = row.try_get("refill_marked")?;
+    let stored = stored.map(|f| {
+        if refill_marked && !f.starts_with("refill:") {
+            format!("refill:{f}")
+        } else {
+            f
+        }
+    });
     let Some(unit) = unit else {
         // No longer a recording: its unit goes, its pairs with it (on both sides), and the
         // recordings that named it are read again to refill their lists.
         if stored.is_none() {
             return Ok(Read::default());
         }
-        before_delete(tx, id).await?;
+        // Its namers are collected under the unit's lock, so no pair joins it meanwhile, and
+        // marked after the delete, as the orphan cleanup marks them.
+        sqlx::query("SELECT resource_id FROM same_recording_unit WHERE resource_id=$1 FOR UPDATE")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        let namers = namers_of(tx, &[id.to_owned()]).await?;
         sqlx::query("DELETE FROM same_recording_unit WHERE resource_id=$1")
             .bind(id)
             .execute(&mut **tx)
             .await?;
+        refill(tx, &namers).await?;
         return Ok(Read {
             changed: true,
             examined: 0,
@@ -306,7 +335,7 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
         }),
         None => None,
     };
-    let resumed = !values_changed && stopped_at.is_some_and(|at| ring.resume_after(at));
+    let mut resumed = !values_changed && stopped_at.is_some_and(|at| ring.resume_after(at));
     sqlx::query("INSERT INTO same_recording_unit(resource_id,fingerprint,title_key,artist_key,length_secs,scan_after,scan_after_length) VALUES($1,$2,$3,$4,$5,NULL,NULL) \
         ON CONFLICT(resource_id) DO UPDATE SET fingerprint=excluded.fingerprint,title_key=excluded.title_key,artist_key=excluded.artist_key,length_secs=excluded.length_secs,scan_after=NULL,scan_after_length=NULL")
         .bind(id)
@@ -317,14 +346,25 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
         .execute(&mut **tx)
         .await?;
     // The pairs a resumed read keeps (left out of the candidates, so they take no place among
-    // those a read may still take); any other read starts from none.
+    // those a read may still take); any other read starts from none. Their units are taken
+    // `FOR KEY SHARE … SKIP LOCKED`: one another transaction holds (an orphan delete, which
+    // passed this unit over in its `refill`) may be going with its pair, so the read starts
+    // over instead, and its list is never left a pair short. It waits for none of them.
     let mut existing: Vec<String> = vec![];
     if resumed {
-        existing = sqlx::query_scalar("SELECT other_id FROM same_recording WHERE resource_id=$1")
+        // One statement, one snapshot: a pair whose unit is held or gone has no `u`.
+        let kept: Vec<Option<String>> = sqlx::query_scalar("SELECT u.resource_id FROM same_recording p LEFT JOIN LATERAL (SELECT x.resource_id FROM same_recording_unit x WHERE x.resource_id=p.other_id FOR KEY SHARE SKIP LOCKED) u ON true WHERE p.resource_id=$1 ORDER BY p.other_id")
             .bind(id)
             .fetch_all(&mut **tx)
             .await?;
-    } else {
+        if let Some(kept) = kept.into_iter().collect::<Option<Vec<String>>>() {
+            existing = kept;
+        } else {
+            resumed = false;
+            ring = Ring::of(&unit, id);
+        }
+    }
+    if !resumed {
         sqlx::query("DELETE FROM same_recording WHERE resource_id=$1")
             .bind(id)
             .execute(&mut **tx)
@@ -461,6 +501,14 @@ pub async fn read_in(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: &str) -
     .await?;
     let pushed_out: Vec<String> = pushed_out.into_iter().filter(|r| r != id).collect();
     refill(tx, &pushed_out).await?;
+    if refill_marked {
+        // Last, so nothing after it waits: the marks made before this read began are taken; one
+        // another transaction is making now stays (`SKIP LOCKED`), and its recording is read again.
+        sqlx::query("DELETE FROM same_recording_refill WHERE resource_id IN (SELECT resource_id FROM same_recording_refill WHERE resource_id=$1 AND marked_at<now() FOR UPDATE SKIP LOCKED)")
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(Read {
         changed: true,
         examined,
@@ -677,44 +725,91 @@ fn bind_all<'q>(
     query
 }
 
-/// Before a recording's unit goes, with its resource (an orphan, `changes::delete_orphans`) or
-/// alone (no longer a recording): its pairs go with it, so the recordings that named it are marked
-/// to refill. Done in the code before the delete, never by a trigger on it: a trigger that
-/// updated a row the same statement deletes aborts the statement (PostgreSQL: "tuple to be
-/// updated was already modified by an operation triggered by the current command"). Nothing
-/// happens for a resource without a unit.
-pub async fn before_delete(
+/// Before resources' rows are deleted (orphans, `changes::delete_orphans`, under the hint's write
+/// lock): which of them another transaction holds (its unit, or one of its pairs), taken without
+/// waiting (`SKIP LOCKED`, in id order). The others' units and pairs stay locked until the delete,
+/// so no pair joins them meanwhile (a pair's foreign key waits). A held resource waits for the
+/// next cleanup, so the cleanup never waits for a hint row: a writer outside the lock could be
+/// waiting for a row the cleanup already deleted.
+pub(crate) async fn held(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    resource_id: &str,
+    ids: &[String],
+) -> Result<Vec<String>> {
+    let mut held: Vec<String> = sqlx::query_scalar(
+        "SELECT u.resource_id FROM same_recording_unit u \
+         LEFT JOIN LATERAL (SELECT x.resource_id FROM same_recording_unit x WHERE x.resource_id=u.resource_id FOR UPDATE SKIP LOCKED) l ON true \
+         WHERE u.resource_id=ANY($1) AND l.resource_id IS NULL ORDER BY u.resource_id",
+    )
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let pairs: Vec<(String, String)> = sqlx::query_as(
+        "SELECT p.resource_id,p.other_id FROM same_recording p \
+         LEFT JOIN LATERAL (SELECT true AS ok FROM same_recording x WHERE x.resource_id=p.resource_id AND x.other_id=p.other_id FOR UPDATE SKIP LOCKED) l ON true \
+         WHERE (p.resource_id=ANY($1) OR p.other_id=ANY($1)) AND l.ok IS NULL ORDER BY p.resource_id,p.other_id",
+    )
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    held.extend(
+        pairs
+            .into_iter()
+            .flat_map(|(a, b)| [a, b])
+            .filter(|r| ids.contains(r)),
+    );
+    held.sort_unstable();
+    held.dedup();
+    Ok(held)
+}
+
+/// The recordings that name `ids` (other than those), whose units are about to go, with their
+/// resource (`changes::delete_orphans`, after `held`) or alone (no longer a recording), in id
+/// order. They refill once the units are gone (`refill_namers`): a transaction that waits in the
+/// delete holds none of their marks. Never by a trigger on the delete: a trigger that updated a
+/// row the same statement deletes aborts the statement (PostgreSQL: "tuple to be updated was
+/// already modified by an operation triggered by the current command").
+pub(crate) async fn namers_of(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[String],
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT resource_id FROM same_recording WHERE other_id=ANY($1) AND NOT resource_id=ANY($1) ORDER BY 1",
+    )
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
+/// Marks `ids` to refill (`refill`), after the rows their pairs named were deleted.
+pub(crate) async fn refill_namers(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[String],
 ) -> Result<()> {
-    // The unit is locked first, so a pass that would pair with it meanwhile waits for the delete
-    // (its pair's FK check needs the unit): a pair added between the namers' collection and the
-    // cascade would go unmarked.
-    sqlx::query("SELECT resource_id FROM same_recording_unit WHERE resource_id=$1 FOR UPDATE")
-        .bind(resource_id)
-        .execute(&mut **tx)
-        .await?;
-    let owners: Vec<String> =
-        sqlx::query_scalar("SELECT resource_id FROM same_recording WHERE other_id=$1")
-            .bind(resource_id)
-            .fetch_all(&mut **tx)
-            .await?;
-    refill(tx, &owners).await
+    refill(tx, ids).await
 }
 
 /// Recordings whose lists lost a pair are read again: their fingerprint is marked `refill:` (so
 /// the read recomputes their list instead of finding it current, and still knows their values)
-/// and their entry is due now.
+/// and their entry is due now. The units are taken in id order, passing over those another
+/// transaction holds (`SKIP LOCKED`): waiting for them, a pass and the orphan cleanup that each
+/// hold the other's unit would deadlock. A unit passed over (a pass is writing it, an orphan
+/// delete or another refill holds it, any of which may still roll back) is marked in
+/// `same_recording_refill` instead, which its next read takes as the same mark. A unit held only
+/// by a candidate read or a pair's foreign key (`FOR KEY SHARE`) is marked itself.
 async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
-    sqlx::query("UPDATE same_recording_unit SET fingerprint='refill:'||fingerprint WHERE resource_id=ANY($1) AND fingerprint NOT LIKE 'refill:%'")
+    sqlx::query("WITH locked AS (SELECT resource_id,fingerprint FROM same_recording_unit WHERE resource_id=ANY($1) ORDER BY resource_id FOR NO KEY UPDATE SKIP LOCKED), \
+        marked AS (UPDATE same_recording_unit u SET fingerprint='refill:'||u.fingerprint FROM locked l WHERE u.resource_id=l.resource_id AND l.fingerprint NOT LIKE 'refill:%') \
+        INSERT INTO same_recording_refill(resource_id) SELECT DISTINCT x FROM unnest($1::text[]) AS t(x) \
+        WHERE x NOT IN (SELECT resource_id FROM locked) AND EXISTS(SELECT 1 FROM same_recording_unit u WHERE u.resource_id=x) ORDER BY 1 \
+        ON CONFLICT(resource_id) DO UPDATE SET marked_at=excluded.marked_at")
         .bind(ids)
         .execute(&mut **tx)
         .await?;
     // Distinct: a recording pushed out of two lists at once is one row.
-    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT DISTINCT x FROM unnest($1::text[]) AS t(x) \
+    sqlx::query("INSERT INTO same_recording_dirty(resource_id) SELECT DISTINCT x FROM unnest($1::text[]) AS t(x) ORDER BY 1 \
         ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_recording_dirty.next_attempt_at>excluded.next_attempt_at")
         .bind(ids)
         .execute(&mut **tx)

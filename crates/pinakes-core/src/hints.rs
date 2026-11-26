@@ -11,6 +11,46 @@ use std::time::Duration;
 /// at and is read again from there.
 pub const SCAN: i64 = 100;
 
+/// Takes a hint's write lock (`locks::SAME_RECORDING` or `locks::SAME_EVENT`) for `tx`, before
+/// its first write to the hint's units, pairs, refill marks or queue: the hint's pass, its sweep
+/// and the orphan cleanup's part never write those rows at once, so no lock cycle can form
+/// between them, whatever order each takes rows in. A save stays outside it: it only marks the
+/// queue from its triggers, under a row lock (`FOR NO KEY UPDATE`) none of these waits for.
+pub async fn lock(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, key: i64) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(key)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Whether `error` is PostgreSQL's deadlock (`40P01`), whose victim's transaction rolled back.
+pub fn deadlocked(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<sqlx::Error>()
+            .and_then(|e| e.as_database_error())
+            .is_some_and(|d| d.code().as_deref() == Some("40P01"))
+    })
+}
+
+/// Runs `step` (one transaction), and once more when it ended in a deadlock (a cycle the hint
+/// locks do not cover, such as one with a save's trigger), logging the retry; a second deadlock
+/// is returned, for the caller to leave the work for the next run.
+pub async fn once_more_if_deadlocked<T, F, Fut>(what: &str, step: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    match step().await {
+        Err(error) if deadlocked(&error) => {
+            tracing::warn!(step = what, error = %crate::resolver::log_error(&error), "deadlock: retried once");
+            step().await
+        }
+        result => result,
+    }
+}
+
 /// Commits a change to the pairs with the search revision moved in the same transaction: a
 /// search page reads the revision and the pairs in one snapshot (`api::REVISION`), so a page that
 /// has not seen the pairs is never answered 304 (`store::note_search_write`).

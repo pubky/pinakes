@@ -19,6 +19,12 @@ pub const CHANGE_SEQUENCE: i64 = 73822918;
 pub const ALIAS: i64 = 73822919;
 /// A group run, before the write order (`groups`).
 pub const GROUP: i64 = 73491620;
+/// The same-recording hint's writes (`same_recording`): its pass and sweep, and the orphan
+/// cleanup for its part, each take it for a transaction before their first unit, pair, mark or
+/// queue write (`hints::lock`), so no two of them write those rows at once.
+pub const SAME_RECORDING: i64 = 73822922;
+/// The same-event hint's writes (`same_event`), as `SAME_RECORDING`.
+pub const SAME_EVENT: i64 = 73822923;
 /// A full import of a large catalogue (`catalogue::Catalogue::large`), held for that run: one at a
 /// time, so their temporary files never pile up on the disk.
 pub const CATALOGUE_LARGE_IMPORT: i64 = 73822921;
@@ -29,13 +35,15 @@ pub const CATALOGUE: [i64; 7] = [
     73822930, 73822931, 73822932, 73822933, 73822934, 73822935, 73822936,
 ];
 /// Every key above, with the name `scripts/lock-waits` reports it by.
-pub const ALL: [(i64, &str); 14] = [
+pub const ALL: [(i64, &str); 16] = [
     (INSTANCE, "instance"),
     (WRITE_ORDER, "write order"),
     (INGEST, "ingest"),
     (CHANGE_SEQUENCE, "change sequence"),
     (ALIAS, "alias"),
     (GROUP, "group"),
+    (SAME_RECORDING, "same-recording writes"),
+    (SAME_EVENT, "same-event writes"),
     (CATALOGUE_LARGE_IMPORT, "large catalogue import"),
     (CATALOGUE[0], "catalogue wikidata"),
     (CATALOGUE[1], "catalogue musicbrainz"),

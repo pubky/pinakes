@@ -2273,3 +2273,130 @@ async fn a_suspension_clears_its_sources_canary_results(pool: PgPool) {
     assert_eq!(after[3], before[3]);
     assert_eq!((after[3].1, after[3].2), (true, true));
 }
+
+/// An alias assigned or released while a save of its root is in flight never deadlocks with
+/// it. Each marks the root (`also_on_dirty` for a recording key, `group_dirty`) and then rescores
+/// it (an update of its row); the save marks it from its own trigger. The assignment and the
+/// release take the root's row first, so they wait for the save before marking. (Marking first,
+/// the save's trigger waited for their mark while they waited for the save's row: a deadlock.)
+/// The save is held before its card's update by a test trigger. The assignment names a spelling
+/// that is itself an alias of the root (one hop), so it inserts no root row (whose unique check
+/// would wait for the save's earlier update of the row anyway).
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_alias_assigned_or_released_beside_a_save_of_its_root_never_deadlocks(pool: PgPool) {
+    const PAUSE: i64 = 23167;
+    sqlx::query(&format!(
+        "CREATE FUNCTION test_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared({PAUSE}); RETURN NEW; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_pause BEFORE UPDATE ON resource FOR EACH ROW WHEN (NEW.name LIKE 'Root (held%') EXECUTE FUNCTION test_pause()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let root_uri = "https://example.org/root";
+    let root = store::ensure_resource(&pool, root_uri).await.unwrap();
+    let mut doc = ResourceMeta::new(root_uri, "web", 86400);
+    doc.name = Some("Root".into());
+    store::save_document(&pool, &root, 0, &doc).await.unwrap();
+    // A recording key: an assignment requeues the root's also-on run.
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES($1,'mb:recording:b1a9c0e9-d987-4042-ae91-78d6a3267d69','musicbrainz','musicbrainz',now()+interval '1 day')")
+        .bind(&root)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hop_uri = "https://example.org/root-spelling";
+    let hop = store::ensure_resource(&pool, hop_uri).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    pinakes_core::alias::assign(
+        &mut tx,
+        &hop,
+        &pinakes_core::alias::Alias {
+            root: root_uri.into(),
+            basis: "canonical",
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let alias = store::ensure_resource(&pool, "https://example.org/spelling")
+        .await
+        .unwrap();
+    for step in ["assign", "release"] {
+        sqlx::query("DELETE FROM also_on_dirty")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM group_dirty")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut held = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(PAUSE)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let saving = {
+            let (pool, root) = (pool.clone(), root.clone());
+            let mut doc = doc.clone();
+            doc.name = Some(format!("Root (held, {step})"));
+            tokio::spawn(async move { store::save_document(&pool, &root, 0, &doc).await })
+        };
+        common::lock_waiters_reach(&pool, 1, "the save").await;
+        let aliasing = {
+            let (pool, alias) = (pool.clone(), alias.clone());
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await?;
+                if step == "assign" {
+                    pinakes_core::alias::assign(
+                        &mut tx,
+                        &alias,
+                        &pinakes_core::alias::Alias {
+                            root: hop_uri.into(),
+                            basis: "canonical",
+                        },
+                    )
+                    .await?;
+                } else {
+                    pinakes_core::alias::release(&mut tx, &alias).await?;
+                }
+                tx.commit().await?;
+                anyhow::Ok(())
+            })
+        };
+        // The step waits for the save's row, or is done.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !aliasing.is_finished() && common::lock_waiters(&pool).await < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the step neither ends nor waits");
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(PAUSE)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), aliasing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{step}: {e:#}"));
+        tokio::time::timeout(Duration::from_secs(20), saving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_or_else(|e| panic!("the save beside {step}: {e:#}"));
+        let aliased: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)")
+                .bind(&alias)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(aliased, step == "assign");
+    }
+}

@@ -632,3 +632,83 @@ pub fn deezer_answer(path: &str) -> Vec<u8> {
     ))
     .unwrap()
 }
+
+/// A pool of one connection to `pool`'s database named `name` (`application_name`), for a test
+/// that pauses that connection alone (`pause_deletes`).
+pub async fn named_connection(pool: &sqlx::PgPool, name: &str) -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone().application_name(name))
+        .await
+        .unwrap()
+}
+/// Makes every `DELETE` statement on `table` by a connection named `name` wait, once it has
+/// deleted, while advisory lock `key` is held: a test holds a pass right after a delete.
+pub async fn pause_deletes(pool: &sqlx::PgPool, table: &str, name: &str, key: i64) {
+    pause_statements(pool, table, "AFTER", name, key).await
+}
+/// Makes every `DELETE` statement on `table` by a connection named `name` wait, `when` (`BEFORE`
+/// or `AFTER`) it deletes, while advisory lock `key` is held.
+pub async fn pause_statements(pool: &sqlx::PgPool, table: &str, when: &str, name: &str, key: i64) {
+    let function = format!("test_pause_{table}_{}", when.to_lowercase());
+    sqlx::query(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF current_setting('application_name')='{name}' THEN PERFORM pg_advisory_xact_lock_shared({key}); END IF; RETURN NULL; END $$"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER {function} {when} DELETE ON {table} FOR EACH STATEMENT EXECUTE FUNCTION {function}()"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+/// Runs `pass` (a hint pass's transaction) while the orphan cleanup (`changes::delete_orphans`)
+/// is held just before it deletes its batch, past its hint locks, and returns what each gave
+/// once both are done. A pass that waits for the cleanup, or the cleanup for it, is let go; a
+/// deadlock between them is an error on one side. Bounded: a side that never ends fails.
+pub async fn beside_a_held_cleanup<T, F>(
+    pool: &sqlx::PgPool,
+    key: i64,
+    pass: F,
+) -> (anyhow::Result<u64>, anyhow::Result<T>)
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+{
+    pause_statements(pool, "resource", "BEFORE", "b1-cleanup", key).await;
+    let cleaner = named_connection(pool, "b1-cleanup").await;
+    let mut held = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(key)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let cleaning =
+        tokio::spawn(async move { pinakes_core::changes::delete_orphans(&cleaner, 7).await });
+    lock_waiters_reach(pool, 1, "the cleanup").await;
+    let passing = tokio::spawn(pass);
+    // The pass waits (for the cleanup's hint lock, or a row), or is done.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while !passing.is_finished() && lock_waiters(pool).await < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the pass neither ends nor waits");
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(key)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let cleaned = tokio::time::timeout(std::time::Duration::from_secs(30), cleaning)
+        .await
+        .expect("the cleanup ends")
+        .unwrap();
+    let passed = tokio::time::timeout(std::time::Duration::from_secs(30), passing)
+        .await
+        .expect("the pass ends")
+        .unwrap();
+    (cleaned, passed)
+}
