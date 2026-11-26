@@ -1044,9 +1044,9 @@ Details:
   card yet shows `error` after `limits.max_failures` in a row.
 - **Never answered.** The streak is kept in `timeout_streak` while `last_error` is `connect`. A link
   with no card yet turns `error` after `limits.max_failures` in a row and is still retried.
-- **Refusals.** A link a social site refuses (its sign-in redirect, a challenge page, a 401, 403 or
-  451, or a status of its own such as LinkedIn's 999) is read again after a day, then after 2, 4 and 7
-  more days, and every 7 days while one refusal follows another. The streak is kept in
+- **Refusals.** A link a social site refuses (its sign-in redirect, a challenge page, a 401 or 403, a
+  page's 451, or a status of its own such as LinkedIn's 999) is read again after a day, then after 2,
+  4 and 7 more days, and every 7 days while one refusal follows another. The streak is kept in
   `timeout_streak` while `last_error` is `wall`, both for a kept card and for a `blocked` card; a read
   that answers ends it, and another failure in between starts it again. A card found gone stays gone: a refusal says nothing
   about the object. Asking a site that refuses the request again soon only makes it refuse longer.
