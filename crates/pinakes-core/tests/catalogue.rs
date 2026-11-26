@@ -1394,6 +1394,24 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
     assert_eq!(needs(&metrics), 0);
+    // Started with its contact, the note goes; another `waiting` stays.
+    run::note_unstarted(&pool, &config).await.unwrap();
+    let waiting = || async {
+        store::state(&pool, Catalogue::Musicbrainz)
+            .await
+            .unwrap()
+            .unwrap()
+            .waiting
+    };
+    assert_eq!(waiting().await, None);
+    sqlx::query(
+        "UPDATE catalogue_state SET waiting='free disk 1.0 GB' WHERE catalogue='musicbrainz'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    run::note_unstarted(&pool, &config).await.unwrap();
+    assert_eq!(waiting().await.as_deref(), Some("free disk 1.0 GB"));
     config.egress.contact.clear();
     config.catalogues.musicbrainz.enabled = false;
     let metrics = Metrics::new().unwrap();

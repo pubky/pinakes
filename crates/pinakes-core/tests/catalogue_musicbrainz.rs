@@ -1168,13 +1168,14 @@ async fn a_by_hand_import_that_fails_leaves_no_request(pool: PgPool) {
     )
     .await;
     assert!(cut.is_err(), "the run waits for the disk");
-    std::fs::write(broken.join("artist.tar.xz"), b"not xz").unwrap();
-    assert!(run(&s, &broken, Run::Import).await.is_err());
-    let state = store::state(&pool, Catalogue::Musicbrainz)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(state.import_requested, None);
+    let requested = || async {
+        store::state(&pool, Catalogue::Musicbrainz)
+            .await
+            .unwrap()
+            .unwrap()
+            .import_requested
+    };
+    assert_eq!(requested().await, None);
     let shrunk = dump(s.root.path(), B, |entity, lines| {
         if matches!(entity, "artist" | "release-group") {
             lines.truncate(1);
@@ -1185,6 +1186,10 @@ async fn a_by_hand_import_that_fails_leaves_no_request(pool: PgPool) {
         .unwrap_err();
     assert!(failed.to_string().contains("removals"), "{failed}");
     assert_eq!(rows(&pool).await, before);
+    // One that fails leaves none either.
+    std::fs::write(broken.join("artist.tar.xz"), b"not xz").unwrap();
+    assert!(run(&s, &broken, Run::Import).await.is_err());
+    assert_eq!(requested().await, None);
 }
 
 /// A dump named after a day after tomorrow is no dump: nothing is read.
