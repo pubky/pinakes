@@ -1,7 +1,8 @@
 //! Wikidata items: identifier properties for places, apps and games.
 //!
 //! Only best-rank statements count (preferred if any, else normal; never deprecated). A
-//! property with more than one best-rank value after validation is ambiguous and adds nothing.
+//! property with more than one best-rank value after validation is ambiguous and adds nothing
+//! (`hubs::wikidata::single`).
 use super::{body, encode_path, plain, web_url, Key, Link};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -45,25 +46,12 @@ pub fn entities(mut value: Value) -> Result<BTreeMap<String, Value>> {
         .collect())
 }
 
-/// The best-rank string values of a property.
+/// The best-rank string values of a property (`hubs::wikidata::best`).
 pub fn best_values<'a>(item: &'a Value, pid: &str) -> Vec<&'a str> {
-    let claims = item["claims"][pid]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let ranked = |rank: &str| -> Vec<&'a str> {
-        claims
-            .iter()
-            .filter(|c| c["rank"] == rank && c["mainsnak"]["snaktype"] == "value")
-            .filter_map(|c| c["mainsnak"]["datavalue"]["value"].as_str())
-            .collect()
-    };
-    let preferred = ranked("preferred");
-    if preferred.is_empty() {
-        ranked("normal")
-    } else {
-        preferred
-    }
+    crate::hubs::wikidata::best(&item["claims"][pid])
+        .into_iter()
+        .filter_map(|s| s["datavalue"]["value"].as_str())
+        .collect()
 }
 
 /// How a property's value becomes a link.
@@ -238,17 +226,10 @@ pub const GAME: &[Property] = &[
     ),
 ];
 
-/// The one valid best-rank value of a property, or `None` when there is none or several.
+/// The one valid best-rank value of a property (`hubs::wikidata::single`): `None` when there is
+/// none, or several.
 pub fn single<'a>(item: &'a Value, property: &Property) -> Option<&'a str> {
-    let mut values: Vec<&str> = best_values(item, property.pid)
-        .into_iter()
-        .filter(|v| (property.valid)(v))
-        .collect();
-    values.dedup();
-    match values.as_slice() {
-        [one] => Some(one),
-        _ => None,
-    }
+    crate::hubs::wikidata::single(best_values(item, property.pid), |v| (property.valid)(v))
 }
 
 /// The links an item has for these properties.
@@ -393,6 +374,12 @@ mod tests {
             sites(&links(&item, GAME)),
             [("Steam", "https://store.steampowered.com/app/20/")]
         );
+        // Two valid best-rank values are a tie: no link.
+        let tie: Value = serde_json::json!({"claims": {"P1733": [
+            {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": "20"}}},
+            {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": "30"}}}
+        ]}});
+        assert!(links(&tie, GAME).is_empty());
         let encoded: Value = serde_json::json!({"claims": {"P3108": [
             {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": "café-zürich"}}}
         ]}});

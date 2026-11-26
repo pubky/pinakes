@@ -326,7 +326,10 @@ A Wikidata item that is a creative work is that work (`TVSeries`, `Movie`, `Book
 `Event`, whatever dates it carries: a series' run is not an occurrence. An item is a creative
 work when it is an instance of (P31) a series, a film, a book, an album, a song, a game, a
 podcast or a periodical; else when it has a publication date, an author, a director, a composer,
-a publisher or an episode count. A page that is a podcast episode by its feed
+a publisher or an episode count. Its claims count at their best rank (preferred if any, else
+normal; never deprecated). A claim the card links by (the official website) gives nothing when it
+has several values; a claim it shows or is typed by (a date, a place, the image) takes the first
+of them. A page that is a podcast episode by its feed
 ([Also on](#also-on)) is a `PodcastEpisode` from its next refresh.
 
 Such a card is named after its object, not its page. Where a TMDB, Trakt, Netflix, Goodreads,
