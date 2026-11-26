@@ -739,12 +739,12 @@ async fn the_dump_is_as_current_as_its_earliest_file(pool: PgPool) {
     );
 }
 
-/// An update that would remove more than a tenth of the cards stops (`removals`, with the counts)
-/// before it writes or removes anything, and waits: tried again with the same newest dump, it
-/// reads nothing; a full import asked for (`--request`) then imports the dump and removes what it
-/// no longer has.
+/// An update that would remove more than a tenth of the cards is refused (`removals`, with the
+/// counts, recorded once) before it writes or removes anything, and the dump is not read again:
+/// a newer dump is, through the disk check; a full import asked for (`--request`) imports it and
+/// removes what it no longer has.
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_update_that_would_remove_too_much_waits(pool: PgPool) {
+async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool) {
     let s = setup(&pool, None);
     let a = dump(s.root.path(), A, unchanged);
     run(&s, &a, Run::Import).await.unwrap();
@@ -759,17 +759,39 @@ async fn an_update_that_would_remove_too_much_waits(pool: PgPool) {
         }
     };
     let b = dump(s.root.path(), B, shrunk);
-    let failed = run(&s, &b, Run::Update).await.unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
-    assert!(failed.to_string().contains("8 of 17 cards"), "{failed}");
+    let state = run(&s, &b, Run::Update).await.unwrap();
+    let error = state.last_error.clone().unwrap();
+    assert!(error.starts_with("removals (8 of 17 cards gone"), "{error}");
+    assert_eq!((state.error_count, state.run.as_deref()), (1, None));
+    assert_eq!(state.position.as_ref().unwrap()["refused"], B);
+    assert_eq!(state.position.as_ref().unwrap()["version"], A);
     assert_eq!(rows(&pool).await, before);
-    // Tried again with its files gone: refused at once, without opening any.
+    // Again, its files gone: nothing is read, nothing more recorded.
     for e in ENTITIES {
         std::fs::remove_file(b.join(format!("{e}.tar.xz"))).unwrap();
     }
-    let failed = run(&s, &b, Run::Update).await.unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    let state = run(&s, &b, Run::Update).await.unwrap();
+    assert_eq!(state.error_count, 1);
     assert_eq!(rows(&pool).await, before);
+    // A newer dump is read, but only once the disk allows.
+    let c = dump(s.root.path(), "20261128-001001", unchanged);
+    let mut tight = setup(&pool, None);
+    tight.ctx = Context {
+        free_disk: Arc::new(|_| Ok(0)),
+        ..s.ctx.clone()
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), run(&tight, &c, Run::Update))
+            .await
+            .is_err()
+    );
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.waiting.unwrap().starts_with("free disk"));
+    let work = s.ctx.config.catalogues.work_dir(Catalogue::Musicbrainz);
+    assert!(!work.join("spill-20261128-001001").exists());
     // A full import asked for: the update hands over to it.
     let b = dump(s.root.path(), B, shrunk);
     run::request_import(
@@ -784,6 +806,45 @@ async fn an_update_that_would_remove_too_much_waits(pool: PgPool) {
     assert_eq!((state.import_requested, state.generation), (None, 2));
 }
 
+/// Cards the new dump makes but that are refused count as removals too: a dump whose artists
+/// lost their names is refused, and so is a full import of it; no card goes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
+    let s = setup(&pool, None);
+    let a = dump(s.root.path(), A, unchanged);
+    run(&s, &a, Run::Import).await.unwrap();
+    let before = rows(&pool).await;
+    let nameless = |entity: &str, lines: &mut Vec<Value>| {
+        if entity == "artist" {
+            for l in lines.iter_mut() {
+                l.as_object_mut().unwrap().remove("name");
+            }
+        }
+    };
+    let b = dump(s.root.path(), B, nameless);
+    let state = run(&s, &b, Run::Update).await.unwrap();
+    let error = state.last_error.clone().unwrap();
+    assert!(
+        error.starts_with("removals (4 of 17 cards gone or refused"),
+        "{error}"
+    );
+    assert_eq!(rows(&pool).await.len(), CARDS);
+    // A full import of it removes nothing either.
+    run::request_import(
+        &pool,
+        Catalogue::Musicbrainz,
+        pinakes_core::catalogue::musicbrainz::REQUESTED,
+    )
+    .await
+    .unwrap();
+    let failed = run(&s, &b, Run::Update).await.unwrap_err();
+    assert!(failed.to_string().contains("rejected"), "{failed}");
+    let names = |rows: Vec<Row>| -> Vec<(String, String)> {
+        rows.into_iter().map(|r| (r.source_id, r.name)).collect()
+    };
+    assert_eq!(names(rows(&pool).await), names(before));
+}
+
 /// A full import cut off after some items resumes from its cursor: the items up to it are not
 /// read again, those after it are, and none is removed at its end.
 #[sqlx::test(migrations = "../../migrations")]
@@ -793,8 +854,9 @@ async fn a_cut_off_import_resumes_after_its_cursor(pool: PgPool) {
     run(&s, &a, Run::Import).await.unwrap();
     // As a second full import cut off after its first artist has it: under way in generation 2,
     // that artist written in it, its cursor after that artist.
+    let b_dir = s.root.path().join(B);
     sqlx::query("UPDATE catalogue_state SET run='import',phase='import',generation=2,cursor=$1 WHERE catalogue='musicbrainz'")
-        .bind(json!({"version": B, "phase": "write", "after": format!("artist/{AMC}"), "removed": 0, "as_of": null}))
+        .bind(json!({"version": B, "phase": "write", "after": format!("artist/{AMC}"), "removed": 0, "as_of": null, "source": source_id(&Source::Dir(b_dir))}))
         .execute(&pool)
         .await
         .unwrap();
@@ -861,7 +923,7 @@ async fn a_run_cut_off_in_its_writes_resumes_from_its_sorted_runs(pool: PgPool) 
         .await
         .unwrap();
     // A small sort memory and fan-in: many runs, merged in passes.
-    let small = || importer(&s, Source::Dir(dir.clone())).sorting(4096, 3);
+    let small = || importer(&s, Source::Dir(dir.clone())).sorting(1 << 16, 3);
     assert!(run_with(&s, small(), Run::Import).await.is_err());
     let written: i64 = sqlx::query_scalar("SELECT count(*) FROM catalogue_card")
         .fetch_one(&pool)
@@ -895,7 +957,7 @@ async fn an_update_cut_off_in_its_removals_removes_the_rest(pool: PgPool) {
     ];
     std::fs::write(work.join(format!("removals-{B}")), ids.join("\n") + "\n").unwrap();
     sqlx::query("UPDATE catalogue_state SET run='update',phase='update',cursor=$1 WHERE catalogue='musicbrainz'")
-        .bind(json!({"version": B, "phase": "remove", "after": null, "removed": 1, "as_of": null}))
+        .bind(json!({"version": B, "phase": "remove", "after": null, "removed": 1, "as_of": null, "source": source_id(&Source::Dir(a.clone()))}))
         .execute(&pool)
         .await
         .unwrap();
@@ -980,6 +1042,12 @@ enum Breaks {
     Once,
     /// It breaks, and the rest is asked for from a file replaced meanwhile (a 200).
     Replaced,
+    /// It breaks once, and its answers name no ETag or Last-Modified.
+    NoValidator,
+    /// It breaks once, and the rest comes from another byte than asked for.
+    WrongRange,
+    /// The artist file answers 503 once.
+    ArtistBusyOnce,
     Never,
 }
 #[derive(Clone)]
@@ -1015,6 +1083,16 @@ async fn serve(
             .body(Body::empty())
             .unwrap();
     };
+    if s.breaks == Breaks::ArtistBusyOnce && path.ends_with("/artist.tar.xz") {
+        let mut broke = s.broke.lock().unwrap();
+        if !*broke {
+            *broke = true;
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::empty())
+                .unwrap();
+        }
+    }
     let etag = format!("\"{}\"", sha256(&body));
     if let Some(range) = header("range") {
         let from: usize = range
@@ -1028,6 +1106,11 @@ async fn serve(
                 .body(Body::from(body))
                 .unwrap();
         }
+        let from = if s.breaks == Breaks::WrongRange {
+            0
+        } else {
+            from
+        };
         return Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header("etag", etag)
@@ -1038,13 +1121,22 @@ async fn serve(
             .body(Body::from(body[from..].to_vec()))
             .unwrap();
     }
-    let break_now = path.ends_with("/release.tar.xz") && s.breaks != Breaks::Never && {
-        let mut broke = s.broke.lock().unwrap();
-        let first = !*broke;
-        *broke = true;
-        first
+    let break_now = path.ends_with("/release.tar.xz")
+        && matches!(
+            s.breaks,
+            Breaks::Once | Breaks::Replaced | Breaks::NoValidator | Breaks::WrongRange
+        )
+        && {
+            let mut broke = s.broke.lock().unwrap();
+            let first = !*broke;
+            *broke = true;
+            first
+        };
+    let response = if s.breaks == Breaks::NoValidator {
+        Response::builder()
+    } else {
+        Response::builder().header("etag", etag)
     };
-    let response = Response::builder().header("etag", etag);
     if break_now {
         // Half the body, then (once the client has it) the connection breaks.
         let half = bytes::Bytes::from(body[..body.len() / 2].to_vec());
@@ -1176,6 +1268,184 @@ async fn a_replaced_file_or_one_the_list_leaves_out_writes_nothing(pool: PgPool)
         "{requests:?}"
     );
     assert!(rows(&pool).await.is_empty());
+}
+
+/// A body whose mirror names no validator is not picked up again (a break fails `download`), nor
+/// one whose rest starts at another byte than asked for; a 404 is `not_found` at the host.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_download_is_picked_up_only_where_it_safely_can_be(pool: PgPool) {
+    let s = setup(&pool, None);
+    let dir = dump(s.root.path(), B, unchanged);
+    for breaks in [Breaks::NoValidator, Breaks::WrongRange] {
+        let m = mirror(served(&dir, B), B, breaks).await;
+        let failed = run_with(
+            &s,
+            importer(&s, Source::parse(&m.url).unwrap()),
+            Run::Import,
+        )
+        .await
+        .unwrap_err();
+        assert!(failed.to_string().contains("download"), "{failed}");
+        let ranged = m.requests.lock().unwrap().iter().any(|r| r.1.is_some());
+        assert_eq!(ranged, breaks == Breaks::WrongRange);
+        assert!(rows(&pool).await.is_empty());
+    }
+    let mut files = served(&dir, B);
+    files.remove(&format!("{B}/recording.tar.xz"));
+    let m = mirror(files, B, Breaks::Never).await;
+    let failed = run_with(
+        &s,
+        importer(&s, Source::parse(&m.url).unwrap()),
+        Run::Import,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        failed.to_string().contains("not_found (127.0.0.1)"),
+        "{failed}"
+    );
+}
+
+/// A read cut off by a busy mirror keeps the files it read whole (their manifests): the next
+/// try reads only the others. What runs over other dumps left is removed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_read_cut_off_keeps_the_files_it_finished(pool: PgPool) {
+    let s = setup(&pool, None);
+    let work = s.ctx.config.catalogues.work_dir(Catalogue::Musicbrainz);
+    std::fs::create_dir_all(work.join(format!("spill-{A}/x"))).unwrap();
+    std::fs::write(work.join(format!("removals-{A}")), "artist/x\n").unwrap();
+    let dir = dump(s.root.path(), B, unchanged);
+    let m = mirror(served(&dir, B), B, Breaks::ArtistBusyOnce).await;
+    let source = Source::parse(&m.url).unwrap();
+    let failed = run_with(&s, importer(&s, source.clone()), Run::Import)
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("download"), "{failed}");
+    assert!(
+        !work.join(format!("spill-{A}")).exists() && !work.join(format!("removals-{A}")).exists()
+    );
+    for file in ["release", "release-group"] {
+        assert!(
+            work.join(format!("spill-{B}/{file}.done")).exists(),
+            "{file}"
+        );
+    }
+    m.requests.lock().unwrap().clear();
+    let state = run_with(&s, importer(&s, source), Run::Import)
+        .await
+        .unwrap();
+    assert_eq!(state.cards, CARDS as i64);
+    let asked: Vec<String> = m
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.0.clone())
+        .filter(|p| p.ends_with(".tar.xz"))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            format!("{B}/artist.tar.xz"),
+            format!("{B}/recording.tar.xz")
+        ]
+    );
+}
+
+/// A run cut off whose dump the mirror no longer has starts over on the newest one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_whose_dump_is_gone_starts_over_on_the_newest(pool: PgPool) {
+    let s = setup(&pool, None);
+    let dir = dump(s.root.path(), B, unchanged);
+    store::ensure_state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET run='import',phase='import',generation=1,cursor=$1 WHERE catalogue='musicbrainz'")
+        .bind(json!({"version": A, "phase": "write", "after": null, "removed": 0, "as_of": null}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let m = mirror(served(&dir, B), B, Breaks::Never).await;
+    let source = Source::parse(&m.url).unwrap();
+    // The cursor names the source it was made with: this one.
+    let id = source_id(&source);
+    sqlx::query("UPDATE catalogue_state SET cursor=jsonb_set(cursor,'{source}',to_jsonb($1::text)) WHERE catalogue='musicbrainz'")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = run_with(&s, importer(&s, source), Run::Import)
+        .await
+        .unwrap();
+    assert_eq!(state.cards, CARDS as i64);
+    assert_eq!(state.position.unwrap()["version"], B);
+}
+fn source_id(source: &Source) -> String {
+    match source {
+        Source::Mirror(url) => url.to_string(),
+        Source::Dir(dir) => dir.display().to_string(),
+    }
+}
+
+/// `plan` reads `LATEST` at most once an hour; it asks for an update when `LATEST` names a newer
+/// dump than the cards' and than one it refused, or the limit changed; a `LATEST` it can't read
+/// is a wait, not a failure.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_plan_polls_latest_hourly(pool: PgPool) {
+    use pinakes_core::catalogue::run::{Importer, Plan};
+    let s = setup(&pool, None);
+    let state = |position: Value| store::State {
+        catalogue: "musicbrainz".into(),
+        phase: "idle".into(),
+        run: None,
+        generation: 1,
+        cursor: None,
+        position: Some(position),
+        cards: 1,
+        upstream_version: None,
+        last_import_at: Some(chrono::Utc::now()),
+        last_update_at: None,
+        import_requested: None,
+        current_as_of: None,
+        waiting: None,
+        last_error: None,
+        error_count: 0,
+        updated_at: chrono::Utc::now(),
+    };
+    let m = mirror(BTreeMap::new(), B, Breaks::Never).await;
+    let at_b = state(json!({"version": B, "limit": null}));
+    let mb = importer(&s, Source::parse(&m.url).unwrap());
+    assert_eq!(
+        mb.plan(&at_b).await.unwrap(),
+        Plan::Wait(pinakes_core::catalogue::musicbrainz::POLL)
+    );
+    assert!(
+        matches!(mb.plan(&at_b).await.unwrap(), Plan::Wait(w) if w < pinakes_core::catalogue::musicbrainz::POLL)
+    );
+    assert_eq!(m.requests.lock().unwrap().len(), 1);
+    // Newer than the cards' dump: an update; unless that dump was refused.
+    let at_a = state(json!({"version": A, "limit": null}));
+    let fresh = || importer(&s, Source::parse(&m.url).unwrap());
+    assert_eq!(fresh().plan(&at_a).await.unwrap(), Plan::Run(Run::Update));
+    let refused = state(json!({"version": A, "limit": null, "refused": B}));
+    assert!(matches!(
+        fresh().plan(&refused).await.unwrap(),
+        Plan::Wait(_)
+    ));
+    // A changed limit: an update (which hands over to a full import), without asking.
+    let before = m.requests.lock().unwrap().len();
+    let limited = state(json!({"version": B, "limit": 5}));
+    assert_eq!(
+        fresh().plan(&limited).await.unwrap(),
+        Plan::Run(Run::Update)
+    );
+    assert_eq!(m.requests.lock().unwrap().len(), before);
+    // Never imported: a full import. A mirror that does not answer: a wait.
+    let mut never = state(json!({}));
+    never.last_import_at = None;
+    assert_eq!(fresh().plan(&never).await.unwrap(), Plan::Run(Run::Import));
+    let gone = importer(&s, Source::parse("http://127.0.0.1:9/json-dumps/").unwrap());
+    assert!(matches!(gone.plan(&at_a).await.unwrap(), Plan::Wait(_)));
 }
 
 fn queue_cfg() -> QueueConfig {

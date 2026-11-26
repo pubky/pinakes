@@ -39,7 +39,7 @@ fn capped<'de, D: Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
             let mut out = Vec::new();
-            while out.len() < N {
+            while out.len() < N && take_element() {
                 match seq.next_element()? {
                     Some(item) => out.push(item),
                     None => return Ok(out),
@@ -50,6 +50,30 @@ fn capped<'de, D: Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
         }
     }
     d.deserialize_option(Capped::<T, N>(std::marker::PhantomData))
+}
+thread_local! {
+    /// The list entries the line being read may still build ([`line_budget`]).
+    static BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+/// The most list entries one line builds, all its lists together: the caps of nested lists
+/// (relations of tracks of media) can't multiply past it.
+pub const LINE_ELEMENTS: usize = 500_000;
+/// Give the line about to be read its budget of list entries.
+pub fn line_budget() {
+    BUDGET.with(|b| b.set(LINE_ELEMENTS));
+}
+/// The list entries the line being read may still build.
+pub fn budget_left() -> usize {
+    BUDGET.with(|b| b.get())
+}
+fn take_element() -> bool {
+    BUDGET.with(|b| match b.get() {
+        0 => false,
+        n => {
+            b.set(n - 1);
+            true
+        }
+    })
 }
 /// The most entries kept of each list of a line: a release's media and a medium's tracks (a box
 /// set holds hundreds), an entity's relations, aliases, genres, ISRCs and credited artists.
@@ -356,10 +380,17 @@ fn credit(credits: &[Credit]) -> (String, Vec<String>) {
     }
     (text(&text_out), artists)
 }
+/// The longest genre name kept (bytes): a label holds at most 20 characters, so a longer genre
+/// makes none.
+const GENRE_NAME: usize = 96;
 fn genres(genres: &[Genre]) -> Vec<(String, u64)> {
     let mut by_name: BTreeMap<String, u64> = BTreeMap::new();
     for g in genres {
-        let name = text(&g.name);
+        let mut name = g.name.trim().to_owned();
+        if name.len() > GENRE_NAME {
+            continue;
+        }
+        crate::model::truncate(&mut name, GENRE_NAME);
         if !name.is_empty() {
             let most = by_name.entry(name).or_default();
             *most = (*most).max(g.count);
@@ -542,18 +573,19 @@ fn track(
     }
     Some((key(MbKind::Recording, &id), rec))
 }
-/// The records of a release line: one `Credited` per artist its credit names, one `Release` for
-/// its release group, and one `Track` (and an `Isrc` per ISRC) per recording on it, each once.
-pub fn release(line: &ReleaseLine, out: &mut Vec<(String, Rec)>) {
+/// The records of a release line, each given to `out` as it is made (a line's records are never
+/// all in memory): one `Credited` per artist its credit names, one `Release` for its release
+/// group, and one `Track` (and an `Isrc` per ISRC) per recording on it, each once.
+pub fn release(line: &ReleaseLine, out: &mut dyn FnMut(String, Rec)) {
     let Some(id) = hubs::mbid(&line.id) else {
         return;
     };
     let (_, artists) = credit(&line.credit);
     for artist in artists {
-        out.push((key(MbKind::Artist, &artist), Rec::Credited));
+        out(key(MbKind::Artist, &artist), Rec::Credited);
     }
     if let Some(group) = hubs::mbid(&line.group.id) {
-        out.push((
+        out(
             key(MbKind::ReleaseGroup, &group),
             Rec::Release {
                 release: id.clone(),
@@ -563,7 +595,7 @@ pub fn release(line: &ReleaseLine, out: &mut Vec<(String, Rec)>) {
                     .filter(|l| music::discogs::of_uri(l).is_none())
                     .collect(),
             },
-        ));
+        );
     }
     let mut seen = BTreeSet::new();
     for medium in &line.media {
@@ -576,22 +608,22 @@ pub fn release(line: &ReleaseLine, out: &mut Vec<(String, Rec)>) {
             }
             let mbid = k[k.find('/').map_or(0, |i| i + 1)..].to_owned();
             for isrc in &rec.isrcs {
-                out.push((isrc_key(isrc), Rec::Isrc(mbid.clone())));
+                out(isrc_key(isrc), Rec::Isrc(mbid.clone()));
             }
-            out.push((k, Rec::Track(rec)));
+            out(k, Rec::Track(rec));
         }
     }
 }
-/// The records of a line of the dump of recordings on no release.
-pub fn standalone(line: &RecordingLine, out: &mut Vec<(String, Rec)>) {
+/// The records of a line of the dump of recordings on no release, each given to `out`.
+pub fn standalone(line: &RecordingLine, out: &mut dyn FnMut(String, Rec)) {
     let Some((k, rec)) = track(line, "", None) else {
         return;
     };
     let mbid = k[k.find('/').map_or(0, |i| i + 1)..].to_owned();
     for isrc in &rec.isrcs {
-        out.push((isrc_key(isrc), Rec::Isrc(mbid.clone())));
+        out(isrc_key(isrc), Rec::Isrc(mbid.clone()));
     }
-    out.push((k, Rec::Track(rec)));
+    out(k, Rec::Track(rec));
 }
 
 /// What the records under one key make: the item's card, and the stored card's hash when an

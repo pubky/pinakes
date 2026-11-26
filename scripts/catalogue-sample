@@ -50,6 +50,10 @@ pinakesd=${PINAKESD:-$root/target/release/pinakesd}
 db=${SAMPLE_DB:-catalogue_sample_musicbrainz}
 work=${SAMPLE_DIR:-$(mktemp -d)}
 mkdir -p "$work"
+# Its own parts only: it removes what it made, never what was there.
+for part in dumps run; do
+  [ ! -e "$work/$part" ] || { echo "$work/$part exists: choose another SAMPLE_DIR" >&2; exit 2; }
+done
 mirror=https://data.metabrainz.org/pub/musicbrainz/data/json-dumps
 contact=${PINAKES__HTTP__CONTACT:-}
 ua="pinakes-catalogue-sample (+https://pubky.app${contact:+; $contact})"
@@ -238,7 +242,9 @@ print(found or "")' "${rec_id#recording/}")
 [ -n "$streaming" ] || fail "no streaming link for $rec_id"
 
 daemon() {
-  "$pinakesd" --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
+  # Without the operator's contact (a PINAKES__ override of the configuration's): its own
+  # importer, which would read the official mirror, does not start.
+  env -u PINAKES__HTTP__CONTACT "$pinakesd" --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
   daemon_pid=$!
   for _ in $(seq 1 120); do
     curl -sf "http://127.0.0.1:$admin/healthz" > /dev/null && return
@@ -274,7 +280,7 @@ for link in "$uri" "$streaming" "https://musicbrainz.org/isrc/$isrc"; do
   [ "$backed" = "$rec_id" ] || fail "$link is not built from $rec_id (got '$backed')"
   echo "joined: $link -> $rec_id"
 done
-note joins "[\"$uri\", \"$streaming\", \"https://musicbrainz.org/isrc/$isrc\"]"
+note joins "$(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$uri" "$streaming" "https://musicbrainz.org/isrc/$isrc")"
 stop_daemon
 
 if [ $import_only = 1 ]; then

@@ -731,7 +731,8 @@ impl Importer for Forced {
 
 /// One run of `importer` now, in this process (`pinakesd catalogue import`): a full import
 /// ([`Run::Import`], which takes up a full import that was cut off, else begins a new one), or an
-/// update ([`Run::Update`], after a finished import). It takes the catalogue's lock (refused
+/// update ([`Run::Update`], after a finished import; one whose dump its importer refused begins
+/// anew). It takes the catalogue's lock (refused
 /// while another process holds it), waits for the large-import turn and the disk as the task
 /// does (`waiting` says why, at each change), and runs through [`step`], so the daemon's code and
 /// state rows are the same. A failure is recorded as the task records it, and returned. The state
@@ -750,8 +751,15 @@ pub async fn run_once(
     let held = &mut lock;
     let ran = async {
         let state = store::ensure_state(&ctx.pool, catalogue).await?;
+        // A full import whose importer refused its dump (its cursor says `refused`) is not taken
+        // up: one by hand begins anew, to read the dump again.
+        let refused = state
+            .cursor
+            .as_ref()
+            .and_then(|c| c.get("phase"))
+            .is_some_and(|p| p == "refused");
         match run {
-            Run::Import if state.run.as_deref() != Some("import") => {
+            Run::Import if state.run.as_deref() != Some("import") || refused => {
                 sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,import_requested=$2,updated_at=now() WHERE catalogue=$1")
                     .bind(catalogue.name())
                     .bind("pinakesd catalogue import")

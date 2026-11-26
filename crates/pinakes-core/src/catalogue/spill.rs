@@ -205,9 +205,10 @@ fn read_record(input: &mut impl Read) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
     Ok(Some((key, payload)))
 }
 
-/// Merge `runs` in passes of at most `fan_in` until at most `fan_in` are left, writing each
-/// pass's runs into `dir` within `room` and removing its inputs. The runs left. `stop` is asked
-/// before each merged run: when it says so, the passes stop (`stopped`).
+/// Merge `runs` until at most `fan_in` are left: each pass merges the smallest runs, as few as
+/// that takes (at most `fan_in`), into one written into `dir` within `room`, and then removes its
+/// inputs. The runs left. `stop` is asked as a pass goes: when it says so, the pass's output is
+/// removed, every input is left as it was, and the merge stops (`stopped`).
 pub fn reduce(
     dir: &Path,
     mut runs: Vec<PathBuf>,
@@ -221,36 +222,40 @@ pub fn reduce(
     let mut pass = 0;
     let mut written = 0u64;
     while runs.len() > fan_in {
-        let mut next = vec![];
-        for (n, group) in std::mem::take(&mut runs).chunks(fan_in).enumerate() {
-            if stop() {
-                bail!(Failure::new("stopped"));
+        if stop() {
+            bail!(Failure::new("stopped"));
+        }
+        let take = (runs.len() - fan_in + 1).min(fan_in);
+        runs.sort_by_key(|r| std::fs::metadata(r).map_or(0, |m| m.len()));
+        let group: Vec<PathBuf> = runs.drain(..take).collect();
+        let path = dir.join(format!("pass-{pass:06}.lz4"));
+        let mut merged = Merge::open(&group)?;
+        let mut failed = None;
+        let mut n = 0u64;
+        let records = std::iter::from_fn(|| {
+            n += 1;
+            if n.is_multiple_of(65_536) && stop() {
+                failed = Some(Failure::new("stopped").into());
+                return None;
             }
-            if group.len() == 1 {
-                next.push(group[0].clone());
-                continue;
-            }
-            let path = dir.join(format!("pass-{pass:03}-{n:06}.lz4"));
-            let mut merged = Merge::open(group)?;
-            let mut failed = None;
-            let records = std::iter::from_fn(|| match merged.next_record() {
+            match merged.next_record() {
                 Ok(next) => next,
                 Err(e) => {
                     failed = Some(e);
                     None
                 }
-            });
-            let bytes = write_run(&path, records, room, written)?;
-            if let Some(e) = failed {
-                return Err(e);
             }
-            written += bytes;
-            for old in group {
-                let _ = std::fs::remove_file(old);
-            }
-            next.push(path);
+        });
+        let bytes = write_run(&path, records, room, written);
+        if let Some(e) = failed {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
         }
-        runs = next;
+        written += bytes?;
+        for old in &group {
+            let _ = std::fs::remove_file(old);
+        }
+        runs.push(path);
         pass += 1;
     }
     Ok(runs)
@@ -332,6 +337,22 @@ impl Merge {
             });
         }
         Ok(Some((head.key, head.payload)))
+    }
+    /// The next key and its records counted by their first byte, none of them kept.
+    pub fn next_counts(&mut self) -> Result<Option<(Vec<u8>, [u64; TAGS])>> {
+        let Some((key, payload)) = self.next_record()? else {
+            return Ok(None);
+        };
+        let mut counts = [0u64; TAGS];
+        let mut count = |p: &[u8]| {
+            counts[usize::from(p.first().copied().unwrap_or(0)).min(TAGS - 1)] += 1;
+        };
+        count(&payload);
+        while self.heap.peek().is_some_and(|h| h.key == key) {
+            let (_, payload) = self.next_record()?.expect("a record was peeked");
+            count(&payload);
+        }
+        Ok(Some((key, counts)))
     }
     /// The next key, every one of its records counted, and of its distinct payloads at most
     /// `max_records` holding at most `max_bytes`: the smallest ones in byte order that fit, so
@@ -501,6 +522,46 @@ mod tests {
         let runs = spill.finish().unwrap();
         assert!(reduce(&dir.path().join("p"), runs.clone(), 2, &room(), &|| true).is_err());
         assert!(reduce(&dir.path().join("q"), runs, 2, &full, &|| false).is_err());
+    }
+
+    /// A pass merges only as many runs as it takes to get down to the fan-in, the smallest
+    /// first; the others are left as they are.
+    #[test]
+    fn a_pass_merges_only_the_excess() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runs = vec![];
+        for n in 0..10u8 {
+            let mut spill = Spill::new(&dir.path().join(format!("s{n}")), 1 << 20, room()).unwrap();
+            for k in 0..(10 + u32::from(n) * 50) {
+                spill.push(format!("{k:05}").as_bytes(), &[n]).unwrap();
+            }
+            runs.extend(spill.finish().unwrap());
+        }
+        let before: Vec<_> = runs
+            .iter()
+            .map(|r| std::fs::metadata(r).unwrap().modified().unwrap())
+            .collect();
+        let left = reduce(&dir.path().join("p"), runs.clone(), 8, &room(), &|| false).unwrap();
+        assert_eq!(left.len(), 8);
+        // The three smallest went into one pass file; the seven others are untouched.
+        let kept: Vec<_> = runs[3..].to_vec();
+        for (r, t) in kept.iter().zip(&before[3..]) {
+            assert!(left.contains(r));
+            assert_eq!(std::fs::metadata(r).unwrap().modified().unwrap(), *t);
+        }
+        assert!(runs[..3].iter().all(|r| !r.exists()));
+        // A merge asked to stop in a pass leaves every input and no output.
+        let mut spill = Spill::new(&dir.path().join("big"), 1 << 22, room()).unwrap();
+        for k in 0..200_000u32 {
+            spill.push(&k.to_be_bytes(), b"v").unwrap();
+        }
+        let runs = spill.finish().unwrap();
+        assert!(runs.len() > 3);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let stop = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1;
+        assert!(reduce(&dir.path().join("q"), runs.clone(), 2, &room(), &stop).is_err());
+        assert!(runs.iter().all(|r| r.exists()));
+        assert_eq!(std::fs::read_dir(dir.path().join("q")).unwrap().count(), 0);
     }
 
     #[test]

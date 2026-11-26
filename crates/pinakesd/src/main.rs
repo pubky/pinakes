@@ -603,7 +603,12 @@ async fn catalogue_command(
                 pinakes_core::catalogue::musicbrainz::REQUESTED,
             )
             .await?;
-            writeln!(out, "a full import of catalogue {catalogue} is asked for: the daemon running it starts it after the run under way (an update hands over at once)")?;
+            writeln!(out, "a full import of catalogue {catalogue} is asked for: the process running its importer starts it when the run under way ends, or at its next step")?;
+            // Whether one runs: its lock is held.
+            if let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? {
+                lock.release().await;
+                writeln!(out, "no process runs the importer of catalogue {catalogue} now: the next pinakesd started with it on (and http.contact set) starts the import, or run catalogue import {catalogue} with it stopped")?;
+            }
         }
         CatalogueCommand::Import {
             catalogue,
@@ -659,8 +664,15 @@ async fn import(
     }
     let before = store::state(pool, catalogue).await?;
     let cards = before.as_ref().map_or(0, |s| s.cards);
+    let stored_limit = before
+        .as_ref()
+        .and_then(|s| s.position.as_ref())
+        .and_then(|p| p.get("limit"))
+        .and_then(|l| l.as_u64());
     if let Some(limit) = config.catalogues.limit(catalogue) {
-        if !update && (limit as i64) < cards && !force {
+        // A limit other than the one the cards were read with makes a full import of the new
+        // subset (an update hands over to one), which removes the others.
+        if stored_limit != Some(limit) && (limit as i64) < cards && !force {
             bail!("catalogue {catalogue} holds {cards} cards: a full import with --limit {limit} removes all but at most {limit} of them; add --force to do so");
         }
     }
@@ -683,10 +695,16 @@ async fn import(
         let _ = writeln!(out, "waiting: {why}");
     })
     .await?;
+    // An update can have handed over to a full import (a limit changed, one asked for).
+    let ran = if state.last_import_at != before.as_ref().and_then(|s| s.last_import_at) {
+        run::Run::Import
+    } else {
+        kind
+    };
     writeln!(
         out,
         "catalogue {catalogue}: {} finished in {:.0} s; {cards} cards before, {} after; written: {} new, {} changed, {} unchanged, {} refused, {} removed",
-        kind.name(),
+        ran.name(),
         started.elapsed().as_secs_f64(),
         state.cards,
         written.inserted,
@@ -1364,6 +1382,104 @@ mod tests {
     /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
     /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
     /// prints the table.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn catalogue_import_guards_its_limit_and_asks_for_imports(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{store, Card};
+        let cards: Vec<Card> = (0..3)
+            .map(|n| Card {
+                source_id: format!("artist/0000000{n}-0000-4000-8000-000000000000"),
+                uri: format!(
+                    "https://musicbrainz.org/artist/0000000{n}-0000-4000-8000-000000000000"
+                ),
+                r#type: "MusicGroup".into(),
+                name: format!("Band {n}"),
+                ..Card::default()
+            })
+            .collect();
+        store::upsert(&pool, Catalogue::Musicbrainz, 1, &cards, None)
+            .await
+            .unwrap();
+        let root = tempfile_dir("pinakesd-import-test");
+        let dump = root.join("20261125-001001");
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut config = Config::default();
+        config.catalogues.dir = root.join("catalogues").to_string_lossy().into_owned();
+        let import =
+            |limit, update, force, from: Option<&std::path::Path>| CatalogueCommand::Import {
+                catalogue: Catalogue::Musicbrainz,
+                from: from.map(|d| d.to_string_lossy().into_owned()),
+                limit,
+                update,
+                request: false,
+                force,
+            };
+        // A limit below the cards would remove the others: refused without --force, also as an
+        // update (which hands over to a full import of the new subset). Nothing is read.
+        for update in [false, true] {
+            let mut out = Vec::new();
+            let refused = catalogue_command(
+                &pool,
+                &config,
+                import(Some(1), update, false, Some(&dump)),
+                &mut out,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(refused.contains("--force"), "{refused}");
+        }
+        assert_eq!(
+            store::state(&pool, Catalogue::Musicbrainz)
+                .await
+                .unwrap()
+                .unwrap()
+                .cards,
+            3
+        );
+        // The official mirror needs the operator's contact.
+        let mut out = Vec::new();
+        let refused = catalogue_command(&pool, &config, import(None, false, false, None), &mut out)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("http.contact"), "{refused}");
+        // --request asks for a full import, and says when no process runs the importer.
+        let mut out = Vec::new();
+        catalogue_command(
+            &pool,
+            &config,
+            CatalogueCommand::Import {
+                catalogue: Catalogue::Musicbrainz,
+                from: None,
+                limit: None,
+                update: false,
+                request: true,
+                force: false,
+            },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("is asked for") && out.contains("no process runs"),
+            "{out}"
+        );
+        assert!(store::state(&pool, Catalogue::Musicbrainz)
+            .await
+            .unwrap()
+            .unwrap()
+            .import_requested
+            .is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    fn tempfile_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[sqlx::test(migrations = "../../migrations")]
     async fn the_drop_command_takes_the_lock_and_removes_the_directory(pool: sqlx::PgPool) {
         use pinakes_core::catalogue::{run::SessionLock, store, Card};
