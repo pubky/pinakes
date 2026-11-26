@@ -195,6 +195,21 @@ impl Job<'_> {
     pub fn generation(&self) -> i64 {
         self.generation
     }
+    /// A full import that starts over, dropping a cut-off attempt's cursor (of another source or
+    /// dump): a generation of its own, so the cards that attempt wrote and this one does not read
+    /// are removed at its end as any others.
+    pub async fn new_generation(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.run == Run::Import,
+            "only a full import starts a generation"
+        );
+        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,cursor=NULL,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+            .bind(self.catalogue.name())
+            .fetch_one(self.pool)
+            .await?;
+        self.cursor = None;
+        Ok(())
+    }
     /// Where to resume: the cursor of the last [`Job::write`] or [`Job::remove`] of this run, or
     /// none at its start.
     pub fn cursor(&self) -> Option<&serde_json::Value> {
@@ -656,7 +671,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         .await?;
         (state.generation, state.cursor.clone())
     } else {
-        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(catalogue.name())
             .bind(run.name())
             .fetch_one(pool)
@@ -708,9 +723,11 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     let ended = match ended {
         Ok(ended) => ended,
         Err(error) if error.is::<Abandoned>() => {
-            sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,position=coalesce($2,position),updated_at=now() WHERE catalogue=$1")
+            // A full import abandoned answers its request (the dump it read can't be applied).
+            sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,position=coalesce($2,position),import_requested=CASE WHEN $3='import' THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1")
                 .bind(catalogue.name())
                 .bind(job.position.take())
+                .bind(run.name())
                 .execute(pool)
                 .await?;
             if let Some(lock) = large {
@@ -727,6 +744,8 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     };
     let mut report = job.report;
     let position = job.position.take();
+    // The run's own generation (a full import that started over has a new one).
+    let generation = job.generation;
     if let UpdateEnd::NeedsImport(reason) = ended {
         // The update ends without marking anything current, and a full import is asked for: the
         // next step starts it as a new import, through the large-import turn and the disk check.

@@ -1863,7 +1863,7 @@ new one. `--from`, `--limit` and `--force` are the importer's own
 task records it. `catalogue import <name> --request` needs no lock: it records that a full import
 is asked for (`import_requested`). The process running the importer starts it after an update
 under way, or at its next step (MusicBrainz: within the hour when idle); a full import under way
-is the one asked for, and its end clears the request. The command says when no process holds the
+is the one asked for, and its end, or its abandonment, clears the request. The command says when no process holds the
 catalogue.
 
 `scripts/lock-waits` names these locks `catalogue <name>` and `large catalogue import`.

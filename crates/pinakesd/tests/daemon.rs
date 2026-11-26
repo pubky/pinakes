@@ -482,4 +482,5 @@ async fn the_daemon_says_when_a_catalogue_needs_its_contact(pool: PgPool) {
     );
     assert_eq!(waiting, None);
     stop(serving).await;
+    std::fs::remove_dir_all(dir).unwrap();
 }

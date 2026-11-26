@@ -334,6 +334,17 @@ impl MusicBrainz {
     fn room(&self) -> Room {
         Room::new(self.need(), DISK_FLOOR)
     }
+    /// A read's room, holding from the start the runs it keeps from an earlier try: all its runs
+    /// together stay within the disk it waited for.
+    fn room_for(&self, kept: &BTreeMap<String, FileDone>) -> Room {
+        let bytes: u64 = kept
+            .values()
+            .flat_map(|done| &done.runs)
+            .filter_map(|run| std::fs::metadata(run).ok())
+            .map(|m| m.len())
+            .sum();
+        self.room().holding(bytes)
+    }
     /// What a read takes at most: [`DISK_NEED`]; for a local dump [`DISK_PER_DUMP_BYTE`] times
     /// its files' size; for a `limit` [`DISK_PER_LIMITED_CARD`] per card; at least
     /// [`DISK_LEAST`].
@@ -376,6 +387,9 @@ impl MusicBrainz {
             .is_some_and(|c| c.source != self.source_id() || c.limit != job.limit())
         {
             resumed = None;
+            if mode == Run::Import {
+                job.new_generation().await?;
+            }
         }
         let mut version = match &resumed {
             Some(c) => c.version.clone(),
@@ -393,7 +407,8 @@ impl MusicBrainz {
         }
         // A run cut off whose dump the mirror no longer has, and that must read it again, starts
         // over on the newest dump.
-        let spill_of = |v: &str| job.dir().join(format!("spill-{v}"));
+        let work = job.dir().to_owned();
+        let spill_of = |v: &str| work.join(format!("spill-{v}"));
         if let Some(c) = &resumed {
             if c.phase == Phase::Write
                 && read_done(&spill_of(&c.version)).is_none()
@@ -401,6 +416,9 @@ impl MusicBrainz {
             {
                 tracing::warn!(catalogue = "musicbrainz", version = c.version, "the dump a cut-off run read is gone from the mirror; the run starts over on the newest dump");
                 resumed = None;
+                if mode == Run::Import {
+                    job.new_generation().await?;
+                }
                 version = self.latest().await?;
             }
         }
@@ -473,9 +491,17 @@ impl MusicBrainz {
                         .await;
                 }
             }
-            if mode == Run::Update && !removals.exists() {
-                let tally = self.count_gone(&removals, &done, &stop).await?;
-                write_json(&Tally::path(&spill_dir), &tally)?;
+            if mode == Run::Update {
+                // The first pass, or (a run cut off after it) the tally it kept: checked again
+                // before any write, whenever the run is still writing.
+                let kept = removals
+                    .exists()
+                    .then(|| read_json::<Tally>(&Tally::path(&spill_dir)))
+                    .flatten();
+                let tally = match kept {
+                    Some(tally) => tally,
+                    None => self.count_gone(&removals, &spill_dir, &done, &stop).await?,
+                };
                 if let Some(note) = tally.too_many(job.limit(), "gone", &version) {
                     return self
                         .refuse(job, mode, &version, "removals", &note, &spill_dir)
@@ -541,22 +567,16 @@ impl MusicBrainz {
                 let listed = tokio::task::spawn_blocking(move || count_kinds(&path))
                     .await
                     .map_err(|_| Failure::new("panic"))??;
-                // By kind against the stored cards the first pass counted; a run that began
-                // before the tally was kept counts them all together.
-                let note = match read_json::<Tally>(&Tally::path(&spill_dir)) {
-                    Some(first) => Tally {
-                        gone: listed,
-                        ..first
-                    }
-                    .too_many(job.limit(), "gone or refused", &version),
-                    None => {
-                        let (listed, cards) =
-                            (listed.iter().sum::<u64>(), job.state().cards.max(0) as u64);
-                        too_many(listed, cards, job.limit()).then(|| {
-                            format!("{listed} of {cards} cards gone or refused in dump {version}")
-                        })
-                    }
-                };
+                // By kind against the stored cards the first pass counted (its tally is kept
+                // before its list of removals is: there is no list without it).
+                let first = read_json::<Tally>(&Tally::path(&spill_dir)).ok_or_else(|| {
+                    Failure::new("spill").at(Tally::path(&spill_dir).display().to_string())
+                })?;
+                let note = Tally {
+                    gone: listed,
+                    ..first
+                }
+                .too_many(job.limit(), "gone or refused", &version);
                 if let Some(note) = note {
                     return self
                         .refuse(job, mode, &version, "removals", &note, &spill_dir)
@@ -658,7 +678,7 @@ impl MusicBrainz {
         }
         clear_spill(dir, &kept)?;
         let started = Instant::now();
-        let room = self.room();
+        let room = self.room_for(&kept);
         let mut stored = vec![];
         if mode == Run::Update {
             stored = snapshot(job, &dir.join(format!("stored-{}", nonce())), room.clone()).await?;
@@ -724,13 +744,20 @@ impl MusicBrainz {
 
     /// An update's first pass: the stored cards the dump no longer has, listed in `removals`
     /// (written whole, then put in place). Their number.
-    async fn count_gone(&self, removals: &Path, done: &Done, stop: &Stop) -> Result<Tally> {
+    async fn count_gone(
+        &self,
+        removals: &Path,
+        spill_dir: &Path,
+        done: &Done,
+        stop: &Stop,
+    ) -> Result<Tally> {
         let runs = done.runs.clone();
-        let path = removals.to_owned();
+        let (path, tally_path) = (removals.to_owned(), Tally::path(spill_dir));
         let flag = stop.flag();
-        let tally = tokio::task::spawn_blocking(move || list_gone(&runs, &path, &flag))
-            .await
-            .map_err(|_| Failure::new("panic"))??;
+        let tally =
+            tokio::task::spawn_blocking(move || list_gone(&runs, &path, &tally_path, &flag))
+                .await
+                .map_err(|_| Failure::new("panic"))??;
         tracing::info!(
             catalogue = "musicbrainz",
             gone = tally.gone(),
@@ -1142,8 +1169,9 @@ impl Tally {
     }
 }
 /// An update's first pass over the merge: each stored card under a key with no record that
-/// makes a card, written to `path` (in key order). The stored cards and those gone, by kind.
-fn list_gone(runs: &[PathBuf], path: &Path, stop: &AtomicBool) -> Result<Tally> {
+/// makes a card, written to `path` (in key order). The stored cards and those gone, by kind, kept
+/// at `tally_path` before the list is put in place.
+fn list_gone(runs: &[PathBuf], path: &Path, tally_path: &Path, stop: &AtomicBool) -> Result<Tally> {
     let disk = || Failure::new("disk").at(path.display().to_string());
     // Written whole, then put in place: a list there is always a whole one.
     let tmp = path.with_extension("tmp");
@@ -1183,6 +1211,7 @@ fn list_gone(runs: &[PathBuf], path: &Path, stop: &AtomicBool) -> Result<Tally> 
         .with_context(disk)?
         .sync_all()
         .with_context(disk)?;
+    write_json(tally_path, &tally)?;
     std::fs::rename(&tmp, path).with_context(disk)?;
     Ok(tally)
 }
@@ -2448,6 +2477,25 @@ mod tests {
         let text = std::fs::read_to_string(dir.join("release.done")).unwrap();
         assert!(!text.contains(root.path().to_str().unwrap()), "{text}");
         assert_eq!(read_file_done(&dir, "release").unwrap().runs, done.runs);
+    }
+
+    /// A resumed read's room counts the runs it keeps from the start.
+    #[test]
+    fn a_read_s_room_counts_the_runs_it_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run-000000.lz4");
+        std::fs::write(&run, vec![0; 5000]).unwrap();
+        let importer = MusicBrainz::new(Source::official(), "").unwrap();
+        let mut kept = BTreeMap::new();
+        kept.insert(
+            "release".to_owned(),
+            FileDone {
+                runs: vec![run],
+                ..FileDone::default()
+            },
+        );
+        assert_eq!(importer.room_for(&kept).held(), 5000);
+        assert_eq!(importer.room_for(&BTreeMap::new()).held(), 0);
     }
 
     /// The tags the merge counts by are the records' own first bytes.

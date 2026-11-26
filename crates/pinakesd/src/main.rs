@@ -1402,7 +1402,8 @@ mod tests {
         store::upsert(&pool, Catalogue::Musicbrainz, 1, &cards, None)
             .await
             .unwrap();
-        let root = tempfile_dir("pinakesd-import-test");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
         let dump = root.join("20261125-001001");
         std::fs::create_dir_all(&dump).unwrap();
         let mut config = Config::default();
@@ -1474,13 +1475,6 @@ mod tests {
             .unwrap()
             .import_requested
             .is_some());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-    fn tempfile_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it

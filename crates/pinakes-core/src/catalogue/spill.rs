@@ -45,6 +45,11 @@ impl Room {
             held: Default::default(),
         }
     }
+    /// The room with `bytes` already held (runs a read keeps from an earlier try).
+    pub fn holding(self, bytes: u64) -> Self {
+        self.add(bytes);
+        self
+    }
     /// The bytes held by the runs written within it.
     pub fn held(&self) -> u64 {
         self.held.load(std::sync::atomic::Ordering::Relaxed)
@@ -584,6 +589,12 @@ mod tests {
             Some("disk")
         );
         assert_eq!(shared.held(), size);
+        // Runs kept from an earlier try count from the start.
+        let kept = Room::new(size * 3 / 2, 0).holding(size);
+        let mut third = Spill::new(&dir.path().join("k"), 1 << 20, kept.clone()).unwrap();
+        fill(&mut third);
+        assert!(third.finish().is_err());
+        assert_eq!(kept.held(), size);
         // Many small runs merged in passes: the room holds the runs left.
         let room = Room::new(1 << 30, 0);
         let mut many = Spill::new(&dir.path().join("d"), 4096, room.clone()).unwrap();

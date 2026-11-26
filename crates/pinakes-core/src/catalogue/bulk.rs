@@ -337,22 +337,80 @@ impl<R: BufRead> Lines<R> {
     }
 }
 
-/// An `.xz` stream decoded on `threads` threads (liblzma's multi-threaded decoder, which decodes
-/// a stream of several blocks in parallel and one of a single block on one thread), within
-/// `memory` bytes of decoder memory. One stream: what follows its end is left in `inner`
-/// (`into_inner`).
-pub fn xz<R: BufRead>(
-    inner: R,
-    threads: u32,
-    memory: u64,
-) -> Result<liblzma::bufread::XzDecoder<R>> {
-    let stream = liblzma::stream::MtStreamBuilder::new()
+/// An `.xz` file decoded on `threads` threads (liblzma's multi-threaded decoder, which decodes a
+/// stream of several blocks in parallel and one of a single block on one thread), within
+/// `memory` bytes of decoder memory: every stream of it, as `xz` reads concatenated ones (the
+/// multi-threaded decoder stops at a stream's end), with the stream padding between them.
+pub fn xz<R: BufRead>(inner: R, threads: u32, memory: u64) -> Result<Xz<R>> {
+    let decoder = liblzma::bufread::XzDecoder::new_stream(inner, xz_stream(threads, memory)?);
+    Ok(Xz {
+        decoder: Some(decoder),
+        rest: None,
+        threads,
+        memory,
+    })
+}
+fn xz_stream(threads: u32, memory: u64) -> Result<liblzma::stream::Stream> {
+    liblzma::stream::MtStreamBuilder::new()
         .threads(threads.max(1))
         .memlimit_threading(memory)
         .memlimit_stop(memory)
         .decoder()
-        .map_err(|_| Failure::new("xz"))?;
-    Ok(liblzma::bufread::XzDecoder::new_stream(inner, stream))
+        .map_err(|_| Failure::new("xz").into())
+}
+/// [`xz`]'s reader: the streams one after another; at the end, what is left of the input in
+/// [`Xz::into_inner`].
+pub struct Xz<R: BufRead> {
+    decoder: Option<liblzma::bufread::XzDecoder<R>>,
+    rest: Option<R>,
+    threads: u32,
+    memory: u64,
+}
+impl<R: BufRead> Xz<R> {
+    /// The input, past what was decoded.
+    pub fn into_inner(self) -> R {
+        match self.decoder {
+            Some(decoder) => decoder.into_inner(),
+            None => self.rest.expect("the input"),
+        }
+    }
+}
+impl<R: BufRead> Read for Xz<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let Some(decoder) = self.decoder.as_mut() else {
+                return Ok(0);
+            };
+            let n = decoder.read(buf)?;
+            if n > 0 || buf.is_empty() {
+                return Ok(n);
+            }
+            // A stream ended: after its padding (NUL bytes), the input ends or another begins.
+            let mut inner = self.decoder.take().expect("the decoder").into_inner();
+            loop {
+                let ahead = match inner.fill_buf() {
+                    Ok(ahead) => ahead,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        self.rest = Some(inner);
+                        return Err(e);
+                    }
+                };
+                if ahead.is_empty() {
+                    self.rest = Some(inner);
+                    return Ok(0);
+                }
+                let padding = ahead.iter().take_while(|b| **b == 0).count();
+                let more = padding < ahead.len();
+                inner.consume(padding);
+                if more {
+                    break;
+                }
+            }
+            let stream = xz_stream(self.threads, self.memory).map_err(io::Error::other)?;
+            self.decoder = Some(liblzma::bufread::XzDecoder::new_stream(inner, stream));
+        }
+    }
 }
 
 /// A reader that keeps the SHA-256 of every byte read through it.
@@ -643,6 +701,36 @@ mod tests {
         }
         out.resize(out.len() + 1024, 0);
         out
+    }
+
+    /// Concatenated streams (with padding between them) read as one, as `xz` reads them; what
+    /// follows the last is left in the input; bytes that are no stream are an error.
+    #[test]
+    fn concatenated_xz_streams_read_as_one() {
+        let packed = |data: &[u8]| {
+            let mut out = vec![];
+            liblzma::read::XzEncoder::new(data, 1)
+                .read_to_end(&mut out)
+                .unwrap();
+            out
+        };
+        let (first, second) = (vec![b'a'; 100_000], vec![b'b'; 50_000]);
+        let mut file = packed(&first);
+        file.extend_from_slice(&[0; 8]);
+        file.extend(packed(&second));
+        file.extend_from_slice(&[0; 4]);
+        let mut decoded = xz(&file[..], 2, 64 << 20).unwrap();
+        let mut out = vec![];
+        decoded.read_to_end(&mut out).unwrap();
+        assert_eq!(out, [first.clone(), second].concat());
+        assert!(decoded.into_inner().is_empty());
+        let mut bad = packed(&first);
+        bad.extend_from_slice(b"no stream here");
+        let mut out = vec![];
+        assert!(xz(&bad[..], 2, 64 << 20)
+            .unwrap()
+            .read_to_end(&mut out)
+            .is_err());
     }
 
     #[test]

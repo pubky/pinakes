@@ -20,8 +20,9 @@ MusicBrainz relates to an item gets its card from the catalogue without a fetch.
 
 ## What it reads
 
-Each file is a `tar.xz` archive holding one JSON line per entity (`mbdump/<entity>`), as
-MusicBrainz's web service writes it, and the dump's `TIMESTAMP`. The importer streams them in this
+Each file is a `tar.xz` archive (of one xz stream or several, read as `xz` reads them) holding
+one JSON line per entity (`mbdump/<entity>`), as MusicBrainz's web service writes it, and the
+dump's `TIMESTAMP`. The importer streams them in this
 order and keeps only what a card needs:
 
 1. `release`: each release's artists, release group and recordings (with the release's date and
@@ -42,7 +43,7 @@ past either, the read stops (`disk`).
 - **Bounds.** A line longer than 128 MiB is skipped and counted. Each list of a line is read up to
   a cap (4,096 tracks a medium, 512 media, 2,048 relations, 256 aliases and genres, 64 ISRCs and
   credited artists) and the rest skipped; all the lists of one line together build at most
-  500,000 entries. Under a `limit`, a release of more than 50,000 records is skipped. Of one
+  500,000 entries. Under a `limit`, a release of more than 50,000 records counts as a bad line. Of one
   item's records at most 8,192 holding 64 MiB make its card (every one counts for its fame). The
   lines waiting for the parsing threads hold at most 64 MiB (one longer line is let through
   alone). A line that doesn't parse, or parses but names no valid MBID, is a bad line; more than
@@ -164,9 +165,12 @@ read resumes as the same run (its cursor is written when it starts). Once its re
 merged its runs, it resumes from them, so the dump is not read again; a read cut off keeps the
 files it had read whole and checked (with a manifest each) and reads the others. A run cut off
 after its writes reads nothing again. When the dump a cut-off run needs again is gone from the
-mirror, the run starts over on the newest dump (a full import then keeps, until the next update,
-the items the older dump had and the newer one lacks). A run cut off in its removals goes on with
-the rest of its list.
+mirror, the run starts over on the newest dump; a cut-off run of another source or `limit` (one by
+hand with `--from` or `--limit`, say) is not resumed either: the run starts over. A full import that
+starts over so begins a generation of its own, so the cards the dropped attempt wrote and it does
+not read are removed at its end. An update cut off in its writes checks its list of removals again
+(by kind, from the counts its first pass kept) before it writes on. A run cut off in its removals
+goes on with the rest of its list.
 
 ## A small instance
 
@@ -198,7 +202,9 @@ started by hand takes up one that was cut off, else begins a new one.
 
 `--request` only asks for a full import: the process running the importer starts it, with its
 turn and disk checks, after an update under way or at its next step (within the hour when idle); a
-full import under way is the one asked for, and its end clears the request. The command says when
+full import under way is the one asked for, and its end (or its abandonment, for a refused dump)
+clears the request: a try that fails or is cut off before its first cursor is still the one asked
+for when it is tried again. The command says when
 no process holds the catalogue.
 
 `scripts/catalogue-sample musicbrainz` imports a sample of the two newest dumps (the first

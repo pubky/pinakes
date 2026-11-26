@@ -796,9 +796,19 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     assert_eq!(get(&metrics2.catalogue_cards, "wikidata"), 42);
     assert_eq!(get(&metrics2.catalogue_enabled, "wikidata"), 1);
     assert_eq!(get(&metrics2.catalogue_enabled, "tranco"), 0);
-    // A refusal standing in the position.
+    // A refusal standing in the position (before any version was applied).
     assert_eq!(get(&metrics2.catalogue_refused, "wikidata"), 1);
     assert_eq!(get(&metrics2.catalogue_refused, "tranco"), 0);
+    // One of an older dump than the applied one (a trial by hand) is not the importer's wait.
+    store::ensure_state(&pool, Catalogue::Osm).await.unwrap();
+    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"20261125-001001\",\"refused\":\"20261121-001001\"}' WHERE catalogue='osm'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let metrics3 = Metrics::new().unwrap();
+    metrics3.refresh(&pool).await.unwrap();
+    assert_eq!(get(&metrics3.catalogue_refused, "osm"), 0);
+    assert_eq!(get(&metrics3.catalogue_refused, "wikidata"), 1);
     // The lag counts from how current the data is, not from the update that finished an hour
     // ago.
     let lag = get(&metrics2.catalogue_lag, "wikidata");
