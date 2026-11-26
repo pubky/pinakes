@@ -1574,9 +1574,14 @@ credential when it has:
 
 - a calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls`
   keeps out of the repository);
-- a password in the user info;
-- a key such as `token`, `access_token`, `key`, `sig` or `signature`
-  (`capability::CREDENTIAL_KEYS`), or one that ends like `client_secret`, `X-Api-Key`,
+- a password in the user info; in a web or calendar link any user info, a name alone included
+  (`https://TOKEN@host/`);
+- `sid` or `session` with an opaque value, a session's ID: 12 characters or more with a letter
+  and a digit, or 16 or more with an upper case letter right after a lower case one
+  (`sid=3243128`, `session=keynote`, `session=keynote2025` or `session=Plenary-Session-Day` names
+  a record);
+- a key such as `token`, `access_token`, `key`, `sig`, `signature`, `jwt`, `authorization` or
+  `connect.sid` (`capability::CREDENTIAL_KEYS`), or one that ends like `client_secret`, `X-Api-Key`,
   `access_key`, `auth_token` or `session_id` once its case and everything but its ASCII letters
   and digits are set aside (`api key`, `user[password]` and `k-e-y` count too). A public list's
   page cursor such as `pageToken` does not count (`capability::credential_key`).

@@ -2093,7 +2093,6 @@ the provider keeps its listing. Any other reads its fixed sample, which its `can
 `scripts/verify-no-capability-urls` (run by the tests) scans every tracked and new source file for capability
 URLs. Synthetic fixture URLs are allowed only in named test files, and failures print paths without the URLs.
 
-At runtime the daemon applies the same provider patterns, plus credential query keys and a password in the
-user info (`crates/pinakes-core/src/capability.rs`): `POST /v1/resolve` refuses such a link, and no also-on,
+At runtime the daemon applies the same provider patterns, plus credential query keys and user info (`crates/pinakes-core/src/capability.rs`): `POST /v1/resolve` refuses such a link, and no also-on,
 archive or oEmbed lookup is sent one. `crates/pinakes-core/tests/fixtures/capability_urls.json` holds the
 probes both must agree on; add a pattern to both.

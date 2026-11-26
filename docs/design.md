@@ -85,8 +85,8 @@ Every link goes to one route, chosen from the link alone without any network req
 
 A link with any other scheme gets no card. When the route a link needs is switched off (a card
 route, an official source, calendars or an event platform), an `http` or `https` link falls back to
-`web`; a link in a source's own scheme (such as `fr:`) waits until the route is on again. A link that carries a credential (a password in the user info, a
-`token` or `key` parameter, a calendar's secret share link) is never previewed: `POST /v1/resolve`
+`web`; a link in a source's own scheme (such as `fr:`) waits until the route is on again. A link that carries a credential (user info, a
+`token`, `key` or `jwt` parameter, a calendar's secret share link) is never previewed: `POST /v1/resolve`
 answers 400. When someone references one on Pubky, it is read from its own site like any link, but
 the credential appears nowhere except in the link itself, and the link is never sent to another
 service ([details](api.md#resolution-and-status)).

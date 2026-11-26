@@ -21,6 +21,9 @@ pub const CREDENTIAL_KEYS: &[&str] = &[
     "sig",
     "signature",
     "password",
+    "authorization",
+    "jwt",
+    "connect.sid",
     "x-amz-signature",
     "x-amz-credential",
     "x-amz-security-token",
@@ -31,8 +34,9 @@ pub const CREDENTIAL_KEYS: &[&str] = &[
 /// Endings of a key that carries a credential, read after [`credential_key`] lowercases the key
 /// and keeps only its ASCII letters and digits: `client_secret`, `X-Api-Key`, `access.key`,
 /// `api key`, `user[password]`, `private_token`,
-/// `oauth_token`, `session_id`, `jsessionid`, `PHPSESSID`. `key`, `auth` and `sig` stay exact
-/// keys only: as endings they would take `monkey`, `hotkey`, `oauth` and the like.
+/// `oauth_token`, `session_id`, `jsessionid`, `PHPSESSID`, `X-Authorization`, `access_jwt`. `key`,
+/// `auth` and `sig` stay exact keys only: as endings they would take `monkey`, `hotkey`, `oauth`
+/// and the like.
 pub const CREDENTIAL_STEMS: &[&str] = &[
     "token",
     "secret",
@@ -48,7 +52,15 @@ pub const CREDENTIAL_STEMS: &[&str] = &[
     "credentials",
     "sessionid",
     "sessid",
+    "authorization",
+    "jwt",
 ];
+
+/// Keys that carry a credential only with an opaque value ([`credential_pair`]): a session's ID
+/// (`sid=…`, `session=…`) is a random string of letters and digits, while public pages name a
+/// numbered record or a word with the same keys (PubChem's `sid=3243128`, a programme's
+/// `session=12` or `session=keynote`, a stream's `sid=1`).
+const SESSION_KEYS: &[&str] = &["sid", "session"];
 
 /// Keys a stem ends that carry no credential, as [`credential_key`] reads them. Each is a public
 /// list's page cursor: `pageToken` and `nextPageToken` (Google's and YouTube's lists),
@@ -78,6 +90,24 @@ pub fn credential_key(key: &str) -> bool {
                 && CREDENTIAL_STEMS.iter().any(|stem| key.ends_with(stem))))
 }
 
+/// Whether a key and its value, as decoded, carry a credential: a [`credential_key`], or one of
+/// [`SESSION_KEYS`] (read as [`fold`] reads it) whose value is opaque: at least 12 characters
+/// among them an ASCII letter and an ASCII digit (`abc123def456`), or at least 16 with an upper
+/// case letter right after a lower case one (a random token without a digit, `QmFzZTY0…`). A
+/// word, a number, a short name with a year (`keynote2025`) or title-cased words
+/// (`Plenary-Session-Day`) are a record's.
+pub fn credential_pair(key: &str, value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    let has = |test: fn(&char) -> bool| chars.iter().any(test);
+    let inner_capital = chars
+        .windows(2)
+        .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase());
+    credential_key(key)
+        || (SESSION_KEYS.contains(&fold(key).as_str())
+            && ((chars.len() >= 12 && has(char::is_ascii_alphabetic) && has(char::is_ascii_digit))
+                || (chars.len() >= 16 && inner_capital)))
+}
+
 /// A key's ASCII letters and digits, lowercased: what [`credential_key`] compares.
 fn fold(key: &str) -> String {
     folded(key).map(char::from).collect()
@@ -95,7 +125,8 @@ pub fn is_capability(uri: &str) -> bool {
     Url::parse(uri).is_ok_and(|url| is_capability_url(&url))
 }
 
-/// Whether `url` carries a credential: a password in its user info, a calendar provider's secret
+/// Whether `url` carries a credential: a password in its user info, or in a web or calendar link
+/// any user info (a name alone may be a token, as in `https://TOKEN@host/`), a calendar provider's secret
 /// share path, or a credential key ([`credential_key`]) in its query (its parameters separated
 /// by `&` or `;`, as in `?x=1;token=…`), or with a value in its form-encoded
 /// fragment or in any part of it after a `?`, `#` or `;` (an OAuth callback's `#access_token=…`,
@@ -112,6 +143,9 @@ pub fn is_capability_url(url: &Url) -> bool {
     }
     if !matches!(url.scheme(), "http" | "https" | "webcal" | "webcals") {
         return false;
+    }
+    if !url.username().is_empty() {
+        return true;
     }
     if let Some(fetched) = webcal_as_https(url.as_str()).and_then(|u| Url::parse(&u).ok()) {
         return is_capability_url(&fetched);
@@ -130,12 +164,13 @@ pub fn is_capability_url(url: &Url) -> bool {
     secret_share(&host, &path)
         || url.query().is_some_and(|query| {
             query.split(';').any(|form| {
-                url::form_urlencoded::parse(form.as_bytes()).any(|(key, _)| credential_key(&key))
+                url::form_urlencoded::parse(form.as_bytes())
+                    .any(|(key, value)| credential_pair(&key, &value))
             })
         })
         || url
             .fragment()
-            .is_some_and(|fragment| fragment_credential(fragment, &credential_key))
+            .is_some_and(|fragment| fragment_credential(fragment, &credential_pair))
 }
 
 /// The https URL a `webcal://` or `webcals://` link is fetched as, the scheme replaced and the
@@ -151,7 +186,7 @@ pub fn webcal_as_https(uri: &str) -> Option<String> {
 /// `&`: a part's key ends at its `=`, is decoded (`%2F`, `+`) and may then start with a hash
 /// router's `/` or `!`; it has a value when something other than `&` follows the `=`. A key never
 /// holds one of those separators, so no credential key is missed.
-fn fragment_credential(fragment: &str, credential: &impl Fn(&str) -> bool) -> bool {
+fn fragment_credential(fragment: &str, credential: &impl Fn(&str, &str) -> bool) -> bool {
     let bytes = fragment.as_bytes();
     let mut start = 0;
     while start <= bytes.len() {
@@ -161,12 +196,14 @@ fn fragment_credential(fragment: &str, credential: &impl Fn(&str) -> bool) -> bo
             .map_or(bytes.len(), |at| start + at);
         if let Some(equals) = bytes[start..end].iter().position(|&b| b == b'=') {
             let has_value = bytes.get(start + equals + 1).is_some_and(|&b| b != b'&');
-            let key = percent_encoding::percent_decode_str(
-                &fragment[start..start + equals].replace('+', " "),
-            )
-            .decode_utf8_lossy()
-            .into_owned();
-            if has_value && credential(key.trim_start_matches(&['/', '!'][..])) {
+            let decode = |part: &str| {
+                percent_encoding::percent_decode_str(&part.replace('+', " "))
+                    .decode_utf8_lossy()
+                    .into_owned()
+            };
+            let key = decode(&fragment[start..start + equals]);
+            let value = decode(&fragment[start + equals + 1..end]);
+            if has_value && credential(key.trim_start_matches(&['/', '!'][..]), &value) {
                 return true;
             }
         }
@@ -194,7 +231,7 @@ pub fn strip<T: serde::de::DeserializeOwned>(value: &mut serde_json::Value, own:
                 && url.password().is_none()
                 && !url
                     .fragment()
-                    .is_some_and(|fragment| fragment_credential(fragment, &credential_key))
+                    .is_some_and(|fragment| fragment_credential(fragment, &credential_pair))
         })
     };
     let foreign = |s: &str| {
@@ -471,6 +508,68 @@ mod tests {
         }
     }
 
+    /// Bearer names are credentials (`connect.sid` folded like every key, an `Authorization` or
+    /// JWT ending a longer key too); `sid` and `session` with an opaque value are, with a record's
+    /// number they are not; a public list's page cursor is not.
+    #[test]
+    fn session_and_bearer_names_are_credential_keys() {
+        for key in [
+            "authorization",
+            "Authorization",
+            "x-authorization",
+            "jwt",
+            "access_jwt",
+            "connect.sid",
+            "connect_sid",
+        ] {
+            assert!(credential_key(key), "{key}");
+            assert!(credential_pair(key, "1"), "{key}");
+        }
+        for key in ["sid", "SID", "session", "Session"] {
+            assert!(!credential_key(key), "{key}");
+            for secret in [
+                "s3cr3tS3ssionValue",
+                "abc123def456",
+                "s%3AAbC1-dEf2.gHi3",
+                "QmFzZTY0VG9rZW5BQkM",
+                "AbCdEfGhIjKlMnOp",
+            ] {
+                assert!(credential_pair(key, secret), "{key}={secret}");
+            }
+            for public in [
+                "3243128",
+                "12",
+                "1",
+                "keynote",
+                "plenary-session-day-two",
+                "12345678901234567890",
+                "a1b2c3",
+                "keynote2025",
+                "abc123def45",
+                "Plenary-Session-Day",
+                "AbCdEfGhIjKlMnO",
+            ] {
+                assert!(!credential_pair(key, public), "{key}={public}");
+            }
+        }
+        for key in
+            PUBLIC_KEYS
+                .iter()
+                .copied()
+                .chain(["side", "inside", "possession", "sessions", "said"])
+        {
+            assert!(!credential_pair(key, "s3cr3tS3ssionValue"), "{key}");
+        }
+        // A session ID in the fragment counts too; a numbered one does not.
+        assert!(is_capability("https://app.example/#sid=s3cr3tS3ssionValue"));
+        assert!(!is_capability("https://app.example/#session=12"));
+        assert!(is_capability(
+            "https://shop.example/cart?session=abc123def456"
+        ));
+        assert!(!is_capability(
+            "https://conference.example/programme?session=keynote2025"
+        ));
+    }
     #[test]
     fn a_credential_key_is_matched_whole_after_decoding() {
         for flagged in [
@@ -479,6 +578,8 @@ mod tests {
             "https://example.org/feed.ics?X-Amz-Signature=x",
             "webcal://example.org/feed.ics?sig=x",
             "https://user:pass@example.org/feed.ics",
+            "https://TOKEN@example.org/feed.ics",
+            "https://:pass@example.org/feed.ics",
         ] {
             assert!(is_capability(flagged), "{flagged}");
         }
@@ -487,7 +588,9 @@ mod tests {
             "https://example.org/feed.ics?monkey=1",
             "https://example.org/token/feed.ics",
             "https://example.org/feed.ics?q=token",
-            "https://user@example.org/feed.ics",
+            "mailto:someone@example.org",
+            "ssh://git@codeberg.org/x/y.git",
+            "git+ssh://git@github.com/x/y.git",
             "https://example.org/apps/calendar/p/",
             "nostr:npub1example",
             "not a url",

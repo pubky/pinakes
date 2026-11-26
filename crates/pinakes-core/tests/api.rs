@@ -856,8 +856,9 @@ async fn a_poll_that_resets_the_feed_reads_no_lines_and_waits(pool: PgPool) {
 }
 
 /// A link that carries a credential is never previewed: `POST /v1/resolve` answers 400 for every
-/// capability probe of the shared fixture and for a password in the user info, stores nothing and
-/// spends no preview budget, and neither an answer nor a log line holds the secret.
+/// capability probe of the shared fixture (user info, a name alone included) and for a password,
+/// stores nothing and spends no preview budget, and neither an answer nor a log line holds the
+/// secret.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_link_that_carries_a_credential_is_never_previewed(pool: PgPool) {
     let probes: Value =
