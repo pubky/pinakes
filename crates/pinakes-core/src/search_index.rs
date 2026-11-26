@@ -4204,7 +4204,11 @@ mod tests {
         let _in = InBudget::new(&budget);
         let phrase = open.words_in(&searcher, open.fields.name, &rare);
         assert!(format!("{phrase:?}").contains("PhraseQuery"));
-        assert_eq!(format!("{phrase:?}").matches("every: 1").count(), 1);
+        assert_eq!(
+            format!("{phrase:?}").matches("every: 1 }").count(),
+            1,
+            "{phrase:?}"
+        );
     }
 
     /// A merge owed for a removal is recorded by the commit that deletes the document, so an index
