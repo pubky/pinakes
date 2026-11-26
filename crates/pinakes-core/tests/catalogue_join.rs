@@ -1026,6 +1026,7 @@ async fn the_links_a_key_names_name_the_key_back(pool: PgPool) {
         "mb:release-group:e9ed318d-8cc5-4cf8-ab77-505e39ab6ea4",
         "mb:recording:e9ed318d-8cc5-4cf8-ab77-505e39ab6ea4",
         "mb:release:e9ed318d-8cc5-4cf8-ab77-505e39ab6ea4",
+        "isrc:GBUM71029604",
         "wikidata:Q42",
         "doi:10.1000/abc",
         "arxiv:2302.04668",
@@ -1054,7 +1055,7 @@ async fn the_links_a_key_names_name_the_key_back(pool: PgPool) {
         }
     }
     for key in [
-        "isrc:GBUM71029604",
+        "upc:0602537347865",
         "url:00000000000000000000000000000000",
         "mb:work:x",
     ] {

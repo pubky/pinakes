@@ -31,7 +31,7 @@ fn config(pool: &PgPool, dir: &Path) -> (PathBuf, String, String) {
         format!(
             "database_url = {:?}\nlisten = \"127.0.0.1:{listen}\"\nadmin_listen = \"127.0.0.1:{admin}\"\n\
              nexus_url = \"http://127.0.0.1:9\"\n[pubky]\nenabled = false\n[canary]\nenabled = false\n\
-             [osm]\ndump_dir = {:?}\n[search]\nindex_dir = {:?}\n",
+             [osm]\ndump_dir = {:?}\n[search]\nindex_dir = {:?}\n[catalogues]\nenabled = false\n",
             database.as_str(),
             dir.join("dumps").to_str().unwrap(),
             dir.join("search-index").to_str().unwrap(),

@@ -48,7 +48,7 @@ const CANDIDATES: i64 = 32;
 
 /// The exact keys a link names by itself, without a fetch, each with the catalogue whose own
 /// key it is, in their stored form ([`stored_key`]): a MusicBrainz entity page's
-/// `mb:<entity>:<mbid>`, a Wikidata item page's `wikidata:Q…`, an OpenStreetMap object's
+/// `mb:<entity>:<mbid>`, a MusicBrainz ISRC page's `isrc:…`, a Wikidata item page's `wikidata:Q…`, an OpenStreetMap object's
 /// `osm:<type>/<id>`, a DOI's `doi:…`, an arXiv page's `arxiv:…`, an OpenAlex work's
 /// `openalex:W…`, a crate's `crate:…` (crates.io, docs.rs, lib.rs), an F-Droid app's
 /// `android:…`, a Flathub app's `flathub:…`, and a site's homepage (`/`, no query) as
@@ -60,6 +60,9 @@ pub fn link_keys(uri: &str) -> Vec<(String, Catalogue)> {
         if let Some(key) = crate::hubs::key::mb(kind, &mbid) {
             keys.push((key, Catalogue::Musicbrainz));
         }
+    }
+    if let Some((isrc, _)) = crate::hubs::musicbrainz::isrc_link(uri) {
+        keys.push((format!("isrc:{isrc}"), Catalogue::Musicbrainz));
     }
     if let Some((qid, _)) = crate::hubs::wikidata::item_link(uri) {
         if let Some(key) = crate::hubs::key::wikidata(&qid) {

@@ -47,6 +47,8 @@ struct Fixture {
     current: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Panic once, in the next import.
     panic_once: AtomicBool,
+    /// Fail once, in the next import, when its gate opens.
+    fail_at_gate: AtomicBool,
     need: u64,
 }
 impl Fixture {
@@ -64,6 +66,7 @@ impl Fixture {
             update_end: Mutex::new(UpdateEnd::Done),
             current: Mutex::default(),
             panic_once: AtomicBool::new(false),
+            fail_at_gate: AtomicBool::new(false),
             need: 1000,
         }
     }
@@ -106,6 +109,9 @@ impl Importer for Fixture {
                 self.entered.notify_one();
                 if let Some(gate) = &self.gate {
                     gate.notified().await;
+                    if self.fail_at_gate.swap(false, Ordering::SeqCst) {
+                        anyhow::bail!("the fixture dump broke off");
+                    }
                 }
             }
         }
@@ -1096,6 +1102,59 @@ async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
     let s = state(&pool, Catalogue::Wikidata).await;
     assert_eq!((s.error_count, s.last_error), (0, None));
     // Let the resumed run past its first batch.
+    gate.notify_one();
+    until("the resumed import", || async {
+        state(&pool, Catalogue::Wikidata)
+            .await
+            .last_import_at
+            .is_some()
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        fixture.started_from.lock().unwrap()[..2],
+        [None, Some(json!({"next": 10}))]
+    );
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.cards, s.error_count, s.phase.as_str()), (25, 0, "idle"));
+}
+
+/// A run that fails after the session of its catalogue lock ended (a database restart ends every
+/// session), before the lock's watch saw it, is a lost lock: logged only, nothing written to the
+/// state row (another daemon may hold the lock and the row by then), and the run resumes from its
+/// cursor once the lock is taken again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_fails_after_its_lock_went_records_nothing(pool: PgPool) {
+    let (mut ctx, _dir) = context(&pool, plenty());
+    // The watch checks only every 30 s: the failure comes first.
+    ctx.pace.lock_check = Duration::from_secs(30);
+    let mut fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    fixture.fail_at_gate.store(true, Ordering::SeqCst);
+    let fixture = Arc::new(fixture);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    let ended: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+    )
+    .bind(Catalogue::Wikidata.lock_key())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(ended);
+    // The run fails now, with its catalogue lock gone.
+    gate.notify_one();
+    until("the resumed run", || async {
+        fixture.started_from.lock().unwrap().len() == 2
+    })
+    .await;
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.last_error), (0, None));
     gate.notify_one();
     until("the resumed import", || async {
         state(&pool, Catalogue::Wikidata)

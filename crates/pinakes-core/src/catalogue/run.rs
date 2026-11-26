@@ -80,7 +80,7 @@ pub enum Plan {
     Wait(Duration),
 }
 
-/// One catalogue's importer. Steps 4–7 add one per catalogue to [`importers`].
+/// One catalogue's importer; [`importers`] lists them.
 #[async_trait]
 pub trait Importer: Send + Sync + 'static {
     /// Its catalogue; whether its full import is a large one is `Catalogue::large`.
@@ -131,8 +131,8 @@ pub trait Importer: Send + Sync + 'static {
 
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
 /// ([`to_start`]).
-pub fn importers(_config: &Config) -> Vec<Arc<dyn Importer>> {
-    Vec::new()
+pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
+    super::musicbrainz::importer(config).into_iter().collect()
 }
 
 /// What a run writes through: its catalogue, generation, resume point, position, work directory
@@ -156,6 +156,10 @@ pub struct Job<'a> {
 impl Job<'_> {
     pub fn catalogue(&self) -> Catalogue {
         self.catalogue
+    }
+    /// The database the run writes to (an importer reads its stored cards through it).
+    pub fn pool(&self) -> &PgPool {
+        self.pool
     }
     pub fn run(&self) -> Run {
         self.run
@@ -451,6 +455,17 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
                 lock = None;
                 ctx.pace.turn
             }
+            // A run that failed while this task's catalogue lock went too (a database restart
+            // ends both sessions): another daemon may hold the lock and the state row by now, so
+            // it is a lost lock, logged only.
+            Err(_) if catalogue_lock_gone(&mut lock, ctx.pace.lock_check).await => {
+                tracing::warn!(
+                    catalogue = catalogue.name(),
+                    "catalogue lock lost; the run resumes from its cursor once the lock is taken again"
+                );
+                lock = None;
+                ctx.pace.turn
+            }
             Err(failed) => {
                 let shown = failure::shown(&failed);
                 tracing::warn!(catalogue = catalogue.name(), error = %shown, "catalogue import failed; it resumes from its cursor");
@@ -464,6 +479,14 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             _ = shutdown.changed() => return,
             _ = tokio::time::sleep(wait) => {}
         }
+    }
+}
+
+/// Whether the catalogue lock this task held has gone (its session ended).
+async fn catalogue_lock_gone(lock: &mut Option<SessionLock>, wait: Duration) -> bool {
+    match lock.as_mut() {
+        Some(l) => l.check(wait).await == crate::locks::Check::Gone,
+        None => true,
     }
 }
 
@@ -655,6 +678,100 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     );
     Ok(Next::Again)
 }
+/// An importer whose plan is always `run` (`pinakesd catalogue import`).
+struct Forced {
+    inner: Arc<dyn Importer>,
+    run: Run,
+}
+#[async_trait]
+impl Importer for Forced {
+    fn catalogue(&self) -> Catalogue {
+        self.inner.catalogue()
+    }
+    fn disk_need(&self, run: Run, state: &State) -> u64 {
+        self.inner.disk_need(run, state)
+    }
+    async fn plan(&self, _state: &State) -> Result<Plan> {
+        Ok(Plan::Run(self.run))
+    }
+    async fn import(&self, job: &mut Job<'_>) -> Result<()> {
+        self.inner.import(job).await
+    }
+    async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
+        self.inner.update(job).await
+    }
+}
+
+/// One run of `importer` now, in this process (`pinakesd catalogue import`): a full import
+/// ([`Run::Import`], which takes up a full import that was cut off, else begins a new one), or an
+/// update ([`Run::Update`], after a finished import). It takes the catalogue's lock (refused
+/// while another process holds it), waits for the large-import turn and the disk as the task
+/// does (`waiting` says why, at each change), and runs through [`step`], so the daemon's code and
+/// state rows are the same. A failure is recorded as the task records it, and returned. The state
+/// row when the run has finished.
+pub async fn run_once(
+    importer: Arc<dyn Importer>,
+    ctx: &Context,
+    run: Run,
+    mut waiting: impl FnMut(&str),
+) -> Result<State> {
+    let catalogue = importer.catalogue();
+    let Some(lock) = SessionLock::try_take(&ctx.pool, catalogue.lock_key()).await? else {
+        anyhow::bail!("another process imports catalogue {catalogue} (its lock is held): stop that pinakesd or switch the catalogue off there first");
+    };
+    let ran = async {
+        let state = store::ensure_state(&ctx.pool, catalogue).await?;
+        match run {
+            Run::Import if state.run.as_deref() != Some("import") => {
+                sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,import_requested=$2,updated_at=now() WHERE catalogue=$1")
+                    .bind(catalogue.name())
+                    .bind("pinakesd catalogue import")
+                    .execute(&ctx.pool)
+                    .await?;
+            }
+            Run::Import => {}
+            Run::Update => {
+                anyhow::ensure!(
+                    state.last_import_at.is_some() && state.run.as_deref() != Some("import"),
+                    "catalogue {catalogue} has no finished full import to update: run the import first"
+                );
+            }
+        }
+        let forced = Forced {
+            inner: importer.clone(),
+            run,
+        };
+        let mut said: Option<String> = None;
+        loop {
+            match step(&forced, ctx).await {
+                Ok(Next::Again) => {
+                    let state = store::ensure_state(&ctx.pool, catalogue).await?;
+                    if state.run.is_none() && state.import_requested.is_none() {
+                        return Ok(state);
+                    }
+                }
+                Ok(Next::Wait(wait)) => {
+                    let state = store::ensure_state(&ctx.pool, catalogue).await?;
+                    let why = state.waiting.clone().unwrap_or_default();
+                    if said.as_deref() != Some(why.as_str()) {
+                        waiting(&why);
+                        said = Some(why);
+                    }
+                    tokio::time::sleep(wait.min(Duration::from_secs(60))).await;
+                }
+                Err(failed) => {
+                    let shown = failure::shown(&failed);
+                    record_failure(&ctx.pool, catalogue, &shown).await?;
+                    anyhow::bail!("catalogue {catalogue} run failed: {shown}");
+                }
+            }
+        }
+    };
+    let ended = ran.await;
+    lock.release().await;
+    ended
+}
+
 /// The catalogue's lock was lost while a run went on (its session ended).
 #[derive(Debug)]
 struct CatalogueLockLost;
@@ -697,7 +814,7 @@ async fn clear_waiting(pool: &PgPool, catalogue: Catalogue) -> Result<()> {
 }
 /// A failed run: `failed`, its error (as logged: no secret) and one more in the count. The run
 /// and its cursor stay.
-async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) -> Result<()> {
+pub async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) -> Result<()> {
     let mut error = error.to_owned();
     crate::model::truncate(&mut error, 1024);
     store::ensure_state(pool, catalogue).await?;
