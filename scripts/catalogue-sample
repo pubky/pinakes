@@ -249,8 +249,8 @@ daemon() {
 }
 stop_daemon() { kill "$daemon_pid"; wait "$daemon_pid" 2>/dev/null || true; daemon_pid=; }
 search() { curl -sf --get "http://127.0.0.1:$listen/v1/search" --data-urlencode "q=$1"; }
-found() { # $1: search answer, $2: uri
-  python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(i.get("uri")==sys.argv[1] for i in d["items"]) else 1)' "$2"
+found() { # stdin: a search answer; $1: a uri
+  python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(i.get("uri")==sys.argv[1] for i in d["items"]) else 1)' "$1"
 }
 daemon
 uri="https://musicbrainz.org/$rec_id"
