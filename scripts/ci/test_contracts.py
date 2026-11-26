@@ -551,8 +551,9 @@ with (p / 'calls.jsonl').open('a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\\n')
 if '--raw' in sys.argv or '--dry-run' in sys.argv:
     arches = ['amd64'] if os.environ.get('MISSING_ARM') else ['amd64', 'arm64']
-    annotations = {} if os.environ.get('MISSING_SOURCE') else {
-        'org.opencontainers.image.source': 'https://github.com/pubky/pinakes'}
+    dropped = os.environ.get('MISSING_SOURCE') == 'all' or (
+        os.environ.get('MISSING_SOURCE') == 'raw' and '--raw' in sys.argv)
+    annotations = {} if dropped else {'org.opencontainers.image.source': 'https://github.com/pubky/pinakes'}
     print(json.dumps({'annotations': annotations,
                       'manifests': [{'platform': {'os': 'linux', 'architecture': a}} for a in arches]}))
 """)
@@ -561,7 +562,9 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
             commit_sha, tag_object = 'a' * 40, 'b' * 40
             cases = [('true', False, {}), ('false', False, {}), ('true', True, {}),
                      # An index without the source annotation is refused before any tag moves.
-                     ('true', 'source', {'MISSING_SOURCE': '1'}),
+                     ('true', 'source', {'MISSING_SOURCE': 'all'}),
+                     # A promoted index read back without it fails the job.
+                     ('true', 'promoted', {'MISSING_SOURCE': 'raw'}),
                      # Fail closed before any registry call on a bad commit or run ID.
                      ('true', None, {'RELEASE_COMMIT': ''}), ('true', None, {'RELEASE_COMMIT': 'main'}),
                      ('true', None, {'GITHUB_RUN_ID': ''}), ('true', None, {'GITHUB_RUN_ID': '1-arm64'})]
@@ -582,6 +585,10 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
                 if missing is None:
                     self.assertNotEqual(run.returncode, 0, override)
                     self.assertEqual(recorded, [], override)
+                    continue
+                if missing == 'promoted':
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertEqual(len(mutations), 1)
                     continue
                 if missing:
                     self.assertNotEqual(run.returncode, 0)
@@ -640,12 +647,13 @@ if '--raw' in sys.argv or '--dry-run' in sys.argv:
         # Spelled in parts so this file does not match itself.
         old = ['synonym' + 'soft', 'docker' + '.io', 'DOCKER' + 'HUB']
         # Where an image name is published, pulled or documented. Sources (the Docker Hub source)
-        # and their fixtures may name Docker Hub links.
+        # and their fixtures and e2e samples may name Docker Hub links.
         def publishes(path):
-            return (path.startswith(('.github/', 'scripts/', 'ops/', 'e2e/')) and '/fixtures/' not in path
+            return (path.startswith(('.github/', 'scripts/', 'ops/', 'e2e/'))
+                    and '/fixtures/' not in path and not path.startswith('e2e/samples')
                     or path in ('Dockerfile', '.dockerignore', 'README.md', '.env.example',
                                 'pinakes.example.toml', 'docs/deployment.md', 'docs/operations.md')
-                    or 'compose' in path)
+                    or re.search(r'(^|/)(docker-)?compose[^/]*\.ya?ml$', path))
         checked = [p for p in tracked if p and publishes(p) and (ROOT / p).is_file()]
         self.assertIn('docs/deployment.md', checked)
         self.assertIn('.github/workflows/ci.yml', checked)

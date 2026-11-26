@@ -205,8 +205,9 @@ Owner prerequisites, not set by this repository's files:
   Change visibility). While it is private, `docker pull` without a login fails. An organization
   owner or a package admin can change it.
 - No package named `ghcr.io/pubky/pinakes` exists before the first release, or it gives this
-  repository write access (package settings, Manage Actions access). A package pushed by hand or
-  with a personal token is not linked to the repository, and the first publish fails with 403.
+  repository write access (package settings, Manage Actions access). A package first pushed by
+  hand or with a personal token, even one linked by the image's source label, doesn't give this
+  repository's workflows write access, and the first publish fails with 403.
 
 Publishing needs no stored secret. The two publishing jobs log in to `ghcr.io` with the run's own
 `GITHUB_TOKEN`, which only they get with `packages: write`. A workflow that creates the package
