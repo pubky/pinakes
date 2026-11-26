@@ -151,6 +151,11 @@ card at once, and reads its Also on and its Wikipedia summary in the background;
 a moment later shows them. With its catalogue off, the link is unknown again. An OpenStreetMap
 card found in search does not open this way yet: its link and ID answer 404.
 
+A card whose root is no web link (an OpenAlex work, stored under its `doi:` root for its
+`doi.org` link) carries the root's web page ([Identifier pages](#identifier-pages)): in `open_in`
+named by the page's host (`[{"client": "doi.org", "url": "https://doi.org/…"}]`), wherever it is
+read, among an unshared card's `aliases`, and as its host for `host=` (`host=doi.org`).
+
 ### Lookup
 
 `POST /v1/resources/lookup` returns up to 500 cards in one request. Send exactly one list:
@@ -160,7 +165,7 @@ card found in search does not open this way yet: its link and ID answer 404.
 
 A catalogue card nobody shared is answered by either list, as `by-uri` and
 `GET /v1/resources/{id}` answer it ([Catalogue cards](#catalogue-cards)), with a lookup card's
-`also_on` and `maybe_same`; one request answers at most 20 of them, and the entries past those
+`also_on` and `maybe_same`; one request answers at most 8 of them, and the entries past those
 are skipped. The answer lists the cards in request order. Duplicates are kept and unknown entries are skipped. Sending both lists, or neither, is a 400.
 
 ### Info
@@ -1162,14 +1167,18 @@ distance. `q` matches like this:
 
 The index reads at most 32 items of `q` (words, phrases, words to leave out, `or`) and a phrase by
 its first 8 words (by all its words, in any order, when every one is in more than 10,000 names and
-5% of the index), proposes names by at most 64 of its three-letter pieces (the rarest), and
-expands the start of a word to at most 1,000 words (of the first 20,000 per index segment in
-dictionary order, those the most names hold); Postgres checks every candidate against the whole
-`q`. At most `limits.search_index_searches` text searches use the index at once (one per CPU core
-by default), a quarter of them at most for one client address, and each has
-`limits.search_index_budget_ms` (2 s) for its index stage, its wait for a turn included. A search
-that finds no free turn within that time, runs past it, or whose client already runs its share,
-answers `503` with `Retry-After: 1`; its work in the index stops there.
+5% of the index, or when its rarest word is in more than 50,000 names), proposes names by at most
+64 of its three-letter pieces (the rarest), and expands the start of a word to at most 1,000 words
+(of the first 20,000 per index segment in dictionary order, those the most names hold, while they
+are in 500,000 names in all); Postgres checks every candidate against the whole `q`. At most
+`limits.search_index_searches` text searches use the index at once (one per CPU core by default),
+and each has `limits.search_index_budget_ms` (2 s) for its index stage, its wait for a turn
+included. A search waits for a free turn; one client address (an IPv6 address by its /64) that
+already runs half the turns waits while another client's search does, and alone it takes every
+free turn. A search that gets no turn within its budget, or runs past it, answers `503` with
+`Retry-After: 1`: the index stops it at its next check (between the posting steps of a word or
+phrase, and before each word set, which reads its words' lists in one go). A text of one character
+found inside names, which Postgres reads alone, takes a turn too.
 
 People's tags and catalogue labels add to a card's relevance but never match `q` alone. A post
 whose author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's
@@ -1227,10 +1236,12 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;
 - without text, the best known first (by its source's fame) after every referenced unit, at most
   `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near` or
-  `bbox`, those are the best known of the eight times `limits.search_text_candidates` cards
+  `bbox`, those of the twice `limits.search_text_candidates` best known cards that are inside it;
+  when they are fewer, also the best known of the twice `limits.search_text_candidates` cards
   nearest to the circle's centre (or to each box's centre) inside it, so a large area reads a
-  bounded number of cards; with `type` (at most 32 types with their subtypes, and no `tags` or
-  `host`), the best known of each type and subtype merged;
+  bounded number of cards. With `host`, each catalogue's best known of each host; with `type` (no
+  `tags`), each catalogue's best known of each type and subtype; both merged. A catalogue switched
+  off but not dropped costs these reads nothing;
 - a catalogue switched off leaves every search at once.
 
 ### Search by key

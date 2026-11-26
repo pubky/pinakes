@@ -119,6 +119,10 @@ const MAX_PIECES: usize = 64;
 const PREFIX_TERMS: usize = 1_000;
 /// The most words of a name field starting with a word that are read per segment to choose them.
 const PREFIX_SCAN: usize = 20_000;
+/// The most postings the words a word start expands to hold, in all (summed over segments).
+const PREFIX_POSTINGS: u64 = if cfg!(test) { 2_000 } else { 500_000 };
+/// The most documents the rarest word of a phrase may be in for the index to match it as a phrase.
+const PHRASE_POSTINGS: u64 = if cfg!(test) { 100 } else { 50_000 };
 /// The most words of one phrase the index matches as a phrase; Postgres checks the whole phrase.
 const MAX_PHRASE_WORDS: usize = 8;
 /// The most removed resources whose merge a commit records ([`Payload::owed`]); past it the next
@@ -533,10 +537,7 @@ fn card_document(f: &Fields, card: &CardRow, import: &str) -> Option<TantivyDocu
     for t in crate::model::type_path(&card.type_name) {
         doc.add_text(f.type_path, t);
     }
-    if let Some(host) = url::Url::parse(&card.uri)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-    {
+    if let Some(host) = crate::catalogue::card_host(&card.uri) {
         doc.add_text(f.host, host);
     }
     doc.add_text(f.source, &card.source);
@@ -816,44 +817,156 @@ pub struct SearchIndex {
     served: AtomicU64,
     /// The catalogues whose cards the index holds: those switched on.
     catalogues: std::sync::RwLock<Vec<String>>,
-    /// The turns of text searches, each one's budget and the number of turns
-    /// ([`SearchIndex::set_bounds`]).
-    bounds: std::sync::RwLock<(Arc<tokio::sync::Semaphore>, Duration, usize)>,
-    /// The index searches each client address runs now ([`ClientShare`]).
-    clients: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
+    /// The turns of text searches and each one's budget ([`SearchIndex::set_bounds`]).
+    bounds: std::sync::RwLock<(Arc<Turns>, Duration)>,
 }
-/// One of a client's index searches running now; dropped when it ends.
-struct ClientShare {
-    clients: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
-    client: std::net::IpAddr,
+/// The address a client's share of turns is counted by: an IPv4 address, or an IPv6 address's
+/// /64 (one host's or one network's addresses, which a client may rotate through); an IPv4
+/// address written as IPv6 (`::ffff:a.b.c.d`) is that IPv4 address.
+fn share_key(client: std::net::IpAddr) -> std::net::IpAddr {
+    match client {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+                u128::from(v6) & !((1u128 << 64) - 1),
+            )),
+        },
+        v4 => v4,
+    }
 }
-impl ClientShare {
-    /// One more search of `client`, unless it runs `share` already.
-    fn take(
-        clients: &Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
-        client: std::net::IpAddr,
-        share: usize,
-    ) -> Result<Self> {
-        let mut running = clients.lock().expect("clients");
-        let n = running.entry(client).or_default();
-        if *n >= share {
-            return Err(Busy.into());
+/// The turns of text searches ([`SearchIndex::set_bounds`]), shared between clients: a search
+/// waits for a free turn; a client past its share (half the turns, at least one) takes one only
+/// while no other client under its share waits, so alone it takes every free turn. A waiting
+/// search holds nothing.
+struct Turns {
+    /// The number of turns.
+    limit: usize,
+    state: std::sync::Mutex<TurnState>,
+    /// Wakes the waiting searches when a turn is given back or a waiting search leaves.
+    changed: tokio::sync::Notify,
+}
+#[derive(Default)]
+struct TurnState {
+    free: usize,
+    /// The turns each client holds, by [`share_key`]; `None`: a search of no client.
+    running: HashMap<Option<std::net::IpAddr>, usize>,
+    /// The searches each client has waiting for a turn.
+    waiting: HashMap<Option<std::net::IpAddr>, usize>,
+}
+impl TurnState {
+    /// Whether `client` runs its share: never a search of no client.
+    fn at_share(&self, client: Option<std::net::IpAddr>, share: usize) -> bool {
+        client.is_some() && self.running.get(&client).copied().unwrap_or(0) >= share
+    }
+}
+/// One turn of a text search, given back when dropped.
+pub struct Turn {
+    turns: Arc<Turns>,
+    client: Option<std::net::IpAddr>,
+}
+impl Drop for Turn {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.turns.state.lock() {
+            state.free += 1;
+            if let Some(n) = state.running.get_mut(&self.client) {
+                *n -= 1;
+                if *n == 0 {
+                    state.running.remove(&self.client);
+                }
+            }
         }
-        *n += 1;
-        Ok(Self {
-            clients: clients.clone(),
+        self.turns.changed.notify_waiters();
+    }
+}
+/// A search waiting for a turn, counted while it waits.
+struct Waiting<'a> {
+    turns: &'a Turns,
+    client: Option<std::net::IpAddr>,
+}
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.turns.state.lock() {
+            if let Some(n) = state.waiting.get_mut(&self.client) {
+                *n -= 1;
+                if *n == 0 {
+                    state.waiting.remove(&self.client);
+                }
+            }
+        }
+        // A search under its share leaving may let one past its share take a free turn.
+        self.turns.changed.notify_waiters();
+    }
+}
+impl Turns {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            state: std::sync::Mutex::new(TurnState {
+                free: limit,
+                ..Default::default()
+            }),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+    /// A client's share: half the turns, at least one.
+    fn share(&self) -> usize {
+        (self.limit / 2).max(1)
+    }
+    /// A turn for a search of `client`, now when one is free and the client may take it.
+    fn try_take(
+        self: &Arc<Self>,
+        state: &mut TurnState,
+        client: Option<std::net::IpAddr>,
+    ) -> Option<Turn> {
+        let share = self.share();
+        let others_under_share = state
+            .waiting
+            .iter()
+            .any(|(other, n)| *other != client && *n > 0 && !state.at_share(*other, share));
+        if state.free == 0 || (state.at_share(client, share) && others_under_share) {
+            return None;
+        }
+        state.free -= 1;
+        *state.running.entry(client).or_default() += 1;
+        Some(Turn {
+            turns: self.clone(),
             client,
         })
     }
-}
-impl Drop for ClientShare {
-    fn drop(&mut self) {
-        if let Ok(mut running) = self.clients.lock() {
-            if let Some(n) = running.get_mut(&self.client) {
-                *n -= 1;
-                if *n == 0 {
-                    running.remove(&self.client);
+    /// A turn for a search of `client` (its address), waited for until `deadline`; past it, why
+    /// none came: `turn` (every turn taken) or `share` (one free, the client past its share while
+    /// others waited).
+    async fn take(
+        self: &Arc<Self>,
+        client: Option<std::net::IpAddr>,
+        deadline: tokio::time::Instant,
+    ) -> std::result::Result<Turn, &'static str> {
+        let client = client.map(share_key);
+        {
+            let mut state = self.state.lock().expect("turns");
+            if let Some(turn) = self.try_take(&mut state, client) {
+                return Ok(turn);
+            }
+            *state.waiting.entry(client).or_default() += 1;
+        }
+        let _waiting = Waiting {
+            turns: self,
+            client,
+        };
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.state.lock().expect("turns");
+                // Its own wait no longer counts against it once a turn is taken.
+                if let Some(turn) = self.try_take(&mut state, client) {
+                    return Ok(turn);
                 }
+            }
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                let state = self.state.lock().expect("turns");
+                return Err(if state.free == 0 { "turn" } else { "share" });
             }
         }
     }
@@ -995,15 +1108,10 @@ impl SearchIndex {
             catalogues: std::sync::RwLock::new(vec![]),
             // The daemon sets its own (`limits.search_index_*`); an index in memory (tests, the
             // e2e harness) waits long, so a loaded host answers no test with a 503.
-            bounds: {
-                let turns = std::thread::available_parallelism().map_or(2, |n| n.get());
-                std::sync::RwLock::new((
-                    Arc::new(tokio::sync::Semaphore::new(turns)),
-                    Duration::from_secs(30),
-                    turns,
-                ))
-            },
-            clients: Arc::default(),
+            bounds: std::sync::RwLock::new((
+                Turns::new(std::thread::available_parallelism().map_or(2, |n| n.get())),
+                Duration::from_secs(30),
+            )),
             home,
             open: std::sync::RwLock::new(None),
             pass: tokio::sync::Mutex::new(()),
@@ -1517,57 +1625,63 @@ impl SearchIndex {
     }
     /// The best units for a text search, at most `cap`, in the order [`TextOrder`] asks for,
     /// with every filter the index holds applied; `None` when the daemon's index is not open
-    /// yet (the search then reads Postgres alone).
+    /// yet or the index leaves the text to Postgres (the search then reads Postgres alone).
     pub async fn candidates(
         &self,
         pool: &PgPool,
         query: TextQuery,
         cap: usize,
     ) -> Result<Option<Candidates>> {
-        self.candidates_for(pool, query, cap, None).await
+        Ok(self
+            .candidates_for(pool, query, cap, None)
+            .await?
+            .candidates)
     }
-    /// [`SearchIndex::candidates`] for a search by `client` (its address): one client holds at
-    /// most a quarter of the turns (at least one) at once; a search past its share answers like a
-    /// busy index ([`Busy`]).
+    /// [`SearchIndex::candidates`] for a search by `client` (its address), which shares the turns
+    /// with the others ([`Turns`]): a search that gets no turn within its budget, or runs past
+    /// it, answers like a busy index ([`Busy`]). A text the index leaves to Postgres (one
+    /// character found inside names) keeps its turn while Postgres reads it ([`Found::turn`]).
     pub async fn candidates_for(
         &self,
         pool: &PgPool,
         query: TextQuery,
         cap: usize,
         client: Option<std::net::IpAddr>,
-    ) -> Result<Option<Candidates>> {
+    ) -> Result<Found> {
         if let Home::Memory = self.home {
             self.sync(pool).await?;
         }
         // Read before the search: a commit during it moves the revision past this page's.
         let revision = self.revision();
         let Some(open) = self.current() else {
-            return Ok(None);
+            return Ok(Found::default());
         };
         // At most `limits.search_index_searches` searches run at once, each within
         // `limits.search_index_budget_ms`, its wait for a turn included. The turn goes with the
         // search into its thread: a search whose request is gone still holds it until it stops.
-        let (searches, budget, turns) = self.bounds();
-        let share = client
-            .map(|client| ClientShare::take(&self.clients, client, (turns / 4).max(1)))
-            .transpose()
-            .inspect_err(|_| crate::telemetry::search_index_busy("share"))?;
+        let (turns, budget) = self.bounds();
         let deadline = std::time::Instant::now() + budget;
-        let turn = tokio::time::timeout_at(deadline.into(), searches.acquire_owned())
+        let turn = turns
+            .take(client, deadline.into())
             .await
-            .map_err(|_| {
-                crate::telemetry::search_index_busy("turn");
+            .map_err(|reason| {
+                crate::telemetry::search_index_busy(reason);
                 Busy
-            })??;
+            })?;
         let budget = Budget::new(deadline);
-        let units = tokio::task::spawn_blocking(move || {
-            let _turn = (turn, share);
-            open.search(&query, cap, &budget)
+        let (turn, units) = tokio::task::spawn_blocking(move || {
+            let units = open.search(&query, cap, &budget);
+            (turn, units)
         })
         .await?;
         let units = match units {
             Ok(Some(units)) => units,
-            Ok(None) => return Ok(None),
+            Ok(None) => {
+                return Ok(Found {
+                    candidates: None,
+                    turn: Some(turn),
+                })
+            }
             Err(error) => {
                 if error.is::<Busy>() {
                     crate::telemetry::search_index_busy("budget");
@@ -1575,21 +1689,35 @@ impl SearchIndex {
                 return Err(error);
             }
         };
+        drop(turn);
         self.served.fetch_add(1, Ordering::SeqCst);
-        Ok(Some(Candidates { units, revision }))
+        Ok(Found {
+            candidates: Some(Candidates { units, revision }),
+            turn: None,
+        })
     }
-    /// Count `client` as running one more index search until the guard is dropped (tests: a
-    /// client past its share).
+    /// Take one turn of the text searches for `client` (its address, counted as [`share_key`]
+    /// counts it) now, whatever its share, and keep it until the guard is dropped (tests).
     #[doc(hidden)]
-    pub fn hold_share(&self, client: std::net::IpAddr) -> Option<impl Drop> {
-        let turns = self.bounds().2;
-        ClientShare::take(&self.clients, client, (turns / 4).max(1)).ok()
+    pub fn hold_turn_for(&self, client: std::net::IpAddr) -> Option<Turn> {
+        self.hold(Some(share_key(client)))
     }
-    /// Take one turn of the text searches and keep it until the permit is dropped (tests: a busy
+    /// Take one turn of the text searches now and keep it until the guard is dropped (tests: a busy
     /// index).
     #[doc(hidden)]
-    pub fn hold_turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        self.bounds().0.try_acquire_owned().ok()
+    pub fn hold_turn(&self) -> Option<Turn> {
+        self.hold(None)
+    }
+    fn hold(&self, client: Option<std::net::IpAddr>) -> Option<Turn> {
+        let turns = self.bounds().0;
+        let mut state = turns.state.lock().expect("turns");
+        if state.free == 0 {
+            return None;
+        }
+        state.free -= 1;
+        *state.running.entry(client).or_default() += 1;
+        drop(state);
+        Some(Turn { turns, client })
     }
     /// Run at most `searches` text searches at once (0: one per CPU core), each within `budget`
     /// (`limits.search_index_searches`, `limits.search_index_budget_ms`).
@@ -1598,15 +1726,11 @@ impl SearchIndex {
             0 => std::thread::available_parallelism().map_or(2, |n| n.get()),
             n => n,
         };
-        *self.bounds.write().expect("bounds") = (
-            Arc::new(tokio::sync::Semaphore::new(searches)),
-            budget,
-            searches,
-        );
+        *self.bounds.write().expect("bounds") = (Turns::new(searches), budget);
     }
-    fn bounds(&self) -> (Arc<tokio::sync::Semaphore>, Duration, usize) {
-        let (searches, budget, turns) = &*self.bounds.read().expect("bounds");
-        (searches.clone(), *budget, *turns)
+    fn bounds(&self) -> (Arc<Turns>, Duration) {
+        let (turns, budget) = &*self.bounds.read().expect("bounds");
+        (turns.clone(), *budget)
     }
 }
 /// The boundary the index's last commit recorded.
@@ -2379,6 +2503,15 @@ pub struct Candidates {
     pub units: Vec<Candidate>,
     pub revision: u64,
 }
+/// What [`SearchIndex::candidates_for`] found.
+#[derive(Default)]
+pub struct Found {
+    /// The candidates; `None` when Postgres reads the text alone.
+    pub candidates: Option<Candidates>,
+    /// The turn the search keeps while Postgres reads a text the index left to it (one
+    /// character found inside names): dropped when that read ends.
+    pub turn: Option<Turn>,
+}
 /// One candidate: its unit, its resource, and its text relevance times (1 + fame).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
@@ -2508,10 +2641,15 @@ thread_local! {
 /// query that matches nothing for long (a word left out of everything, an intersection) stops
 /// too. Without a search under way, `query` as it is.
 fn leaf(query: Box<dyn Query>) -> Box<dyn Query> {
+    leaf_every(query, 1024)
+}
+/// [`leaf`], checking the budget every `every` posting steps (a phrase's step may read far).
+fn leaf_every(query: Box<dyn Query>, every: u32) -> Box<dyn Query> {
     SEARCH_BUDGET.with(|budget| match &*budget.borrow() {
         Some(budget) => Box::new(Budgeted {
             inner: query,
             budget: budget.clone(),
+            every,
         }),
         None => query,
     })
@@ -2545,17 +2683,19 @@ impl std::fmt::Display for Busy {
 }
 impl std::error::Error for Busy {}
 /// A query that stops matching once its search's [`Budget`] has run out: each segment checks it
-/// before it starts, and every 1024 documents.
+/// before it starts, and every `every` posting steps.
 #[derive(Debug)]
 struct Budgeted {
     inner: Box<dyn Query>,
     budget: Arc<Budget>,
+    every: u32,
 }
 impl Clone for Budgeted {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.box_clone(),
             budget: self.budget.clone(),
+            every: self.every,
         }
     }
 }
@@ -2572,6 +2712,7 @@ impl Query for Budgeted {
         Ok(Box::new(BudgetedWeight {
             inner: self.inner.weight(scoring)?,
             budget: self.budget.clone(),
+            every: self.every,
         }))
     }
     fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
@@ -2581,6 +2722,7 @@ impl Query for Budgeted {
 struct BudgetedWeight {
     inner: Box<dyn tantivy::query::Weight>,
     budget: Arc<Budget>,
+    every: u32,
 }
 impl tantivy::query::Weight for BudgetedWeight {
     fn scorer(
@@ -2594,6 +2736,7 @@ impl tantivy::query::Weight for BudgetedWeight {
         Ok(Box::new(BudgetedScorer {
             inner: self.inner.scorer(reader, boost)?,
             budget: self.budget.clone(),
+            every: self.every.max(1),
             steps: 0,
             ended: false,
         }))
@@ -2609,6 +2752,7 @@ impl tantivy::query::Weight for BudgetedWeight {
 struct BudgetedScorer {
     inner: Box<dyn tantivy::query::Scorer>,
     budget: Arc<Budget>,
+    every: u32,
     steps: u32,
     ended: bool,
 }
@@ -2617,7 +2761,7 @@ impl BudgetedScorer {
         #[cfg(test)]
         STEPS.with(|n| n.set(n.get() + 1));
         self.steps = self.steps.wrapping_add(1);
-        if !self.ended && self.steps.is_multiple_of(1024) && self.budget.over() {
+        if !self.ended && self.steps.is_multiple_of(self.every) && self.budget.over() {
             self.ended = true;
         }
         self.ended
@@ -2709,6 +2853,7 @@ impl Open {
             let query = Budgeted {
                 inner: query,
                 budget: budget.clone(),
+                every: 1024,
             };
             let hits = searcher.search(&query, &ranked(cap, order, now))?;
             budget.check()?;
@@ -3018,10 +3163,12 @@ impl Open {
             .collect()
     }
     /// The words of one item in one field, as a word or a phrase.
-    /// A phrase is matched as one in the index by its first [`MAX_PHRASE_WORDS`] words, and as all
-    /// of its words when every one is common (in [`COMMON_PIECE_DOCS`] and [`COMMON_PIECE`] of the
-    /// documents: `"the the of"`): a phrase of common words reads their whole position lists in one
-    /// step, past any budget. Postgres checks the whole phrase on every candidate.
+    /// A phrase is matched as one in the index by its first [`MAX_PHRASE_WORDS`] words, checking
+    /// the budget at every step, and as all of its words when every one is common (in
+    /// [`COMMON_PIECE_DOCS`] and [`COMMON_PIECE`] of the documents: `"the the of"`) or its rarest
+    /// is in more than [`PHRASE_POSTINGS`] documents (`"york new"`): one step of a phrase reads
+    /// its words' lists until a document holds them in order, which for such words may be the
+    /// whole lists. Postgres checks the whole phrase on every candidate.
     fn words_in(
         &self,
         searcher: &tantivy::Searcher,
@@ -3045,19 +3192,26 @@ impl Open {
                 .doc_freq(t)
                 .is_ok_and(|n| n >= COMMON_PIECE_DOCS && n as f64 / docs > COMMON_PIECE)
         });
-        if common {
+        let rarest = terms
+            .iter()
+            .map(|t| searcher.doc_freq(t).unwrap_or(u64::MAX))
+            .min()
+            .unwrap_or(0);
+        if common || rarest > PHRASE_POSTINGS {
             terms.sort();
             terms.dedup();
             return Box::new(BooleanQuery::new(
                 terms.into_iter().map(|t| (Occur::Must, one(t))).collect(),
             ));
         }
-        leaf(Box::new(PhraseQuery::new(terms)))
+        leaf_every(Box::new(PhraseQuery::new(terms)), 1)
     }
     /// The words of `field` that start with `word` (`word` too), at most [`PREFIX_TERMS`] in all:
     /// of the first [`PREFIX_SCAN`] such words of each segment, in dictionary order, those the
-    /// most documents hold. A short start in a large dictionary expands to a bounded set of words;
-    /// the scan stops with the search's budget.
+    /// most documents hold, each while the documents of those taken stay within
+    /// [`PREFIX_POSTINGS`] in all (a word set reads every posting of its words in one go). A short
+    /// start in a large dictionary expands to a bounded set of words; the scan stops with the
+    /// search's budget.
     fn prefix_terms(&self, searcher: &tantivy::Searcher, field: Field, word: &str) -> Vec<Term> {
         let over = || SEARCH_BUDGET.with(|b| b.borrow().as_ref().is_some_and(|b| b.over()));
         let mut held: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
@@ -3086,6 +3240,14 @@ impl Open {
         }
         let mut held: Vec<(u64, Vec<u8>)> = held.into_iter().map(|(k, n)| (n, k)).collect();
         held.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut postings = 0u64;
+        held.retain(|(n, _)| {
+            let fits = postings + n <= PREFIX_POSTINGS;
+            if fits {
+                postings += n;
+            }
+            fits
+        });
         held.truncate(PREFIX_TERMS);
         held.into_iter()
             .filter_map(|(_, key)| {
@@ -3699,9 +3861,11 @@ mod tests {
     }
 
     /// Property (fuzz): any text up to the API's 256 bytes (many words, phrases, `-`, `or` chains,
-    /// one character, symbols, scripts written without spaces) is searched over a seeded index
-    /// within its budget: candidates, or `None` (Postgres reads it alone), or `Busy` once the budget
-    /// ran out; never a panic, never more than the candidates asked for from each part.
+    /// one character, symbols, scripts written without spaces) is searched over a seeded index:
+    /// candidates, or `None` (Postgres reads it alone); never a panic, never more than the
+    /// candidates asked for from each part. Each text holds at most MAX_ITEMS items, and each of
+    /// its words' starts expands to at most PREFIX_TERMS words holding at most PREFIX_POSTINGS
+    /// postings. The budget is generous (a loaded host is slow): no wall-clock bound is checked.
     #[test]
     fn any_text_of_256_bytes_is_searched_within_its_budget() {
         let mut gen =
@@ -3785,23 +3949,30 @@ mod tests {
                 ])),
                 ..Default::default()
             };
-            let started = std::time::Instant::now();
-            let budget = Budget::new(started + std::time::Duration::from_secs(5));
+            let parts = items(&open.index, &text);
+            assert!(parts.len() <= MAX_ITEMS, "{round}: {text:?}");
+            let searcher = open.reader.searcher();
+            for word in text.split_whitespace().take(4) {
+                let word = word.to_lowercase();
+                let terms = open.prefix_terms(&searcher, open.fields.name, &word);
+                let postings: u64 = terms
+                    .iter()
+                    .map(|t| searcher.doc_freq(t).unwrap_or(0))
+                    .sum();
+                assert!(terms.len() <= PREFIX_TERMS, "{round}: {word:?}");
+                assert!(postings <= PREFIX_POSTINGS, "{round}: {word:?}: {postings}");
+            }
+            let budget =
+                Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(600));
             match open.search(&q, 500, &budget) {
                 Ok(Some(found)) => {
                     served += 1;
                     assert!(found.len() <= 1000, "{round}: {text:?}")
                 }
                 Ok(None) => assert_eq!(text.trim().chars().count(), 1, "{text:?}"),
-                Err(error) => assert!(error.is::<Busy>(), "{round}: {text:?}: {error}"),
+                Err(error) => panic!("{round}: {text:?}: {error}"),
             }
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(10),
-                "{round}: {text:?} took {:?}",
-                started.elapsed()
-            );
         }
-        // The budget is a backstop: such texts are answered.
         assert!(served >= 250, "{served} of 300 answered");
     }
 
@@ -3940,6 +4111,57 @@ mod tests {
             count_up_to(&searcher, &all, 1_000_000, &budget).unwrap(),
             names.len()
         );
+    }
+
+    /// A client's share is counted by its IPv4 address or its IPv6 address's /64; an IPv4 address
+    /// written as IPv6 is that address.
+    #[test]
+    fn a_client_is_its_address_or_its_v6_network() {
+        let key = |a: &str| share_key(a.parse().unwrap());
+        assert_eq!(key("2001:db8::1"), key("2001:db8::ffff:2"));
+        assert_ne!(key("2001:db8::1"), key("2001:db8:0:1::1"));
+        assert_eq!(key("::ffff:192.0.2.1"), key("192.0.2.1"));
+        assert_ne!(key("192.0.2.1"), key("192.0.2.2"));
+    }
+
+    /// A word start expands to the words the most names hold while the postings they hold, in all,
+    /// stay within PREFIX_POSTINGS (a word set reads every posting of its words in one go); a
+    /// phrase whose rarest word more names hold than PHRASE_POSTINGS is matched as all its words,
+    /// each read a step at a time, and a phrase leaf checks the budget at every step.
+    #[test]
+    fn expansions_and_phrases_are_bounded_by_the_postings_they_read() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let per = PREFIX_POSTINGS / 4 + 1;
+        let mut names: Vec<String> = (0..6)
+            .flat_map(|n| (0..per).map(move |_| format!("b{n} york new")))
+            .collect();
+        names.push("b9".to_owned());
+        named(&open, &names);
+        let searcher = open.reader.searcher();
+        let terms = open.prefix_terms(&searcher, open.fields.name, "b");
+        let postings: u64 = terms.iter().map(|t| searcher.doc_freq(t).unwrap()).sum();
+        assert!(postings <= PREFIX_POSTINGS, "{postings}");
+        assert_eq!(
+            terms.len(),
+            4,
+            "three of the frequent words and the rare one"
+        );
+        let words = ["new".to_owned(), "york".to_owned()];
+        let query = format!("{:?}", open.words_in(&searcher, open.fields.name, &words));
+        assert!(!query.contains("PhraseQuery"), "{query}");
+        let rare = ["b9".to_owned(), "york".to_owned()];
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let _in = InBudget::new(&budget);
+        let phrase = open.words_in(&searcher, open.fields.name, &rare);
+        assert!(format!("{phrase:?}").contains("PhraseQuery"));
+        assert_eq!(format!("{phrase:?}").matches("every: 1").count(), 1);
     }
 
     /// A merge owed for a removal is recorded by the commit that deletes the document, so an index

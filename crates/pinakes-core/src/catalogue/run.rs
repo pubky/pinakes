@@ -1044,12 +1044,13 @@ async fn clear_waiting(pool: &PgPool, catalogue: Catalogue) -> Result<()> {
     Ok(())
 }
 /// A failed run: `failed`, its error (as logged: no secret) and one more in the count. The run
-/// and its cursor stay.
+/// and its cursor stay; an operator's allowance to shrink is taken back (the next `shrunk` failure
+/// is checked again).
 pub async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) -> Result<()> {
     let mut error = error.to_owned();
     crate::model::truncate(&mut error, 1024);
     store::ensure_state(pool, catalogue).await?;
-    sqlx::query("UPDATE catalogue_state SET phase='failed',waiting=NULL,last_error=$2,error_count=error_count+1,updated_at=now() WHERE catalogue=$1")
+    sqlx::query("UPDATE catalogue_state SET phase='failed',waiting=NULL,last_error=$2,error_count=error_count+1,shrink_allowed=false,updated_at=now() WHERE catalogue=$1")
         .bind(catalogue.name())
         .bind(error)
         .execute(pool)

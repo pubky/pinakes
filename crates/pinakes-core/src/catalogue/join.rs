@@ -376,6 +376,14 @@ pub fn document(card: &CardRow, uri: &str) -> Option<ResourceMeta> {
         _ => None,
     };
     doc.labels = card.labels.clone();
+    // A root that is no web link (`doi:…`) carries its web page, as a fetched card of it does.
+    if let Some((page, host)) = super::root_page(uri) {
+        doc.aliases.push(page.clone());
+        doc.open_in.push(model::OpenIn {
+            client: host,
+            url: page,
+        });
+    }
     doc.catalogue = Some(CatalogueRef {
         catalogue: card.catalogue.clone(),
         source_id: card.source_id.clone(),
@@ -459,6 +467,17 @@ pub async fn join(
     id: &str,
     claimed: Option<i64>,
 ) -> Result<Outcome> {
+    join_in(pool, cfg, id, claimed, &tokio::sync::OnceCell::new()).await
+}
+/// [`join`], one of a batch whose checks share `burst` (whether more than [`RELEASE_BURST`]
+/// checks are due), read at most once for the batch.
+async fn join_in(
+    pool: &PgPool,
+    cfg: &QueueConfig,
+    id: &str,
+    claimed: Option<i64>,
+    burst_due: &tokio::sync::OnceCell<bool>,
+) -> Result<Outcome> {
     let Some(row) = sqlx::query_as::<_, Linked>(
         "SELECT uri,resolver,catalogue_card,EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) AS alias,osm_id IS NOT NULL AS osm,
           coalesce(type_path @> ARRAY['Event'],false) AS event,doc#>>'{catalogue,hash}' AS built_hash,doc#>>'{catalogue,catalogue}' AS built_catalogue,EXISTS(SELECT 1 FROM catalogue_state s WHERE s.catalogue=r.doc#>>'{catalogue,catalogue}') AS built_state,
@@ -525,7 +544,8 @@ pub async fn join(
                 .is_some_and(|c| !cfg.catalogues.contains(&c));
         let when = if off {
             Some(DAY)
-        } else if row.catalogue_card.is_some() && burst(pool).await? {
+        } else if row.catalogue_card.is_some() && *burst_due.get_or_try_init(|| burst(pool)).await?
+        {
             Some(HOUR)
         } else {
             None
@@ -838,8 +858,10 @@ pub async fn drain(pool: &PgPool, cfg: &QueueConfig, limit: i64) -> Result<usize
     .bind(limit)
     .fetch_all(pool)
     .await?;
+    // Whether a burst of checks is due is read once for the batch.
+    let burst_due = tokio::sync::OnceCell::new();
     for (id, attempts, marked) in &due {
-        let retry = match join(pool, cfg, id, None).await {
+        let retry = match join_in(pool, cfg, id, None, &burst_due).await {
             // Another write came first: checked again soon, later each time it does again.
             Ok(Outcome::Raced) => Some((
                 5u64.saturating_mul(1 << (*attempts).clamp(0, 9)).min(3600),
@@ -878,6 +900,16 @@ pub async fn drain(pool: &PgPool, cfg: &QueueConfig, limit: i64) -> Result<usize
 }
 /// The rows the start's sweep writes per transaction.
 const SWEEP_ROWS: i64 = 1000;
+thread_local! {
+    /// The catalogue keys the sweeps this thread ran have read (tests).
+    static SWEEP_KEYS_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// The catalogue keys the sweeps this thread ran have read so far (tests: the sweep reads only
+/// the keys of the catalogues it removes).
+#[doc(hidden)]
+pub fn sweep_keys_read() -> u64 {
+    SWEEP_KEYS_READ.with(std::cell::Cell::get)
+}
 /// When a link given back by a catalogue switched off or dropped is read again: a time within the
 /// next day its resource ID picks, so the links of a large catalogue are not fetched at once.
 const SPREAD: &str = "now()+(('x'||substr(r.id,1,8))::bit(32)::bigint%86400)*interval '1 second'";
@@ -958,53 +990,44 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
             break;
         }
     }
-    // The related links' keys of those catalogues (`catalogue:<name>:…`): the catalogue keys in
-    // the order of their index, a page at a time from where the last ended (never from the start
-    // again), each page's keys of those catalogues deleted.
-    let mut prefixes: Vec<String> = vec![];
+    // The related links' keys of those catalogues (`catalogue:<name>:…`), a catalogue at a time in
+    // the `C` order of `resource_key_catalogue_idx`, where one prefix's keys are one range: a page
+    // at a time from where the last ended, until past the prefix, each page deleted. A catalogue
+    // whose keys are all gone (a later start) costs one read.
     for catalogue in &off {
-        // A first look from the prefix on: a catalogue whose keys are all gone (a later start)
-        // costs one read.
         let prefix = format!("catalogue:{catalogue}:");
-        let first: Option<String> = sqlx::query_scalar(
-            "SELECT key FROM resource_key WHERE source='catalogue' AND key>=$1 ORDER BY key LIMIT 1",
-        )
-        .bind(&prefix)
-        .fetch_optional(pool)
-        .await?;
-        if first.is_some_and(|k| k.starts_with(&prefix)) {
-            prefixes.push(prefix);
-        }
-    }
-    let mut after = (String::new(), String::new());
-    while !prefixes.is_empty() {
-        let page: Vec<(String, String)> = sqlx::query_as(
-            "SELECT key,resource_id FROM resource_key WHERE source='catalogue' AND key>=$1 AND (key,resource_id)>($1,$2) ORDER BY key,resource_id LIMIT $3",
-        )
-        .bind(&after.0)
-        .bind(&after.1)
-        .bind(SWEEP_ROWS)
-        .fetch_all(pool)
-        .await?;
-        let Some(last) = page.last().cloned() else {
-            break;
-        };
-        let (keys, ids): (Vec<&str>, Vec<&str>) = page
-            .iter()
-            .filter(|(key, _)| prefixes.iter().any(|p| key.starts_with(p.as_str())))
-            .map(|(key, id)| (key.as_str(), id.as_str()))
-            .unzip();
-        if !keys.is_empty() {
+        let past = format!("catalogue:{catalogue};");
+        let mut after = String::new();
+        let mut after_id = String::new();
+        loop {
+            let page: Vec<(String, String)> = sqlx::query_as(
+                "SELECT key,resource_id FROM resource_key WHERE source='catalogue' AND key COLLATE \"C\">=$1 AND key COLLATE \"C\"<$2 AND (key COLLATE \"C\">$3 OR (key=$3 AND resource_id>$4)) ORDER BY key COLLATE \"C\",resource_id LIMIT $5",
+            )
+            .bind(&prefix)
+            .bind(&past)
+            .bind(&after)
+            .bind(&after_id)
+            .bind(SWEEP_ROWS)
+            .fetch_all(pool)
+            .await?;
+            SWEEP_KEYS_READ.with(|n| n.set(n.get() + page.len() as u64));
+            let Some(last) = page.last().cloned() else {
+                break;
+            };
+            let (keys, ids): (Vec<&str>, Vec<&str>) = page
+                .iter()
+                .map(|(key, id)| (key.as_str(), id.as_str()))
+                .unzip();
             sqlx::query("DELETE FROM resource_key k USING unnest($1::text[],$2::text[]) AS x(key,resource_id) WHERE k.key=x.key AND k.resource_id=x.resource_id AND k.source='catalogue'")
                 .bind(&keys)
                 .bind(&ids)
                 .execute(pool)
                 .await?;
+            if (page.len() as i64) < SWEEP_ROWS {
+                break;
+            }
+            (after, after_id) = last;
         }
-        if (page.len() as i64) < SWEEP_ROWS {
-            break;
-        }
-        after = last;
     }
     Ok(released)
 }

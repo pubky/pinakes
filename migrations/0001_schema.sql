@@ -801,7 +801,9 @@ CREATE TABLE resource_key (
 );
 CREATE INDEX resource_key_source_idx ON resource_key USING btree (resource_id, source);
 CREATE INDEX resource_key_key_idx ON resource_key USING btree (key);
-CREATE INDEX resource_key_catalogue_idx ON resource_key USING btree (key) WHERE source = 'catalogue';
+-- In byte order, where the keys of one catalogue (`catalogue:<name>:…`) are one range: the
+-- start's sweep reads only those of the catalogues it removes.
+CREATE INDEX resource_key_catalogue_idx ON resource_key USING btree (key COLLATE "C") WHERE source = 'catalogue';
 
 -- Facts a source reads for a resource (`isrc`, `upc`, `mbid`, `artist`, `duration`): shown in
 -- the read's `details.facts` and searchable by `key`; unlike keys they never join anything.
@@ -1312,12 +1314,14 @@ CREATE TABLE catalogue_card (
 -- index) that finds room on its page is a heap-only update, with no new index entries (about one
 -- stamp in four when a whole catalogue is stamped).
 WITH (fillfactor = 80);
-CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (fame DESC, id);
+-- Searches without text read each catalogue that is on in fame order, by type and by host too, so
+-- the cards of one switched off but not dropped are never read.
+CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (catalogue, fame DESC, id);
 CREATE INDEX catalogue_card_keys_idx ON catalogue_card USING gin (keys);
 CREATE INDEX catalogue_card_labels_idx ON catalogue_card USING gin (labels);
 CREATE INDEX catalogue_card_point_idx ON catalogue_card USING gist (point);
 CREATE INDEX catalogue_card_related_uris_idx ON catalogue_card USING gin (related_uris);
-CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (type, fame DESC, id);
+CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (catalogue, type, fame DESC, id);
 CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 
 -- Each catalogue's import: what it does now (`phase`: idle, import (a full import, the first or
@@ -1405,9 +1409,15 @@ CREATE FUNCTION bump_search_revision_for_cards() RETURNS trigger
     RETURN NULL;
 END $$;
 
+-- The host a catalogue card is listed under (`host=`): its link's, or for a root that is no web
+-- link (`doi:…`) its identifier page's (`catalogue::card_host` answers the same; a test holds
+-- them equal for every identifier page).
+CREATE FUNCTION catalogue_card_host(uri text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT coalesce(substring(uri FROM '^[a-z][a-z0-9+.-]*://([^/?#:]+)'), CASE lower(split_part(uri, ':', 1)) WHEN 'artic' THEN 'www.artic.edu' WHEN 'btc' THEN 'mempool.space' WHEN 'btc-signet' THEN 'mempool.space' WHEN 'btc-testnet' THEN 'mempool.space' WHEN 'btc-testnet4' THEN 'mempool.space' WHEN 'cleveland' THEN 'www.clevelandart.org' WHEN 'commons' THEN 'commons.wikimedia.org' WHEN 'docker' THEN 'hub.docker.com' WHEN 'doi' THEN 'doi.org' WHEN 'figshare' THEN 'figshare.com' WHEN 'fr' THEN 'www.federalregister.gov' WHEN 'gbif' THEN 'www.gbif.org' WHEN 'hf' THEN 'huggingface.co' WHEN 'ia' THEN 'archive.org' WHEN 'inat' THEN 'www.inaturalist.org' WHEN 'isbn' THEN 'openlibrary.org' WHEN 'isrc' THEN 'musicbrainz.org' WHEN 'lei' THEN 'www.gleif.org' WHEN 'ln' THEN 'mempool.space' WHEN 'ln-testnet' THEN 'mempool.space' WHEN 'mb' THEN 'musicbrainz.org' WHEN 'met' THEN 'www.metmuseum.org' WHEN 'nct' THEN 'clinicaltrials.gov' WHEN 'osm' THEN 'www.openstreetmap.org' WHEN 'pdb' THEN 'www.rcsb.org' WHEN 'pubchem' THEN 'pubchem.ncbi.nlm.nih.gov' WHEN 'ror' THEN 'ror.org' WHEN 'uniprot' THEN 'www.uniprot.org' WHEN 'usgs' THEN 'earthquake.usgs.gov' WHEN 'wikidata' THEN 'www.wikidata.org' WHEN 'zenodo' THEN 'zenodo.org' END) $$;
 -- Searches without text read the cards near a point and on a host through these.
 CREATE INDEX catalogue_card_geography_idx ON catalogue_card USING gist ((point::geography));
-CREATE INDEX catalogue_card_host_idx ON catalogue_card USING btree ((substring(uri FROM '^[a-z][a-z0-9+.-]*://([^/?#:]+)')), fame DESC);
+CREATE INDEX catalogue_card_host_idx ON catalogue_card USING btree (catalogue, catalogue_card_host(uri), fame DESC, id);
 CREATE TRIGGER catalogue_card_search_index_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
 CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card FOR EACH ROW WHEN (OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.catalogue IS DISTINCT FROM NEW.catalogue) EXECUTE FUNCTION queue_search_index_catalogue_card();
 CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();

@@ -1490,8 +1490,9 @@ async fn a_failure_after_the_catalogue_lock_is_gone_is_not_recorded(pool: PgPool
 
 /// A full import that reads under half the cards the catalogue holds (a dump cut at a clean
 /// boundary, an empty answer) removes nothing: it fails (`shrunk`) with its cursor kept, and the
-/// next try fails again. It goes through when the importer says the drop is expected, or when the
-/// import's scope (here Wikidata's `limit`) is another than the last finished import's.
+/// next try fails again. It goes through when the importer says the drop is expected, when the
+/// import's scope (here Wikidata's `limit`) is another than the last finished import's, or when the
+/// operator allows it after a `shrunk` failure (until any other failure).
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgPool) {
     let (ctx, _dir) = context(&pool, plenty());
@@ -1544,18 +1545,41 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
         "shrunk"
     );
     assert_eq!(count(&pool, Catalogue::Wikidata).await, 1);
-    // The operator lets it through, once.
-    assert!(store::allow_shrink(&pool, Catalogue::Wikidata)
+    // The operator lets it through, once, and only a run whose last failure was `shrunk` (the run
+    // loop records it).
+    let allow = || store::allow_shrink(&pool, Catalogue::Wikidata);
+    assert_eq!(allow().await.unwrap(), store::Allowance::NotShrunk);
+    assert!(!state(&pool, Catalogue::Wikidata).await.shrink_allowed);
+    run::record_failure(&pool, Catalogue::Wikidata, "shrunk")
         .await
-        .unwrap());
+        .unwrap();
+    assert_eq!(allow().await.unwrap(), store::Allowance::Allowed);
     assert!(state(&pool, Catalogue::Wikidata).await.shrink_allowed);
+    // Any failure after it takes the allowance back: the next try is checked again.
+    run::record_failure(&pool, Catalogue::Wikidata, "network")
+        .await
+        .unwrap();
+    assert!(!state(&pool, Catalogue::Wikidata).await.shrink_allowed);
+    assert_eq!(allow().await.unwrap(), store::Allowance::NotShrunk);
+    assert_eq!(
+        pinakes_core::catalogue::failure::shown(&run::step(&none, &ctx).await.unwrap_err()),
+        "shrunk"
+    );
+    run::record_failure(&pool, Catalogue::Wikidata, "shrunk")
+        .await
+        .unwrap();
+    assert_eq!(allow().await.unwrap(), store::Allowance::Allowed);
     assert_eq!(run::step(&none, &ctx).await.unwrap(), Next::Again);
     assert_eq!(count(&pool, Catalogue::Wikidata).await, 0);
     let s = state(&pool, Catalogue::Wikidata).await;
     assert!(!s.shrink_allowed, "cleared by the import it let through");
-    assert!(!store::allow_shrink(&pool, Catalogue::Openalex)
-        .await
-        .unwrap());
+    assert_eq!(allow().await.unwrap(), store::Allowance::NotShrunk);
+    assert_eq!(
+        store::allow_shrink(&pool, Catalogue::Openalex)
+            .await
+            .unwrap(),
+        store::Allowance::NoState
+    );
 }
 
 /// No scope recorded (a state row from before scopes were kept) counts as the same scope: the

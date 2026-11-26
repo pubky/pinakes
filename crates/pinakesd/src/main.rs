@@ -604,8 +604,10 @@ async fn catalogue_command(
             writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
         }
         CatalogueCommand::AllowShrink(catalogue) => {
-            if !store::allow_shrink(pool, catalogue).await? {
-                bail!("catalogue {catalogue} has no state yet: it has never run");
+            match store::allow_shrink(pool, catalogue).await? {
+                store::Allowance::Allowed => {}
+                store::Allowance::NotShrunk => bail!("catalogue {catalogue} has no full import under way that failed as shrunk: there is nothing to allow"),
+                store::Allowance::NoState => bail!("catalogue {catalogue} has no state yet: it has never run"),
             }
             writeln!(
                 out,

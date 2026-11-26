@@ -361,17 +361,31 @@ pub async fn remove(
 }
 
 /// Let the next full import of `catalogue` remove the cards it does not read, whatever their share
-/// of the catalogue (`pinakesd catalogue allow-shrink`): a run that failed `shrunk` then goes
-/// through at its next try. Whether the catalogue has a state row to set it on.
-pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<bool> {
-    Ok(sqlx::query(
-        "UPDATE catalogue_state SET shrink_allowed=true,updated_at=now() WHERE catalogue=$1",
+/// of the catalogue (`pinakesd catalogue allow-shrink`), while the full import under way last
+/// failed as `shrunk`: it then goes through at its next try, unless a run fails for another
+/// reason first (`run::record_failure` takes the allowance back). Refused in any other state.
+pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<Allowance> {
+    let state: Option<bool> = sqlx::query_scalar(
+        "UPDATE catalogue_state SET shrink_allowed=coalesce(run='import' AND last_error='shrunk',false),updated_at=now() WHERE catalogue=$1 RETURNING shrink_allowed",
     )
     .bind(catalogue.name())
-    .execute(pool)
-    .await?
-    .rows_affected()
-        > 0)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match state {
+        Some(true) => Allowance::Allowed,
+        Some(false) => Allowance::NotShrunk,
+        None => Allowance::NoState,
+    })
+}
+/// What [`allow_shrink`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Allowance {
+    /// The next try of the run that failed as shrunk removes what it does not read.
+    Allowed,
+    /// No full import under way last failed as shrunk: nothing is allowed.
+    NotShrunk,
+    /// The catalogue has no state row: it never ran.
+    NoState,
 }
 /// The end of a full import of `generation`: remove the cards of `catalogue` it did not read
 /// (`seen_generation` below it), so an item removed upstream leaves with the import that no

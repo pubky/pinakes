@@ -722,12 +722,16 @@ async fn status_of(app: &axum::Router, path: &str) -> (u16, Option<String>) {
 async fn a_busy_text_index_answers_503(pool: PgPool) {
     card(&pool, 1, "Aurora", "Northern lights.", "sky", 1).await;
     let index = SearchIndex::in_memory();
-    index.set_bounds(1, Duration::from_millis(300));
+    // A generous budget wherever a search must be answered (a loaded host is slow), a short one
+    // only to wait for a turn that never comes.
+    let generous = Duration::from_secs(30);
+    index.set_bounds(1, generous);
     let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
     state.search_index = index.clone();
     let app = api::router(state);
     assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
     let turns = pinakes_core::telemetry::search_index_busy_count("turn");
+    index.set_bounds(1, Duration::from_millis(300));
     let turn = index.hold_turn().unwrap();
     let (status, retry) = status_of(&app, "/v1/search?q=aurora").await;
     assert_eq!(status, 503);
@@ -736,6 +740,7 @@ async fn a_busy_text_index_answers_503(pool: PgPool) {
     // A search that needs no text index waits for nothing.
     assert_eq!(status_of(&app, "/v1/search?tags=sky").await.0, 200);
     drop(turn);
+    index.set_bounds(1, generous);
     assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
     let spent = pinakes_core::telemetry::search_index_busy_count("budget");
     index.set_bounds(1, Duration::ZERO);
@@ -762,6 +767,15 @@ async fn one_character_inside_names_is_read_by_postgres(pool: PgPool) {
         assert_eq!(ids_of(&page), std::slice::from_ref(id), "{q}");
     }
     assert_eq!(index.served(), served, "the index answered none of them");
+    // It takes a turn of the text searches as an index search does: with none free within its
+    // budget it answers 503.
+    index.set_bounds(1, Duration::from_millis(300));
+    let turn = index.hold_turn().unwrap();
+    let (status, retry) = status_of(&app, "/v1/search?q=%E2%82%AC").await;
+    assert_eq!((status, retry.as_deref()), (503, Some("1")));
+    drop(turn);
+    index.set_bounds(1, Duration::from_secs(30));
+    assert_eq!(status_of(&app, "/v1/search?q=%E2%82%AC").await.0, 200);
 }
 
 /// The last pass's time starts at the index's open, so when every pass fails from the start the
@@ -798,25 +812,62 @@ async fn passes_that_fail_from_the_start_leave_the_last_pass_at_the_open(pool: P
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
-/// One client holds at most a quarter of the turns (at least one) at once: past its share its
-/// text search answers 503 with `Retry-After: 1`, while another client's is answered.
+/// A client alone is never refused for its share: with a turn free and no other client waiting,
+/// its searches run however many of its own already do.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_client_past_its_share_of_turns_is_busy_alone(pool: PgPool) {
+async fn a_client_alone_takes_every_free_turn(pool: PgPool) {
     card(&pool, 1, "Aurora", "Northern lights.", "sky", 1).await;
     let index = SearchIndex::in_memory();
-    index.set_bounds(4, Duration::from_secs(30));
+    index.set_bounds(2, Duration::from_secs(30));
     let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
     state.search_index = index.clone();
     let app = api::router(state);
-    let shares = pinakes_core::telemetry::search_index_busy_count("share");
+    // Its share of two turns is one, and it runs one already.
     let held = index
-        .hold_share("127.0.0.2".parse().unwrap())
-        .expect("a share");
-    let (status, retry) = status_of(&app, "/v1/search?q=aurora").await;
-    assert_eq!((status, retry.as_deref()), (503, Some("1")));
-    assert!(pinakes_core::telemetry::search_index_busy_count("share") > shares);
-    let (status, _) = common::get_from(&app, "127.0.0.3:1234", "/v1/search?q=aurora").await;
+        .hold_turn_for("127.0.0.2".parse().unwrap())
+        .expect("a turn");
+    let (status, _) = status_of(&app, "/v1/search?q=aurora").await;
     assert_eq!(status, 200);
     drop(held);
-    assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
+}
+
+/// Past its share (half the turns, at least one), a client's search waits while another
+/// client's does: the other is answered first, then it (a turn free and nobody else waiting). A
+/// waiting search holds nothing: a turn of its own taken, it does not wait for its own search.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_client_past_its_share_waits_for_the_others(pool: PgPool) {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    card(&pool, 1, "Aurora", "Northern lights.", "sky", 1).await;
+    let index = SearchIndex::in_memory();
+    index.set_bounds(2, Duration::from_secs(30));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    // The client's one turn (an address of its /64), and the other turn taken by a search of no
+    // client.
+    let own = index
+        .hold_turn_for("2001:db8::1".parse().unwrap())
+        .expect("a turn");
+    let other = index.hold_turn().expect("a turn");
+    let order = Arc::new(AtomicUsize::new(0));
+    let search = |peer: &'static str| {
+        let (app, order) = (app.clone(), order.clone());
+        tokio::spawn(async move {
+            let status = common::get_from(&app, peer, "/v1/search?q=aurora").await.0;
+            (status, order.fetch_add(1, Ordering::SeqCst))
+        })
+    };
+    let waiting = search("[2001:db8::2]:1234");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let another = search("127.0.0.3:1234");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished() && !another.is_finished());
+    drop(other);
+    let within = |task| tokio::time::timeout(Duration::from_secs(20), task);
+    assert_eq!(within(another).await.unwrap().unwrap(), (200, 0));
+    assert_eq!(within(waiting).await.unwrap().unwrap(), (200, 1));
+    drop(own);
 }

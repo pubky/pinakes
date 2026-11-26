@@ -23,7 +23,7 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue import NAME [--from DIR\|URL] [--limit N] [--update] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz` only in this version. |
 | `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
-| `pinakesd [--config PATH] catalogue allow-shrink NAME` | Lets the catalogue's next full import remove the cards it did not read, however many: a run that failed as `shrunk` goes through at its next try. Runs beside the daemon ([catalogues](#a-full-import-that-shrinks-the-catalogue)). |
+| `pinakesd [--config PATH] catalogue allow-shrink NAME` | After a run that failed as `shrunk` (refused otherwise), lets the catalogue's next full import remove the cards it did not read, however many: it goes through at its next try, unless a run fails for another reason first. Runs beside the daemon ([catalogues](#a-full-import-that-shrinks-the-catalogue)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
 | `pinakesd --openapi` | Prints the OpenAPI document. |
 | `pinakesd --help` | Prints the usage line. |
@@ -261,7 +261,7 @@ resolver limits apply to pubky and to each card route.
 | `max_radius_m` | `200000.0` | 1–200000 | Largest `near` radius (metres). |
 | `search_text_candidates` | `500` | 50–10000 | The best units a search with `q` reads from the text index ([Text index](#text-index)). |
 | `search_index_commit_secs` | `2` | 1–60 | Seconds between two passes that commit queued changes to the text index. |
-| `search_index_searches` | `0` | 0–256 | Text searches the text index runs at once; `0` is one per CPU core. One more waits for a turn ([Text index](#text-index)). |
+| `search_index_searches` | `0` | 0–256 | Text searches the text index runs at once; `0` is one per CPU core. One more waits for a turn; one client address runs at most half of them while others wait ([Text index](#text-index)). Behind a proxy, set `api.trusted_proxies`, or every client counts as the proxy's one address. |
 | `search_index_budget_ms` | `2000` | 100–30000 | The most a text search's index stage takes, its wait for a turn included; past it the search answers 503. |
 | `api_cache_capacity` | `10000` | 100–100000 | Entries the rate limiter's table holds when an API request adds a client address. Past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
 | `preview_cache_capacity` | `10000` | 100–100000 | The same table's size when a preview adds its client address and link. Keep it equal to `api_cache_capacity`. |
@@ -1730,13 +1730,18 @@ default) and has `limits.search_index_budget_ms` (2 s) for its index stage, the 
 the turn goes with the search, so one whose client has gone still holds it until it stops. Past
 the budget a search stops in the index and answers `503` ([API](api.md#text-search));
 `pinakes_search_index_busy_total{reason}` counts them (`turn`: no free turn in time; `budget`:
-past the budget; `share`: its client address already runs a quarter of the turns), alert
-`TextSearchBusy`. Every word, word set and filter of a search checks the budget as it reads its
-lists, so a part that matches nothing for long stops too. A word's start expands to at most 1,000
-words in all (those the most names hold of the first 20,000 per segment in dictionary order), a
-text to 32 items, a phrase to its first 8 words (all of its words when every one is common), and
-64 three-letter pieces; a text of one character found inside names is left to Postgres, so no
-search reads the index's whole dictionary.
+past the budget; `share`: a turn was free, but its client address ran half the turns while
+another client's search waited, for the whole budget), alert `TextSearchBusy`. A client address
+(an IPv6 address by its /64) runs at most half the turns (at least one) while other clients wait;
+alone it takes every free turn, and a waiting search holds nothing. Every word, phrase and filter
+of a search checks the budget between its posting steps (a phrase at every step), so a part that
+matches nothing for long stops too; a word set (a word's start) reads its words' lists in one go,
+and is checked before it starts. A word's start expands to at most 1,000 words in all (those the
+most names hold of the first 20,000 per segment in dictionary order, while they are in 500,000
+names in all), a text to 32 items, a phrase to its first 8 words (all of its words when every one
+is common or its rarest is in more than 50,000 names), and 64 three-letter pieces. A text of one
+character found inside names is left to Postgres, so no search reads the index's whole
+dictionary; it takes a turn as an index search does.
 
 ## Catalogues
 
@@ -1949,7 +1954,9 @@ nothing and is tried again every ten minutes from its last cursor (`CatalogueImp
 1. Check upstream: a cut-off or empty download, or a filter that let too little through, shows
    in the importer's log lines.
 2. If upstream really holds that few items, run `pinakesd --config <path> catalogue allow-shrink
-   <name>`. The next try removes the cards it did not read, and the allowance is used up.
+   <name>`. It is refused unless the catalogue's last run failed as `shrunk`. The next try removes
+   the cards it did not read, and the allowance is used up; a run that fails for any reason first
+   takes it back.
 3. A narrower scope (a lower `limit`, a higher `min_citations`, another `region`) needs no
    allowance: its first full import removes the rest on its own.
 

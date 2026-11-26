@@ -2409,7 +2409,10 @@ struct CardUnit {
     card: i64,
     unit_id: String,
     type_path: String,
+    /// The host it is listed under ([`crate::catalogue::card_host`]).
     host: Option<String>,
+    /// The web page of a root that is no web link ([`crate::catalogue::root_page`]).
+    page: Option<String>,
     /// The units that stand for this card when the search lists them too (`hidden_by`): the
     /// referenced cards built from it or from another catalogue's card sharing its keys, and the
     /// card it is merged into. The page leaves the card out only when one of them is listed.
@@ -2561,9 +2564,8 @@ fn units_of(
                 card: *card,
                 unit_id: unit_of.get(card)?.clone(),
                 type_path: model::type_path(type_name).join(","),
-                host: url::Url::parse(uri)
-                    .ok()
-                    .and_then(|u| u.host_str().map(str::to_owned)),
+                host: crate::catalogue::card_host(uri),
+                page: crate::catalogue::root_page(uri).map(|(page, _)| page),
                 hidden_by: merged
                     .get(card)
                     .and_then(|main| unit_of.get(main))
@@ -2599,19 +2601,104 @@ async fn card_units(
     let ambiguous = ambiguous_keys(pool, &rows).await?;
     with_replacers(pool, catalogues, units_of(rows, &ambiguous)).await
 }
-/// How many times `cap` cards a search without text reads nearest to its place (`near`, `bbox`)
-/// before it takes the best known of them: a place search reads a bounded number of cards however
-/// many lie in its circle or box.
-pub const NEAREST_CARDS: usize = 8;
-/// The most types (a type and its subtypes) a search without text reads in one ordered branch
-/// each ([`best_known_cards`]).
-const TYPE_BRANCHES: usize = 32;
+/// How many times `cap` of the best known cards a place search without text reads first, keeping
+/// those in its circle or box ([`best_known_cards`]).
+pub const FAMOUS_PROBE: usize = 2;
+/// How many times `cap` cards nearest to its place a search without text reads when the best
+/// known it read first hold fewer than `cap` in it ([`best_known_cards`]).
+pub const NEAREST_CARDS: usize = 2;
+/// The most branches (a catalogue's type or host) a search without text reads, each in its
+/// index's order ([`best_known_cards`]).
+const CARD_BRANCHES: usize = 64;
+thread_local! {
+    /// Tests: the plans of the card reads without text this thread ran, while recorded.
+    static CARD_READ_PLANS: std::cell::RefCell<Option<Vec<Value>>> = const { std::cell::RefCell::new(None) };
+}
+/// Tests: record the plan (`EXPLAIN (ANALYZE, FORMAT JSON)`) of each card read without text this
+/// thread runs from now on, until [`card_read_plans`] takes them.
+#[doc(hidden)]
+pub fn record_card_read_plans() {
+    CARD_READ_PLANS.with(|p| *p.borrow_mut() = Some(vec![]));
+}
+/// Tests: the plans recorded since [`record_card_read_plans`]; recording stops.
+#[doc(hidden)]
+pub fn card_read_plans() -> Vec<Value> {
+    CARD_READ_PLANS.with(|p| p.borrow_mut().take().unwrap_or_default())
+}
+/// A card row read without text, with its `fame`.
+type FamedCard = (i64, String, String, String, Vec<String>, f32);
+/// The columns of a card read without text.
+const CARD_READ_COLUMNS: &str = "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame";
+/// The rows the statement `build` writes reads; its plan recorded first while a test asks
+/// ([`record_card_read_plans`]).
+async fn read_cards(
+    pool: &PgPool,
+    build: impl Fn(&mut QueryBuilder<'static, Postgres>),
+) -> Result<Vec<FamedCard>, ApiError> {
+    if CARD_READ_PLANS.with(|p| p.borrow().is_some()) {
+        let mut sql = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
+        build(&mut sql);
+        let plan: Value = sql.build_query_scalar().fetch_one(pool).await?;
+        CARD_READ_PLANS.with(|p| {
+            if let Some(plans) = p.borrow_mut().as_mut() {
+                plans.push(plan);
+            }
+        });
+    }
+    let mut sql = QueryBuilder::<Postgres>::new("");
+    build(&mut sql);
+    Ok(sql.build_query_as().fetch_all(pool).await?)
+}
+/// One branch of a card read in fame order: a catalogue, and a column equal to a value in it.
+type Branch = (String, Option<(&'static str, String)>);
+/// `branches`, each read in fame order with `columns` and the conditions `inner` adds (on `c`),
+/// merged in that order: at most `limit` rows in all, as `b`.
+fn by_fame(
+    sql: &mut QueryBuilder<'static, Postgres>,
+    columns: &str,
+    branches: &[Branch],
+    inner: &dyn Fn(&mut QueryBuilder<'static, Postgres>),
+    limit: usize,
+) {
+    sql.push("SELECT * FROM (");
+    for (i, (catalogue, extra)) in branches.iter().enumerate() {
+        if i > 0 {
+            sql.push(" UNION ALL ");
+        }
+        sql.push("(SELECT ")
+            .push(columns)
+            .push(" FROM catalogue_card c WHERE c.catalogue=")
+            .push_bind(catalogue.clone());
+        if let Some((column, value)) = extra {
+            sql.push(" AND ")
+                .push(*column)
+                .push("=")
+                .push_bind(value.clone());
+        }
+        inner(sql);
+        sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
+            .push_bind(limit as i64)
+            .push(")");
+    }
+    sql.push(") b ORDER BY b.fame DESC,b.id LIMIT ")
+        .push_bind(limit as i64);
+}
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
-/// the filters let in, at most `cap`. Every read is bounded: with `near` or `bbox`, the
-/// [`NEAREST_CARDS`] times `cap` cards nearest to the circle's or each box's centre in it (through
-/// the `point` indexes), then the best known of those; with `type`, each type's (and subtype's)
-/// best known in the `(type, fame, id)` index's order, merged, so the read stops after `cap` rows;
-/// else the `fame` index in order.
+/// the filters let in, at most `cap`. Each read stops after a bounded number of rows, and reads
+/// catalogue by catalogue, so the cards of a catalogue switched off but not dropped are never
+/// read:
+/// - With `near` or `bbox`: the [`FAMOUS_PROBE`] times `cap` best known cards (the `(catalogue,
+///   fame, id)` index in order) and those of them in the place kept, the whole answer when they
+///   are `cap`; when they are fewer, also the [`NEAREST_CARDS`] times `cap` cards nearest to the
+///   circle's or each box's centre in it (the `point` indexes), and the best known of both. With
+///   `sort=distance` and `near`, the `cap` nearest.
+/// - With hosts: each catalogue's host in the `(catalogue, catalogue_card_host(uri), fame, id)`
+///   index's order.
+/// - With types and no label: each catalogue's type (and subtype) in the `(catalogue, type, fame,
+///   id)` index's order.
+/// - Else each catalogue in the `(catalogue, fame, id)` index's order.
+///
+/// The branches of one read are merged in their order, so it stops after `cap` rows.
 async fn best_known_cards(
     pool: &PgPool,
     q: &SearchQuery,
@@ -2621,7 +2708,6 @@ async fn best_known_cards(
     sort: Option<&str>,
     cap: usize,
 ) -> Result<CardUnits, ApiError> {
-    const COLUMNS: &str = "SELECT c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point FROM catalogue_card c WHERE c.catalogue=ANY(";
     let types = q
         .type_name
         .as_deref()
@@ -2635,9 +2721,10 @@ async fn best_known_cards(
         })
         .transpose()?;
     let hosts = q.host.as_deref().map(search_hosts).transpose()?;
-    // Every filter but the place, on `c` (the types too unless `one_type`: each branch's own).
-    let filters = |sql: &mut QueryBuilder<'_, Postgres>, one_type: bool| {
-        sql.push_bind(catalogues.to_vec()).push(")");
+    let all_labels = q.match_mode.as_deref() == Some("all");
+    // Every filter but the place and the catalogue, on `c`: the types unless `one_type` (each
+    // branch's own), the hosts unless `one_host`.
+    let filters = |sql: &mut QueryBuilder<'static, Postgres>, one_type: bool, one_host: bool| {
         if let Some(types) = types.as_ref().filter(|_| !one_type) {
             sql.push(" AND c.type=ANY(")
                 .push_bind(types.clone())
@@ -2649,106 +2736,180 @@ async fn best_known_cards(
                 .push(")");
         }
         if !tags.is_empty() {
-            sql.push(if q.match_mode.as_deref() == Some("all") {
+            sql.push(if all_labels {
                 " AND c.labels@>"
             } else {
                 " AND c.labels&&"
             })
             .push_bind(tags.to_vec());
         }
-        if let Some(hosts) = &hosts {
-            sql.push(" AND substring(c.uri FROM '^[a-z][a-z0-9+.-]*://([^/?#:]+)')=ANY(")
+        if let Some(hosts) = hosts.as_ref().filter(|_| !one_host) {
+            sql.push(" AND catalogue_card_host(c.uri)=ANY(")
                 .push_bind(hosts.clone())
                 .push(")");
         }
     };
-    let nearest = (cap * NEAREST_CARDS) as i64;
-    let mut sql = QueryBuilder::<Postgres>::new("SELECT id,uri,type,catalogue,keys FROM (");
-    let by_distance = sort == Some("distance");
-    if let Some((lat, lon, radius)) = spatial.near {
-        // The nearest in the circle (the geography index serves the distance and the order).
-        sql.push(COLUMNS);
-        filters(&mut sql, false);
-        if let Some(bbox) = &spatial.bbox {
-            push_boxes(&mut sql, &bbox.split());
-        }
-        let centre = |sql: &mut QueryBuilder<'_, Postgres>| {
-            sql.push("ST_SetSRID(ST_MakePoint(")
-                .push_bind(lon)
-                .push(",")
-                .push_bind(lat)
-                .push("),4326)::geography");
-        };
-        sql.push(" AND ST_DWithin(c.point::geography,");
-        centre(&mut sql);
-        sql.push(",")
+    let circle = |sql: &mut QueryBuilder<'static, Postgres>,
+                  (lat, lon, radius): (f64, f64, f64)| {
+        sql.push(" AND ST_DWithin(c.point::geography,ST_SetSRID(ST_MakePoint(")
+            .push_bind(lon)
+            .push(",")
+            .push_bind(lat)
+            .push("),4326)::geography,")
             .push_bind(radius)
-            .push(") ORDER BY c.point::geography<->");
-        centre(&mut sql);
-        sql.push(",c.id LIMIT ")
-            .push_bind(if by_distance { cap as i64 } else { nearest })
-            .push(") n");
-    } else if let Some(bbox) = &spatial.bbox {
-        // The nearest to each box's centre in it (the geometry index serves both).
-        for (i, b) in bbox.split().iter().enumerate() {
-            if i > 0 {
-                sql.push(" UNION ALL ");
+            .push(")");
+    };
+    let any_catalogue = |sql: &mut QueryBuilder<'static, Postgres>| {
+        sql.push("SELECT ")
+            .push(CARD_READ_COLUMNS)
+            .push(" FROM catalogue_card c WHERE c.catalogue=ANY(")
+            .push_bind(catalogues.to_vec())
+            .push(")");
+    };
+    let each: Vec<Branch> = catalogues.iter().map(|c| (c.clone(), None)).collect();
+    let rows = if let (Some("distance"), Some(near)) = (sort, spatial.near) {
+        // The nearest in the circle (the geography index serves the distance and the order).
+        read_cards(pool, |sql| {
+            any_catalogue(sql);
+            filters(sql, false, false);
+            circle(sql, near);
+            if let Some(bbox) = &spatial.bbox {
+                push_boxes(sql, &bbox.split());
             }
-            sql.push("(");
-            sql.push(COLUMNS);
-            filters(&mut sql, false);
-            push_boxes(&mut sql, std::slice::from_ref(b));
-            sql.push(" ORDER BY c.point<->ST_SetSRID(ST_MakePoint(")
-                .push_bind((b[0] + b[2]) / 2.0)
+            sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
+                .push_bind(near.1)
                 .push(",")
-                .push_bind((b[1] + b[3]) / 2.0)
-                .push("),4326),c.id LIMIT ")
-                .push_bind(nearest)
-                .push(")");
+                .push_bind(near.0)
+                .push("),4326)::geography,c.id LIMIT ")
+                .push_bind(cap as i64);
+        })
+        .await?
+    } else if spatial.near.is_some() || spatial.bbox.is_some() {
+        // The best known first, kept when in the place and through every filter.
+        let mut rows = read_cards(pool, |sql| {
+            sql.push("SELECT ").push(CARD_READ_COLUMNS).push(" FROM (");
+            by_fame(
+                sql,
+                "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point,c.labels",
+                &each,
+                &|_| {},
+                FAMOUS_PROBE * cap,
+            );
+            sql.push(") c WHERE true");
+            filters(sql, false, false);
+            if let Some(near) = spatial.near {
+                circle(sql, near);
+            }
+            if let Some(bbox) = &spatial.bbox {
+                push_boxes(sql, &bbox.split());
+            }
+            sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
+                .push_bind(cap as i64);
+        })
+        .await?;
+        if rows.len() < cap {
+            // Fewer: the nearest to the circle's centre, or to each box's, in it too.
+            let nearest = (NEAREST_CARDS * cap) as i64;
+            let near = read_cards(pool, |sql| {
+                if let Some(near) = spatial.near {
+                    any_catalogue(sql);
+                    filters(sql, false, false);
+                    circle(sql, near);
+                    if let Some(bbox) = &spatial.bbox {
+                        push_boxes(sql, &bbox.split());
+                    }
+                    sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
+                        .push_bind(near.1)
+                        .push(",")
+                        .push_bind(near.0)
+                        .push("),4326)::geography,c.id LIMIT ")
+                        .push_bind(nearest);
+                } else if let Some(bbox) = &spatial.bbox {
+                    for (i, b) in bbox.split().iter().enumerate() {
+                        if i > 0 {
+                            sql.push(" UNION ALL ");
+                        }
+                        sql.push("(");
+                        any_catalogue(sql);
+                        filters(sql, false, false);
+                        push_boxes(sql, std::slice::from_ref(b));
+                        sql.push(" ORDER BY c.point<->ST_SetSRID(ST_MakePoint(")
+                            .push_bind((b[0] + b[2]) / 2.0)
+                            .push(",")
+                            .push_bind((b[1] + b[3]) / 2.0)
+                            .push("),4326),c.id LIMIT ")
+                            .push_bind(nearest)
+                            .push(")");
+                    }
+                }
+            })
+            .await?;
+            rows.extend(near);
+            rows.sort_by(|a, b| b.5.total_cmp(&a.5).then(a.0.cmp(&b.0)));
+            rows.dedup_by_key(|r| r.0);
+            rows.truncate(cap);
         }
-        sql.push(") n");
+        rows
+    } else if let Some(hosts) = hosts
+        .as_ref()
+        .filter(|h| h.len() * catalogues.len() <= CARD_BRANCHES)
+    {
+        let branches: Vec<Branch> = catalogues
+            .iter()
+            .flat_map(|c| {
+                hosts
+                    .iter()
+                    .map(move |h| (c.clone(), Some(("catalogue_card_host(c.uri)", h.clone()))))
+            })
+            .collect();
+        read_cards(pool, |sql| {
+            by_fame(
+                sql,
+                CARD_READ_COLUMNS,
+                &branches,
+                &|sql| filters(sql, false, true),
+                cap,
+            )
+        })
+        .await?
     } else if let Some(types) = types
         .as_ref()
-        .filter(|t| t.len() <= TYPE_BRANCHES && tags.is_empty() && hosts.is_none())
+        .filter(|t| t.len() * catalogues.len() <= CARD_BRANCHES && tags.is_empty())
     {
-        // The best known of each type, each in the `(type, fame, id)` index's order: merged in that
-        // order, the read stops after `cap` rows. (With more types, or a label or host to match,
-        // the `fame` order with the filters, or the `labels` and host indexes, serve best.)
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                sql.push(" UNION ALL ");
-            }
-            sql.push("(");
-            sql.push(COLUMNS);
-            filters(&mut sql, true);
-            sql.push(" AND c.type=")
-                .push_bind(t.clone())
-                .push(" ORDER BY c.fame DESC,c.id LIMIT ")
-                .push_bind(cap as i64)
-                .push(")");
-        }
-        sql.push(") n");
+        let branches: Vec<Branch> = catalogues
+            .iter()
+            .flat_map(|c| {
+                types
+                    .iter()
+                    .map(move |t| (c.clone(), Some(("c.type", t.clone()))))
+            })
+            .collect();
+        read_cards(pool, |sql| {
+            by_fame(
+                sql,
+                CARD_READ_COLUMNS,
+                &branches,
+                &|sql| filters(sql, true, false),
+                cap,
+            )
+        })
+        .await?
     } else {
-        sql.push(COLUMNS);
-        filters(&mut sql, false);
-        sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
-            .push_bind(cap as i64)
-            .push(") n");
-    }
-    match (sort, spatial.near) {
-        (Some("distance"), Some((lat, lon, _))) => {
-            sql.push(" ORDER BY n.point::geography<->ST_SetSRID(ST_MakePoint(")
-                .push_bind(lon)
-                .push(",")
-                .push_bind(lat)
-                .push("),4326)::geography,n.id");
-        }
-        _ => {
-            sql.push(" ORDER BY n.fame DESC,n.id");
-        }
-    }
-    sql.push(" LIMIT ").push_bind(cap as i64);
-    let rows: Vec<CardRow> = sql.build_query_as().fetch_all(pool).await?;
+        read_cards(pool, |sql| {
+            by_fame(
+                sql,
+                CARD_READ_COLUMNS,
+                &each,
+                &|sql| filters(sql, false, false),
+                cap,
+            )
+        })
+        .await?
+    };
+    let rows: Vec<CardRow> = rows
+        .into_iter()
+        .map(|(id, uri, type_name, catalogue, keys, _)| (id, uri, type_name, catalogue, keys))
+        .collect();
     let ambiguous = ambiguous_keys(pool, &rows).await?;
     with_replacers(pool, catalogues, units_of(rows, &ambiguous)).await
 }
@@ -2786,7 +2947,7 @@ fn push_card_units(
     .expect("a document");
     sql.push("card_unit AS (SELECT x.unit_id AS id,c.uri,x.host,c.type,string_to_array(x.path,',') AS type_path,c.name,NULL::text AS category,c.point,NULL::timestamptz AS start_at,NULL::timestamptz AS end_at,NULL::text AS venue_id,")
         .push_bind(template)
-        .push("::jsonb||jsonb_build_object('type',c.type,'type_path',to_jsonb(string_to_array(x.path,',')),'name',c.name,'description',c.description,'url',c.uri,'source',c.source,'status','ok')||CASE WHEN c.point IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('location',jsonb_build_object('lat',ST_Y(c.point),'lon',ST_X(c.point))) END||CASE WHEN c.catalogue='osm' THEN jsonb_build_object('attribution','© OpenStreetMap contributors (ODbL)') ELSE '{}'::jsonb END AS doc,to_tsvector('simple',c.name||' '||coalesce(c.description,'')) AS search_text,NULL::text AS resolver,c.updated_at AS resolved_at,NULL::timestamptz AS refresh_at,'ok'::text AS status,NULL::text AS osm_type,NULL::bigint AS osm_id,x.unit_id,NULL::jsonb AS occurrence,c.labels,c.fame,string_to_array(x.hidden,',') AS hidden_by FROM unnest(")
+        .push("::jsonb||jsonb_build_object('type',c.type,'type_path',to_jsonb(string_to_array(x.path,',')),'name',c.name,'description',c.description,'url',c.uri,'source',c.source,'status','ok')||CASE WHEN x.page IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('aliases',jsonb_build_array(x.page),'open_in',jsonb_build_array(jsonb_build_object('client',x.host,'url',x.page))) END||CASE WHEN c.point IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('location',jsonb_build_object('lat',ST_Y(c.point),'lon',ST_X(c.point))) END||CASE WHEN c.catalogue='osm' THEN jsonb_build_object('attribution','© OpenStreetMap contributors (ODbL)') ELSE '{}'::jsonb END AS doc,to_tsvector('simple',c.name||' '||coalesce(c.description,'')) AS search_text,NULL::text AS resolver,c.updated_at AS resolved_at,NULL::timestamptz AS refresh_at,'ok'::text AS status,NULL::text AS osm_type,NULL::bigint AS osm_id,x.unit_id,NULL::jsonb AS occurrence,c.labels,c.fame,string_to_array(x.hidden,',') AS hidden_by FROM unnest(")
         .push_bind(units.iter().map(|u| u.card).collect::<Vec<_>>())
         .push("::bigint[],")
         .push_bind(units.iter().map(|u| u.unit_id.clone()).collect::<Vec<_>>())
@@ -2795,13 +2956,15 @@ fn push_card_units(
         .push("::text[],")
         .push_bind(units.iter().map(|u| u.host.clone()).collect::<Vec<_>>())
         .push("::text[],")
+        .push_bind(units.iter().map(|u| u.page.clone()).collect::<Vec<_>>())
+        .push("::text[],")
         .push_bind(
             units
                 .iter()
                 .map(|u| (!u.hidden_by.is_empty()).then(|| u.hidden_by.join(",")))
                 .collect::<Vec<_>>(),
         )
-        .push("::text[]) AS x(card,unit_id,path,host,hidden) JOIN catalogue_card c ON c.id=x.card WHERE c.catalogue=ANY(")
+        .push("::text[]) AS x(card,unit_id,path,host,page,hidden) JOIN catalogue_card c ON c.id=x.card WHERE c.catalogue=ANY(")
         .push_bind(catalogues.to_vec())
         .push(")), ");
 }
@@ -3386,6 +3549,8 @@ pub async fn search(
         .map(str::to_owned)
         .collect();
     let cards_allowed = !catalogues.is_empty() && catalogue_cards_allowed(&q, sort);
+    // Held to the end of the search (a binding, not `_`, so it is not dropped at once).
+    let mut _postgres_turn = None;
     let candidates = match text_route {
         Some(text) => {
             let mut query = text_query(&q, text, &tags, &spatial, at, sort)?;
@@ -3407,7 +3572,11 @@ pub async fn search(
                 .candidates_for(&state.pool, query, cap, client)
                 .await
             {
-                Ok(found) => found,
+                // A text the index leaves to Postgres keeps its turn while Postgres reads it.
+                Ok(found) => {
+                    _postgres_turn = found.turn;
+                    found.candidates
+                }
                 // Every turn was taken for the search's whole budget, it ran past it, or its client
                 // runs its share of turns already: a 503, not a read of Postgres, which the same load
                 // would hold up next. Asked again a second later, a turn is likely free.
@@ -4269,7 +4438,7 @@ const UNSHARED_READ_CAPS: (i64, i64) = (10, 256);
 const UNSHARED_LOOKUP_CAPS: (i64, i64) = (3, 8);
 /// The most catalogue cards nobody shared one lookup answers; the entries past them are skipped
 /// as unknown ones are.
-pub const LOOKUP_UNSHARED: usize = 20;
+pub const LOOKUP_UNSHARED: usize = 8;
 /// [`read_unshared`] with `caps`: at most `caps.0` `maybe_same` and `caps.1` `also_on` entries.
 async fn read_unshared_with(
     pool: &PgPool,
@@ -4284,9 +4453,12 @@ async fn read_unshared_with(
     let Some(doc) = crate::catalogue::join::document(&card, &card.uri) else {
         return Ok(None);
     };
-    let host = url::Url::parse(&card.uri)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned));
+    let host = crate::catalogue::card_host(&card.uri);
+    // A root that is no web link lists its web page as an alias (by-uri answers it by that page).
+    let aliases: Vec<String> = crate::catalogue::root_page(&card.uri)
+        .map(|(page, _)| page)
+        .into_iter()
+        .collect();
     // The group of the links built from the card or related to it, when one is stored, and its
     // members as `also_on` (that member first, as another member lists it): their tags show with
     // the card.
@@ -4295,7 +4467,7 @@ async fn read_unshared_with(
         "SELECT jsonb_build_object('id',$1::text,'uri',$5::text,'host',$6::text,'type',$7::text,'type_path',to_jsonb($2::text[]),'name',$8::text,'category',NULL,'doc',$9::jsonb,'resolver',NULL,'resolved_at',NULL,'refresh_at',NULL,'status','ok','osm_type',NULL,'osm_id',NULL)||jsonb_build_object('group',CASE WHEN $12 AND $11::text IS NOT NULL THEN group_hint($11) END,'maybe_same',",
         &maybe_same_sql("$1::text", "$2::text[]", caps.0 as u32, "$3", "$4"),
         // The member first, as another member lists it, then the member's own; `caps.1` in all.
-        &format!(",'also_on',CASE WHEN $11::text IS NULL OR NOT $12 THEN '[]'::jsonb ELSE (SELECT coalesce(jsonb_agg(e ORDER BY n),'[]'::jsonb) FROM (SELECT e,n FROM jsonb_array_elements(coalesce((SELECT jsonb_agg(e) FROM jsonb_array_elements(also_on((SELECT u.unit_id FROM group_unit u JOIN group_unit me ON me.group_id=u.group_id WHERE me.unit_id=$11 AND u.unit_id<>$11 AND u.group_id IS NOT NULL ORDER BY u.unit_id LIMIT 1),'',{0},true)) e WHERE e->>'id'=$11),'[]'::jsonb)||also_on($11,'',{0},$12)) WITH ORDINALITY AS a(e,n) ORDER BY n LIMIT {0}) x) END,'aliases','[]'::jsonb,'keys',to_jsonb($10::text[]),'facts',NULL)", caps.1),
+        &format!(",'also_on',CASE WHEN $11::text IS NULL OR NOT $12 THEN '[]'::jsonb ELSE (SELECT coalesce(jsonb_agg(e ORDER BY n),'[]'::jsonb) FROM (SELECT e,n FROM jsonb_array_elements(coalesce((SELECT jsonb_agg(e) FROM jsonb_array_elements(also_on((SELECT u.unit_id FROM group_unit u JOIN group_unit me ON me.group_id=u.group_id WHERE me.unit_id=$11 AND u.unit_id<>$11 AND u.group_id IS NOT NULL ORDER BY u.unit_id LIMIT 1),'',{0},true)) e WHERE e->>'id'=$11),'[]'::jsonb)||also_on($11,'',{0},$12)) WITH ORDINALITY AS a(e,n) ORDER BY n LIMIT {0}) x) END,'aliases',to_jsonb($13::text[]),'keys',to_jsonb($10::text[]),'facts',NULL)", caps.1),
     ]
     .concat())
     .bind(id)
@@ -4310,6 +4482,7 @@ async fn read_unshared_with(
     .bind(crate::catalogue::join::backed_keys(&card))
     .bind(member)
     .bind(config.groups.enabled)
+    .bind(aliases)
     .fetch_one(pool)
     .await?;
     let mut detail = detail(&value)?;

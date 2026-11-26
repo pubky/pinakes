@@ -1034,10 +1034,12 @@ async fn switching_off_an_empty_catalogue_merges_nothing(pool: PgPool) {
     assert!(!index.holds_word("guide"));
 }
 
-/// Card reads without text are bounded: by place, the eight times `cap` cards nearest to the
-/// circle's centre (or to each box's) are read and the best known of those listed, however many
-/// lie in it; by type, the best known of each type and subtype. A box across the antimeridian
-/// holds the cards on both sides.
+/// Card reads without text are bounded: by place, the twice `cap` best known cards are read first
+/// and those in the circle or box kept (the answer a read of the whole place gives, when they are
+/// `cap`); when they are fewer, the twice `cap` cards nearest to the circle's centre (or each
+/// box's) are read too and the best known of all of them listed, however many lie in it. By type,
+/// the best known of each type and subtype. A box across the antimeridian holds the cards on both
+/// sides.
 #[sqlx::test(migrations = "../../migrations")]
 async fn card_reads_without_text_are_bounded_by_place_and_type(pool: PgPool) {
     // 450 peaks going north from 46,7, about 111 m apart, the farther the better known.
@@ -1057,14 +1059,22 @@ async fn card_reads_without_text_are_bounded_by_place_and_type(pool: PgPool) {
     let mut config = Config::default();
     config.search.text_candidates = 50;
     let app = app(&pool, config);
-    // Every peak is in the circle; the 400 nearest are read, and the best known of those listed.
+    // Every peak is in the circle: the 100 best known are, and the best 50 of them are listed.
     let page = names(&common::get(&app, "/v1/search?near=46.0,7.0&radius=100000&limit=50").await);
+    assert_eq!(page.len(), 50);
+    assert_eq!(page.first().map(String::as_str), Some("Peak 449"));
+    // A circle of the first 135 peaks holds none of the 100 best known: of the 100 nearest the
+    // best known is listed first, not the best known in the circle (Peak 134).
+    let page = names(&common::get(&app, "/v1/search?near=46.0,7.0&radius=15000&limit=50").await);
     assert_eq!(
         page.first().map(String::as_str),
-        Some("Peak 399"),
+        Some("Peak 99"),
         "{page:?}"
     );
-    assert!(!page.iter().any(|n| n == "Peak 449"), "{page:?}");
+    assert!(
+        !page.iter().any(|n| n == "Peak 100" || n == "Peak 134"),
+        "{page:?}"
+    );
     // Nearest first: the nearest 50.
     let page = names(
         &common::get(
@@ -1075,11 +1085,17 @@ async fn card_reads_without_text_are_bounded_by_place_and_type(pool: PgPool) {
     );
     assert_eq!(page.first().map(String::as_str), Some("Peak 0"));
     assert_eq!(page.len(), 50);
-    // A box: the nearest to its centre (46.225) in it.
+    // A box of every peak: the best known.
     let page = names(&common::get(&app, "/v1/search?bbox=6.9,45.99,7.1,46.46&limit=50").await);
     assert_eq!(page.len(), 50);
+    assert_eq!(page.first().map(String::as_str), Some("Peak 449"));
+    // A box of the first 200: the best known of the 100 nearest to its centre (46.095).
+    let page = names(&common::get(&app, "/v1/search?bbox=6.9,45.99,7.1,46.1995&limit=50").await);
+    assert_eq!(page.len(), 50);
     assert!(
-        !page.iter().any(|n| n == "Peak 449" || n == "Peak 0"),
+        !page
+            .iter()
+            .any(|n| n == "Peak 199" || n == "Peak 150" || n == "Peak 0"),
         "{page:?}"
     );
     // By type: the best known of each subtype of Place come first, whichever type they are.
@@ -1299,4 +1315,103 @@ async fn a_later_import_is_not_read_again_but_a_first_one_after_a_drop_is(pool: 
     assert_eq!(index.rereads(), 1);
     let held = index.documents();
     assert_eq!(held.len(), 1, "only the new import's card: {held:?}");
+}
+
+/// The catalogue rows the plans read: those each scan of `catalogue_card` or of its indexes
+/// returned or filtered out, over all its loops.
+fn card_rows_read(plans: &[Value]) -> u64 {
+    fn walk(node: &Value) -> u64 {
+        let on_cards = node["Relation Name"] == "catalogue_card"
+            || node["Index Name"]
+                .as_str()
+                .is_some_and(|i| i.starts_with("catalogue_card"));
+        let rows = |k: &str| node[k].as_f64().unwrap_or(0.0);
+        let own = if on_cards {
+            ((rows("Actual Rows")
+                + rows("Rows Removed by Filter")
+                + rows("Rows Removed by Index Recheck"))
+                * rows("Actual Loops").max(1.0)) as u64
+        } else {
+            0
+        };
+        own + node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(walk)
+            .sum::<u64>()
+    }
+    plans
+        .iter()
+        .flat_map(|p| p.as_array().cloned().unwrap_or_default())
+        .map(|p| walk(&p["Plan"]))
+        .sum()
+}
+
+/// Reads without text go catalogue by catalogue, each in its `(catalogue, …)` index's order: the
+/// cards of a catalogue switched off but not dropped are never read, and by type only each type's
+/// best known are (not the better known cards of other types). A host is read in its index's
+/// order too.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_reads_without_text_skip_a_catalogue_that_is_off(pool: PgPool) {
+    // On: 2,000 people and 30 lesser known mountains. Off: 2,000 mountains better known than
+    // anything on, so an index not led by the catalogue would read them all first.
+    let mut on: Vec<Card> = (0..2000)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Person {n}"),
+                "Person",
+                &[],
+                None,
+                0.3 + n as f32 / 10_000.0,
+            )
+        })
+        .collect();
+    on.extend((0..30).map(|n| {
+        card(
+            5000 + n,
+            &format!("Hill {n}"),
+            "Mountain",
+            &[],
+            None,
+            n as f32 / 100.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &on).await;
+    let off: Vec<Card> = (0..2000)
+        .map(|n| {
+            let mut c = card(
+                10_000 + n,
+                &format!("Alp {n}"),
+                "Mountain",
+                &[],
+                None,
+                0.6 + n as f32 / 10_000.0,
+            );
+            c.source_id = format!("place/{n}");
+            c
+        })
+        .collect();
+    import(&pool, Catalogue::Musicbrainz, &off).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.catalogues.musicbrainz.enabled = false;
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    for (path, first) in [
+        ("/v1/search?type=Mountain&limit=20", "Hill 29"),
+        ("/v1/search?limit=20", "Person 1999"),
+        ("/v1/search?host=en.wikipedia.org&limit=20", "Person 1999"),
+    ] {
+        api::record_card_read_plans();
+        let page = names(&common::get(&app, path).await);
+        let read = card_rows_read(&api::card_read_plans());
+        assert_eq!(page.first().map(String::as_str), Some(first), "{path}");
+        assert!(!page.iter().any(|n| n.starts_with("Alp")), "{path}");
+        assert!(read > 0 && read <= 100, "{path}: {read} card rows read");
+    }
 }

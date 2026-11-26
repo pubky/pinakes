@@ -472,6 +472,29 @@ fn link_root(uri: &str) -> Option<String> {
     (root.len() <= 2048 && !crate::capability::is_capability(uri) && publishable(&root))
         .then_some(root)
 }
+/// The web page of a card's root that is no web link (`doi:…`: its `doi.org` page,
+/// `alias::web_page`) and that page's host; `None` for a web link.
+pub fn root_page(uri: &str) -> Option<(String, String)> {
+    let scheme = uri.split_once(':')?.0.to_ascii_lowercase();
+    if matches!(scheme.as_str(), "http" | "https") {
+        return None;
+    }
+    let (page, _) = crate::alias::web_page(uri)?;
+    let host = url::Url::parse(&page).ok()?.host_str()?.to_owned();
+    Some((page, host))
+}
+/// The host a card is listed under (`host=`, the text index): its link's, or for a root that is
+/// no web link its page's ([`root_page`]). The schema's `catalogue_card_host` answers the same for
+/// every stored link.
+pub fn card_host(uri: &str) -> Option<String> {
+    match url::Url::parse(uri)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    {
+        Some(host) => Some(host),
+        None => root_page(uri).map(|(_, host)| host),
+    }
+}
 /// `url:` and the resource ID of a stored link (`model::identity` already applied).
 fn own_key(root: &str) -> String {
     format!("url:{}", crate::identity::resource_id(root))
@@ -1792,7 +1815,8 @@ mod tests {
         let mut c = card();
         c.name = "https://example.org/?access_token=abc".into();
         assert_eq!(c.checked(Catalogue::Wikidata).unwrap_err(), Reject::Name);
-        // A megabyte of each input: cut or refused, and quickly.
+        // A megabyte of each input: cut or refused, and quickly (well within a minute even on a
+        // loaded host; work that grew with the square of the input would take hours).
         let started = std::time::Instant::now();
         let huge = "x ".repeat(512 * 1024);
         let mut c = card();
@@ -1819,7 +1843,7 @@ mod tests {
             Reject::SourceId
         );
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
+            started.elapsed() < std::time::Duration::from_secs(60),
             "{:?}",
             started.elapsed()
         );

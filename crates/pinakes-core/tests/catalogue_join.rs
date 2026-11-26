@@ -2265,7 +2265,10 @@ async fn a_dropped_catalogue_gives_its_links_back_spread_over_a_day(pool: PgPool
 }
 
 /// The start's sweep deletes the related links' keys of a catalogue switched off page by page,
-/// each page after the last (more keys than a page), and keeps those of a catalogue still on.
+/// each page after the last (more keys than a page), and keeps those of a catalogue still on. It
+/// reads only the off catalogue's keys: not the on one's, nor other catalogue keys (`doi:…`), nor
+/// those of a catalogue whose name starts with the off one's, in whatever order the database's
+/// collation puts them.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: PgPool) {
     store::ensure_state(&pool, Catalogue::Wikidata)
@@ -2289,17 +2292,32 @@ async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: Pg
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) SELECT $1,k,'catalogue','catalogue','infinity' FROM (SELECT 'doi:10.1/'||n AS k FROM generate_series(1,3000) n UNION ALL SELECT 'catalogue:wikidata9:'||n FROM generate_series(1,500) n UNION ALL SELECT 'catalogue:wikidataX'||n FROM generate_series(1,500) n) x")
+        .bind(&b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = join::sweep_keys_read();
     join::sweep(&pool, &["musicbrainz"]).await.unwrap();
-    let left: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT split_part(key,':',2),count(*) FROM resource_key WHERE source='catalogue' GROUP BY 1 ORDER BY 1",
+    let read = join::sweep_keys_read() - before;
+    assert_eq!(read, 2600, "only the off catalogue's keys are read");
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT CASE WHEN key LIKE 'doi:%' THEN 'doi' WHEN key LIKE 'catalogue:wikidata:%' THEN 'wikidata' WHEN key LIKE 'catalogue:musicbrainz:%' THEN 'musicbrainz' ELSE 'other' END,count(*) FROM resource_key WHERE source='catalogue' GROUP BY 1 ORDER BY 1",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(left, [("musicbrainz".to_owned(), 700)]);
+    assert_eq!(
+        counts,
+        [
+            ("doi".to_owned(), 3000),
+            ("musicbrainz".to_owned(), 700),
+            ("other".to_owned(), 1000)
+        ]
+    );
 }
 
-/// One lookup answers at most twenty catalogue cards nobody shared (the rest are skipped as
+/// One lookup answers at most eight catalogue cards nobody shared (the rest are skipped as
 /// unknown entries are), each with a lookup card's caps.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_lookup_answers_a_bounded_number_of_cards_nobody_shared(pool: PgPool) {
@@ -2325,6 +2343,105 @@ async fn a_lookup_answers_a_bounded_number_of_cards_nobody_shared(pool: PgPool) 
     assert_eq!(status, 200, "{looked}");
     let looked = looked.as_array().unwrap();
     assert_eq!(looked.len(), api::LOOKUP_UNSHARED);
+    assert_eq!(api::LOOKUP_UNSHARED, 8);
     assert_eq!(looked[0]["name"], "Item 1");
-    assert_eq!(looked[19]["name"], "Item 20");
+    assert_eq!(looked[7]["name"], "Item 8");
+}
+
+/// A card whose root is no web link (an OpenAlex work shared as its `doi.org` page, stored as
+/// its `doi:` root) carries that page: in `open_in` wherever it is read, among the unshared
+/// card's aliases, and as its host in search.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_whose_root_is_no_web_link_carries_its_web_page(pool: PgPool) {
+    const PAGE: &str = "https://doi.org/10.1000/abc";
+    let work = Card {
+        source_id: "W1".into(),
+        uri: PAGE.into(),
+        r#type: "ScholarlyArticle".into(),
+        name: "A study of ridges".into(),
+        keys: vec!["doi:10.1000/abc".into()],
+        fame: 0.5,
+        ..Default::default()
+    };
+    import(&pool, Catalogue::Openalex, &[work]).await;
+    let open_in = json!([{"client": "doi.org", "url": PAGE}]);
+    let index = pinakes_core::search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    index.sync(&pool).await.unwrap();
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let (status, card) = get(
+        &app,
+        &format!("/v1/resources/by-uri?uri={}", uri_query(PAGE)),
+    )
+    .await;
+    assert_eq!(status, 200, "{card}");
+    assert_eq!(card["uri"], "doi:10.1000/abc");
+    assert_eq!(card["open_in"], open_in);
+    assert_eq!(card["aliases"], json!([PAGE]));
+    for path in [
+        "/v1/search?q=ridges",
+        "/v1/search?host=doi.org",
+        "/v1/search?q=ridges&host=doi.org",
+        "/v1/search?type=ScholarlyArticle&host=doi.org",
+    ] {
+        let (status, page) = get(&app, path).await;
+        assert_eq!(status, 200, "{path}: {page}");
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{path}: {page}");
+        assert_eq!(items[0]["open_in"], open_in, "{path}");
+    }
+    // Shared, the link is built from the card, with the page.
+    let id = tagged(&pool, PAGE).await;
+    assert_eq!(
+        join::referenced(&pool, &queue_cfg(), std::slice::from_ref(&id)).await,
+        1
+    );
+    // The page is an alias of the `doi:` root, which is built.
+    let (root, _, _) = model::identity("doi:10.1000/abc").unwrap();
+    assert!(backed(&pool, &root).await.catalogue_card.is_some());
+    let (_, built) = get(&app, &format!("/v1/resources/{id}")).await;
+    assert_eq!(built["uri"], "doi:10.1000/abc");
+    assert_eq!(built["open_in"], open_in);
+}
+
+/// The host a card is listed under is the same in Postgres (`catalogue_card_host`, behind its
+/// index) as in the code (`catalogue::card_host`): its link's host, or for a root that is no web
+/// link its identifier page's, for every identifier page there is.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_s_host_is_the_same_in_postgres_and_in_the_code(pool: PgPool) {
+    let spellings: Value =
+        serde_json::from_str(include_str!("../../../data/spellings.json")).unwrap();
+    let mut uris: Vec<String> = spellings["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| !e["page"].is_null())
+        .filter_map(|e| model::identity(e["id"].as_str().unwrap()).ok())
+        .map(|(_, uri, _)| uri)
+        .collect();
+    assert!(uris.len() > 30, "{}", uris.len());
+    uris.extend(
+        [
+            ARTICLE,
+            MB,
+            WEBSITE,
+            "https://Example.COM:8080/a?b#c",
+            "doi:10.1000/ABC",
+        ]
+        .into_iter()
+        .filter_map(|u| model::identity(u).ok())
+        .map(|(_, uri, _)| uri),
+    );
+    for uri in &uris {
+        let code = pinakes_core::catalogue::card_host(uri);
+        assert!(code.is_some(), "{uri}");
+        let sql: Option<String> = sqlx::query_scalar("SELECT catalogue_card_host($1)")
+            .bind(uri)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sql, code, "{uri}");
+    }
 }
