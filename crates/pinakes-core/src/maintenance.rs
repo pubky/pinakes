@@ -8,6 +8,7 @@ pub async fn run(
     grace_days: u32,
     preview_grace_hours: u32,
     retention_days: u32,
+    prune_batch: i64,
     period: Duration,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -57,7 +58,7 @@ pub async fn run(
         if let Err(e) = pruned {
             tracing::warn!(error=%crate::resolver::log_error(&e),"pruning cached OSM objects failed");
         }
-        let pruned = crate::also_on::prune(&pool).await;
+        let pruned = crate::also_on::prune(&pool, prune_batch).await;
         crate::telemetry::background_pass("also_on_prune", &pruned);
         if let Err(e) = pruned {
             tracing::warn!(error=%crate::resolver::log_error(&e),"also-on pruning failed");
@@ -119,7 +120,15 @@ mod tests {
         let before = failures();
         pool.close().await;
         let (stop, shutdown) = watch::channel(false);
-        let pass = tokio::spawn(run(pool, 7, 24, 30, Duration::from_secs(3600), shutdown));
+        let pass = tokio::spawn(run(
+            pool,
+            7,
+            24,
+            30,
+            1000,
+            Duration::from_secs(3600),
+            shutdown,
+        ));
         for _ in 0..200 {
             if failures().iter().zip(&before).all(|(now, was)| now > was) {
                 break;

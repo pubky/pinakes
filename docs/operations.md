@@ -294,6 +294,7 @@ resolver limits apply to pubky and to each card route.
 | `also_on_retry_secs` | `300` | 1–86400 | First retry of a failed source run (seconds). Doubles up to an hour. |
 | `also_on_refusal_hold_secs` | `300` | 120–86400 | How long a service's refusal of the operator's credentials (TIDAL, Spotify, Podcast Index) is held before it is asked again (seconds). |
 | `also_on_watch_page_bytes` | `3145728` | 1–16 MiB | Largest YouTube watch page `youtube_match` reads (bytes). A larger one is refused. |
+| `also_on_prune_batch` | `1000` | 10–100000 | Expired join keys, derived links or facts the hourly cleanup deletes in one transaction, oldest expiry first. Each transaction of keys or links holds the writers while it runs. |
 
 #### Calendar and event limits
 

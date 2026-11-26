@@ -846,6 +846,7 @@ CREATE TABLE resource_key (
     CONSTRAINT resource_key_via_check CHECK ((via ~ '^[a-z0-9_]{1,32}$'))
 );
 CREATE INDEX resource_key_source_idx ON resource_key USING btree (resource_id, source);
+CREATE INDEX resource_key_expires_idx ON resource_key USING btree (expires_at);
 CREATE INDEX resource_key_key_idx ON resource_key USING btree (key);
 -- In byte order, where the keys of one catalogue (`catalogue:<name>:…`) are one range, then by
 -- resource: the start's sweep reads only those of the catalogues it removes, a page at a time from
@@ -866,6 +867,7 @@ CREATE TABLE resource_fact (
     CONSTRAINT resource_fact_value_check CHECK ((octet_length(value) BETWEEN 1 AND 512)),
     CONSTRAINT resource_fact_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
 );
+CREATE INDEX resource_fact_expires_idx ON resource_fact USING btree (expires_at);
 CREATE INDEX resource_fact_source_idx ON resource_fact USING btree (resource_id, source);
 CREATE INDEX resource_fact_value_idx ON resource_fact USING btree (name, value);
 
@@ -896,6 +898,7 @@ CREATE TABLE derived_link (
     CONSTRAINT derived_link_kind_check CHECK ((kind IS NULL OR kind ~ '^[a-z_]{1,32}$')),
     CONSTRAINT derived_link_key_check CHECK ((key IS NULL OR octet_length(key) BETWEEN 3 AND 512))
 );
+CREATE INDEX derived_link_expires_idx ON derived_link USING btree (expires_at);
 CREATE INDEX derived_link_named_idx ON derived_link USING btree (link_id) WHERE key IS NOT NULL;
 CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS NOT NULL;
 

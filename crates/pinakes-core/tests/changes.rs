@@ -1347,6 +1347,7 @@ async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
         7,
         7 * 24,
         90,
+        1000,
         Duration::from_millis(20),
         rx,
     ));

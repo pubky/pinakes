@@ -1311,6 +1311,7 @@ impl Config {
             || !(1..=86400).contains(&a.retry_secs)
             || !(120..=86400).contains(&a.refusal_hold_secs)
             || !(1024 * 1024..=16 * 1024 * 1024).contains(&a.watch_page_bytes)
+            || !(10..=100_000).contains(&a.prune_batch)
         {
             bail!("invalid also_on limits");
         }
@@ -1708,6 +1709,7 @@ mod tests {
         assert_eq!(limits.discovery_cache_secs, 3600);
         assert_eq!(limits.also_on_refusal_hold_secs, 300);
         assert_eq!(limits.also_on_watch_page_bytes, 3 * 1024 * 1024);
+        assert_eq!(limits.also_on_prune_batch, 1000);
         let set = with(serde_json::json!({"limits": {
             "hub_body_bytes": 16 * 1024 * 1024,
             "discovery_cache_secs": 7200,
@@ -1731,6 +1733,8 @@ mod tests {
             ("also_on_refusal_hold_secs", 86401),
             ("also_on_watch_page_bytes", 1024),
             ("also_on_watch_page_bytes", 17 * 1024 * 1024),
+            ("also_on_prune_batch", 9),
+            ("also_on_prune_batch", 100_001),
         ] {
             assert!(
                 with(serde_json::json!({"limits":{key:value}})).is_err(),
@@ -3050,6 +3054,8 @@ limits! {
     /// The largest YouTube watch page `youtube_match` reads (bytes, 1–16 MiB); a larger one is
     /// refused.
     also_on_watch_page_bytes: usize = |c| c.also_on.watch_page_bytes => [|c, v| c.also_on.watch_page_bytes = v],
+    /// Expired join keys, derived links or facts the hourly cleanup deletes in one transaction (10–100000); each transaction of keys or links holds the writers while it runs.
+    also_on_prune_batch: i64 = |c| c.also_on.prune_batch => [|c, v| c.also_on.prune_batch = v],
     /// The body cap of a MusicBrainz or Wikidata answer (bytes, 1–64 MiB).
     hub_body_bytes: usize = |c| c.egress.hub_body_bytes => [|c, v| c.egress.hub_body_bytes = v],
     /// How long an answer the also-on sources, lookups and hubs ask for is shared (seconds,

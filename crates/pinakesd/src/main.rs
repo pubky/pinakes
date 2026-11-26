@@ -512,6 +512,7 @@ async fn start(
             config.grace_days,
             config.preview_grace_hours,
             config.refresh.retention_days,
+            config.also_on.prune_batch,
             MAINTENANCE_PERIOD,
             shutdown_rx.clone(),
         ),
