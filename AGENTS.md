@@ -96,7 +96,9 @@ spellings` writes this build's answers to copy over the file). A root listed the
 spelling of its card: a rule that gives links another root folds the old root into the new one
 too. Never remove a vector but with its source ([docs/api.md](docs/api.md#spelling-vectors)).
 A source whose roots are in a scheme of its own builds their web page in `fn root_page`, with
-entries in the file's `pages` ([identifier pages](docs/api.md#identifier-pages)).
+entries in the file's `pages` ([identifier pages](docs/api.md#identifier-pages)). A tracking
+parameter goes in `alias::TRACKING`, which the file's `tracking` list follows, with a vector of
+the tracking rule that drops it; only a parameter that never changes the page.
 
 **Keys and facts.** Only a hub (MusicBrainz, Wikidata) or a service's own record of its own ID
 makes a join key. What a page says about itself (`sameAs`, a canonical link to another page, an
