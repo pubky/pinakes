@@ -7,13 +7,18 @@
 //! Joins run when a link is referenced (`referenced`, after an ingest batch, and
 //! `POST /v1/resolve`), before every fetch (`before_fetch`), and for the rows a card's write
 //! names (`catalogue_join_due`, filled by the card table's triggers; `drain` works it off). Links
-//! built from a catalogue switched off are given back by `sweep`, run in the background at start.
-//! With every catalogue off nothing here reads the database, unless one was imported once.
+//! built from a catalogue switched off are given back by `sweep`, run in the background at start,
+//! and so are those a check finds built from a catalogue that is off or dropped: their next reads
+//! spread over a day. With every catalogue off, a join reads nothing; the daemon's joins task runs
+//! the sweep and works the queue off once at start, then reads nothing more, and the extras task
+//! reads nothing at all.
 //!
 //! What joins: the card whose `uri` is the link, then the card that holds the link's `url:` key,
 //! then a card holding a key the link names ([`link_keys`]): the key's own catalogue first. Two
 //! cards of one catalogue that tie are no join. A name, a title or any other metadata never
-//! joins. OpenStreetMap's cards are left out: no resource row may hold an OSM-derived value. A
+//! joins. A card typed as an event (an event's own schedule and route decide its card) backs no
+//! link, and a link a source of people's own posts reads ([`social_link`]) is never built from a
+//! card. OpenStreetMap's cards are left out: no resource row may hold an OSM-derived value. A
 //! Podcast Index card makes its feed a related link only: the feed is fetched for its episodes.
 //! Every link also takes the group keys of the cards it is a related link of.
 use super::{link_key, stored_key, Catalogue, CataloguesConfig};
@@ -126,7 +131,7 @@ fn openalex_work(uri: &str) -> Option<String> {
 }
 /// The site a homepage link is: its host, without `www.` and a final dot, for an `http(s)` link
 /// whose path is `/` with no query, user or port, on a host name with a dot (not an address).
-fn homepage(uri: &str) -> Option<String> {
+pub(crate) fn homepage(uri: &str) -> Option<String> {
     let url = url::Url::parse(uri).ok()?;
     if !matches!(url.scheme(), "http" | "https")
         || url.path() != "/"
@@ -250,6 +255,8 @@ pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found
     let (fetched, cards): (Vec<CardRow>, Vec<CardRow>) = cards
         .into_iter()
         .partition(|c| FETCHED.contains(&c.catalogue.as_str()));
+    // A card typed as an event backs no link: an event keeps its own schedule and card.
+    let cards: Vec<CardRow> = cards.into_iter().filter(|c| !event_card(c)).collect();
     // So many cards hold the link that one of them may be missing: no join, unless one is the
     // card whose link it is.
     let card = pick(cards, uri).filter(|c| !full || c.uri == uri);
@@ -270,6 +277,41 @@ pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found
     Ok(Found {
         card: card.map(Box::new),
         related: related_keys(&related),
+    })
+}
+/// Whether `card` is typed as an event (`Event` or one of its subtypes, `Festival`,
+/// `SportsEvent`, …): such a card backs no link.
+pub fn event_card(card: &CardRow) -> bool {
+    model::type_path(&card.r#type)
+        .iter()
+        .any(|t| t == "Event")
+}
+/// The types a source's card of people's own posts has (`Source::social`): a post, a comment, a
+/// profile or page (its bio is its owner's own text), a video.
+const SOCIAL_TYPES: &[&str] = &[
+    "SocialMediaPosting",
+    "DiscussionForumPosting",
+    "Comment",
+    "Person",
+    "Organization",
+    "VideoObject",
+    "Article",
+    "CreativeWork",
+];
+/// Whether `uri` is a link a source of people's own posts reads (a Nostr object, a link of an
+/// official source with social cards: Bluesky, Mastodon, Reddit, X, …): such a link keeps its own
+/// card, with its scrubs and refresh, and is never built from a catalogue card, even before its
+/// first read (when no stored card says it is social yet).
+pub fn social_link(uri: &str) -> bool {
+    if crate::resolver::classify(uri) == Some("nostr") {
+        return true;
+    }
+    crate::sources::reading(uri).is_some_and(|source| {
+        SOCIAL_TYPES.iter().any(|t| {
+            let mut doc = ResourceMeta::new(uri, source.name(), 0);
+            doc.set_type(t);
+            source.social(&doc)
+        })
     })
 }
 /// The group keys of the cards a link is a related link of: one per catalogue (a link two cards
@@ -395,6 +437,10 @@ struct Linked {
     /// An event of any kind, dated or not: events keep their own schedule and card.
     event: bool,
     built_hash: Option<String>,
+    /// The catalogue of the card it is built from, as its stored card names it, and whether that
+    /// catalogue has its state row (`pinakesd catalogue drop` deletes it).
+    built_catalogue: Option<String>,
+    built_state: bool,
     /// Its catalogue keys.
     keys: Vec<String>,
 }
@@ -410,7 +456,7 @@ pub async fn join(
 ) -> Result<Outcome> {
     let Some(row) = sqlx::query_as::<_, Linked>(
         "SELECT uri,resolver,catalogue_card,EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=r.id) AS alias,osm_id IS NOT NULL AS osm,
-          coalesce(type_path @> ARRAY['Event'],false) AS event,doc#>>'{catalogue,hash}' AS built_hash,
+          coalesce(type_path @> ARRAY['Event'],false) AS event,doc#>>'{catalogue,hash}' AS built_hash,doc#>>'{catalogue,catalogue}' AS built_catalogue,EXISTS(SELECT 1 FROM catalogue_state s WHERE s.catalogue=r.doc#>>'{catalogue,catalogue}') AS built_state,
           coalesce((SELECT array_agg(k.key ORDER BY k.key COLLATE \"C\") FROM resource_key k WHERE k.resource_id=r.id AND k.source='catalogue'),'{}') AS keys
          FROM resource r WHERE id=$1",
     )
@@ -437,14 +483,18 @@ pub async fn join(
         Found::default()
     };
     if found.card.is_some() || !found.related.is_empty() {
-        // Social content (a post, even a gone one) keeps its own card, its scrubs and no group.
-        let doc: Option<Value> = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-        let social = doc
-            .and_then(|d| serde_json::from_value::<ResourceMeta>(d).ok())
-            .is_some_and(|d| crate::resolver::cards::social(&d) || crate::changes::gone_social(&d));
+        // Social content (a post, even a gone one) keeps its own card, its scrubs and no group:
+        // by its link before its first read, by its card after.
+        let social = social_link(&row.uri) || {
+            let doc: Option<Value> = sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+            doc.and_then(|d| serde_json::from_value::<ResourceMeta>(d).ok())
+                .is_some_and(|d| {
+                    crate::resolver::cards::social(&d) || crate::changes::gone_social(&d)
+                })
+        };
         if social {
             found = Found::default();
         }
@@ -459,7 +509,15 @@ pub async fn join(
         found.card = None;
     }
     let Some(card) = found.card else {
-        let released = row.catalogue_card.is_some() && release(pool, id, None).await?;
+        // Built from a catalogue that is off now, or dropped: its next read is spread over a day,
+        // as the start's sweep spreads them (no burst of fetches); a card removed upstream gives
+        // its link back at once.
+        let spread = !row.built_state
+            || row
+                .built_catalogue
+                .as_deref()
+                .is_some_and(|c| !cfg.catalogues.contains(&c));
+        let released = row.catalogue_card.is_some() && release(pool, id, spread).await?;
         set_keys(pool, id, &row.keys, &found.related).await?;
         return Ok(if released {
             Outcome::Released
@@ -502,7 +560,7 @@ async fn build(
         // A card that makes no valid card: the link is fetched (a row built from an earlier
         // version of it goes back to the queue).
         crate::telemetry::catalogue_join(&card.catalogue, "invalid");
-        release(pool, id, None).await?;
+        release(pool, id, false).await?;
         set_keys(pool, id, &[], &[]).await.ok();
         return Ok(Outcome::Invalid);
     };
@@ -600,22 +658,18 @@ async fn build(
     }
     Ok(Outcome::Built)
 }
-/// Give a catalogue-backed resource back to the fetch queue: due at `due` (now when `None`), its
-/// catalogue's labels and mark taken off its card, which stays until the fetch replaces it.
-/// Whether it was backed.
-async fn release(
-    pool: &PgPool,
-    id: &str,
-    due: Option<chrono::DateTime<chrono::Utc>>,
-) -> Result<bool> {
+/// Give a catalogue-backed resource back to the fetch queue: due now, or with `spread` at a time
+/// within the next day its ID picks (the start's sweep's spread), its catalogue's labels and mark
+/// taken off its card, which stays until the fetch replaces it. Whether it was backed.
+async fn release(pool: &PgPool, id: &str, spread: bool) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    let catalogue: Option<Option<String>> = sqlx::query_scalar(
-        "WITH old AS (SELECT id,doc#>>'{catalogue,catalogue}' AS catalogue FROM resource WHERE id=$1 AND catalogue_card IS NOT NULL FOR UPDATE)
-         UPDATE resource r SET catalogue_card=NULL,final=false,dead_letter=false,attempts=0,timeout_streak=0,refresh_at=coalesce($2,now()),next_attempt_at=coalesce($2,now()),priority_at=NULL,generation=r.generation+1
+    let catalogue: Option<Option<String>> = sqlx::query_scalar(&format!(
+        "WITH old AS (SELECT id,doc#>>'{{catalogue,catalogue}}' AS catalogue FROM resource WHERE id=$1 AND catalogue_card IS NOT NULL FOR UPDATE)
+         UPDATE resource r SET catalogue_card=NULL,final=false,dead_letter=false,attempts=0,timeout_streak=0,refresh_at=CASE WHEN $2 THEN {SPREAD} ELSE now() END,next_attempt_at=CASE WHEN $2 THEN {SPREAD} ELSE now() END,priority_at=NULL,generation=r.generation+1
          FROM old WHERE r.id=old.id RETURNING old.catalogue",
-    )
+    ))
     .bind(id)
-    .bind(due)
+    .bind(spread)
     .fetch_optional(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM catalogue_extras WHERE resource_id=$1")
@@ -809,6 +863,9 @@ pub async fn drain(pool: &PgPool, cfg: &QueueConfig, limit: i64) -> Result<usize
 }
 /// The rows the start's sweep writes per transaction.
 const SWEEP_ROWS: i64 = 1000;
+/// When a link given back by a catalogue switched off or dropped is read again: a time within the
+/// next day its resource ID picks, so the links of a large catalogue are not fetched at once.
+const SPREAD: &str = "now()+(('x'||substr(r.id,1,8))::bit(32)::bigint%86400)*interval '1 second'";
 /// After the daemon's start, in the background, for the catalogues that are off and have ever been
 /// imported (a state row; OpenStreetMap is never joined): give every resource built from one of
 /// their cards back to the fetch queue, due at times spread over the next day (no burst of
@@ -833,13 +890,13 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
     let mut after: (i64, String) = (i64::MIN, String::new());
     loop {
         let mut tx = pool.begin().await?;
-        let ids: Vec<(String, Option<String>, i64)> = sqlx::query_as(
-            "WITH old AS (SELECT r.id,r.catalogue_card AS card,r.doc#>>'{catalogue,catalogue}' AS catalogue FROM resource r JOIN catalogue_card c ON c.id=r.catalogue_card
+        let ids: Vec<(String, Option<String>, i64)> = sqlx::query_as(&format!(
+            "WITH old AS (SELECT r.id,r.catalogue_card AS card,r.doc#>>'{{catalogue,catalogue}}' AS catalogue FROM resource r JOIN catalogue_card c ON c.id=r.catalogue_card
                WHERE r.catalogue_card IS NOT NULL AND (r.catalogue_card,r.id)>($3,$4) AND c.catalogue=ANY($1) ORDER BY r.catalogue_card,r.id LIMIT $2 FOR UPDATE OF r)
              UPDATE resource r SET catalogue_card=NULL,final=false,dead_letter=false,attempts=0,timeout_streak=0,priority_at=NULL,generation=r.generation+1,
-               refresh_at=now()+(('x'||substr(r.id,1,8))::bit(32)::bigint%86400)*interval '1 second',next_attempt_at=now()+(('x'||substr(r.id,1,8))::bit(32)::bigint%86400)*interval '1 second'
+               refresh_at={SPREAD},next_attempt_at={SPREAD}
              FROM old WHERE r.id=old.id RETURNING r.id,old.catalogue,old.card",
-        )
+        ))
         .bind(&off)
         .bind(SWEEP_ROWS)
         .bind(after.0)
@@ -870,22 +927,39 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
             break;
         }
     }
-    // The related links' keys of those catalogues (`catalogue:<name>:…`).
-    for catalogue in &off {
-        let prefix = format!("catalogue:{catalogue}:");
-        loop {
-            let deleted = sqlx::query(
-                "DELETE FROM resource_key WHERE (resource_id,key) IN (SELECT resource_id,key FROM resource_key WHERE source='catalogue' AND starts_with(key,$1) LIMIT $2)",
-            )
-            .bind(&prefix)
-            .bind(SWEEP_ROWS)
-            .execute(pool)
-            .await?
-            .rows_affected();
-            if (deleted as i64) < SWEEP_ROWS {
-                break;
-            }
+    // The related links' keys of those catalogues (`catalogue:<name>:…`): the catalogue keys in
+    // the order of their index, a page at a time from where the last ended (never from the start
+    // again), each page's keys of those catalogues deleted.
+    let prefixes: Vec<String> = off.iter().map(|c| format!("catalogue:{c}:")).collect();
+    let mut after = (String::new(), String::new());
+    loop {
+        let page: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key,resource_id FROM resource_key WHERE source='catalogue' AND key>=$1 AND (key,resource_id)>($1,$2) ORDER BY key,resource_id LIMIT $3",
+        )
+        .bind(&after.0)
+        .bind(&after.1)
+        .bind(SWEEP_ROWS)
+        .fetch_all(pool)
+        .await?;
+        let Some(last) = page.last().cloned() else {
+            break;
+        };
+        let (keys, ids): (Vec<&str>, Vec<&str>) = page
+            .iter()
+            .filter(|(key, _)| prefixes.iter().any(|p| key.starts_with(p.as_str())))
+            .map(|(key, id)| (key.as_str(), id.as_str()))
+            .unzip();
+        if !keys.is_empty() {
+            sqlx::query("DELETE FROM resource_key k USING unnest($1::text[],$2::text[]) AS x(key,resource_id) WHERE k.key=x.key AND k.resource_id=x.resource_id AND k.source='catalogue'")
+                .bind(&keys)
+                .bind(&ids)
+                .execute(pool)
+                .await?;
         }
+        if (page.len() as i64) < SWEEP_ROWS {
+            break;
+        }
+        after = last;
     }
     Ok(released)
 }
@@ -910,7 +984,7 @@ pub async fn unshared(pool: &PgPool, catalogues: &[&str], id: &str) -> Result<Op
     let own: Vec<CardRow> = cards
         .into_iter()
         .filter(|c| model::identity(&c.uri).is_ok_and(|(own, _, _)| own == id))
-        .filter(|c| !crate::capability::is_capability(&c.uri))
+        .filter(|c| !crate::capability::is_capability(&c.uri) && !social_link(&c.uri))
         .filter(|c| {
             !url::Url::parse(&c.uri)
                 .ok()
@@ -1341,5 +1415,52 @@ mod tests {
             ("musicbrainz".to_owned(), "a".to_owned()),
         ];
         assert_eq!(related_keys(&related), ["catalogue:musicbrainz:a"]);
+    }
+
+    /// Property, both ways over generated keys of every kind a link names (case, `_` and `-` in a
+    /// crate's name, arXiv versions, IDN hosts): each link `catalogue_key_links` names for a key is
+    /// normalized and names the key back (`link_keys`), so a row stored under it is marked when a
+    /// card with the key is written; and the canonical spelling of a link (lower case, a crate's
+    /// name with one kind of separator) is among the links of each key it names, as its root (a
+    /// `doi.org` link's `doi:` root).
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn catalogue_key_links_and_link_keys_agree_both_ways(pool: PgPool) {
+        use super::super::testgen::{spelled, Gen};
+        let mut gen = Gen::new("key links", 0x1c69_b3f7_4ac4_5a1d);
+        let spelled: Vec<_> = (0..3000).map(|_| spelled(&mut gen, true)).collect();
+        // OpenStreetMap is never joined: no links are named for its keys.
+        let keys: Vec<String> = spelled
+            .iter()
+            .filter(|s| s.owner != Catalogue::Osm)
+            .map(|s| s.key.clone())
+            .collect();
+        let named: Vec<(String, Vec<String>)> = sqlx::query_as(
+            "SELECT k,coalesce(catalogue_key_links(k),'{}') FROM unnest($1::text[]) k",
+        )
+        .bind(&keys)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let links: std::collections::HashMap<String, Vec<String>> = named.into_iter().collect();
+        for (key, named) in &links {
+            assert!(!named.is_empty(), "{key} names no link");
+            for link in named {
+                let (_, normal, _) = model::identity(link).unwrap();
+                assert_eq!(&normal, link, "{key}: {link} not normalized");
+                assert!(
+                    link_keys(link).iter().any(|(k, _)| k == key),
+                    "{key}: {link} reads {:?}",
+                    link_keys(link)
+                );
+            }
+        }
+        for s in spelled.iter().filter(|s| s.owner != Catalogue::Osm) {
+            let (_, normal, _) = model::identity(&s.link).unwrap();
+            let root = crate::alias::root(&normal).map_or(normal, |a| a.root);
+            for (key, _) in link_keys(&s.link) {
+                let named = &links[&key];
+                assert!(named.contains(&root), "{}: {root} not among {key}'s {named:?}", s.link);
+            }
+        }
     }
 }

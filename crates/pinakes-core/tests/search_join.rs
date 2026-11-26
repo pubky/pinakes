@@ -296,7 +296,8 @@ async fn the_join_and_its_release_reach_the_index(pool: PgPool) {
         urls(&common::get(&app, "/v1/search?q=zaphod").await),
         [SPOTIFY]
     );
-    assert!(items(&common::get(&app, "/v1/search?q=bop").await).is_empty());
+    let bop = common::get(&app, "/v1/search?q=bop").await;
+    assert!(items(&bop).is_empty(), "{bop}");
     // The card goes: the link is released, and its labels leave the index.
     sqlx::query("DELETE FROM catalogue_card")
         .execute(&pool)

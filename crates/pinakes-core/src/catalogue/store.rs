@@ -63,6 +63,9 @@ pub struct State {
     pub upstream_version: Option<String>,
     pub last_import_at: Option<DateTime<Utc>>,
     pub last_update_at: Option<DateTime<Utc>>,
+    /// The scope of the last finished full import (`CataloguesConfig::scope`): a full import of
+    /// another scope may remove more cards than `run::SHRINK_FLOOR` lets one of the same scope.
+    pub scope: Option<serde_json::Value>,
     /// Why an update asked for a full import (its importer's fixed words), until that import
     /// begins; none when none is asked for.
     pub import_requested: Option<String>,
@@ -143,7 +146,10 @@ fn rows(catalogue: Catalogue, cards: &[Card]) -> (Vec<Row>, u64) {
             },
             Err(reject) => {
                 rejected += 1;
-                tracing::debug!(catalogue = catalogue.name(), source_id = %card.source_id, ?reject, "catalogue card refused");
+                // Its ID as far as a valid one goes: an over-long ID is one reason to refuse.
+                let mut shown: String = card.source_id.chars().take(128).collect();
+                shown.retain(|c| !c.is_control());
+                tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card refused");
             }
         }
     }
@@ -180,6 +186,13 @@ pub async fn upsert_rows(
         rejected,
         ..WriteReport::default()
     };
+    crate::telemetry::catalogue_cards(
+        catalogue.name(),
+        WriteReport {
+            rejected,
+            ..WriteReport::default()
+        },
+    );
     let parts = rows.chunks(BATCH_ROWS).count();
     if parts == 0 {
         if let Some(cursor) = cursor {
@@ -189,7 +202,8 @@ pub async fn upsert_rows(
     }
     for (n, part) in rows.chunks(BATCH_ROWS).enumerate() {
         let mut tx = pool.begin().await?;
-        report += write_part(&mut tx, catalogue, generation, part).await?;
+        let written = write_part(&mut tx, catalogue, generation, part).await?;
+        report += written;
         if n + 1 == parts {
             if let Some(cursor) = cursor {
                 sqlx::query(
@@ -202,6 +216,7 @@ pub async fn upsert_rows(
             }
         }
         tx.commit().await?;
+        crate::telemetry::catalogue_cards(catalogue.name(), written);
     }
     Ok(report)
 }
@@ -318,6 +333,13 @@ pub async fn remove(
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        crate::telemetry::catalogue_cards(
+            catalogue.name(),
+            WriteReport {
+                removed: gone,
+                ..WriteReport::default()
+            },
+        );
         removed += gone;
     }
     if parts == 0 {
@@ -333,7 +355,19 @@ pub async fn remove(
 /// longer finds it. Reads the catalogue's rows in `source_id` order, [`SWEEP_ROWS`] per
 /// transaction. The number removed.
 pub async fn finish_import(pool: &PgPool, catalogue: Catalogue, generation: i64) -> Result<u64> {
-    sweep(pool, catalogue, Some(generation), |_| {}).await
+    // `sweep` tells the total so far: each page's own count is counted.
+    let mut counted = 0;
+    sweep(pool, catalogue, Some(generation), |total| {
+        crate::telemetry::catalogue_cards(
+            catalogue.name(),
+            WriteReport {
+                removed: total - counted,
+                ..WriteReport::default()
+            },
+        );
+        counted = total;
+    })
+    .await
 }
 
 /// Delete every card of `catalogue` and its state row (`pinakesd catalogue drop`), in
@@ -514,6 +548,7 @@ mod tests {
             last_import_at: Some("2026-11-24T10:00:00Z".parse().unwrap()),
             last_update_at: None,
             current_as_of: Some("2026-11-23T00:00:00Z".parse().unwrap()),
+            scope: None,
             import_requested: None,
             waiting: None,
             last_error: Some("timed\nout".into()),
@@ -560,6 +595,7 @@ mod tests {
             last_import_at: None,
             last_update_at: None,
             current_as_of: None,
+            scope: None,
             import_requested: Some("the change stream is gone".into()),
             waiting: Some("osm's full import is under way".into()),
             last_error: None,

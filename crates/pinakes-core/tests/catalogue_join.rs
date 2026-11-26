@@ -810,7 +810,7 @@ async fn a_built_card_reads_its_wikipedia_summary_in_the_background(pool: PgPool
         transport.clone(),
     );
     assert_eq!(
-        pinakes_core::catalogue::extras::run_due(&pool, &egress, 20)
+        pinakes_core::catalogue::extras::run_due(&pool, &egress, &cfg.catalogues, 20)
             .await
             .unwrap(),
         2
@@ -840,7 +840,7 @@ async fn a_built_card_reads_its_wikipedia_summary_in_the_background(pool: PgPool
     assert_eq!(credits[0]["source_url"], ARTICLE);
     // Nothing more is due; an open within 30 days reads nothing again.
     assert_eq!(
-        pinakes_core::catalogue::extras::run_due(&pool, &egress, 20)
+        pinakes_core::catalogue::extras::run_due(&pool, &egress, &cfg.catalogues, 20)
             .await
             .unwrap(),
         0
@@ -848,6 +848,27 @@ async fn a_built_card_reads_its_wikipedia_summary_in_the_background(pool: PgPool
     assert!(!pinakes_core::catalogue::extras::opened(&pool, &shared)
         .await
         .unwrap());
+    // Due again while Wikidata is off (before the start's sweep gives the links back): no read
+    // asks Wikipedia, and with no catalogue on not even the database is read.
+    sqlx::query("UPDATE catalogue_extras SET due_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let asked = transport.0.load(Ordering::SeqCst);
+    for on in [&["musicbrainz"][..], &[]] {
+        assert_eq!(
+            pinakes_core::catalogue::extras::run_due(&pool, &egress, on, 20)
+                .await
+                .unwrap(),
+            0,
+            "{on:?}"
+        );
+    }
+    assert_eq!(transport.0.load(Ordering::SeqCst), asked);
+    sqlx::query("UPDATE catalogue_extras SET due_at=NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
     // A card built again keeps the summary, and asks Wikipedia nothing.
     let mut changed = adams();
     changed.labels = vec!["writer".into()];
@@ -1994,3 +2015,180 @@ async fn a_catalogue_off_shows_nothing_until_its_sweep_and_each_removal_is_a_cha
     };
     assert_eq!(rule.next(100 * 86400, true), 100 * 86400);
 }
+
+/// A card typed as an event (an event, a festival, a sports event) backs no link, even one shared
+/// for the first time (no card of its own yet, so no type of its own): the link is fetched, with
+/// its event schedule. Another catalogue's card of the same thing that is no event still backs it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_fresh_link_never_takes_an_event_typed_card(pool: PgPool) {
+    let cfg = queue_cfg();
+    let olympics = "https://en.wikipedia.org/wiki/2024_Summer_Olympics";
+    let festival = "https://en.wikipedia.org/wiki/Roskilde_Festival";
+    let event = |id: &str, uri: &str, r#type: &str| Card {
+        source_id: id.into(),
+        uri: uri.into(),
+        r#type: r#type.into(),
+        name: id.into(),
+        keys: vec![format!("wikidata:{id}")],
+        ..Default::default()
+    };
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[
+            event("Q995653", olympics, "Event"),
+            event("Q211919", festival, "Festival"),
+        ],
+    )
+    .await;
+    for uri in [olympics, festival] {
+        let id = tagged(&pool, uri).await;
+        let outcome = join::join(&pool, &cfg, &id, None).await.unwrap();
+        assert_ne!(outcome, join::Outcome::Built, "{uri}");
+        let row = backed(&pool, &id).await;
+        assert_eq!(row.catalogue_card, None, "{uri}");
+        assert_eq!(row.name, None, "{uri}");
+        assert!(row.due, "{uri}: fetched");
+    }
+    // A link the Wikidata event card names by its `url:` key (its best hold) and a MusicBrainz
+    // card of the same thing, typed as a place, by the key the link names: the place card backs
+    // it; the event card never does.
+    let page = "https://musicbrainz.org/artist/0a1b2c3d-0000-4000-8000-000000000001";
+    let mut festival_card = event("Q211919", festival, "Festival");
+    festival_card.keys.push(link_key(page).unwrap());
+    import(&pool, Catalogue::Wikidata, &[festival_card]).await;
+    import(
+        &pool,
+        Catalogue::Musicbrainz,
+        &[Card {
+            source_id: "artist/1".into(),
+            uri: "https://musicbrainz.org/place/0a1b2c3d-0000-4000-8000-000000000002".into(),
+            r#type: "Place".into(),
+            name: "Roskilde Festival".into(),
+            keys: vec!["mb:artist:0a1b2c3d-0000-4000-8000-000000000001".into()],
+            ..Default::default()
+        }],
+    )
+    .await;
+    let item = tagged(&pool, page).await;
+    assert_eq!(
+        join::join(&pool, &cfg, &item, None).await.unwrap(),
+        join::Outcome::Built
+    );
+    let card: String = sqlx::query_scalar("SELECT c.catalogue FROM resource r JOIN catalogue_card c ON c.id=r.catalogue_card WHERE r.id=$1")
+        .bind(&item)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(card, "musicbrainz");
+}
+
+/// A link a source of people's own posts reads (a Bluesky profile) that a card names by a `url:`
+/// key is never built from the card, even before its first read: it keeps its own card and joins
+/// no group. A card whose own link is such a link answers no read of a link nobody shared.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_social_link_a_card_names_is_fetched_from_its_first_reference(pool: PgPool) {
+    let cfg = queue_cfg();
+    let profile = "https://bsky.app/profile/douglasadams.bsky.social";
+    assert!(join::social_link(profile));
+    assert!(!join::social_link(ARTICLE));
+    let mut card = adams();
+    card.keys.push(link_key(profile).unwrap());
+    import(&pool, Catalogue::Wikidata, &[card]).await;
+    let id = tagged(&pool, profile).await;
+    assert_eq!(
+        join::join(&pool, &cfg, &id, None).await.unwrap(),
+        join::Outcome::Nothing
+    );
+    assert_eq!(backed(&pool, &id).await.catalogue_card, None);
+    assert!(catalogue_keys(&pool, &id).await.is_empty());
+    import(
+        &pool,
+        Catalogue::Musicbrainz,
+        &[Card {
+            source_id: "artist/x".into(),
+            uri: profile.into(),
+            r#type: "Person".into(),
+            name: "Douglas Adams".into(),
+            ..Default::default()
+        }],
+    )
+    .await;
+    let (own, _, _) = model::identity(profile).unwrap();
+    assert_eq!(
+        join::unshared(&pool, &cfg.catalogues, &own).await.unwrap(),
+        None
+    );
+}
+
+/// A link built from a card of a catalogue that is dropped (its cards and state row deleted) goes
+/// back to the fetch queue with its next read spread over the next day, as the start's sweep
+/// spreads them, whether or not the daemon still has the catalogue on; one card removed upstream
+/// gives its link back at once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_dropped_catalogue_gives_its_links_back_spread_over_a_day(pool: PgPool) {
+    let cfg = queue_cfg();
+    import(&pool, Catalogue::Wikidata, &[adams()]).await;
+    let ids = [
+        tagged(&pool, ARTICLE).await,
+        tagged(&pool, SPOTIFY).await,
+        tagged(&pool, MB).await,
+    ];
+    join::referenced(&pool, &cfg, &ids).await;
+    for id in &ids {
+        assert!(backed(&pool, id).await.catalogue_card.is_some());
+    }
+    store::drop_catalogue(&pool, Catalogue::Wikidata, |_| {})
+        .await
+        .unwrap();
+    // The daemon still runs with Wikidata on: the catalogue is gone all the same.
+    drain(&pool, &cfg).await;
+    let waits: Vec<f64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=ANY($1) AND catalogue_card IS NULL ORDER BY id",
+    )
+    .bind(&ids)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(waits.len(), 3);
+    assert!(
+        waits.iter().all(|w| (0.0..86400.0).contains(w)),
+        "{waits:?}"
+    );
+    assert!(waits.iter().filter(|w| **w > 1.0).count() >= 2, "{waits:?}");
+    for id in &ids {
+        assert_eq!(backed(&pool, id).await.labels, None);
+    }
+}
+
+/// The start's sweep deletes the related links' keys of a catalogue switched off page by page,
+/// each page after the last (more keys than a page), and keeps those of a catalogue still on.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: PgPool) {
+    store::ensure_state(&pool, Catalogue::Wikidata).await.unwrap();
+    store::ensure_state(&pool, Catalogue::Musicbrainz).await.unwrap();
+    let a = tagged(&pool, "https://example.org/a").await;
+    let b = tagged(&pool, "https://example.org/b").await;
+    for (id, from) in [(&a, 0), (&b, 1300)] {
+        sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) SELECT $1,'catalogue:wikidata:Q'||n,'catalogue','catalogue','infinity' FROM generate_series($2::int,$2::int+1299) n")
+            .bind(id)
+            .bind(from)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO resource_key(resource_id,key,source,via,expires_at) SELECT $1,'catalogue:musicbrainz:artist%2F'||n,'catalogue','catalogue','infinity' FROM generate_series(1,700) n")
+        .bind(&a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    join::sweep(&pool, &["musicbrainz"]).await.unwrap();
+    let left: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT split_part(key,':',2),count(*) FROM resource_key WHERE source='catalogue' GROUP BY 1 ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, [("musicbrainz".to_owned(), 700)]);
+}
+

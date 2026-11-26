@@ -15,7 +15,11 @@
 //!   row and the log) while it is short: nothing is started half;
 //! - records the run in `catalogue_state` (`run`, `cursor`, `generation`), so a run cut off (a
 //!   restart, a failure) resumes from its importer's last cursor;
-//! - after a full import, removes the cards it did not read ([`store::finish_import`]);
+//! - after a full import, removes the cards it did not read ([`store::finish_import`]), unless the
+//!   import read fewer than half the cards the catalogue holds ([`SHRINK_FLOOR`]): then the run
+//!   fails (`shrunk`) and removes nothing, until the importer says the drop is expected
+//!   ([`Job::expect_shrink`]) or the import's scope changed (`limit`, `region`,
+//!   `min_citations`; [`CataloguesConfig::scope`](super::CataloguesConfig::scope));
 //! - keeps how current the cards are (`current_as_of`, the upstream data time the importer
 //!   states with [`Job::set_current_as_of`]), which the update lag metric measures.
 //!
@@ -176,6 +180,9 @@ pub struct Job<'a> {
     state: State,
     /// A full import asked for ([`Job::asked`]).
     asked: bool,
+    /// Whether the importer said this full import may hold far fewer cards than the last
+    /// ([`Job::expect_shrink`]).
+    shrink_expected: bool,
     dir: &'a Path,
     config: &'a Config,
     report: WriteReport,
@@ -246,6 +253,12 @@ impl Job<'_> {
     }
     pub fn config(&self) -> &Config {
         self.config
+    }
+    /// Say that this full import reads far fewer cards than the catalogue holds and that is
+    /// expected (upstream removed them, or the operator asked for it): the runner then removes the
+    /// cards it did not read even when they are more than [`SHRINK_FLOOR`] allows.
+    pub fn expect_shrink(&mut self) {
+        self.shrink_expected = true;
     }
     /// `limit` of Wikidata and MusicBrainz (`[catalogues.<name>] limit`).
     pub fn limit(&self) -> Option<u64> {
@@ -560,7 +573,6 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
                 if let Err(unrecorded) = record_failure(&ctx.pool, catalogue, &shown).await {
                     tracing::warn!(catalogue = catalogue.name(), error = %failure::shown(&unrecorded), "catalogue failure not recorded");
                 }
-                ctx.pace.retry
             }
         };
         tokio::select! {
@@ -696,6 +708,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         current_as_of: None,
         asked,
         state,
+        shrink_expected: false,
         dir: &dir,
         config: &ctx.config,
         report: WriteReport::default(),
@@ -761,7 +774,32 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         );
         return Ok(Next::Again);
     }
+    let scope = ctx.config.catalogues.scope(catalogue);
     if run == Run::Import {
+        // A full import that read far fewer cards than the catalogue holds (a dump cut at a clean
+        // boundary, an empty answer, a filter gone wrong) removes nothing: it fails (`shrunk`) with
+        // its cursor kept, and is tried again; it goes through once the importer says the drop is
+        // expected, or the import's scope (`limit`, `region`, `min_citations`) is another than the
+        // last finished import's.
+        let same_scope = job.state.scope.as_ref() == Some(&scope);
+        if same_scope && !job.shrink_expected && job.state.last_import_at.is_some() {
+            let (held, read): (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT cards FROM catalogue_state WHERE catalogue=$1),(SELECT count(*) FROM catalogue_card WHERE catalogue=$1 AND seen_generation>=$2)",
+            )
+            .bind(catalogue.name())
+            .bind(generation)
+            .fetch_one(pool)
+            .await?;
+            if shrunk(held, read) {
+                tracing::warn!(
+                    catalogue = catalogue.name(),
+                    held,
+                    read,
+                    "catalogue full import read far fewer cards than the catalogue holds; nothing is removed"
+                );
+                return Err(Failure::new("shrunk").into());
+            }
+        }
         report.removed += store::finish_import(pool, catalogue, generation).await?;
     }
     sqlx::query(
@@ -770,12 +808,14 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
          import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,\
          last_update_at=CASE WHEN $2='update' THEN now() ELSE last_update_at END,\
          current_as_of=CASE WHEN $2='import' THEN coalesce($4,now()) ELSE coalesce($4,current_as_of) END,\
+         scope=CASE WHEN $2='import' THEN $5 ELSE scope END,\
          updated_at=now() WHERE catalogue=$1",
     )
     .bind(catalogue.name())
     .bind(run.name())
     .bind(position)
     .bind(job.current_as_of)
+    .bind(&scope)
     .execute(pool)
     .await?;
     if let Some(lock) = large {
@@ -924,6 +964,13 @@ pub async fn request_import(pool: &PgPool, catalogue: Catalogue, reason: &str) -
     Ok(())
 }
 
+/// The share of a catalogue's cards a full import must read for the runner to remove the rest
+/// without being told the drop is expected ([`Job::expect_shrink`]): half.
+pub const SHRINK_FLOOR: f64 = 0.5;
+/// Whether a full import that read `read` of the `held` cards reads too few to remove the rest.
+fn shrunk(held: i64, read: i64) -> bool {
+    (read as f64) < SHRINK_FLOOR * held as f64
+}
 /// The catalogue's lock was lost while a run went on (its session ended).
 #[derive(Debug)]
 struct CatalogueLockLost;

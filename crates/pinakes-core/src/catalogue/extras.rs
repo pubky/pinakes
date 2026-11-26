@@ -116,14 +116,25 @@ fn with_summary(
 }
 
 /// Read the extras of up to `limit` cards that are due, through `egress` (paced and cached as
-/// every request). A card no longer built from a catalogue card loses its row. A read that
-/// failed, or whose write failed, is tried again later, backing off to a day; the others go on.
-/// The rows read.
-pub async fn run_due(pool: &PgPool, egress: &Egress, limit: i64) -> Result<usize> {
+/// every request), of the cards built from a catalogue that is on (`catalogues`, those joined):
+/// a card of a catalogue that is off is read from no service (the start's sweep then gives it
+/// back to the fetch queue, its extras with it). A card no longer built from a catalogue card loses
+/// its row. A read that failed, or whose write failed, is tried again later, backing off to a day;
+/// the others go on. With no catalogue on, nothing is read, not even the database. The rows read.
+pub async fn run_due(
+    pool: &PgPool,
+    egress: &Egress,
+    catalogues: &[&str],
+    limit: i64,
+) -> Result<usize> {
+    if catalogues.is_empty() {
+        return Ok(0);
+    }
     let due: Vec<(String, i32, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT e.resource_id,e.attempts,c.uri,c.details->>'wikipedia' FROM catalogue_extras e JOIN resource r ON r.id=e.resource_id LEFT JOIN catalogue_card c ON c.id=r.catalogue_card WHERE e.due_at<=now() ORDER BY e.due_at,e.resource_id LIMIT $1",
+        "SELECT e.resource_id,e.attempts,c.uri,c.details->>'wikipedia' FROM catalogue_extras e JOIN resource r ON r.id=e.resource_id LEFT JOIN catalogue_card c ON c.id=r.catalogue_card WHERE e.due_at<=now() AND (c.id IS NULL OR c.catalogue=ANY($2)) ORDER BY e.due_at,e.resource_id LIMIT $1",
     )
     .bind(limit)
+    .bind(catalogues)
     .fetch_all(pool)
     .await?;
     for (id, attempts, uri, named) in &due {

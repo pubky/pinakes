@@ -297,6 +297,10 @@ async fn start(
     let mut state = AppState::new(api_pool, config.clone())?;
     let search_index = pinakes_core::search_index::SearchIndex::on_disk(&config.search.index_dir);
     search_index.set_catalogues(&config.catalogues.enabled_names());
+    search_index.set_bounds(
+        config.search.index_searches,
+        Duration::from_millis(config.search.index_budget_ms),
+    );
     state.search_index = search_index.clone();
     // Both listeners are bound before any task or worker starts: from here on nothing waits,
     // so a signal during startup never cuts off a worker that has claimed a job.
@@ -395,7 +399,8 @@ async fn start(
     });
     // Links built from a card of a catalogue that is off now go back to the fetch queue: the
     // joins task does that first, in the background (until then an answer shows nothing of such a
-    // catalogue), then checks the links each card's write names.
+    // catalogue), then checks the links each card's write names. With every catalogue off it
+    // works the queue off once and then reads nothing more.
     let join_pool = pool.clone();
     let join_config = config.queue.clone();
     let mut join_shutdown = shutdown_rx.clone();
@@ -427,17 +432,29 @@ async fn start(
                 Err(error) => {
                     tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"catalogue join checks will retry")
                 }
+                // No catalogue is on: nothing joins any more, and a check only gives back what the
+                // sweep gave back already.
+                Ok(_) if join_config.catalogues.is_empty() => {
+                    let _ = join_shutdown.changed().await;
+                    break;
+                }
                 _ => {}
             }
             tokio::select! {_=join_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
         }
     });
     // The extras of cards built from catalogue cards (their Wikipedia summary), as they come due.
+    // With no catalogue on, none: nothing is read for a catalogue that is off.
     let extras_pool = pool.clone();
+    let extras_catalogues = config.queue.catalogues.clone();
     let mut extras_shutdown = shutdown_rx.clone();
     tasks.spawn("catalogue extras", async move {
+        if extras_catalogues.is_empty() {
+            let _ = extras_shutdown.changed().await;
+            return;
+        }
         loop {
-            let batch = tokio::select! { _=extras_shutdown.changed()=>break,result=pinakes_core::catalogue::extras::run_due(&extras_pool,&extras_egress,EXTRAS_BATCH)=>result };
+            let batch = tokio::select! { _=extras_shutdown.changed()=>break,result=pinakes_core::catalogue::extras::run_due(&extras_pool,&extras_egress,&extras_catalogues,EXTRAS_BATCH)=>result };
             match batch {
                 Ok(n) if n as i64 == EXTRAS_BATCH => continue,
                 Err(error) => {

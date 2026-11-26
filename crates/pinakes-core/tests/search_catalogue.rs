@@ -418,9 +418,11 @@ async fn a_referenced_card_is_listed_once(pool: PgPool) {
     }
 }
 
-/// An update run's changes reach the index through its queue; an import's through its end.
+/// An update run's changes reach the index through its queue, and so do a later full import's
+/// (its new and removed cards too, so the catalogue is not read again); a first full import's
+/// by the index reading the catalogue's cards again.
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_update_run_changes_the_index(pool: PgPool) {
+async fn an_update_run_and_a_later_import_change_the_index_through_its_queue(pool: PgPool) {
     import(
         &pool,
         Catalogue::Wikidata,
@@ -461,13 +463,20 @@ async fn an_update_run_changes_the_index(pool: PgPool) {
         .await
         .unwrap();
     assert!(items(&common::get(&app, "/v1/search?q=weisshorn").await).is_empty());
-    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM search_index_catalogue_queue")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(queued > 0, "an update run queues its cards");
-    // An import queues its new cards nothing; the index reads the catalogue again when it ends.
-    sqlx::query("UPDATE catalogue_state SET run='import' WHERE catalogue='wikidata'")
+    let queued = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search_index_catalogue_queue")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let before = queued().await;
+    assert!(before > 0, "an update run queues its cards");
+    // A later full import (one has finished before) queues its new card and the card its end
+    // removes, and each reaches the index while the import still runs.
+    sqlx::query("UPDATE catalogue_state SET run='import',generation=2 WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
         .unwrap();
@@ -480,28 +489,49 @@ async fn an_update_run_changes_the_index(pool: PgPool) {
     )
     .await
     .unwrap();
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM search_index_catalogue_queue")
-        .fetch_one(&pool)
+    assert_eq!(queued().await, before + 1);
+    assert_eq!(names(&common::get(&app, "/v1/search?q=dom").await), ["Dom"]);
+    store::finish_import(&pool, Catalogue::Wikidata, 2)
         .await
         .unwrap();
-    assert_eq!(after, queued);
-    assert!(items(&common::get(&app, "/v1/search?q=dom").await).is_empty());
-    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now()+interval '1 second' WHERE catalogue='wikidata'")
+    assert!(items(&common::get(&app, "/v1/search?q=cervino").await).is_empty());
+    let later = queued().await;
+    // A first full import queues nothing: its cards are found once it has finished.
+    sqlx::query("INSERT INTO catalogue_state(catalogue,run,phase,generation) VALUES('musicbrainz','import','import',1)")
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(names(&common::get(&app, "/v1/search?q=dom").await), ["Dom"]);
+    let mut song = card(9, "Hörnli Song", "MusicRecording", &[], None, 0.4);
+    song.source_id = "recording/1".into();
+    store::upsert(&pool, Catalogue::Musicbrainz, 1, &[song], None)
+        .await
+        .unwrap();
+    assert_eq!(queued().await, later);
+    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now() WHERE catalogue='musicbrainz'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=hornli").await),
+        ["Hörnli Song"]
+    );
+    assert_eq!(queued().await, later, "read again, not queued");
 }
 
-/// A catalogue read again after its import, a part per pass: the queues are drained before each
-/// part, so a new tag is found while the re-read is under way; a card changed in place during the
-/// import is found by its new name before the import ends; at the end the cards gone since leave.
+/// A catalogue read again after its first full import, a part per pass: the queues are drained
+/// before each part, so a new tag is found while the re-read is under way; a card changed in place
+/// during the import is found by its new name before the import ends; at the end the cards gone
+/// since leave.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
+    // The catalogue's first full import is under way (none has finished): the index reads the
+    // cards there are when it is built.
     let cards: Vec<Card> = (1..=6)
         .map(|n| card(n, &format!("Peak {n}"), "Mountain", &[], None, 0.5))
         .collect();
-    import(&pool, Catalogue::Wikidata, &cards).await;
+    store::upsert(&pool, Catalogue::Wikidata, 1, &cards, None)
+        .await
+        .unwrap();
     let index = search_index::SearchIndex::in_memory_with_reread_part(2);
     index.set_catalogues(&["wikidata"]);
     let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
@@ -511,7 +541,7 @@ async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
         items(&common::get(&app, "/v1/search?q=peak").await).len(),
         6
     );
-    // A re-import: a card renamed in place, one added, one gone.
+    // The import goes on: a card renamed in place, one added, one gone at its end.
     sqlx::query("UPDATE catalogue_state SET run='import',generation=2 WHERE catalogue='wikidata'")
         .execute(&pool)
         .await

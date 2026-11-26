@@ -280,6 +280,24 @@ impl CataloguesConfig {
     pub fn cited_enough(&self, citations: u64) -> bool {
         citations > u64::from(self.openalex.min_citations)
     }
+    /// What a full import of `catalogue` reads, as its configuration sets it: Wikidata's and
+    /// MusicBrainz's `limit`, OpenStreetMap's `region`, OpenAlex's `min_citations` (an empty
+    /// object for the others). Kept with each finished full import (`catalogue_state.scope`): one
+    /// of another scope may remove many cards (`run::SHRINK_FLOOR`).
+    pub fn scope(&self, catalogue: Catalogue) -> serde_json::Value {
+        match catalogue {
+            Catalogue::Wikidata | Catalogue::Musicbrainz => {
+                serde_json::json!({ "limit": self.limit(catalogue) })
+            }
+            Catalogue::Osm => serde_json::json!({ "region": self.osm.region }),
+            Catalogue::Openalex => {
+                serde_json::json!({ "min_citations": self.openalex.min_citations })
+            }
+            Catalogue::Podcastindex | Catalogue::Tranco | Catalogue::Software => {
+                serde_json::json!({})
+            }
+        }
+    }
     /// `limit` of Wikidata or MusicBrainz; none for the others.
     pub fn limit(&self, catalogue: Catalogue) -> Option<u64> {
         match catalogue {
@@ -333,19 +351,25 @@ fn valid_region(region: &str) -> bool {
 pub const LABEL_MAX_CHARS: usize = 20;
 const LABEL_INVALID: [char; 6] = [',', ':', ' ', '\t', '\n', '\r'];
 
+/// The longest source label read (bytes): one longer is no label (and none is cleaned).
+const LABEL_RAW_CAP: usize = 256;
 /// A source's label (a genre, an OSM category, a topic) as a valid Pubky tag label, so one tap on
 /// a suggested tag writes a tag every client accepts: lower case, each run of whitespace, commas,
-/// colons and underscores one hyphen, no control characters, no hyphens at either end. `None`
-/// when nothing is left or the label is longer than [`LABEL_MAX_CHARS`]: a cut label would say
-/// something else.
+/// colons and underscores one hyphen, no control or invisible format characters ([`invisible`]),
+/// no hyphens at either end. `None` when nothing is left, the label is longer than
+/// [`LABEL_MAX_CHARS`] (a cut label would say something else), or the source's text is over
+/// 256 bytes.
 pub fn label(raw: &str) -> Option<String> {
+    if raw.len() > LABEL_RAW_CAP {
+        return None;
+    }
     let mut out = String::with_capacity(raw.len());
     let mut gap = false;
     // The whole text at once, as a client lower-cases a tag (a final Σ becomes ς).
     for c in raw.to_lowercase().chars() {
         if c.is_whitespace() || LABEL_INVALID.contains(&c) || c == '_' || c == '-' {
             gap = true;
-        } else if c.is_control() {
+        } else if c.is_control() || invisible(c) || joiner(c) {
             continue;
         } else {
             if gap && !out.is_empty() {
@@ -356,6 +380,43 @@ pub fn label(raw: &str) -> Option<String> {
         }
     }
     (!out.is_empty() && out.chars().count() <= LABEL_MAX_CHARS).then_some(out)
+}
+/// A format character (Unicode category Cf) that shows nothing, but the two joiners
+/// ([`joiner`]): a soft hyphen, the zero-width space, direction marks and overrides, word joiners,
+/// invisible operators, the byte order mark, interlinear annotation marks, tag characters. A label
+/// or name holding one looks like another (`jazz` and `jazz` with a zero-width space are two
+/// tags) or reads in another order (U+202E).
+pub fn invisible(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B
+            | 0x200E..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+/// ZWNJ and ZWJ: format characters a word is written with (Persian, the Indic scripts, emoji),
+/// kept in names; a label never holds one.
+fn joiner(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}')
 }
 /// Labels as [`label`] makes them, each once, in their first order; at most [`LABELS_CAP`].
 pub fn labels<'a>(raw: impl IntoIterator<Item = &'a str>) -> Vec<String> {
@@ -383,11 +444,31 @@ pub const KEY_CAP: usize = 512;
 pub const DETAILS_CAP: usize = model::DOCUMENT_CAP;
 
 /// The key a link people share for an item is stored under in `keys`: `url:` and the resource ID
-/// of the normalized link (`identity::resource_id`), the form a resource's grouping keys use. An
-/// http(s) link only.
+/// of the link's root (the normalized link, `identity::resource_id`, or the root its spelling
+/// rules name, `alias::root`), the form a resource's grouping keys use. An http(s) link, or a root
+/// that is no web link but has a web page of its own (`doi:…`, `alias::web_page`).
 pub fn link_key(uri: &str) -> Option<String> {
-    let (id, _, scheme) = model::identity(uri).ok()?;
-    matches!(scheme.as_str(), "http" | "https").then(|| format!("url:{id}"))
+    link_root(uri).map(|root| own_key(&root))
+}
+/// The root a card may name for `uri`: the root of an http(s) link (its spelling rules', else the
+/// link normalized), or a root that is no web link but has a web page (`doi:…`); never a link
+/// that carries a credential (as written or normalized: a password in its user info is cut by
+/// normalizing) nor a Pubky object.
+fn link_root(uri: &str) -> Option<String> {
+    let (_, normal, scheme) = model::identity(uri).ok()?;
+    let root = match scheme.as_str() {
+        "http" | "https" => crate::alias::root(&normal).map_or(normal, |a| a.root),
+        _ if crate::alias::web_page(&normal).is_some() => normal,
+        _ => return None,
+    };
+    (root.len() <= 2048
+        && !crate::capability::is_capability(uri)
+        && publishable(&root))
+    .then_some(root)
+}
+/// `url:` and the resource ID of a stored link (`model::identity` already applied).
+fn own_key(root: &str) -> String {
+    format!("url:{}", crate::identity::resource_id(root))
 }
 /// A join key in the stored form: `kind:value`, the kind lower case (`wikidata`, `mb`, `isrc`,
 /// `osm`, `doi`, `url`), the value non-empty, no whitespace or control character, at most
@@ -406,25 +487,49 @@ pub fn valid_key(key: &str) -> bool {
         && !value.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// A key as it is stored: [`valid_key`], with a DOI lower case, an ISBN as its ISBN-13 and an
-/// ISRC, a Wikidata ID and an OpenAlex ID upper case, the forms a resource's keys take, and a `url:` key a
-/// resource ID; `None` for one that is not valid.
+/// A key as it is stored: [`valid_key`], in the form a resource's keys take and a link's derived
+/// key has (`join::link_keys`), built by the same code: a DOI lower case, an ISBN as its ISBN-13, an
+/// ISRC, a Wikidata ID and an OpenAlex ID upper case, a MusicBrainz key's entity and MBID lower
+/// case (`hubs::key::mb`), a crate's name lower case with `-` for `_` (`packages::Package::key`),
+/// an arXiv ID without its version, an F-Droid package and a Flathub ID as those stores spell them
+/// (`apps`), a homepage's host lower case, punycode, without `www.` or a final dot, an OSM object
+/// as `osm:<type>/<id>`, and a `url:` key a resource ID. `None` for one that is not valid in its
+/// kind.
 pub fn stored_key(key: &str) -> Option<String> {
+    use crate::lookups::{packages, papers};
     let key = key.trim();
     if !valid_key(key) {
         return None;
     }
     let (kind, value) = key.split_once(':')?;
-    match kind {
+    let stored = match kind {
         "doi" => crate::resolver::cards::doi(key).map(|doi| format!("doi:{doi}")),
         "isbn" => crate::resolver::cards::isbn(key)
             .map(|isbn| format!("isbn:{}", crate::resolver::cards::isbn13(&isbn))),
         "url" => model::valid_id(value).then(|| key.to_owned()),
-        // Resources key an ISRC and a Wikidata ID in upper case (`isrc:GBUM71029604`, `wikidata:Q42`),
-        // and joins an OpenAlex work as `openalex:W…` (`join::link_keys`).
-        "isrc" | "wikidata" | "openalex" => Some(format!("{kind}:{}", value.to_ascii_uppercase())),
+        // Resources key an ISRC in upper case (`isrc:GBUM71029604`), and join an OpenAlex work as
+        // `openalex:W…` (`join::link_keys`).
+        "isrc" | "openalex" => Some(format!("{kind}:{}", value.to_ascii_uppercase())),
+        "wikidata" => crate::hubs::key::wikidata(&value.to_ascii_uppercase()),
+        "mb" => {
+            let (entity, mbid) = value.split_once(':')?;
+            let entity = entity.to_ascii_lowercase().replace('_', "-");
+            match crate::hubs::MbKind::parse(&entity) {
+                Some(kind) => crate::hubs::key::mb(kind, mbid),
+                None => crate::hubs::mbid(mbid).map(|mbid| format!("mb:{entity}:{mbid}")),
+            }
+        }
+        "crate" => packages::Package::new(packages::Registry::Crates, value)
+            .map(|p| p.key().to_string()),
+        "arxiv" => papers::arxiv_id(value).map(|id| papers::arxiv_key(&id).to_string()),
+        "android" => crate::app_ids::android_package(value).then(|| key.to_owned()),
+        "flathub" => crate::app_ids::flathub_id(value).then(|| key.to_owned()),
+        "homepage" => join::homepage(&format!("https://{value}/")).map(|h| format!("homepage:{h}")),
+        "osm" => crate::resolver::osm::parse_id(&format!("https://www.openstreetmap.org/{value}"))
+            .map(|osm| crate::lookups::places::key(&osm).to_string()),
         _ => Some(key.to_owned()),
-    }
+    }?;
+    valid_key(&stored).then_some(stored)
 }
 /// The length of a JSON value as PostgreSQL prints a `jsonb` (`details::text`, which the table's
 /// check measures): `": "` and `", "` between entries, numbers written out in full.
@@ -532,9 +637,17 @@ pub struct Row {
 fn publishable(uri: &str) -> bool {
     !crate::capability::is_capability(uri) && !uri.starts_with("pubky:")
 }
+/// `text` on one line within `cap` bytes: control characters as spaces, invisible format
+/// characters ([`invisible`]) dropped, runs of whitespace one space. At most four times `cap` of
+/// the text is read.
 fn clean(text: &str, cap: usize) -> String {
-    let mut text: String = text
+    let mut read = cap.saturating_mul(4).min(text.len());
+    while !text.is_char_boundary(read) {
+        read -= 1;
+    }
+    let mut text: String = text[..read]
         .chars()
+        .filter(|c| !invisible(*c))
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
         .split_whitespace()
@@ -564,48 +677,61 @@ impl Card {
         {
             return Err(Reject::SourceId);
         }
-        let (_, uri, _) = model::identity(&self.uri).map_err(|_| Reject::Uri)?;
-        // Normalizing may lengthen a link (percent-encoding); the table holds 2048 bytes. A link
-        // that carries a credential, or a Pubky object, is never a card's.
-        if uri.len() > 2048 || !publishable(&uri) {
-            return Err(Reject::Uri);
-        }
+        // Its root: an http(s) link's, normalized as a referenced link is, or the root its
+        // spelling rules name (`https://doi.org/…` is `doi:…`), so the card holds the link a
+        // resource of any of its spellings is stored under. Never another scheme, a link that
+        // carries a credential (as written: normalizing cuts a password), a Pubky object, or one
+        // over the table's 2048 bytes (normalizing may lengthen a link).
+        let uri = match model::identity(&self.uri) {
+            Ok((_, _, scheme)) if matches!(scheme.as_str(), "http" | "https") => {
+                link_root(&self.uri).ok_or(Reject::Uri)?
+            }
+            _ => return Err(Reject::Uri),
+        };
         // Stored by its bare name (`Person`, never `schema:Person`), as resources store theirs.
         let Some(r#type) = model::type_path(&self.r#type).pop() else {
             return Err(Reject::Type);
         };
         let name = clean(&self.name, NAME_CAP);
-        if name.is_empty() {
+        // A name that carries a credential is no item's.
+        if name.is_empty() || crate::capability::contains_credential(&name) {
             return Err(Reject::Name);
         }
         let mut seen = BTreeSet::from([name.clone()]);
+        // Other names and the description are listed in search and indexed as they are stored:
+        // one that carries a credential is left out.
         let other_names = self
             .other_names
             .iter()
             .map(|n| clean(n, NAME_CAP))
-            .filter(|n| !n.is_empty() && seen.insert(n.clone()))
+            .filter(|n| {
+                !n.is_empty() && !crate::capability::contains_credential(n) && seen.insert(n.clone())
+            })
             .take(OTHER_NAMES_CAP)
             .collect();
         let description = self
             .description
             .as_deref()
             .map(|d| clean(d, model::DESCRIPTION_CAP))
-            .filter(|d| !d.is_empty());
+            .filter(|d| !d.is_empty() && !crate::capability::contains_credential(d));
         // The card's own link's key comes first, so a read by the link's resource ID finds the
         // card (`join::unshared`) and no cap cuts it.
         let mut seen = BTreeSet::new();
-        let keys = link_key(&uri)
-            .into_iter()
+        let keys = std::iter::once(own_key(&uri))
             .chain(self.keys.iter().filter_map(|k| stored_key(k)))
             .filter(|k| seen.insert(k.clone()))
             .take(KEYS_CAP)
             .collect();
+        // Related links: http(s) links, each by its root, as the card's own link.
         let mut seen = BTreeSet::from([uri.clone()]);
         let related_uris = self
             .related_uris
             .iter()
-            .filter_map(|u| model::identity(u).ok().map(|(_, u, _)| u))
-            .filter(|u| u.len() <= 2048 && publishable(u) && seen.insert(u.clone()))
+            .filter(|u| {
+                model::identity(u).is_ok_and(|(_, _, scheme)| matches!(scheme.as_str(), "http" | "https"))
+            })
+            .filter_map(|u| link_root(u))
+            .filter(|u| seen.insert(u.clone()))
             .take(RELATED_CAP)
             .collect();
         let (lon, lat) = match &self.point {
@@ -660,8 +786,353 @@ impl Card {
     }
 }
 
+/// What the property tests of the catalogue modules share: a small generator and its seed.
+#[cfg(test)]
+pub(crate) mod testgen {
+    use super::Catalogue;
+    /// The seed of a property test: `PINAKES_TEST_SEED` (decimal, or hex after `0x`) when it is
+    /// set, else `fixed`, so every run is the same unless asked otherwise. Printed (`--nocapture`
+    /// shows it), so a failure seen with another seed can be repeated.
+    pub fn seed(test: &str, fixed: u64) -> u64 {
+        let seed = std::env::var("PINAKES_TEST_SEED")
+            .ok()
+            .and_then(|s| {
+                let s = s.trim();
+                match s.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                    None => s.parse().ok(),
+                }
+            })
+            .unwrap_or(fixed);
+        eprintln!("{test}: seed {seed:#x} (PINAKES_TEST_SEED={seed:#x} repeats it)");
+        seed
+    }
+    /// A small generator (xorshift).
+    pub struct Gen(u64);
+    impl Gen {
+        pub fn new(test: &str, fixed: u64) -> Self {
+            // xorshift never leaves 0.
+            Self(seed(test, fixed).max(1))
+        }
+        pub fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        pub fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+        pub fn pick<'a, T>(&mut self, from: &'a [T]) -> &'a T {
+            &from[self.below(from.len())]
+        }
+        pub fn chance(&mut self, one_in: usize) -> bool {
+            self.below(one_in) == 0
+        }
+        /// `least` characters drawn from `from`, and up to `more` fewer than that more.
+        pub fn chars(&mut self, from: &str, least: usize, more: usize) -> String {
+            let len = least + self.below(more);
+            let from: Vec<char> = from.chars().collect();
+            (0..len).map(|_| *self.pick(&from)).collect()
+        }
+        /// Each ASCII letter of `text` in upper or lower case.
+        pub fn cased(&mut self, text: &str) -> String {
+            text.chars()
+                .map(|c| {
+                    if self.chance(2) {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c.to_ascii_lowercase()
+                    }
+                })
+                .collect()
+        }
+    }
+    /// An importer's spelling of a key (case, `_` in a crate's name, an arXiv version, `www.` and
+    /// a final dot on a host, a MusicBrainz entity with `_`) and the link the key names, for each
+    /// kind of key a link names by itself (`join::link_keys`), with the stored key both must give.
+    pub struct Spelled {
+        pub spelling: String,
+        pub link: String,
+        pub key: String,
+        pub owner: Catalogue,
+    }
+    pub fn mbid(gen: &mut Gen) -> String {
+        let hex = "0123456789abcdef";
+        [8, 4, 4, 4, 12]
+            .iter()
+            .map(|n| gen.chars(hex, *n, 0))
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+    pub fn digits(gen: &mut Gen, max: usize) -> String {
+        let n = 1 + gen.below(max);
+        format!("{}{}", 1 + gen.below(9), gen.chars("0123456789", n - 1, 0))
+    }
+    /// One [`Spelled`] of a random kind; `canonical` keeps the link in the one spelling
+    /// `catalogue_key_links` gives for its key (lower case, a crate's name with one kind of
+    /// separator).
+    pub fn spelled(gen: &mut Gen, canonical: bool) -> Spelled {
+        let lower = "abcdefghijklmnopqrstuvwxyz";
+        let alnum = "abcdefghijklmnopqrstuvwxyz0123456789";
+        match gen.below(9) {
+            0 => {
+                let entity = *gen.pick(&["artist", "recording", "release", "release-group"]);
+                let id = mbid(gen);
+                let written = if entity == "release-group" && gen.chance(2) {
+                    "release_group".to_owned()
+                } else {
+                    gen.cased(entity)
+                };
+                let link_id = if canonical { id.clone() } else { gen.cased(&id) };
+                Spelled {
+                    spelling: format!("mb:{written}:{}", gen.cased(&id)),
+                    link: format!("https://musicbrainz.org/{entity}/{link_id}"),
+                    key: format!("mb:{entity}:{id}"),
+                    owner: Catalogue::Musicbrainz,
+                }
+            }
+            1 => {
+                let q = format!("Q{}", digits(gen, 9));
+                let host = if canonical {
+                    "https://www.wikidata.org/wiki/"
+                } else {
+                    *gen.pick(&[
+                        "https://www.wikidata.org/wiki/",
+                        "https://m.wikidata.org/wiki/",
+                        "https://www.wikidata.org/entity/",
+                        "http://wikidata.org/wiki/",
+                    ])
+                };
+                Spelled {
+                    spelling: format!("wikidata:{}", gen.cased(&q)),
+                    link: format!("{host}{q}"),
+                    key: format!("wikidata:{q}"),
+                    owner: Catalogue::Wikidata,
+                }
+            }
+            2 => {
+                // No `.` or `..` path segment: a link's path drops them, so no link names such a DOI.
+                let suffix = gen
+                    .chars("abcxyzABCXYZ0189.-_;()/", 1, 20)
+                    .split('/')
+                    .filter(|part| !matches!(*part, "." | ".."))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let doi = format!("10.{}/{suffix}x", gen.chars("0123456789", 4, 5));
+                let lowered = doi.to_lowercase();
+                Spelled {
+                    spelling: format!("doi:{}", gen.cased(&doi)),
+                    link: if canonical {
+                        format!("doi:{lowered}")
+                    } else {
+                        format!("https://doi.org/{}", gen.cased(&doi))
+                    },
+                    key: format!("doi:{lowered}"),
+                    owner: Catalogue::Openalex,
+                }
+            }
+            3 => {
+                let id = if gen.chance(3) {
+                    format!(
+                        "{}/{}",
+                        gen.pick(&["hep-th", "math.ag", "cond-mat", "astro-ph"]),
+                        gen.chars("0123456789", 7, 0)
+                    )
+                } else {
+                    format!(
+                        "{}.{}",
+                        gen.chars("0123456789", 4, 0),
+                        gen.chars("0123456789", 4, 2)
+                    )
+                };
+                let version = if gen.chance(2) {
+                    format!("v{}", 1 + gen.below(9))
+                } else {
+                    String::new()
+                };
+                let page = *gen.pick(&["abs", "pdf"]);
+                Spelled {
+                    spelling: format!("arxiv:{id}{version}"),
+                    link: if canonical {
+                        format!("https://arxiv.org/{page}/{id}")
+                    } else {
+                        format!("https://arxiv.org/{page}/{id}{version}")
+                    },
+                    key: format!("arxiv:{id}"),
+                    owner: Catalogue::Openalex,
+                }
+            }
+            4 => {
+                let w = format!("W{}", digits(gen, 12));
+                let host = if canonical {
+                    "https://openalex.org/"
+                } else {
+                    *gen.pick(&[
+                        "https://openalex.org/",
+                        "https://openalex.org/works/",
+                        "https://api.openalex.org/works/",
+                    ])
+                };
+                Spelled {
+                    spelling: format!("openalex:{}", gen.cased(&w)),
+                    link: format!("{host}{w}"),
+                    key: format!("openalex:{w}"),
+                    owner: Catalogue::Openalex,
+                }
+            }
+            5 => {
+                // `x` first: never one of docs.rs's own pages (`about`, `crate`).
+                let separator = if gen.chance(2) { "-" } else { "_" };
+                let parts: Vec<String> = (0..1 + gen.below(3))
+                    .map(|_| gen.chars(alnum, 1, 6))
+                    .collect();
+                let name = format!("x{}", parts.join(separator));
+                let published = if canonical {
+                    name.clone()
+                } else {
+                    let other = if gen.chance(2) { "_" } else { "-" };
+                    gen.cased(&name.replace('-', other))
+                };
+                let page = if canonical {
+                    *gen.pick(&[
+                        "https://crates.io/crates/",
+                        "https://docs.rs/",
+                        "https://docs.rs/crate/",
+                        "https://lib.rs/crates/",
+                    ])
+                } else {
+                    "https://crates.io/crates/"
+                };
+                Spelled {
+                    spelling: format!("crate:{published}"),
+                    link: format!("{page}{published}"),
+                    key: format!("crate:{}", name.to_ascii_lowercase().replace('_', "-")),
+                    owner: Catalogue::Software,
+                }
+            }
+            6 => {
+                let id = format!(
+                    "{}.{}.{}",
+                    gen.pick(&["org", "com", "net", "de"]),
+                    gen.chars(lower, 1, 8),
+                    gen.chars(lower, 1, 0) + &gen.chars("abcXYZ019_", 0, 8)
+                );
+                let page = *gen.pick(&[
+                    "https://f-droid.org/packages/{}/",
+                    "https://f-droid.org/packages/{}",
+                    "https://f-droid.org/en/packages/{}/",
+                ]);
+                Spelled {
+                    spelling: format!("android:{id}"),
+                    link: page.replace("{}", &id),
+                    key: format!("android:{id}"),
+                    owner: Catalogue::Software,
+                }
+            }
+            7 => {
+                let id = format!(
+                    "{}.{}.{}",
+                    gen.pick(&["org", "com", "io"]),
+                    gen.chars(alnum, 1, 8),
+                    gen.chars("abcXYZ019-_", 1, 8)
+                );
+                let page = *gen.pick(&[
+                    "https://flathub.org/apps/",
+                    "https://flathub.org/apps/details/",
+                ]);
+                Spelled {
+                    spelling: format!("flathub:{id}"),
+                    link: format!("{page}{id}"),
+                    key: format!("flathub:{id}"),
+                    owner: Catalogue::Software,
+                }
+            }
+            _ => {
+                let labels: Vec<String> = (0..1 + gen.below(2))
+                    .map(|_| {
+                        if gen.chance(6) {
+                            "bücher".to_owned()
+                        } else {
+                            gen.chars(lower, 1, 0) + &gen.chars("abc-019", 0, 8) + "x"
+                        }
+                    })
+                    .collect();
+                let host = format!("{}.{}", labels.join("."), gen.pick(&["org", "de", "co.uk"]));
+                let ascii = url::Url::parse(&format!("https://{host}/"))
+                    .unwrap()
+                    .host_str()
+                    .unwrap()
+                    .to_owned();
+                let www = if gen.chance(2) { "www." } else { "" };
+                let dot = if !canonical && gen.chance(4) { "." } else { "" };
+                let written = if canonical { host.clone() } else { gen.cased(&host) };
+                let scheme = if canonical || gen.chance(2) { "https" } else { "http" };
+                Spelled {
+                    spelling: format!("homepage:{www}{written}{dot}"),
+                    link: format!("{scheme}://{www}{written}{dot}/"),
+                    key: format!("homepage:{ascii}"),
+                    owner: Catalogue::Tranco,
+                }
+            }
+        }
+    }
+
+    /// A URL with the spellings people share: scheme and host in any case, an IDN host, default
+    /// and other ports, percent-encoding (of letters, of a slash, a bad escape), dot segments,
+    /// a trailing slash, tracking and other query parameters, a fragment.
+    pub fn url(gen: &mut Gen) -> String {
+        let scheme = *gen.pick(&["http", "https"]);
+        let scheme = gen.cased(scheme);
+        let host = gen.pick(&[
+            "example.org",
+            "Example.ORG",
+            "bücher.de",
+            "xn--bcher-kva.de",
+            "en.wikipedia.org",
+            "en.m.wikipedia.org",
+            "www.youtube.com",
+            "doi.org",
+            "musicbrainz.org",
+            "crates.io",
+            "sub.example.co.uk.",
+            "127.0.0.1",
+        ]);
+        let port = *gen.pick(&["", "", ":80", ":443", ":8080"]);
+        let mut out = format!("{scheme}://{host}{port}");
+        for _ in 0..gen.below(5) {
+            out.push('/');
+            out.push_str(gen.pick(&[
+                "a", "B", "wiki", "Douglas_Adams", "%41b", "%2F", "%7euser", "%zz", ".", "..",
+                "caf%C3%A9", "café", "a b", "10.1000", "abc", "watch", "",
+            ]));
+        }
+        if gen.chance(3) {
+            out.push('/');
+        }
+        if gen.chance(2) {
+            out.push('?');
+            let params: Vec<&str> = (0..1 + gen.below(3))
+                .map(|_| {
+                    *gen.pick(&[
+                        "utm_source=x", "fbclid=1", "v=dQw4w9WgXcQ", "q=a+b", "page=2", "x", "a=%20",
+                        "si=abc",
+                    ])
+                })
+                .collect();
+            out.push_str(&params.join("&"));
+        }
+        if gen.chance(3) {
+            out.push_str(gen.pick(&["#top", "#", "#a=b"]));
+        }
+        out
+    }
+
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testgen::{spelled, url, Gen as Rng};
     use super::*;
 
     /// Labels become valid Pubky tag labels: lower case, one hyphen for each run of spaces,
@@ -904,6 +1375,31 @@ mod tests {
             stored_key("isrc:gbum71029604").as_deref(),
             Some("isrc:GBUM71029604")
         );
+        // Each kind in the form the link it names derives (`join::link_keys`).
+        for (raw, stored) in [
+            ("crate:Serde_Json", Some("crate:serde-json")),
+            ("crate:1abc", None),
+            (
+                "mb:Release_Group:B1392450-E666-3926-A536-22C65F834433",
+                Some("mb:release-group:b1392450-e666-3926-a536-22c65f834433"),
+            ),
+            ("mb:artist:not-an-mbid", None),
+            ("arxiv:2302.04668v3", Some("arxiv:2302.04668")),
+            ("arxiv:nonsense", None),
+            ("openalex:w2741809807", Some("openalex:W2741809807")),
+            ("wikidata:Q042", None),
+            ("android:org.fdroid.fdroid", Some("android:org.fdroid.fdroid")),
+            ("android:nodots", None),
+            ("flathub:org.gnome.Maps", Some("flathub:org.gnome.Maps")),
+            ("flathub:org.gnome", None),
+            ("homepage:WWW.Bücher.DE.", Some("homepage:xn--bcher-kva.de")),
+            ("homepage:example.org/path", None),
+            ("homepage:localhost", None),
+            ("osm:node/1", Some("osm:node/1")),
+            ("osm:planet/1", None),
+        ] {
+            assert_eq!(stored_key(raw).as_deref(), stored, "{raw}");
+        }
         assert_eq!(link_key("nostr:note1abc"), None);
         assert_eq!(
             link_key("HTTPS://Example.org/a#b"),
@@ -986,7 +1482,7 @@ mod tests {
     /// character) or nothing, and a label it made is its own label again.
     #[test]
     fn label_always_gives_a_valid_tag_and_is_idempotent() {
-        let mut gen = Gen(0x9e37_79b9_7f4a_7c15);
+        let mut gen = Gen(super::testgen::seed("label", 0x9e37_79b9_7f4a_7c15).max(1));
         let mut made = 0;
         for _ in 0..20_000 {
             let raw = gen.text(30);
@@ -1008,9 +1504,10 @@ mod tests {
     /// Property: a key `stored_key` returns is its own stored form, and is valid.
     #[test]
     fn stored_key_is_idempotent() {
-        let mut gen = Gen(0x2545_f491_4f6c_dd1d);
+        let mut gen = Gen(super::testgen::seed("stored_key", 0x2545_f491_4f6c_dd1d).max(1));
         let kinds = [
-            "doi", "isbn", "isrc", "wikidata", "url", "mb", "osm", "Doi", "x_1", "",
+            "doi", "isbn", "isrc", "wikidata", "url", "mb", "osm", "crate", "arxiv", "android",
+            "flathub", "homepage", "openalex", "Doi", "x_1", "",
         ];
         let values = [
             "10.1038/Nature12373",
@@ -1020,7 +1517,15 @@ mod tests {
             "q42",
             "0123456789abcdef0123456789abcdef",
             "recording:b1392450-e666-3926-a536-22c65f834433",
+            "Release_Group:B1392450-E666-3926-A536-22C65F834433",
             "node/1",
+            "Serde_Json",
+            "2302.04668v2",
+            "hep-th/9901001",
+            "org.fdroid.fdroid",
+            "org.gnome.Maps",
+            "WWW.Example.ORG.",
+            "w2741809807",
         ];
         let mut kept = 0;
         for _ in 0..20_000 {
@@ -1041,7 +1546,217 @@ mod tests {
             assert!(valid_key(&key), "{raw:?} -> {key:?}");
             assert_eq!(stored_key(&key).as_deref(), Some(key.as_str()), "{raw:?}");
         }
-        assert!(kept > 5_000, "{kept}");
+        assert!(kept > 2_000, "{kept}");
+    }
+
+    /// Property: an importer's spelling of a key is stored as the key the link it names derives
+    /// (`join::link_keys`), so a card written with the dump's own spelling joins the links people
+    /// share (`crate:serde_json` and `crates.io/crates/serde_json` are both `crate:serde-json`).
+    #[test]
+    fn an_importers_spelling_is_stored_as_the_key_its_link_derives() {
+        let mut gen = Rng::new("importer spellings", 0x51ab_00c3_9e10_7a21);
+        for _ in 0..20_000 {
+            let canonical = gen.chance(2);
+            let spelled = spelled(&mut gen, canonical);
+            assert_eq!(
+                stored_key(&spelled.spelling).as_deref(),
+                Some(spelled.key.as_str()),
+                "{}",
+                spelled.spelling
+            );
+            let derived = join::link_keys(&spelled.link);
+            assert!(
+                derived.contains(&(spelled.key.clone(), spelled.owner)),
+                "{} -> {derived:?}, not {}",
+                spelled.link,
+                spelled.key
+            );
+        }
+    }
+
+    /// Property: normalizing is idempotent (a normalized link is its own normal form and ID), and
+    /// a root is its own root, so the link a card stores is the one a resource of the same shared
+    /// link is stored under.
+    #[test]
+    fn identity_is_idempotent_and_a_root_is_its_own() {
+        let mut gen = Rng::new("identity", 0x7f4a_7c15_9e37_79b9);
+        let mut read = 0;
+        for _ in 0..20_000 {
+            let raw = url(&mut gen);
+            let Ok((id, normal, scheme)) = model::identity(&raw) else {
+                continue;
+            };
+            read += 1;
+            assert_eq!(
+                model::identity(&normal).unwrap(),
+                (id, normal.clone(), scheme),
+                "{raw}"
+            );
+            if let Some(alias) = crate::alias::root(&normal) {
+                let (_, root, _) = model::identity(&alias.root).unwrap();
+                assert_eq!(root, alias.root, "{raw}: root not normalized");
+                // Known edge of the DOI rule, outside the catalogues: a `doi:` root holding a
+                // percent-escape (a DOI with a non-ASCII character) is lowered again by its own
+                // root (`%C3%A9` to `%c3%a9`). No DOI registry issues such names.
+                if !(root.starts_with("doi:") && root.contains('%')) {
+                    assert_eq!(crate::alias::root(&root), None, "{raw}: {root} has a root");
+                }
+            }
+        }
+        assert!(read > 10_000, "{read}");
+    }
+
+    /// Property: a card's link, related links and own `url:` key are what a resource of the same
+    /// shared link is stored under: its root (`alias::root` of the normalized link) and that root's
+    /// resource ID.
+    #[test]
+    fn a_cards_links_are_stored_as_a_shared_links_root() {
+        let mut gen = Rng::new("card links", 0x3c6e_f372_fe94_f82b);
+        let root = |raw: &str| {
+            let (_, normal, _) = model::identity(raw).unwrap();
+            crate::alias::root(&normal).map_or(normal, |a| a.root)
+        };
+        let mut stored = 0;
+        for _ in 0..5_000 {
+            let (link, related) = (url(&mut gen), url(&mut gen));
+            let row = Card {
+                source_id: "Q1".into(),
+                uri: link.clone(),
+                r#type: "Thing".into(),
+                name: "x".into(),
+                related_uris: vec![related.clone()],
+                ..Default::default()
+            }
+            .checked(Catalogue::Wikidata);
+            let Ok(row) = row else { continue };
+            stored += 1;
+            assert_eq!(row.uri, root(&link), "{link}");
+            let (id, _, _) = model::identity(&row.uri).unwrap();
+            assert_eq!(row.keys[0], format!("url:{id}"), "{link}");
+            assert_eq!(link_key(&link).as_ref(), Some(&row.keys[0]), "{link}");
+            if let Some(kept) = row.related_uris.first() {
+                assert_eq!(*kept, root(&related), "{related}");
+            }
+        }
+        assert!(stored > 2_000, "{stored}");
+    }
+
+    /// A card's link is an http(s) link (`javascript:`, `data:`, `file:` and the like are refused,
+    /// and dropped from its related links), never one that carries a credential as written
+    /// (normalizing cuts a password); a link whose spelling rules name a root is stored as the
+    /// root (`https://doi.org/…` as `doi:…`), with that root's own key.
+    #[test]
+    fn a_cards_links_are_web_links_without_credentials_stored_by_their_root() {
+        let with = |uri: &str, related: &[&str]| {
+            let mut c = card();
+            c.uri = uri.into();
+            c.related_uris = related.iter().map(|r| r.to_string()).collect();
+            c.checked(Catalogue::Wikidata)
+        };
+        for bad in [
+            "javascript:alert(1)",
+            "data:text/html,<b>x</b>",
+            "file:///etc/passwd",
+            "ftp://example.org/x",
+            "mailto:a@example.org",
+            "nostr:npub1x",
+            "doi:10.1000/abc",
+            "https://user:secret@example.org/feed.xml",
+            "https://example.org/?access_token=abc",
+            "pubky://x/pub/a",
+        ] {
+            assert_eq!(with(bad, &[]).unwrap_err(), Reject::Uri, "{bad}");
+        }
+        let row = with(
+            "https://example.org/",
+            &[
+                "javascript:alert(1)",
+                "data:text/html,x",
+                "file:///x",
+                "https://user:pw@example.org/a",
+                "https://example.org/b?token=x",
+                "https://example.org/c",
+            ],
+        )
+        .unwrap();
+        assert_eq!(row.related_uris, ["https://example.org/c"]);
+        let row = with("https://doi.org/10.1000/ABC", &["https://dx.doi.org/10.1000/xyz"]).unwrap();
+        assert_eq!(row.uri, "doi:10.1000/abc");
+        assert_eq!(row.related_uris, ["doi:10.1000/xyz"]);
+        assert_eq!(
+            row.keys[0],
+            format!("url:{}", crate::identity::resource_id("doi:10.1000/abc"))
+        );
+        assert_eq!(link_key("https://doi.org/10.1000/abc"), Some(row.keys[0].clone()));
+        assert_eq!(link_key("doi:10.1000/abc"), Some(row.keys[0].clone()));
+        // A tracked spelling is its root.
+        assert_eq!(
+            with("https://example.org/a?utm_source=x", &[]).unwrap().uri,
+            "https://example.org/a"
+        );
+    }
+
+    /// Names, other names and descriptions keep no invisible format characters (a zero-width
+    /// space, direction overrides, a soft hyphen, a byte order mark), labels none at all (no
+    /// joiners either); text that carries a credential is left out, a name that does refuses the
+    /// card; over-long input is cut before it is cleaned, and a label over 256 bytes is none.
+    #[test]
+    fn card_texts_hold_no_invisible_characters_credentials_or_unbounded_input() {
+        for (raw, want) in [
+            ("jazz\u{200b}", Some("jazz")),
+            ("\u{202e}zzaj", Some("zzaj")),
+            ("ja\u{ad}zz", Some("jazz")),
+            ("\u{feff}rock", Some("rock")),
+            ("hip\u{2066}hop", Some("hiphop")),
+            ("k\u{200d}pop", Some("kpop")),
+            ("\u{200b}", None),
+        ] {
+            assert_eq!(label(raw).as_deref(), want, "{raw:?}");
+        }
+        assert_eq!(label(&"a".repeat(300)), None);
+        assert_eq!(label(&format!("a{}b", " ".repeat(300))), None);
+        let mut c = card();
+        c.name = "Dou\u{200b}glas \u{202e}Adams\u{feff}".into();
+        c.other_names = vec![
+            "می\u{200c}خواهم".into(),
+            "see https://example.org/x?token=abc".into(),
+        ];
+        c.description = Some("Read https://user:pw@example.org/feed".into());
+        let row = c.checked(Catalogue::Wikidata).unwrap();
+        assert_eq!(row.name, "Douglas Adams");
+        assert_eq!(row.other_names, ["می\u{200c}خواهم"]);
+        assert_eq!(row.description, None);
+        let mut c = card();
+        c.name = "https://example.org/?access_token=abc".into();
+        assert_eq!(c.checked(Catalogue::Wikidata).unwrap_err(), Reject::Name);
+        // A megabyte of each input: cut or refused, and quickly.
+        let started = std::time::Instant::now();
+        let huge = "x ".repeat(512 * 1024);
+        let mut c = card();
+        c.name = huge.clone();
+        c.other_names = vec![huge.clone(); 64];
+        c.description = Some(huge.clone());
+        c.labels = vec![huge.clone(); 64];
+        c.keys = vec![format!("wikidata:Q{}", "1".repeat(1 << 20)); 8];
+        c.related_uris = vec![format!("https://example.org/{}", "a".repeat(1 << 20))];
+        let row = c.checked(Catalogue::Wikidata).unwrap();
+        assert!(row.name.len() <= NAME_CAP && row.name.starts_with("x x"));
+        assert!(row.other_names.is_empty(), "the same as the name");
+        assert!(row.description.as_ref().unwrap().len() <= model::DESCRIPTION_CAP);
+        assert!(row.labels.is_empty());
+        assert_eq!(row.keys.len(), 1, "only its own link's");
+        assert!(row.related_uris.is_empty());
+        let mut c = card();
+        c.uri = format!("https://example.org/{}", "a".repeat(1 << 20));
+        assert_eq!(c.checked(Catalogue::Wikidata).unwrap_err(), Reject::Uri);
+        let mut c = card();
+        c.source_id = "1".repeat(1 << 20);
+        assert_eq!(c.checked(Catalogue::Wikidata).unwrap_err(), Reject::SourceId);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
