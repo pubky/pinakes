@@ -2629,16 +2629,39 @@ pub fn card_read_plans() -> Vec<Value> {
 type FamedCard = (i64, String, String, String, Vec<String>, f32);
 /// The columns of a card read without text.
 const CARD_READ_COLUMNS: &str = "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame";
-/// The rows the statement `build` writes reads; its plan recorded first while a test asks
-/// ([`record_card_read_plans`]).
+/// How a card read without text is planned ([`read_cards`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Plan {
+    /// In its indexes' order, as the planner chooses.
+    Ordered,
+    /// The nearest to a point in the `point` indexes' nearest-first order: the planner would rather
+    /// read every card in the circle or box and sort them, which reads far more.
+    Nearest,
+}
+/// The rows the statement `build` writes reads, in a transaction of its own planned as `plan`
+/// says, never with parallel workers (they take longer to start than a bounded read takes); its
+/// plan recorded first while a test asks ([`record_card_read_plans`]).
 async fn read_cards(
     pool: &PgPool,
+    plan: Plan,
     build: impl Fn(&mut QueryBuilder<'static, Postgres>),
 ) -> Result<Vec<FamedCard>, ApiError> {
+    let mut tx = pool.begin().await?;
+    let settings: &[&str] = match plan {
+        Plan::Ordered => &["SET LOCAL max_parallel_workers_per_gather = 0"],
+        Plan::Nearest => &[
+            "SET LOCAL max_parallel_workers_per_gather = 0",
+            "SET LOCAL enable_bitmapscan = off",
+            "SET LOCAL enable_seqscan = off",
+        ],
+    };
+    for setting in settings {
+        sqlx::query(setting).execute(&mut *tx).await?;
+    }
     if CARD_READ_PLANS.with(|p| p.borrow().is_some()) {
         let mut sql = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
         build(&mut sql);
-        let plan: Value = sql.build_query_scalar().fetch_one(pool).await?;
+        let plan: Value = sql.build_query_scalar().fetch_one(&mut *tx).await?;
         CARD_READ_PLANS.with(|p| {
             if let Some(plans) = p.borrow_mut().as_mut() {
                 plans.push(plan);
@@ -2647,7 +2670,9 @@ async fn read_cards(
     }
     let mut sql = QueryBuilder::<Postgres>::new("");
     build(&mut sql);
-    Ok(sql.build_query_as().fetch_all(pool).await?)
+    let rows = sql.build_query_as().fetch_all(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(rows)
 }
 /// One branch of a card read in fame order: a catalogue, and a column equal to a value in it.
 type Branch = (String, Option<(&'static str, String)>);
@@ -2768,25 +2793,36 @@ async fn best_known_cards(
     };
     let each: Vec<Branch> = catalogues.iter().map(|c| (c.clone(), None)).collect();
     let rows = if let (Some("distance"), Some(near)) = (sort, spatial.near) {
-        // The nearest in the circle (the geography index serves the distance and the order).
-        read_cards(pool, |sql| {
-            any_catalogue(sql);
+        // The nearest in the circle (the geography index serves the distance and the order), then
+        // in that order with the card ID for equal distances.
+        let centre = |sql: &mut QueryBuilder<'static, Postgres>| {
+            sql.push("ST_SetSRID(ST_MakePoint(")
+                .push_bind(near.1)
+                .push(",")
+                .push_bind(near.0)
+                .push("),4326)::geography");
+        };
+        read_cards(pool, Plan::Nearest, |sql| {
+            sql.push("SELECT c.id,c.uri,c.type,c.catalogue,c.keys,c.fame FROM (SELECT c.*");
+            sql.push(" FROM catalogue_card c WHERE c.catalogue=ANY(")
+                .push_bind(catalogues.to_vec())
+                .push(")");
             filters(sql, false, false);
             circle(sql, near);
             if let Some(bbox) = &spatial.bbox {
                 push_boxes(sql, &bbox.split());
             }
-            sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
-                .push_bind(near.1)
-                .push(",")
-                .push_bind(near.0)
-                .push("),4326)::geography,c.id LIMIT ")
-                .push_bind(cap as i64);
+            sql.push(" ORDER BY c.point::geography<->");
+            centre(sql);
+            sql.push(" LIMIT ").push_bind(cap as i64);
+            sql.push(") c ORDER BY c.point::geography<->");
+            centre(sql);
+            sql.push(",c.id");
         })
         .await?
     } else if spatial.near.is_some() || spatial.bbox.is_some() {
         // The best known first, kept when in the place and through every filter.
-        let mut rows = read_cards(pool, |sql| {
+        let mut rows = read_cards(pool, Plan::Ordered, |sql| {
             sql.push("SELECT ").push(CARD_READ_COLUMNS).push(" FROM (");
             by_fame(
                 sql,
@@ -2808,9 +2844,10 @@ async fn best_known_cards(
         })
         .await?;
         if rows.len() < cap {
-            // Fewer: the nearest to the circle's centre, or to each box's, in it too.
+            // Fewer: the nearest to the circle's centre, or to each box's, in it too (in the index's
+            // nearest-first order: at equal distances at the end, either may be read).
             let nearest = (NEAREST_CARDS * cap) as i64;
-            let near = read_cards(pool, |sql| {
+            let near = read_cards(pool, Plan::Nearest, |sql| {
                 if let Some(near) = spatial.near {
                     any_catalogue(sql);
                     filters(sql, false, false);
@@ -2822,7 +2859,7 @@ async fn best_known_cards(
                         .push_bind(near.1)
                         .push(",")
                         .push_bind(near.0)
-                        .push("),4326)::geography,c.id LIMIT ")
+                        .push("),4326)::geography LIMIT ")
                         .push_bind(nearest);
                 } else if let Some(bbox) = &spatial.bbox {
                     for (i, b) in bbox.split().iter().enumerate() {
@@ -2837,7 +2874,7 @@ async fn best_known_cards(
                             .push_bind((b[0] + b[2]) / 2.0)
                             .push(",")
                             .push_bind((b[1] + b[3]) / 2.0)
-                            .push("),4326),c.id LIMIT ")
+                            .push("),4326) LIMIT ")
                             .push_bind(nearest)
                             .push(")");
                     }
@@ -2862,7 +2899,7 @@ async fn best_known_cards(
                     .map(move |h| (c.clone(), Some(("catalogue_card_host(c.uri)", h.clone()))))
             })
             .collect();
-        read_cards(pool, |sql| {
+        read_cards(pool, Plan::Ordered, |sql| {
             by_fame(
                 sql,
                 CARD_READ_COLUMNS,
@@ -2884,7 +2921,7 @@ async fn best_known_cards(
                     .map(move |t| (c.clone(), Some(("c.type", t.clone()))))
             })
             .collect();
-        read_cards(pool, |sql| {
+        read_cards(pool, Plan::Ordered, |sql| {
             by_fame(
                 sql,
                 CARD_READ_COLUMNS,
@@ -2895,7 +2932,7 @@ async fn best_known_cards(
         })
         .await?
     } else {
-        read_cards(pool, |sql| {
+        read_cards(pool, Plan::Ordered, |sql| {
             by_fame(
                 sql,
                 CARD_READ_COLUMNS,
