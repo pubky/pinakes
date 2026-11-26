@@ -161,6 +161,14 @@ pub fn valid_version(v: &str) -> bool {
             .all(|(i, c)| i == 8 || c.is_ascii_digit())
 }
 
+/// A dump named after a day after tomorrow (or no day at all): no mirror publishes one.
+fn in_future(version: &str) -> bool {
+    let day = chrono::NaiveDate::parse_from_str(&version[..8], "%Y%m%d");
+    day.map_or(true, |d| {
+        d > chrono::Utc::now().date_naive() + chrono::Duration::days(1)
+    })
+}
+
 /// The MusicBrainz importer.
 pub struct MusicBrainz {
     source: Source,
@@ -279,7 +287,7 @@ impl MusicBrainz {
                 .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
                 .unwrap_or_default(),
         };
-        if !valid_version(&version) {
+        if !valid_version(&version) || in_future(&version) {
             bail!(Failure::new("version").at(self.source.at()));
         }
         Ok(version)
@@ -351,9 +359,7 @@ impl MusicBrainz {
     /// A run of `mode`: read the dump, sort its records (with the stored hashes for an update),
     /// and write; or the rest of one cut off. A dump that can't be applied as it is (its files
     /// don't match their checksums or don't parse, or it would remove or refuse too many cards)
-    /// is refused: an update records the failure once and remembers the dump in its position,
-    /// so it is not read again until `LATEST` names a newer one (or a full import is asked
-    /// for); an import keeps a `refused` cursor and fails at once on each try until then.
+    /// is refused ([`Self::refuse`]).
     async fn read_and_write(&self, job: &mut Job<'_>, mode: Run) -> Result<()> {
         let stop = Stop::default();
         let mut resumed: Option<Cursor> = job
@@ -364,14 +370,6 @@ impl MusicBrainz {
             .as_ref()
             .is_some_and(|c| c.source != self.source_id() || c.limit != job.limit())
         {
-            resumed = None;
-        }
-        if let Some(c) = resumed.clone().filter(|c| c.phase == Phase::Refused) {
-            if self.latest().await? <= c.version {
-                bail!(
-                    Failure::new(refused_class(c.class.as_deref())).at(c.note.unwrap_or_default())
-                );
-            }
             resumed = None;
         }
         let mut version = match &resumed {
@@ -403,6 +401,12 @@ impl MusicBrainz {
         }
         let mut as_of = resumed.as_ref().and_then(|c| c.as_of);
         let (source, limit) = (self.source_id(), job.limit());
+        // A full import asked for (by hand, or by an update handing over for a changed limit)
+        // removes what its dump no longer has, however much; one of the importer's own may
+        // remove at most a tenth. Kept in the cursor: a resumed import is still the one asked for.
+        let forced = resumed
+            .as_ref()
+            .map_or(job.state().import_requested.is_some(), |c| c.forced);
         let cursor = |phase, after: Option<String>, removed, as_of| {
             serde_json::to_value(Cursor {
                 version: version.clone(),
@@ -410,10 +414,9 @@ impl MusicBrainz {
                 after,
                 removed,
                 as_of,
-                note: None,
-                class: None,
                 source: source.clone(),
                 limit,
+                forced,
             })
         };
         let phase = resumed.as_ref().map(|c| c.phase);
@@ -456,7 +459,9 @@ impl MusicBrainz {
             }
             let after = resumed.as_ref().and_then(|c| c.after.clone());
             let read = self
-                .write(job, mode, &version, &done, &removals, after, as_of, &stop)
+                .write(
+                    job, mode, &version, &done, &removals, after, as_of, forced, &stop,
+                )
                 .await;
             match read {
                 Ok(()) => {}
@@ -475,28 +480,32 @@ impl MusicBrainz {
                 }
                 Err(error) => return Err(error),
             }
-            // A full import that read nothing, or whose cards were mostly refused, removes no
-            // card at its end: an empty or broken dump never empties the catalogue.
-            let report = job.report();
-            if mode == Run::Import
-                && cards > 0
-                && job.limit().is_none()
-                && (done.records == 0 || too_many(report.rejected, cards, None))
-            {
-                let note = format!(
-                    "{} of {cards} cards refused, {} records read in dump {version}",
-                    report.rejected, done.records
-                );
-                return self
-                    .refuse(job, mode, &version, "rejected", &note, &spill_dir)
-                    .await;
+            // A full import of the importer's own removes at most a tenth of the cards: a dump
+            // that is empty, or whose cards are mostly refused, never empties the catalogue.
+            if mode == Run::Import && !forced && job.limit().is_none() {
+                let (gone, all): (i64, i64) = sqlx::query_as(
+                    "SELECT count(*) FILTER (WHERE seen_generation<$2),count(*) FROM catalogue_card WHERE catalogue=$1",
+                )
+                .bind(Catalogue::Musicbrainz.name())
+                .bind(job.generation())
+                .fetch_one(job.pool())
+                .await?;
+                if too_many(gone as u64, all as u64, None) {
+                    let note = format!("{gone} of {all} cards not in dump {version}");
+                    return self
+                        .refuse(job, mode, &version, "removals", &note, &spill_dir)
+                        .await;
+                }
             }
         }
         if mode == Run::Update && phase != Some(Phase::Finished) {
             // Everything an update removes counts: the cards the dump no longer has and those it
             // makes but that are refused. The new and changed cards are written by now.
             if phase != Some(Phase::Remove) {
-                let listed = count_lines(&removals)?;
+                let path = removals.clone();
+                let listed = tokio::task::spawn_blocking(move || count_lines(&path))
+                    .await
+                    .map_err(|_| Failure::new("panic"))??;
                 let cards = job.state().cards.max(0) as u64;
                 if too_many(listed, cards, job.limit()) {
                     let note =
@@ -528,14 +537,15 @@ impl MusicBrainz {
         Ok(())
     }
 
-    /// Refuse the dump `version` (`class`, with our own `note`): its runs are removed. An update
-    /// records the failure and ends, remembering the dump in its position (`refused`), so the
-    /// cards stay as they are and the dump is not read again; an import keeps a `refused`
-    /// cursor and fails.
+    /// Refuse the dump `version` (`class`, with our own `note`): its runs are removed and the run
+    /// is abandoned ([`super::run::Abandoned`]: no card removed for it, the failure recorded,
+    /// the run cleared), and the position remembers the dump and its source (`refused`,
+    /// `refused_source`), so the dump is read again only when `LATEST` names another, or a full
+    /// import is asked for.
     async fn refuse(
         &self,
         job: &mut Job<'_>,
-        mode: Run,
+        _mode: Run,
         version: &str,
         class: &'static str,
         note: &str,
@@ -546,39 +556,23 @@ impl MusicBrainz {
             version,
             class,
             note,
-            "musicbrainz dump refused: it waits for a newer dump, or `pinakesd catalogue import musicbrainz --request` asks for a full import"
+            "musicbrainz dump refused: it waits for another dump, or `pinakesd catalogue import musicbrainz --request` asks for a full import"
         );
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(job.dir().join(format!("removals-{version}")));
         let failure = Failure::new(class).at(note.to_owned());
-        if mode == Run::Update {
-            super::run::record_failure(job.pool(), Catalogue::Musicbrainz, &failure.to_string())
-                .await?;
-            let mut position = job
-                .state()
-                .position
-                .clone()
-                .unwrap_or_else(|| serde_json::json!({}));
-            if let Some(p) = position.as_object_mut() {
-                p.insert("refused".into(), version.into());
-                p.insert("refused_for".into(), failure.to_string().into());
-            }
-            job.set_position(position);
-            return Ok(());
+        let mut position = job
+            .state()
+            .position
+            .clone()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(p) = position.as_object_mut() {
+            p.insert("refused".into(), version.into());
+            p.insert("refused_source".into(), self.source_id().into());
         }
-        let cursor = serde_json::to_value(Cursor {
-            version: version.to_owned(),
-            phase: Phase::Refused,
-            after: None,
-            removed: 0,
-            as_of: None,
-            note: Some(note.to_owned()),
-            class: Some(class.to_owned()),
-            source: self.source_id(),
-            limit: job.limit(),
-        })?;
-        job.write_rows(&[], 0, cursor).await?;
-        bail!(failure);
+        job.set_position(position);
+        bail!(super::run::Abandoned(failure));
     }
 
     /// The dump read into sorted runs under `dir` and merged down to at most the fan-in: the
@@ -606,7 +600,9 @@ impl MusicBrainz {
         let mut kept: BTreeMap<String, FileDone> = BTreeMap::new();
         if limit.is_none() {
             for file in FILES {
-                if let Some(done) = read_file_done(dir, file) {
+                if let Some(done) =
+                    read_file_done(dir, file).filter(|d| d.source == self.source_id())
+                {
                     kept.insert(file.to_owned(), done);
                 }
             }
@@ -635,6 +631,7 @@ impl MusicBrainz {
             retry_wait: self.retry_wait,
             stop: stop.flag(),
             kept,
+            source_id: self.source_id(),
         };
         let fan_in = self.fan_in;
         let final_dir = dir.join(format!("final-{}", nonce()));
@@ -665,6 +662,7 @@ impl MusicBrainz {
             lines = done.lines,
             bad_lines = done.bad_lines,
             too_long = done.too_long,
+            cut = done.cut,
             downloaded = done.downloaded,
             checked = done.checked,
             runs = done.runs.len(),
@@ -704,6 +702,7 @@ impl MusicBrainz {
         removals: &Path,
         after: Option<String>,
         as_of: Option<chrono::DateTime<chrono::Utc>>,
+        forced: bool,
         stop: &Stop,
     ) -> Result<()> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Part>(4);
@@ -739,10 +738,9 @@ impl MusicBrainz {
                 after: Some(part.last.clone()),
                 removed: 0,
                 as_of,
-                note: None,
-                class: None,
                 source: self.source_id(),
                 limit: job.limit(),
+                forced,
             })?;
             job.write_rows(&part.rows, part.rejected, cursor).await?;
         }
@@ -801,24 +799,20 @@ struct Cursor {
     removed: u64,
     /// The dump's time.
     as_of: Option<chrono::DateTime<chrono::Utc>>,
-    /// Why a dump was refused (our own counts), and the failure's class.
-    #[serde(default)]
-    note: Option<String>,
-    #[serde(default)]
-    class: Option<String>,
     /// The source and the limit the run reads with: a cursor of others is not resumed.
     #[serde(default)]
     source: String,
     #[serde(default)]
     limit: Option<u64>,
+    /// A full import asked for: no removal check.
+    #[serde(default)]
+    forced: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Phase {
     Write,
     Remove,
-    /// An import refused for its dump: it waits for a newer one.
-    Refused,
     /// Written and removed: what is left is the runner's (an import's sweep).
     Finished,
 }
@@ -833,6 +827,9 @@ pub struct Done {
     pub lines: u64,
     pub bad_lines: u64,
     pub too_long: u64,
+    /// Lines whose lists the budget of list entries cut short.
+    #[serde(default)]
+    pub cut: u64,
     pub records: u64,
     pub downloaded: u64,
     /// The files whose SHA-256 was checked.
@@ -845,6 +842,12 @@ pub struct Done {
 /// One file read whole: its runs and what the read found (its `<file>.done` manifest).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct FileDone {
+    /// The source it was read from: a manifest of another is not used.
+    #[serde(default)]
+    source: String,
+    /// Lines the budget of list entries cut short.
+    #[serde(default)]
+    cut: u64,
     runs: Vec<PathBuf>,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
     lines: u64,
@@ -885,9 +888,21 @@ fn resolved(dir: &Path, runs: &[PathBuf]) -> Option<Vec<PathBuf>> {
             let plain = !r.as_os_str().is_empty()
                 && r.components()
                     .all(|c| matches!(c, std::path::Component::Normal(_)));
-            let path = dir.join(r);
-            (plain && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()))
-                .then_some(path)
+            if !plain {
+                return None;
+            }
+            // No part is a link: every directory on the way is one of the dump's own.
+            let mut at = dir.to_owned();
+            let parts: Vec<_> = r.components().collect();
+            for (n, part) in parts.iter().enumerate() {
+                at.push(part);
+                let kind = std::fs::symlink_metadata(&at).ok()?.file_type();
+                let last = n + 1 == parts.len();
+                if (last && !kind.is_file()) || (!last && !kind.is_dir()) {
+                    return None;
+                }
+            }
+            Some(at)
         })
         .collect()
 }
@@ -1261,23 +1276,6 @@ fn failure_note(error: &anyhow::Error) -> String {
         .and_then(|f| f.at.clone())
         .unwrap_or_default()
 }
-/// A stored class name as the fixed text a failure carries.
-fn refused_class(class: Option<&str>) -> &'static str {
-    [
-        "checksum",
-        "archive",
-        "parse",
-        "size",
-        "record_size",
-        "isrc_shared",
-        "removals",
-        "rejected",
-    ]
-    .into_iter()
-    .find(|c| Some(*c) == class)
-    .unwrap_or("refused")
-}
-
 /// What a read needs.
 struct ReadPlan {
     source: Source,
@@ -1294,6 +1292,7 @@ struct ReadPlan {
     stop: Arc<AtomicBool>,
     /// Files an earlier attempt read whole.
     kept: BTreeMap<String, FileDone>,
+    source_id: String,
 }
 impl ReadPlan {
     fn open(&self, file: &str) -> Result<Box<dyn Read + Send>> {
@@ -1405,6 +1404,7 @@ fn read_dump(plan: ReadPlan) -> Result<Done> {
         done.lines += read.lines;
         done.bad_lines += read.bad_lines;
         done.too_long += read.too_long;
+        done.cut += read.cut;
         done.records += read.records;
         done.downloaded += read.downloaded;
         done.checked += u32::from(read.checked);
@@ -1439,7 +1439,10 @@ fn read_file(
         .map(|i| Spill::new(&dir.join(format!("w{i}")), budget, plan.room))
         .collect::<Result<_>>()?;
     let mut hashed = bulk::Hashed::new(plan.open(&name)?);
-    let mut out = FileDone::default();
+    let mut out = FileDone {
+        source: plan.source_id.clone(),
+        ..FileDone::default()
+    };
     let stopped_early;
     {
         let decoded = bulk::xz(
@@ -1472,6 +1475,7 @@ fn read_file(
                 None => read_parallel(file, lines, &mut spills, &at, &plan.stop)?,
             };
             out.lines = read.lines;
+            out.cut = read.cut;
             out.bad_lines = read.bad;
             out.too_long = read.too_long;
             out.records = read.records;
@@ -1532,6 +1536,8 @@ fn dump_time(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 #[derive(Default)]
 struct FileRead {
     lines: u64,
+    /// Lines whose lists the budget of list entries cut short.
+    cut: u64,
     bad: u64,
     too_long: u64,
     records: u64,
@@ -1599,6 +1605,7 @@ fn read_parallel<R: BufRead>(
     let counted = (
         std::sync::atomic::AtomicU64::new(0),
         std::sync::atomic::AtomicU64::new(0),
+        std::sync::atomic::AtomicU64::new(0),
     );
     let results: Vec<Result<u64>> = std::thread::scope(|scope| {
         let workers: Vec<_> = spills
@@ -1611,7 +1618,7 @@ fn read_parallel<R: BufRead>(
                     while let Ok(chunk) = rx.recv() {
                         stopped(stop)?;
                         let mut start = 0;
-                        let (mut lines, mut bad) = (0, 0);
+                        let (mut lines, mut bad, mut cut) = (0, 0, 0);
                         for end in chunk.ends {
                             lines += 1;
                             // Each record goes to the sorter as it is made.
@@ -1634,10 +1641,14 @@ fn read_parallel<R: BufRead>(
                             if parsed.is_none() {
                                 bad += 1;
                             }
+                            if records::budget_left() == 0 {
+                                cut += 1;
+                            }
                             start = end;
                         }
                         let lines = counted.0.fetch_add(lines, Ordering::Relaxed) + lines;
                         let bad = counted.1.fetch_add(bad, Ordering::Relaxed) + bad;
+                        counted.2.fetch_add(cut, Ordering::Relaxed);
                         if too_bad(bad, lines) {
                             bail!(Failure::new("parse").at(at.to_owned()));
                         }
@@ -1709,6 +1720,15 @@ fn read_parallel<R: BufRead>(
     }
     read.lines = counted.0.load(Ordering::Relaxed);
     read.bad = counted.1.load(Ordering::Relaxed);
+    read.cut = counted.2.load(Ordering::Relaxed);
+    if read.cut > 0 {
+        tracing::warn!(
+            catalogue = "musicbrainz",
+            file,
+            lines = read.cut,
+            "musicbrainz lines with more list entries than a line may build: their later lists were cut short"
+        );
+    }
     read.too_long = lines.too_long();
     Ok(read)
 }
@@ -1800,17 +1820,28 @@ fn position_limit(state: &State) -> Option<u64> {
 fn cursor_of(state: &State) -> Option<Cursor> {
     serde_json::from_value(state.cursor.clone()?).ok()
 }
-/// The newest dump an update refused (`refused` in the position): not read again.
-fn position_refused(state: &State) -> String {
-    state
-        .position
-        .as_ref()
-        .and_then(|p| p.get("refused"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_owned()
+/// The dump a run refused and the source it read it from (`refused`, `refused_source` in the
+/// position).
+fn position_refused(state: &State) -> (String, String) {
+    let get = |name: &str| {
+        state
+            .position
+            .as_ref()
+            .and_then(|p| p.get(name))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    (get("refused"), get("refused_source"))
 }
 
+impl MusicBrainz {
+    /// Whether `latest` is the dump a run refused from this source: not read again.
+    fn refused(&self, state: &State, latest: &str) -> bool {
+        let (version, source) = position_refused(state);
+        version == latest && source == self.source_id()
+    }
+}
 #[async_trait]
 impl Importer for MusicBrainz {
     fn catalogue(&self) -> Catalogue {
@@ -1821,7 +1852,9 @@ impl Importer for MusicBrainz {
     /// cut off in its removals, or refused, needs none.
     fn disk_need(&self, _run: Run, state: &State) -> u64 {
         if state.run.is_some() {
-            if let Some(c) = cursor_of(state) {
+            if let Some(c) =
+                cursor_of(state).filter(|c| c.source == self.source_id() && c.limit == self.limit)
+            {
                 let finished_read = c.phase == Phase::Write
                     && self.work_dir.as_ref().is_some_and(|d| {
                         read_done(&d.join(format!("spill-{}", c.version))).is_some()
@@ -1840,10 +1873,12 @@ impl Importer for MusicBrainz {
     /// `LATEST` names a newer dump than the cards are from (and than one it refused), or the
     /// `limit` changed. A `LATEST` that can't be read is asked again at the next poll.
     async fn plan(&self, state: &State) -> Result<Plan> {
-        if state.current_at().is_none() {
+        let never = state.current_at().is_none();
+        // A first import whose dump was refused waits for another, as an update does.
+        if never && position_refused(state).0.is_empty() {
             return Ok(Plan::Run(Run::Import));
         }
-        if position_limit(state) != self.limit {
+        if !never && position_limit(state) != self.limit {
             return Ok(Plan::Run(Run::Update));
         }
         {
@@ -1857,9 +1892,9 @@ impl Importer for MusicBrainz {
             *polled = Some(Instant::now());
         }
         match self.latest().await {
-            Ok(latest) if latest > position_version(state) && latest > position_refused(state) => {
-                Ok(Plan::Run(Run::Update))
-            }
+            Ok(latest) if self.refused(state, &latest) => Ok(Plan::Wait(POLL)),
+            Ok(_) if never => Ok(Plan::Run(Run::Import)),
+            Ok(latest) if latest > position_version(state) => Ok(Plan::Run(Run::Update)),
             Ok(_) => Ok(Plan::Wait(POLL)),
             Err(error) => {
                 tracing::info!(catalogue = "musicbrainz", error = %super::failure::shown(&error), "the newest MusicBrainz dump could not be looked up; asked again in an hour");
@@ -1881,7 +1916,7 @@ impl Importer for MusicBrainz {
         }
         if job.cursor().is_none() {
             let latest = self.latest().await?;
-            if latest <= position_version(job.state()) || latest <= position_refused(job.state()) {
+            if latest <= position_version(job.state()) || self.refused(job.state(), &latest) {
                 return Ok(UpdateEnd::Done);
             }
         }
@@ -1991,7 +2026,12 @@ mod tests {
             PathBuf::from("release-1/w0"),
             PathBuf::from("release-1/w0/missing.lz4"),
         ] {
-            assert_eq!(resolved(&dir, &[bad.clone()]), None, "{}", bad.display());
+            assert_eq!(
+                resolved(&dir, std::slice::from_ref(&bad)),
+                None,
+                "{}",
+                bad.display()
+            );
         }
         assert!(relative(&dir, &[root.path().join("outside.lz4")]).is_err());
         let done = FileDone {
@@ -2140,18 +2180,24 @@ mod tests {
             importer.disk_need(Run::Update, &state(Some("update"), None)),
             DISK_NEED - 5000
         );
-        let removing = serde_json::json!({"version": "20261125-001001", "phase": "remove", "after": null, "removed": 3, "as_of": null});
+        let removing = serde_json::json!({"version": "20261125-001001", "phase": "remove", "after": null, "removed": 3, "as_of": null, "source": MIRROR});
         assert_eq!(
             importer.disk_need(Run::Update, &state(Some("update"), Some(removing))),
             0
         );
-        let finished = serde_json::json!({"version": "20261125-001001", "phase": "finished", "after": null, "removed": 0, "as_of": null});
+        let finished = serde_json::json!({"version": "20261125-001001", "phase": "finished", "after": null, "removed": 0, "as_of": null, "source": MIRROR});
+        // Another source's cursor is not this importer's to resume: it needs the disk.
+        let foreign = serde_json::json!({"version": "20261125-001001", "phase": "remove", "after": null, "removed": 3, "as_of": null, "source": "elsewhere"});
+        assert_eq!(
+            importer.disk_need(Run::Update, &state(Some("update"), Some(foreign))),
+            DISK_NEED - 5000
+        );
         assert_eq!(
             importer.disk_need(Run::Import, &state(Some("import"), Some(finished))),
             0
         );
-        // A refused import that reads a newer dump needs the disk as any read.
-        let refused = serde_json::json!({"version": "20261125-001001", "phase": "refused", "after": null, "removed": 0, "as_of": null});
+        // A cursor this importer can't read (another kind) needs the disk as any read.
+        let refused = serde_json::json!({"version": "20261125-001001", "phase": "other", "after": null, "removed": 0, "as_of": null});
         assert_eq!(
             importer.disk_need(Run::Import, &state(Some("import"), Some(refused))),
             DISK_NEED - 5000
@@ -2326,6 +2372,11 @@ mod tests {
         assert!(Source::parse(named.to_str().unwrap()).is_ok());
         assert!(Source::parse(root.path().to_str().unwrap()).is_err());
         assert!(valid_version("20261125-001001"));
+        // A dump named after a day after tomorrow is no dump a mirror publishes.
+        assert!(in_future("99991231-000000") && in_future("20261399-000000"));
+        assert!(!in_future("20261125-001001"));
+        let today = chrono::Utc::now().format("%Y%m%d-000000").to_string();
+        assert!(!in_future(&today));
         for bad in [
             "20261125001001",
             "2026112-0010010",

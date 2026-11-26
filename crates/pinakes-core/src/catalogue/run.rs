@@ -72,6 +72,25 @@ pub enum UpdateEnd {
     /// reason is the importer's own fixed text.
     NeedsImport(&'static str),
 }
+/// A run its importer abandons (`Err(Abandoned(..).into())` from [`Importer::import`] or
+/// [`Importer::update`]): what it read can't be applied (a dump refused for its checksums, its
+/// shape or what it would remove). The run ends without a full import's removal of the cards it
+/// did not read: its run and cursor are cleared, the position the importer set
+/// ([`Job::set_position`]) is kept, so its plan can tell what it refused, and the failure is
+/// recorded as any. Nothing else of the run is kept.
+#[derive(Debug)]
+pub struct Abandoned(pub Failure);
+impl std::fmt::Display for Abandoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for Abandoned {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// What an importer does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plan {
@@ -648,8 +667,28 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         }
     };
     let ended = tokio::select! {
-        ran = ran => ran?,
+        ran = ran => ran,
         _ = watched => return Err(Failure::new("turn_lost").into()),
+    };
+    let ended = match ended {
+        Ok(ended) => ended,
+        Err(error) if error.is::<Abandoned>() => {
+            sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,position=coalesce($2,position),updated_at=now() WHERE catalogue=$1")
+                .bind(catalogue.name())
+                .bind(job.position.take())
+                .execute(pool)
+                .await?;
+            if let Some(lock) = large {
+                lock.release().await;
+            }
+            tracing::info!(
+                catalogue = catalogue.name(),
+                run = run.name(),
+                "catalogue run abandoned: what it read can't be applied"
+            );
+            return Err(error);
+        }
+        Err(error) => return Err(error),
     };
     let mut report = job.report;
     let position = job.position.take();
@@ -731,8 +770,7 @@ impl Importer for Forced {
 
 /// One run of `importer` now, in this process (`pinakesd catalogue import`): a full import
 /// ([`Run::Import`], which takes up a full import that was cut off, else begins a new one), or an
-/// update ([`Run::Update`], after a finished import; one whose dump its importer refused begins
-/// anew). It takes the catalogue's lock (refused
+/// update ([`Run::Update`], after a finished import). It takes the catalogue's lock (refused
 /// while another process holds it), waits for the large-import turn and the disk as the task
 /// does (`waiting` says why, at each change), and runs through [`step`], so the daemon's code and
 /// state rows are the same. A failure is recorded as the task records it, and returned. The state
@@ -751,15 +789,8 @@ pub async fn run_once(
     let held = &mut lock;
     let ran = async {
         let state = store::ensure_state(&ctx.pool, catalogue).await?;
-        // A full import whose importer refused its dump (its cursor says `refused`) is not taken
-        // up: one by hand begins anew, to read the dump again.
-        let refused = state
-            .cursor
-            .as_ref()
-            .and_then(|c| c.get("phase"))
-            .is_some_and(|p| p == "refused");
         match run {
-            Run::Import if state.run.as_deref() != Some("import") || refused => {
+            Run::Import if state.run.as_deref() != Some("import") => {
                 sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,import_requested=$2,updated_at=now() WHERE catalogue=$1")
                     .bind(catalogue.name())
                     .bind("pinakesd catalogue import")

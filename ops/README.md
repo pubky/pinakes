@@ -127,7 +127,11 @@ alert shows only at the next refusal.
 
 `CatalogueImportFailed` (warning) fires for an hour after a catalogue's import or update run
 failed: `pinakesd catalogue status` shows the error, and the run is tried again from its cursor
-every ten minutes, so a failure that persists keeps it firing. `CatalogueUpdateLag` (warning)
+every ten minutes, so a failure that persists keeps it firing. A dump an importer refuses (its
+checksums, its shape, or what it would remove) fires it once: that run is abandoned and the dump
+is not read again until another appears; `catalogue status` keeps the phase `failed` and the
+reason, and `CatalogueUpdateLag` follows if no good dump comes in time
+([MusicBrainz](../docs/sources/musicbrainz_catalogue.md#a-dump-that-is-refused)). `CatalogueUpdateLag` (warning)
 fires when a catalogue's cards are further behind upstream than its source's publication rhythm
 allows (`pinakes_catalogue_max_update_lag_seconds`). Both read only catalogues
 that are on and have finished a full import: a catalogue that is off raises neither, and the

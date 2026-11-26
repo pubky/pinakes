@@ -10,7 +10,7 @@ MusicBrainz relates to an item gets its card from the catalogue without a fetch.
 | Catalogue | `musicbrainz` |
 | Reads | `https://data.metabrainz.org/pub/musicbrainz/data/json-dumps/`: `LATEST`, then the newest dump's `release.tar.xz`, `release-group.tar.xz`, `artist.tar.xz`, `recording.tar.xz` and `SHA256SUMS` |
 | Credentials | None |
-| Rate | `LATEST` once an hour; one file at a time, streamed; nothing is kept but sorted runs under `catalogues.dir/musicbrainz` |
+| Rate | `LATEST` at most once an hour; one file at a time, streamed; nothing is kept but sorted runs under `catalogues.dir/musicbrainz` |
 | Refresh | A new dump is read when `LATEST` names one; MusicBrainz publishes two a week |
 | Needs | `http.contact`: without it the importer does not start (every request names the operator's contact) |
 | Card types | `Person` or `MusicGroup` (artists), `MusicAlbum` (release groups), `MusicRecording` (recordings) |
@@ -115,18 +115,19 @@ A dump is refused, and no card is removed for it, when:
 - an update would remove more than a tenth of the cards (counted after the first pass, before any
   card is written, and again before the removals, counting the refused cards too; the new and
   changed cards are written by then);
-- a full import of a catalogue that holds cards reads no record, or refuses more than a tenth of
-  them;
+- a full import that was not asked for by hand would remove more than a tenth of the cards (an
+  empty dump, or one whose cards are mostly refused);
 - its files don't match their checksums, don't parse, or hold more than a file may (`checksum`,
-  `parse`, `archive`, `size`).
+  `parse`, `archive`, `size`, `record_size`, `isrc_shared`).
 
-The refusal is recorded once (`last_error`, which `catalogue status` shows with its counts, and
-`CatalogueImportFailed`), and the refused dump is not read again: an update waits for `LATEST` to
-name a newer dump, which it reads after the usual disk check; a refused full import fails at once
-on each try until then. If the dump is right, ask for a full import of it, which removes every
-card it does not read: `pinakesd catalogue import musicbrainz --request` beside the running
-daemon, or `pinakesd catalogue import musicbrainz` with the daemon stopped (a full import by hand
-begins anew, also after a refused one). There is no removal check under a `limit`.
+The run then ends as a failure: `catalogue status` shows the phase `failed` and the reason with its
+counts (`last_error`), and `CatalogueImportFailed` fires. The refused dump is not read again from
+the same source (`refused` in the state's position): the importer waits for `LATEST` to name
+another dump, which it reads after the usual disk check. If the dump is right, ask for a full import
+of it, which removes every card it does not read: `pinakesd catalogue import musicbrainz --request`
+beside the running daemon, or `pinakesd catalogue import musicbrainz` with the daemon stopped.
+There is no removal check under a `limit`, nor for a full import asked for by hand. A `LATEST`
+naming a dump dated after tomorrow is refused as no dump (`version`).
 
 ### Runs cut off
 

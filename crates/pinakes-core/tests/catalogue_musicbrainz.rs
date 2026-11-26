@@ -740,11 +740,12 @@ async fn the_dump_is_as_current_as_its_earliest_file(pool: PgPool) {
 }
 
 /// An update that would remove more than a tenth of the cards is refused (`removals`, with the
-/// counts, recorded once) before it writes or removes anything, and the dump is not read again:
-/// a newer dump is, through the disk check; a full import asked for (`--request`) imports it and
-/// removes what it no longer has.
+/// counts) before it writes or removes anything: the run ends as a failure, the cards stay, and
+/// the dump is not read again; a newer dump is, through the disk check; a full import asked for
+/// (`--request`) imports it and removes what it no longer has.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool) {
+    use pinakes_core::catalogue::run::Next;
     let s = setup(&pool, None);
     let a = dump(s.root.path(), A, unchanged);
     run(&s, &a, Run::Import).await.unwrap();
@@ -759,12 +760,29 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
         }
     };
     let b = dump(s.root.path(), B, shrunk);
-    let state = run(&s, &b, Run::Update).await.unwrap();
-    let error = state.last_error.clone().unwrap();
-    assert!(error.starts_with("removals (8 of 17 cards gone"), "{error}");
+    let failed = run(&s, &b, Run::Update).await.unwrap_err();
+    assert!(
+        failed.to_string().contains("removals (8 of 17 cards gone"),
+        "{failed}"
+    );
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!((state.error_count, state.run.as_deref()), (1, None));
-    assert_eq!(state.position.as_ref().unwrap()["refused"], B);
-    assert_eq!(state.position.as_ref().unwrap()["version"], A);
+    assert_eq!(
+        (state.phase.as_str(), state.last_update_at),
+        ("failed", None)
+    );
+    assert!(state
+        .last_error
+        .unwrap()
+        .starts_with("removals (8 of 17 cards gone"));
+    let position = state.position.unwrap();
+    assert_eq!(
+        (position["refused"].as_str(), position["version"].as_str()),
+        (Some(B), Some(A))
+    );
     assert_eq!(rows(&pool).await, before);
     // Again, its files gone: nothing is read, nothing more recorded.
     for e in ENTITIES {
@@ -774,25 +792,23 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     assert_eq!(state.error_count, 1);
     assert_eq!(rows(&pool).await, before);
     // A newer dump is read, but only once the disk allows.
-    let c = dump(s.root.path(), "20261128-001001", unchanged);
-    let mut tight = setup(&pool, None);
-    tight.ctx = Context {
+    let c = dump(s.root.path(), "20261126-001001", unchanged);
+    let tight = Context {
         free_disk: Arc::new(|_| Ok(0)),
         ..s.ctx.clone()
     };
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), run(&tight, &c, Run::Update))
-            .await
-            .is_err()
-    );
+    let next = run::step(&importer(&s, Source::Dir(c.clone())), &tight)
+        .await
+        .unwrap();
+    assert!(matches!(next, Next::Wait(_)));
     let state = store::state(&pool, Catalogue::Musicbrainz)
         .await
         .unwrap()
         .unwrap();
     assert!(state.waiting.unwrap().starts_with("free disk"));
     let work = s.ctx.config.catalogues.work_dir(Catalogue::Musicbrainz);
-    assert!(!work.join("spill-20261128-001001").exists());
-    // A full import asked for: the update hands over to it.
+    assert!(!work.join("spill-20261126-001001").exists());
+    // A full import asked for: the next run is it.
     let b = dump(s.root.path(), B, shrunk);
     run::request_import(
         &pool,
@@ -806,8 +822,9 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     assert_eq!((state.import_requested, state.generation), (None, 2));
 }
 
-/// Cards the new dump makes but that are refused count as removals too: a dump whose artists
-/// lost their names is refused, and so is a full import of it; no card goes.
+/// Cards the new dump makes but that are refused count as removals too: an update of a dump
+/// whose artists lost their names is refused; so is a full import of the importer's own that would
+/// remove them (one cut off and resumed); one asked for by hand applies it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
     let s = setup(&pool, None);
@@ -822,14 +839,97 @@ async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
         }
     };
     let b = dump(s.root.path(), B, nameless);
-    let state = run(&s, &b, Run::Update).await.unwrap();
-    let error = state.last_error.clone().unwrap();
+    let failed = run(&s, &b, Run::Update).await.unwrap_err();
     assert!(
-        error.starts_with("removals (4 of 17 cards gone or refused"),
-        "{error}"
+        failed
+            .to_string()
+            .contains("removals (4 of 17 cards gone or refused"),
+        "{failed}"
     );
-    assert_eq!(rows(&pool).await.len(), CARDS);
-    // A full import of it removes nothing either.
+    assert_eq!(rows(&pool).await, before);
+    // A full import of its own (here one cut off at its start in generation 2) would remove the
+    // refused cards: refused, nothing removed.
+    sqlx::query("UPDATE catalogue_state SET run='import',phase='import',generation=2,cursor=$1 WHERE catalogue='musicbrainz'")
+        .bind(json!({"version": B, "phase": "write", "after": null, "removed": 0, "as_of": null, "source": source_id(&Source::Dir(b.clone())), "forced": false}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let failed = run(&s, &b, Run::Import).await.unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains("removals (4 of 17 cards not in dump"),
+        "{failed}"
+    );
+    let names = |rows: Vec<Row>| -> Vec<(String, String)> {
+        rows.into_iter().map(|r| (r.source_id, r.name)).collect()
+    };
+    assert_eq!(names(rows(&pool).await), names(before.clone()));
+    let state = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.run, None);
+    // Asked for by hand, it applies the dump.
+    let state = run(&s, &b, Run::Import).await.unwrap();
+    assert_eq!(state.cards, (CARDS - 4) as i64);
+}
+
+/// A run cut off after it wrote and removed everything reads and writes nothing again; a cursor
+/// of another source is not resumed (the run starts over); an update cut off, then asked to be a
+/// full import, hands over to it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn finished_foreign_and_handed_over_cursors(pool: PgPool) {
+    let s = setup(&pool, None);
+    let b = dump(s.root.path(), B, unchanged);
+    run(&s, &b, Run::Import).await.unwrap();
+    let set = |cursor: Value, run: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE catalogue_state SET run=$2,phase=$2,generation=1,cursor=$1 WHERE catalogue='musicbrainz'")
+                .bind(cursor)
+                .bind(run)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let src = source_id(&Source::Dir(b.clone()));
+    // Finished: the dump's files are gone, nothing is read.
+    set(json!({"version": B, "phase": "finished", "after": null, "removed": 0, "as_of": null, "source": src}), "import").await;
+    for e in ENTITIES {
+        std::fs::rename(
+            b.join(format!("{e}.tar.xz")),
+            b.join(format!("{e}.tar.xz.away")),
+        )
+        .unwrap();
+    }
+    let state = run(&s, &b, Run::Import).await.unwrap();
+    assert_eq!((state.cards, state.run), (CARDS as i64, None));
+    for e in ENTITIES {
+        std::fs::rename(
+            b.join(format!("{e}.tar.xz.away")),
+            b.join(format!("{e}.tar.xz")),
+        )
+        .unwrap();
+    }
+    // Another source's cursor: read again from the start, every artist renamed.
+    let renamed = dump(s.root.path(), B, |entity, lines| {
+        if entity == "artist" {
+            for l in lines.iter_mut() {
+                l["name"] = json!(format!("{} (renamed)", l["name"].as_str().unwrap()));
+            }
+        }
+    });
+    set(json!({"version": B, "phase": "write", "after": format!("artist/{TORI_AMOS}"), "removed": 0, "as_of": null, "source": "elsewhere"}), "import").await;
+    run(&s, &renamed, Run::Import).await.unwrap();
+    assert!(rows(&pool)
+        .await
+        .iter()
+        .filter(|r| r.source_id.starts_with("artist/"))
+        .all(|r| r.name.ends_with("(renamed)")));
+    // An update under way, asked to become a full import.
+    set(json!({"version": B, "phase": "write", "after": null, "removed": 0, "as_of": null, "source": src}), "update").await;
     run::request_import(
         &pool,
         Catalogue::Musicbrainz,
@@ -837,12 +937,13 @@ async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
     )
     .await
     .unwrap();
-    let failed = run(&s, &b, Run::Update).await.unwrap_err();
-    assert!(failed.to_string().contains("rejected"), "{failed}");
-    let names = |rows: Vec<Row>| -> Vec<(String, String)> {
-        rows.into_iter().map(|r| (r.source_id, r.name)).collect()
-    };
-    assert_eq!(names(rows(&pool).await), names(before));
+    let before = store::state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap()
+        .unwrap();
+    let state = run(&s, &b, Run::Update).await.unwrap();
+    assert!(state.last_import_at > before.last_import_at);
+    assert_eq!((state.import_requested, state.run), (None, None));
 }
 
 /// A full import cut off after some items resumes from its cursor: the items up to it are not
@@ -1427,7 +1528,8 @@ async fn the_plan_polls_latest_hourly(pool: PgPool) {
     let at_a = state(json!({"version": A, "limit": null}));
     let fresh = || importer(&s, Source::parse(&m.url).unwrap());
     assert_eq!(fresh().plan(&at_a).await.unwrap(), Plan::Run(Run::Update));
-    let refused = state(json!({"version": A, "limit": null, "refused": B}));
+    let refused =
+        state(json!({"version": A, "limit": null, "refused": B, "refused_source": m.url}));
     assert!(matches!(
         fresh().plan(&refused).await.unwrap(),
         Plan::Wait(_)
@@ -1440,10 +1542,19 @@ async fn the_plan_polls_latest_hourly(pool: PgPool) {
         Plan::Run(Run::Update)
     );
     assert_eq!(m.requests.lock().unwrap().len(), before);
-    // Never imported: a full import. A mirror that does not answer: a wait.
+    // Never imported: a full import; one whose first dump was refused waits for another.
     let mut never = state(json!({}));
     never.last_import_at = None;
     assert_eq!(fresh().plan(&never).await.unwrap(), Plan::Run(Run::Import));
+    never.position = Some(json!({"refused": B, "refused_source": m.url}));
+    assert!(matches!(fresh().plan(&never).await.unwrap(), Plan::Wait(_)));
+    // Refused from another source: not this one's refusal.
+    let elsewhere =
+        state(json!({"version": A, "limit": null, "refused": B, "refused_source": "elsewhere"}));
+    assert_eq!(
+        fresh().plan(&elsewhere).await.unwrap(),
+        Plan::Run(Run::Update)
+    );
     let gone = importer(&s, Source::parse("http://127.0.0.1:9/json-dumps/").unwrap());
     assert!(matches!(gone.plan(&at_a).await.unwrap(), Plan::Wait(_)));
 }

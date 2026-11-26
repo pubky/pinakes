@@ -39,9 +39,12 @@ fn capped<'de, D: Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
             let mut out = Vec::new();
-            while out.len() < N && take_element() {
+            while out.len() < N && budget_left() > 0 {
                 match seq.next_element()? {
-                    Some(item) => out.push(item),
+                    Some(item) => {
+                        out.push(item);
+                        take_element();
+                    }
                     None => return Ok(out),
                 }
             }

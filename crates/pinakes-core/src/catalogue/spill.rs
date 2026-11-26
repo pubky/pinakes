@@ -252,6 +252,10 @@ pub fn reduce(
             return Err(e);
         }
         written += bytes?;
+        if stop() {
+            let _ = std::fs::remove_file(&path);
+            bail!(Failure::new("stopped"));
+        }
         for old in &group {
             let _ = std::fs::remove_file(old);
         }

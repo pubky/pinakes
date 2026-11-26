@@ -175,14 +175,27 @@ enabled = $1
 EOF
 }
 config true
-"$pinakesd" --config "$run/pinakes.toml" --migrate
 psql() { command psql -X -q -v ON_ERROR_STOP=1 -At -d "$db" "$@"; }
+# pinakesd without any PINAKES__ override of the configuration (a database URL or a contact
+# exported for another instance must never reach this throwaway one).
+pk() {
+  local unset=()
+  while IFS='=' read -r name _; do
+    [[ $name == PINAKES__* ]] && unset+=(-u "$name")
+  done < <(env)
+  env "${unset[@]}" "$pinakesd" "$@"
+}
+# pk as a program measure can run.
+pk_bin=$run/pk
+{ echo '#!/usr/bin/env bash'; declare -f pk; echo "pinakesd=$(printf %q "$pinakesd")"; echo 'pk "$@"'; } > "$pk_bin"
+chmod +x "$pk_bin"
+pk --config "$run/pinakes.toml" --migrate
 # A query with one value bound as :'v' (read from stdin, where psql interpolates).
 psqlv() { printf '%s\n' "$2" | command psql -X -q -v ON_ERROR_STOP=1 -At -d "$db" -v v="$1"; }
 
 # The import, timed, with its peak memory.
 started=$(date +%s.%N)
-measure "$run/time" "$pinakesd" --config "$run/pinakes.toml" catalogue import musicbrainz --from "$work/dumps/$old" > "$run/import.log"
+measure "$run/time" "$pk_bin" --config "$run/pinakes.toml" catalogue import musicbrainz --from "$work/dumps/$old" > "$run/import.log"
 tail -12 "$run/import.log"
 read -r rss secs < "$run/time"
 note import "{\"seconds\": $secs, \"peak_rss_kb\": $rss}"
@@ -244,7 +257,7 @@ print(found or "")' "${rec_id#recording/}")
 daemon() {
   # Without the operator's contact (a PINAKES__ override of the configuration's): its own
   # importer, which would read the official mirror, does not start.
-  env -u PINAKES__HTTP__CONTACT "$pinakesd" --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
+  pk --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
   daemon_pid=$!
   for _ in $(seq 1 120); do
     curl -sf "http://127.0.0.1:$admin/healthz" > /dev/null && return
@@ -291,7 +304,7 @@ if [ $import_only = 1 ]; then
 fi
 # The update: the newer dump's sample; only rows whose content changed are written.
 psql -c "CREATE TABLE sample_before AS SELECT source_id, content_hash, xmin::text AS version FROM catalogue_card WHERE catalogue='musicbrainz'"
-measure "$run/time" "$pinakesd" --config "$run/pinakes.toml" catalogue import musicbrainz --update --from "$work/dumps/$new" > "$run/update.log"
+measure "$run/time" "$pk_bin" --config "$run/pinakes.toml" catalogue import musicbrainz --update --from "$work/dumps/$new" > "$run/update.log"
 tail -12 "$run/update.log"
 read -r rss secs < "$run/time"
 counts=$(psql -c "SELECT json_build_object(

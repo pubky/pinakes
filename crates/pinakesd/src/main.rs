@@ -713,6 +713,15 @@ async fn import(
         written.rejected,
         written.removed
     )?;
+    // An update that found the newest dump refused before reads nothing.
+    if let Some(refused) = state
+        .position
+        .as_ref()
+        .and_then(|p| p.get("refused"))
+        .and_then(|v| v.as_str())
+    {
+        writeln!(out, "dump {refused} was refused (last error: {}): it is not read again until another dump appears; a full import (catalogue import {catalogue}, without --update) reads it again", state.last_error.as_deref().unwrap_or("-"))?;
+    }
     let states = store::states(pool).await?;
     writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
     Ok(())

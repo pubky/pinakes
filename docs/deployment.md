@@ -364,10 +364,10 @@ dump (48.8 million cards):
 
 | | Sample | Whole dump (estimate) |
 | --- | --- | --- |
-| Download | 110 MB | 26 GB, once per run, streamed (MusicBrainz serves at about 35 MB/s) |
-| Disk under `catalogues.dir/musicbrainz` | 51 MB of sorted runs | about 16 GB for an import, 19 GB for an update (the stored cards' hashes too); a run waits for 40 GB free (`DISK_NEED`), less what a cut-off run left there |
+| Download | 84 MB a dump | 26 GB, once per run, streamed (MusicBrainz serves at about 35 MB/s) |
+| Disk under `catalogues.dir/musicbrainz` | 51 MB of sorted runs (0.6 of the files) | about 16 GB for an import, 19 GB for an update (the stored cards' hashes too); a run waits for 40 GB free (`DISK_NEED`), less what a cut-off run left there |
 | PostgreSQL | 254 MB (1.4 KB a card with its indexes) | about 70 GB |
-| Memory | 200 MB at most | about 1.5 GB (512 MiB of records being sorted, the xz decoder, the lines in flight) |
+| Memory | 195 MB for the import, 214 MB for the update | about 1.5 GB (512 MiB of records being sorted, the xz decoder, the lines in flight) |
 | Read and sort | 2.2 s | 15–20 minutes, bound by the download |
 | Write | 8.1 s (21,800 cards a second) | about 40 minutes for a full import; an update writes only what changed (0.9% of the sample's cards from one dump to the next) |
 
