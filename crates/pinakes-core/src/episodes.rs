@@ -514,7 +514,7 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
 /// A date as feeds write it (RFC 2822, some RFC 3339), within the stored range. A zone name
 /// RFC 2822 does not list (`UTC`, `CEST`, `BST`) still dates the episode: `UTC` is `+0000`,
 /// any other says nothing of its offset and is read as `-0000` (RFC 2822 4.3).
-fn date(s: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn date(s: &str) -> Option<DateTime<Utc>> {
     let s = s.trim();
     DateTime::parse_from_rfc2822(s)
         .or_else(|_| DateTime::parse_from_rfc3339(s))

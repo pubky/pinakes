@@ -962,7 +962,7 @@ fn feed_text(v: &Value) -> Option<String> {
 /// A feed field's words with its spaces collapsed. Only a field the feed's format makes HTML
 /// (`html`: an Atom `type="html"` text, an RSS description) has its markup taken out; any other
 /// keeps what looks like markup as the literal text it is (`Using <title> in HTML`).
-fn feed_words(s: &str, html: bool) -> String {
+pub(crate) fn feed_words(s: &str, html: bool) -> String {
     let text = if html {
         super::cards::plain(s)
     } else {
