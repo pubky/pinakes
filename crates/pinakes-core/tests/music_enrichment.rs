@@ -5,6 +5,7 @@ mod common;
 use axum::{body::Body, http::Request, Router};
 use common::{author, media::PublicDns};
 use http_body_util::BodyExt;
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     api::{self, AppState},
     config::{Config, IngestConfig, QueueConfig, ResolverConfig},
@@ -2346,12 +2347,13 @@ impl pinakes_core::also_on::Source for Keys {
 async fn a_musicbrainz_page_keys_its_own_wikidata_item_and_a_disagreeing_one_stays_apart(
     pool: PgPool,
 ) {
-    let Some(entity_source) = pinakes_core::also_on::registry()
+    if !needs_also_on(&["musicbrainz_entity"]) {
+        return;
+    }
+    let entity_source = pinakes_core::also_on::registry()
         .into_iter()
         .find(|s| s.id() == "musicbrainz_entity")
-    else {
-        return;
-    };
+        .unwrap();
     let other = "https://open.spotify.com/album/0000000000000000000001";
     let item_only = "https://open.spotify.com/album/0000000000000000000003";
     let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
@@ -2526,9 +2528,14 @@ async fn entity_lookup(
     mode: Mode,
     stored: &[&str],
 ) -> Option<pinakes_core::also_on::Found> {
+    // `None` only while a removal of the source is checked.
+    if !needs_also_on(&["musicbrainz_entity"]) {
+        return None;
+    }
     let source = pinakes_core::also_on::registry()
         .into_iter()
-        .find(|s| s.id() == "musicbrainz_entity")?;
+        .find(|s| s.id() == "musicbrainz_entity")
+        .unwrap();
     let cx = pinakes_core::also_on::Context {
         egress: Egress::with_backends(
             common::unpaced_egress_config(),

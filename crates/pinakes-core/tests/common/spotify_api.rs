@@ -309,7 +309,6 @@ pub fn config(pair: Option<(&str, &str)>) -> Config {
         );
     }
     // Only the sources this build has: a switch for one it lacks is refused at validation.
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     for (source, enabled) in [
         ("deezer", true),
         ("spotify_isrc", true),
@@ -317,7 +316,7 @@ pub fn config(pair: Option<(&str, &str)>) -> Config {
         ("musicbrainz_entity", false),
         ("wikidata", false),
     ] {
-        if !registered.contains(&source) {
+        if !pinakes_core::test_support::switch_also_on(&[source]) {
             continue;
         }
         config.also_on.sources.insert(

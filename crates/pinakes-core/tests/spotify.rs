@@ -1,6 +1,6 @@
 //! The `spotify` also-on source through Egress, against the Spotify answers of
 //! `common::spotify_api`.
-use pinakes_core::also_on;
+use pinakes_core::test_support::needs_also_on;
 mod common;
 use common::{
     save_card as save,
@@ -14,11 +14,7 @@ use common::{
 /// nothing); a track's ISRC, which MusicBrainz gives to one recording, is its key.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_barcode_joins_deezer_and_lists_apple_music_as_a_maybe(pool: sqlx::PgPool) {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !["deezer", "itunes"]
-        .iter()
-        .all(|id| registered.contains(id))
-    {
+    if !needs_also_on(&["deezer", "itunes"]) {
         return;
     }
     let album = save(

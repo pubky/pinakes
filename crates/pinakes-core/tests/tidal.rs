@@ -1,6 +1,7 @@
 //! The `tidal` also-on source through Egress, against recorded TIDAL, iTunes and Deezer answers
 //! (`tests/fixtures/hubs`): HYDRA 3D's barcode from TIDAL's own record joins Apple Music and
 //! Deezer.
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
@@ -213,7 +214,6 @@ fn config(pair: Option<(&str, &str)>) -> Config {
         );
     }
     // Only the sources this build has: a switch for one it lacks is refused at validation.
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     for (source, enabled) in [
         ("deezer", true),
         // Its TIDAL reads (a track's album and place) are not this test's.
@@ -222,7 +222,7 @@ fn config(pair: Option<(&str, &str)>) -> Config {
         ("musicbrainz_entity", false),
         ("wikidata", false),
     ] {
-        if !registered.contains(&source) {
+        if !pinakes_core::test_support::switch_also_on(&[source]) {
             continue;
         }
         config.also_on.sources.insert(
@@ -280,11 +280,7 @@ const KEYS: &str =
 async fn a_tidal_barcode_joins_deezer_and_lists_apple_music_as_a_maybe(pool: sqlx::PgPool) {
     // Deezer's album is the join and iTunes' a maybe; without either source there is nothing to
     // check.
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !["deezer", "itunes"]
-        .iter()
-        .all(|id| registered.contains(id))
-    {
+    if !needs_also_on(&["deezer", "itunes"]) {
         return;
     }
     let hydra = save(&pool, "https://tidal.com/album/199574241", "MusicAlbum").await;

@@ -1,9 +1,10 @@
 //! A social site that refuses Pinakes: what its links' cards show (`embed` from the link alone),
 //! when they are asked again (a refusal's backoff, a host that refuses the whole address) and
-//! what stays of a card read before. Instagram's links, from scripted answers; each test returns
-//! early in a build without the `instagram` source.
+//! what stays of a card read before. Instagram's links, from scripted answers; each test needs the
+//! `instagram` source (`test_support::needs_sources`).
 use anyhow::Result;
 use async_trait::async_trait;
+use pinakes_core::test_support::needs_sources;
 use pinakes_core::{
     api::{self, AppState},
     config::Config,
@@ -104,9 +105,6 @@ impl Transport for Site {
     }
 }
 
-fn has_instagram() -> bool {
-    pinakes_core::sources::by_name("instagram").is_some()
-}
 fn official(site: &Arc<Site>) -> CardResolver {
     CardResolver::new(
         "official",
@@ -187,7 +185,7 @@ fn app(pool: &PgPool) -> axum::Router {
 /// link not read yet, and a card another route stored (the source off). A profile has none.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_instagram_card_carries_its_frame_in_every_state(pool: PgPool) {
-    if !has_instagram() {
+    if !needs_sources(&["instagram"]) {
         return;
     }
     let site = Arc::new(Site::default());
@@ -269,7 +267,7 @@ async fn an_instagram_card_carries_its_frame_in_every_state(pool: PgPool) {
 /// ends the streak.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_refused_link_waits_a_day_doubling_to_a_week(pool: PgPool) {
-    if !has_instagram() {
+    if !needs_sources(&["instagram"]) {
         return;
     }
     let site = Arc::new(Site::default());
@@ -326,7 +324,7 @@ async fn a_refused_link_waits_a_day_doubling_to_a_week(pool: PgPool) {
 /// a refusal after that leaves it gone.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_refused_refresh_keeps_the_card_and_waits(pool: PgPool) {
-    if !has_instagram() {
+    if !needs_sources(&["instagram"]) {
         return;
     }
     let site = Arc::new(Site::default());
@@ -396,7 +394,7 @@ async fn a_refused_refresh_keeps_the_card_and_waits(pool: PgPool) {
 /// new or due, sends nothing meanwhile and waits (a refused link keeps its streak).
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_rate_limited_address_pauses_the_whole_host(pool: PgPool) {
-    if !has_instagram() {
+    if !needs_sources(&["instagram"]) {
         return;
     }
     let site = Arc::new(Site::default());
@@ -455,7 +453,7 @@ async fn a_rate_limited_address_pauses_the_whole_host(pool: PgPool) {
 /// gone through a later refusal: no "Blocked by the site." card, and no frame.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_link_gone_from_the_start_stays_gone_through_a_refusal(pool: PgPool) {
-    if !has_instagram() {
+    if !needs_sources(&["instagram"]) {
         return;
     }
     let site = Arc::new(Site::default());

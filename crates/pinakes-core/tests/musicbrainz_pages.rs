@@ -3,6 +3,7 @@
 //! (`tests/fixtures/shared/music_matching`): which exact lookups a page gets, that an album a
 //! recording is on is a fact and never its key, and whose cover an ISRC's page takes.
 mod common;
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     also_on::{self, Subject},
     config::Config,
@@ -150,9 +151,13 @@ async fn musicbrainz_isrc_and_recording_use_exact_deezer_lookup() {
         format!("https://musicbrainz.org/recording/{RECORDING}"),
     ] {
         let s = subject(&uri);
-        let Some(source) = also_on::registered().iter().find(|s| s.id() == "deezer") else {
+        if !needs_also_on(&["deezer"]) {
             return;
-        };
+        }
+        let source = also_on::registered()
+            .iter()
+            .find(|s| s.id() == "deezer")
+            .unwrap();
         assert!(
             source.applies(&s),
             "must use the already verified ISRC of {uri}"
@@ -185,6 +190,8 @@ async fn musicbrainz_isrc_and_recording_use_exact_deezer_lookup() {
 }
 #[test]
 fn exact_reverse_sources_accept_known_mb_levels_not_arbitrary_pages() {
+    // Each is registered: a misspelled id fails here instead of filtering its source out.
+    let _ = needs_also_on(&["deezer", "tidal_isrc", "spotify_isrc"]);
     let sources = also_on::registered()
         .iter()
         .filter(|s| matches!(s.id(), "deezer" | "tidal_isrc" | "spotify_isrc"));
@@ -209,12 +216,13 @@ async fn recording_containment_is_a_fact_never_an_identity_key() {
         format!("mb:recording:{RECORDING}"),
         "musicbrainz_entity".into(),
     ));
-    let Some(source) = also_on::registered()
+    if !needs_also_on(&["musicbrainz_containment"]) {
+        return;
+    }
+    let source = also_on::registered()
         .iter()
         .find(|s| s.id() == "musicbrainz_containment")
-    else {
-        return;
-    };
+        .unwrap();
     let found = source
         .lookup(&cx(Arc::new(Recorded::default())), &s)
         .await

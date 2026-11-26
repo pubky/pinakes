@@ -153,10 +153,7 @@ mod tests {
     #[tokio::test]
     async fn only_no_data_and_a_404_are_none() {
         // The API is asked only in a build that has the `deezer` source.
-        if !crate::also_on::registered()
-            .iter()
-            .any(|s| s.id() == "deezer")
-        {
+        if !crate::test_support::needs_also_on(&["deezer"]) {
             return;
         }
         let mut config = crate::config::Config::default();

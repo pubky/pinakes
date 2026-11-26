@@ -4,6 +4,7 @@
 mod common;
 
 use common::media::*;
+use pinakes_core::test_support::needs_sources;
 use pinakes_core::{
     also_on::{self, product_keys::ProductKeys, AlsoOnConfig, Source},
     api::{self, AppState},
@@ -15,12 +16,15 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 /// Any official source that reads a service's own record (no page hook): whose record stated
-/// the barcode matters, not which one.
+/// the barcode matters, not which one. `None` only while a removal takes the last one.
 fn record_source() -> Option<&'static str> {
-    pinakes_core::sources::REGISTRY
-        .iter()
-        .find(|s| !s.hooks_pages())
-        .map(|s| s.name())
+    pinakes_core::test_support::needs_one(
+        pinakes_core::sources::REGISTRY
+            .iter()
+            .find(|s| !s.hooks_pages())
+            .map(|s| s.name()),
+        "an official source that reads a service's own record",
+    )
 }
 
 fn shop_page(uri: &str, gtin: &str) -> ResourceMeta {
@@ -75,7 +79,7 @@ async fn a_pages_own_barcode_is_no_key() {
 #[tokio::test]
 async fn a_record_from_the_pages_own_host_is_no_key() {
     let hook = "shopify";
-    if pinakes_core::sources::by_name(hook).is_none() {
+    if !needs_sources(&["shopify"]) {
         return;
     }
     let uri = "https://shop.example/products/runner";

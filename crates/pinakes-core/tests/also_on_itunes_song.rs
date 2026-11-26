@@ -2,6 +2,7 @@
 //! answers (`tests/fixtures/media/itunes_song`, `tests/fixtures/hubs`): Get Lucky's Apple Music
 //! song from its album barcode and place on Deezer and TIDAL; Walking Disaster's barcode answers
 //! several collections and gives nothing.
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
@@ -120,12 +121,6 @@ impl Transport for Recorded {
     }
 }
 
-/// Whether this build has every also-on source a test needs: a test of some sources returns
-/// early without them.
-fn has(ids: &[&str]) -> bool {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    ids.iter().all(|id| registered.contains(id))
-}
 /// The switches (`itunes_song` and `deezer`) and TIDAL's pair.
 fn config(on: bool, deezer: bool, tidal: Option<(&str, &str)>) -> Config {
     let mut config = Config::default();
@@ -136,8 +131,8 @@ fn config(on: bool, deezer: bool, tidal: Option<(&str, &str)>) -> Config {
         );
     }
     for (source, enabled) in [("itunes_song", on), ("deezer", deezer)] {
-        // Only the sources this build has: a switch for one it lacks is refused.
-        if !has(&[source]) {
+        // Only the sources this build has (`switch_also_on`: a misspelled one fails): a switch for one it lacks is refused.
+        if !pinakes_core::test_support::switch_also_on(&[source]) {
             continue;
         }
         config.also_on.sources.insert(
@@ -209,7 +204,7 @@ const GET_LUCKY: &str = "https://music.apple.com/song/617154366 - itunes_song ma
 /// Deezer's track 2 of Underclass Hero, whose barcode answers several collections: nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
-    if !has(&["deezer", "itunes"]) {
+    if !needs_also_on(&["deezer", "itunes"]) {
         return;
     }
     let lucky = save(&pool, "https://www.deezer.com/track/67238735", None).await;
@@ -241,7 +236,7 @@ async fn a_deezer_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 /// TIDAL's Walking Disaster: Underclass Hero again, several collections, nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
-    if !has(&["tidal", "itunes"]) {
+    if !needs_also_on(&["tidal", "itunes"]) {
         return;
     }
     let lucky = save(&pool, "https://tidal.com/track/20115564", None).await;
@@ -264,7 +259,7 @@ async fn a_tidal_track_s_place_names_its_apple_song(pool: sqlx::PgPool) {
 /// pair) or with `itunes` off, it asks nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgPool) {
-    if !has(&["deezer", "itunes"]) {
+    if !needs_also_on(&["deezer", "itunes"]) {
         return;
     }
     save(&pool, "https://www.deezer.com/track/67238735", None).await;
@@ -307,7 +302,7 @@ async fn without_its_switch_or_a_place_s_source_nothing_is_asked(pool: sqlx::PgP
 /// found kept.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_itunes_keeps_the_song(pool: sqlx::PgPool) {
-    if !has(&["deezer", "itunes"]) {
+    if !needs_also_on(&["deezer", "itunes"]) {
         return;
     }
     let lucky = save(&pool, "https://www.deezer.com/track/67238735", None).await;

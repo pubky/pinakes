@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
+use pinakes_core::test_support::{needs_also_on, needs_families};
 use pinakes_core::{
     also_on::{self, Context, Found, Key, Link, Source, Subject},
     api::{self, AppState},
@@ -84,16 +85,6 @@ impl Source for Fake {
     }
 }
 
-/// Whether this build has each lookup family (`lookups::FAMILIES`): a test of how a family's
-/// services take their place on a card returns early without the family, and with it asserts
-/// the names (`named`), never the other way round.
-fn families(names: &[&str]) -> bool {
-    let registered: Vec<&str> = pinakes_core::lookups::FAMILIES
-        .iter()
-        .map(|f| f.name())
-        .collect();
-    names.iter().all(|name| registered.contains(name))
-}
 /// Each link's service is named (`lookups::service_name`): asserted once its family is in the
 /// build, so a classification that stops naming a page fails the test instead of skipping it.
 fn named(uris: &[&str]) {
@@ -702,8 +693,8 @@ async fn saves_make_sources_due_and_unknown_sources_are_refused(pool: PgPool) {
         toml::from_str::<Config>("[also_on.sources.nope]\nenabled = false\n").map(|c| c.validate());
     assert!(matches!(unknown, Ok(Err(_))), "{unknown:?}");
     // A MusicBrainz mirror: an http(s) web service root; no other source takes a base URL. The
-    // setting is the musicbrainz source's: nothing to check in a build without it.
-    if !also_on::registry().iter().any(|s| s.id() == "musicbrainz") {
+    // setting is the musicbrainz source's.
+    if !needs_also_on(&["musicbrainz"]) {
         return;
     }
     let base = |id: &str, url: &str| {
@@ -1667,7 +1658,7 @@ async fn a_shared_key_never_joins_two_places_crates_or_games(pool: PgPool) {
     ];
     let cases: Vec<_> = cases
         .into_iter()
-        .filter(|(family, _, _)| family.is_none_or(|f| families(&[f])))
+        .filter(|(family, _, _)| family.is_none_or(|f| needs_families(&[f])))
         .collect();
     for (family, namespace, _) in &cases {
         if family.is_some() {
@@ -1755,7 +1746,7 @@ async fn a_tagged_btc_map_link_joins_its_osm_object(pool: PgPool) {
 /// names takes that service's place; a tagged member of another site still shows.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tagged_member_and_a_derived_link_of_one_service_show_once(pool: PgPool) {
-    if !families(&["games", "apps"]) {
+    if !needs_families(&["games", "apps"]) {
         return;
     }
     named(&[
@@ -1976,7 +1967,7 @@ async fn two_tagged_spellings_of_a_derived_link_show_once(pool: PgPool) {
 /// place: the derived link to the real service still shows.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_page_naming_itself_after_a_service_takes_no_slot(pool: PgPool) {
-    if !families(&["apps"]) {
+    if !needs_families(&["apps"]) {
         return;
     }
     named(&[
@@ -2279,7 +2270,7 @@ async fn a_music_typed_impostor_takes_no_slot_and_hides_nothing(pool: PgPool) {
 /// itself and the repository keeps GitHub's place.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
-    if !families(&["packages"]) {
+    if !needs_families(&["packages"]) {
         return;
     }
     named(&["https://github.com/rust-random/rand"]);
@@ -2335,7 +2326,7 @@ async fn a_non_object_page_on_a_service_host_takes_no_slot(pool: PgPool) {
 /// listed beside it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_shared_repository_link_with_a_tab_is_the_repository_once(pool: PgPool) {
-    if !families(&["packages"]) {
+    if !needs_families(&["packages"]) {
         return;
     }
     named(&["https://github.com/rust-random/rand"]);
@@ -4354,7 +4345,7 @@ impl pinakes_core::resolver::Resolver for Scripted {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_switched_off_source_s_name_leaves_a_card_no_read_reaches(pool: PgPool) {
     use pinakes_core::{also_on::Fact, also_on::SourceOptions, config::QueueConfig, queue};
-    if !also_on::registered().iter().any(|s| s.id() == "titles") {
+    if !needs_also_on(&["titles"]) {
         return;
     }
     let config = |on: bool| {
@@ -4536,7 +4527,7 @@ async fn a_switched_off_source_s_name_leaves_a_card_no_read_reaches(pool: PgPool
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_switched_off_source_s_name_leaves_the_card_even_on_a_304(pool: PgPool) {
     use pinakes_core::{also_on::Fact, also_on::SourceOptions, config::QueueConfig, queue};
-    if !also_on::registered().iter().any(|s| s.id() == "titles") {
+    if !needs_also_on(&["titles"]) {
         return;
     }
     let uri = "https://www.netflix.com/title/80025678";

@@ -1459,7 +1459,7 @@ async fn retention_preserves_normalized_current_and_cached_osm_versions(pool: Pg
 #[sqlx::test(migrations = "../../migrations")]
 async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: PgPool) {
     let uri = "https://mastodon.social/@Gargron/1";
-    // The post's card from the Mastodon source; without it in this build there is nothing to test.
+    // The post's card from the Mastodon source (`common::source_card` needs it).
     let card = |file: &'static str, at: i64| async move {
         let api = "https://mastodon.social/api/v1/statuses/1";
         let mut doc =

@@ -2,6 +2,7 @@
 //! failing service ends.
 use anyhow::Result;
 use async_trait::async_trait;
+use pinakes_core::test_support::needs_sources;
 use pinakes_core::{
     config::Config,
     model::Status,
@@ -175,11 +176,6 @@ impl Transport for Scripted {
     }
 }
 
-/// Whether this build has the source a test needs: a test of one source returns early without it.
-fn has(source: &str) -> bool {
-    pinakes_core::sources::by_name(source).is_some()
-}
-
 fn official() -> CardResolver {
     CardResolver::new(
         "official",
@@ -192,7 +188,7 @@ fn official() -> CardResolver {
 /// `timeout` (which counts toward dead letter): the route leaves the fetch room to time out first.
 #[tokio::test(start_paused = true)]
 async fn a_slow_usgs_answer_is_a_retry_that_never_counts() {
-    if !has("usgs") {
+    if !needs_sources(&["usgs"]) {
         return;
     }
     let error = official()
@@ -208,7 +204,7 @@ async fn a_slow_usgs_answer_is_a_retry_that_never_counts() {
 /// mempool.space answers a server error for a node it doesn't know: the search decides.
 #[tokio::test(start_paused = true)]
 async fn an_unknown_lightning_node_is_missing_and_a_listed_one_counts() {
-    if !has("mempool") {
+    if !needs_sources(&["mempool"]) {
         return;
     }
     let doc = official()
@@ -228,7 +224,7 @@ async fn an_unknown_lightning_node_is_missing_and_a_listed_one_counts() {
 /// for a server error, so a listed node is never counted as failing for it.
 #[tokio::test(start_paused = true)]
 async fn a_rate_limited_lightning_node_is_only_a_retry() {
-    if !has("mempool") {
+    if !needs_sources(&["mempool"]) {
         return;
     }
     for (key, class) in [(BUSY, "http_4xx"), (SLOW, "http_4xx")] {
@@ -246,7 +242,7 @@ async fn a_rate_limited_lightning_node_is_only_a_retry() {
 /// mempool.space's error, a retry. mempool.space's own "not found" is `missing`.
 #[tokio::test(start_paused = true)]
 async fn a_transaction_only_the_fallback_calls_unknown_is_a_retry() {
-    if !has("mempool") {
+    if !needs_sources(&["mempool"]) {
         return;
     }
     for (txid, class) in [(LIMITED, "http_4xx"), (FAILING, "upstream")] {
@@ -265,7 +261,7 @@ async fn a_transaction_only_the_fallback_calls_unknown_is_a_retry() {
 /// it, and several give the page an ordinary web card.
 #[tokio::test(start_paused = true)]
 async fn compound_names_never_merge() {
-    if !has("pubchem") {
+    if !needs_sources(&["pubchem"]) {
         return;
     }
     let one = official()
@@ -290,7 +286,7 @@ async fn compound_names_never_merge() {
 /// timeout (which counts toward dead letter).
 #[tokio::test(start_paused = true)]
 async fn a_stalled_related_part_leaves_the_card_in_time() {
-    if !has("mempool") {
+    if !needs_sources(&["mempool"]) {
         return;
     }
     let started = tokio::time::Instant::now();
@@ -311,7 +307,7 @@ async fn a_stalled_related_part_leaves_the_card_in_time() {
 /// best chain's tip itself is read again within the hour, for its next block.
 #[tokio::test(start_paused = true)]
 async fn a_part_refused_for_good_is_not_read_again_soon() {
-    if !has("mempool") {
+    if !needs_sources(&["mempool"]) {
         return;
     }
     let deep = official()
@@ -337,7 +333,7 @@ async fn a_part_refused_for_good_is_not_read_again_soon() {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_past_dated_official_card_is_final_after_its_job(pool: sqlx::PgPool) {
     use pinakes_core::{queue, store};
-    if !has("mempool") || !has("pubchem") {
+    if !needs_sources(&["mempool", "pubchem"]) {
         return;
     }
     let resolver = official();
@@ -381,7 +377,7 @@ async fn a_past_dated_official_card_is_final_after_its_job(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_walled_refresh_keeps_the_last_good_card(pool: sqlx::PgPool) {
     use pinakes_core::{model::ResourceMeta, queue, store};
-    if !has("x") {
+    if !needs_sources(&["x"]) {
         return;
     }
     let resolver = official();
@@ -444,7 +440,7 @@ async fn a_walled_refresh_keeps_the_last_good_card(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_gone_profile_is_purged_like_a_post(pool: sqlx::PgPool) {
     use pinakes_core::{model::ResourceMeta, store};
-    if !has("x") {
+    if !needs_sources(&["x"]) {
         return;
     }
     let uri = "https://x.com/someone";
@@ -483,7 +479,7 @@ async fn a_gone_profile_is_purged_like_a_post(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_deleted_stack_exchange_question_is_purged(pool: sqlx::PgPool) {
     use pinakes_core::{model::ResourceMeta, store};
-    if !has("stack_exchange") {
+    if !needs_sources(&["stack_exchange"]) {
         return;
     }
     let uri = "https://stackoverflow.com/questions/10567404";
@@ -522,9 +518,10 @@ async fn a_deleted_stack_exchange_question_is_purged(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_app_store_card_keeps_its_storefront_across_restarts(pool: sqlx::PgPool) {
     use pinakes_core::{queue, sources, store};
-    let Some(app_store) = sources::by_name("app_store") else {
+    if !needs_sources(&["app_store"]) {
         return;
-    };
+    }
+    let app_store = sources::by_name("app_store").unwrap();
     let resolver = official();
     let root = "https://apps.apple.com/app/id1225135057";
     let id = store::ensure_resource(&pool, root).await.unwrap();
@@ -574,7 +571,7 @@ async fn an_app_store_card_keeps_its_storefront_across_restarts(pool: sqlx::PgPo
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_past_dated_official_card_found_missing_is_read_again(pool: sqlx::PgPool) {
     use pinakes_core::{model::ResourceMeta, queue, store};
-    if !has("mempool") {
+    if !needs_sources(&["mempool"]) {
         return;
     }
     let resolver = official();

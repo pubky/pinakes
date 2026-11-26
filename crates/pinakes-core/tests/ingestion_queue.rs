@@ -1,4 +1,5 @@
 use chrono::Utc;
+use pinakes_core::test_support::{has_sources, needs_sources};
 use pinakes_core::{
     config::{IngestConfig, QueueConfig},
     ingest,
@@ -1760,7 +1761,7 @@ async fn a_failure_log_prints_no_upstream_text(pool: PgPool) {
 async fn a_hook_timeout_names_no_link() {
     // The feed source's hook reads any host, so it is the one a passed deadline times out;
     // another hook answers a host it does not know at once. Nothing to log without it.
-    if pinakes_core::sources::by_name("feed").is_none() {
+    if !needs_sources(&["feed"]) {
         return;
     }
     let lines = log_lines();
@@ -2462,8 +2463,8 @@ async fn reextract_requeues_the_selected_routes_without_validators(pool: PgPool)
 /// `reextract_releases_moves_and_keeps_aliases_by_the_rules_of_their_uris`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn reextract_moves_or_releases_the_aliases_rules_no_longer_make(pool: PgPool) {
-    let linkedin = pinakes_core::sources::by_name("linkedin").is_some();
-    let reddit = pinakes_core::sources::by_name("reddit").is_some();
+    let linkedin = has_sources(&["linkedin"]);
+    let reddit = has_sources(&["reddit"]);
     if !linkedin && !reddit {
         return;
     }

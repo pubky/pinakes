@@ -1,6 +1,7 @@
 //! The `apps` family in storage: an app's store links join one group through their store keys
 //! and the Wikidata item that names them, against the recorded answers in
 //! `tests/fixtures/lookups/apps`.
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     also_on,
     api::{self, AppState},
@@ -85,7 +86,7 @@ impl Transport for Recorded {
 /// lacks join through the package alone.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
-    if !also_on::registry().iter().any(|s| s.id() == "app_stores") {
+    if !needs_also_on(&["app_stores"]) {
         return;
     }
     // Each store's own address: every other spelling is an alias of it.
@@ -198,7 +199,7 @@ async fn an_apps_store_links_join_one_group(pool: sqlx::PgPool) {
 /// with the same name under another website is not named.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_app_wikidata_lacks_is_only_possibly_the_same(pool: sqlx::PgPool) {
-    if !also_on::registry().iter().any(|s| s.id() == "app_stores") {
+    if !needs_also_on(&["app_stores"]) {
         return;
     }
     let cards = [

@@ -5,6 +5,7 @@
 //! included.
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     also_on::{self, editions::Editions, Edition, Found, Link, Source, SourceOptions, Subject},
     api::{self, AppState},
@@ -148,14 +149,6 @@ impl Transport for Captured {
     }
 }
 
-/// Whether this build has each of these sources. `editions` asks a service which album a track
-/// is on only while that service's own source runs (`tidal`, `deezer`, `itunes`, `spotify`; a
-/// Spotify card's own album too), so a test returns early without the ones its expectations
-/// rest on. An album card's links are placed by MusicBrainz's release pages alone.
-fn has(ids: &[&str]) -> bool {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    ids.iter().all(|id| registered.contains(id))
-}
 /// TIDAL with a pair (each test its own: tokens are kept per pair), Deezer on or off.
 fn config(pair: &str, deezer: bool) -> Config {
     switched(pair, &[("deezer", deezer)])
@@ -170,8 +163,8 @@ fn switched(pair: &str, sources: &[(&str, bool)]) -> Config {
         serde_json::json!({"client_id": pair, "client_secret": format!("{pair}-secret")}),
     );
     for (source, enabled) in sources {
-        // Only the sources this build has: a switch for one it lacks is refused at validation.
-        if !has(&[*source]) {
+        // Only the sources this build has (`switch_also_on`: a misspelled one fails): a switch for one it lacks is refused at validation.
+        if !pinakes_core::test_support::switch_also_on(&[*source]) {
             continue;
         }
         config.also_on.sources.insert(
@@ -259,7 +252,7 @@ fn others(found: &Found) -> Vec<String> {
 /// services name no track's album here).
 #[tokio::test]
 async fn get_luckys_links_are_placed_on_random_access_memories() {
-    if !has(&["spotify", "itunes", "tidal"]) {
+    if !needs_also_on(&["spotify", "itunes", "tidal"]) {
         return;
     }
     let transport = Captured::new();
@@ -324,7 +317,7 @@ async fn get_luckys_links_are_placed_on_random_access_memories() {
 /// With Deezer's source on, its link on that album is placed too.
 #[tokio::test]
 async fn with_deezer_on_its_link_on_the_album_is_placed() {
-    if !has(&["spotify", "deezer"]) {
+    if !needs_also_on(&["spotify", "deezer"]) {
         return;
     }
     let transport = Captured::new();
@@ -417,7 +410,7 @@ async fn kind_of_blues_album_pages_are_placed_on_its_own_release() {
 /// before (kept), and the run comes back sooner; the other services' links are placed.
 #[tokio::test]
 async fn a_busy_service_keeps_its_links_places() {
-    if !has(&["spotify", "itunes", "tidal"]) {
+    if !needs_also_on(&["spotify", "itunes", "tidal"]) {
         return;
     }
     let transport = Captured::busy(&["itunes.apple.com"]);
@@ -451,7 +444,7 @@ async fn a_busy_service_keeps_its_links_places() {
 /// album page nobody linked; with the `spotify` source off, no Spotify page is read.
 #[tokio::test]
 async fn a_spotify_link_is_placed_by_its_own_page() {
-    if !has(&["spotify"]) {
+    if !needs_also_on(&["spotify"]) {
         return;
     }
     let apple = "https://music.apple.com/us/song/617154366";
@@ -504,7 +497,7 @@ async fn a_spotify_link_is_placed_by_its_own_page() {
 /// placed.
 #[tokio::test]
 async fn refused_spotify_credentials_place_nothing_and_fail_nothing() {
-    if !has(&["spotify", "tidal"]) {
+    if !needs_also_on(&["spotify", "tidal"]) {
         return;
     }
     let mut config = config("editions-refused", false);
@@ -930,7 +923,7 @@ async fn a_group_that_changes_places_its_cards_links_again(pool: PgPool) {
 /// place.
 #[tokio::test]
 async fn a_list_cut_short_ranks_only_the_cards_own_release() {
-    if !has(&["spotify", "itunes", "tidal"]) {
+    if !needs_also_on(&["spotify", "itunes", "tidal"]) {
         return;
     }
     let transport = Captured::truncated();
@@ -960,7 +953,7 @@ async fn a_list_cut_short_ranks_only_the_cards_own_release() {
 /// Of one service, at most eight links are asked about; the rest keep their places.
 #[tokio::test]
 async fn links_past_the_cap_keep_their_places() {
-    if !has(&["itunes"]) {
+    if !needs_also_on(&["itunes"]) {
         return;
     }
     let transport = Captured::new();
@@ -980,7 +973,7 @@ async fn links_past_the_cap_keep_their_places() {
 /// API refuses the credentials, the pages switch off: its own release ranks first.
 #[tokio::test]
 async fn a_spotify_cards_own_page_names_its_own_release() {
-    if !has(&["spotify", "tidal"]) {
+    if !needs_also_on(&["spotify", "tidal"]) {
         return;
     }
     let mut config = config("editions-own-page", false);
@@ -1020,7 +1013,7 @@ async fn a_spotify_cards_own_page_names_its_own_release() {
 /// places stay as recorded, and its run comes back sooner.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_worker_keeps_the_places_a_failing_service_could_not_tell(pool: PgPool) {
-    if !has(&["itunes", "tidal"]) {
+    if !needs_also_on(&["itunes", "tidal"]) {
         return;
     }
     let cfg = Config::default().also_on;

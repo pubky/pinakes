@@ -1,5 +1,6 @@
 //! `reextract` with a source switched off, in a process of its own: the switches are global
 //! (`sources::configure`), as `pinakesd reextract` sets them from the operator's configuration.
+use pinakes_core::test_support::needs_sources;
 use pinakes_core::{config::Config, queue, store};
 use sqlx::PgPool;
 
@@ -9,7 +10,7 @@ use sqlx::PgPool;
 /// as before.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_switched_off_sources_aliases_stay_through_reextract(pool: PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
+    if !needs_sources(&["reddit"]) {
         return;
     }
     let mut config = Config::default();

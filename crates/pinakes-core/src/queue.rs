@@ -1875,8 +1875,8 @@ mod tests {
     /// (a day): it is not read again within the hour as an accepted card is.
     #[sqlx::test(migrations = "../../migrations")]
     async fn a_blocked_card_keeps_its_wait_after_a_failed_step(pool: PgPool) {
-        // The `blocked` fact is a social source's; a build without one has no such card.
-        if !crate::sources::attributes().contains(&"blocked") {
+        // The `blocked` fact is a social source's.
+        if !crate::test_support::needs_attributes(&["blocked"]) {
             return;
         }
         let uri = "https://after-save.example.org/refused";
