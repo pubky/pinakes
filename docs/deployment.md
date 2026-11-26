@@ -355,6 +355,25 @@ Each catalogue's importer follows these ([importer rules](operations.md#importer
   until it is on again and finishes, or until `pinakesd catalogue drop <name>` deletes its
   directory with its cards.
 
+### MusicBrainz
+
+The importer needs `http.contact` ([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md)).
+Measured on a sample of the real dump (the first 60 MB of the release file and a few MB of the
+others: 63,313 lines, 177,190 cards) on a 20-core host, and estimated from it for the whole
+dump (48.8 million cards):
+
+| | Sample | Whole dump (estimate) |
+| --- | --- | --- |
+| Download | 110 MB | 26 GB, once per run, streamed (MusicBrainz serves at about 35 MB/s) |
+| Disk under `catalogues.dir/musicbrainz` | 51 MB of sorted runs | about 16 GB for an import, 19 GB for an update (the stored cards' hashes too); a run waits for 40 GB free (`DISK_NEED`), less what a cut-off run left there |
+| PostgreSQL | 254 MB (1.4 KB a card with its indexes) | about 70 GB |
+| Memory | 200 MB at most | about 1.5 GB (512 MiB of records being sorted, the xz decoder, the lines in flight) |
+| Read and sort | 2.2 s | 15–20 minutes, bound by the download |
+| Write | 8.1 s (21,800 cards a second) | about 40 minutes for a full import; an update writes only what changed (0.9% of the sample's cards from one dump to the next) |
+
+A full import takes about an hour; the text index then reads the new cards in the background
+([text index](operations.md#text-index)).
+
 ## Network and secrets
 
 **Listeners.** Terminate TLS at a reverse proxy in front of the public listener (`listen`, port

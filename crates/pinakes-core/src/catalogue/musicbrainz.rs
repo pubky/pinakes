@@ -1970,6 +1970,40 @@ mod tests {
         counts
     }
 
+    /// A manifest's run paths are used only as plain paths under the dump's directory naming
+    /// regular files there; written, they are relative to it.
+    #[test]
+    fn manifests_name_runs_under_their_directory_only() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("spill-20261125-001001");
+        std::fs::create_dir_all(dir.join("release-1/w0")).unwrap();
+        std::fs::write(dir.join("release-1/w0/run-000000.lz4"), b"x").unwrap();
+        std::fs::write(root.path().join("outside.lz4"), b"x").unwrap();
+        let run = dir.join("release-1/w0/run-000000.lz4");
+        let kept = relative(&dir, std::slice::from_ref(&run)).unwrap();
+        assert_eq!(kept, [PathBuf::from("release-1/w0/run-000000.lz4")]);
+        assert_eq!(resolved(&dir, &kept), Some(vec![run.clone()]));
+        for bad in [
+            root.path().join("outside.lz4"),
+            PathBuf::from("../outside.lz4"),
+            PathBuf::from("release-1/../../outside.lz4"),
+            PathBuf::from(""),
+            PathBuf::from("release-1/w0"),
+            PathBuf::from("release-1/w0/missing.lz4"),
+        ] {
+            assert_eq!(resolved(&dir, &[bad.clone()]), None, "{}", bad.display());
+        }
+        assert!(relative(&dir, &[root.path().join("outside.lz4")]).is_err());
+        let done = FileDone {
+            runs: vec![run],
+            ..FileDone::default()
+        };
+        write_file_done(&dir, "release", &done).unwrap();
+        let text = std::fs::read_to_string(dir.join("release.done")).unwrap();
+        assert!(!text.contains(root.path().to_str().unwrap()), "{text}");
+        assert_eq!(read_file_done(&dir, "release").unwrap().runs, done.runs);
+    }
+
     /// The tags the merge counts by are the records' own first bytes.
     #[test]
     fn record_tags_are_their_first_bytes() {

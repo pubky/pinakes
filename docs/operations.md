@@ -1861,8 +1861,9 @@ the status table when it has finished. A full import takes up one that was cut o
 new one. `--from`, `--limit` and `--force` are the importer's own
 ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand)). A failure is recorded as the
 task records it. `catalogue import <name> --request` needs no lock: it records that a full import
-is asked for (`import_requested`), and the daemon running the importer starts it after the run
-under way.
+is asked for (`import_requested`). The process running the importer starts it when the run under
+way ends, or at its next step (MusicBrainz: within the hour when idle); the command says when no
+process holds the catalogue.
 
 `scripts/lock-waits` names these locks `catalogue <name>` and `large catalogue import`.
 
@@ -1874,7 +1875,7 @@ is on (in this version: `musicbrainz`), and follows these rules:
 | Rule | What the task does |
 | --- | --- |
 | One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
-| What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz looks for a new dump every 12 hours). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
+| What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
 | How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. Each catalogue may lag as far as its source's publication rhythm allows (below). |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
 | Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |

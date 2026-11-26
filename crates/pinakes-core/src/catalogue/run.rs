@@ -821,7 +821,7 @@ pub async fn run_once(
 
 /// Ask for a full import of `catalogue` (`pinakesd catalogue import --request`): the importer
 /// that holds the catalogue (a daemon's task) starts it as any full import asked for, after the
-/// run under way (an update hands over at once). Needs no lock.
+/// run under way, or at its next step. Needs no lock.
 pub async fn request_import(pool: &PgPool, catalogue: Catalogue, reason: &str) -> Result<()> {
     store::ensure_state(pool, catalogue).await?;
     sqlx::query(

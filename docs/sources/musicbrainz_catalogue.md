@@ -97,27 +97,46 @@ A full import runs first. After it, the importer reads `LATEST` once an hour; wh
 newer dump than the cards are from, an update runs:
 
 1. It reads the four files again and sorts the stored cards' content hashes with them.
-2. A first pass lists the stored cards the dump no longer has. When they are more than a tenth of
-   the cards, the update stops there with nothing written (`removals`, with the counts, in
-   `catalogue status` and `CatalogueImportFailed`), and waits: it is not read again until `LATEST`
-   names a newer dump. If the dump is right, ask for a full import of it, which removes every card
-   it does not read: `pinakesd catalogue import musicbrainz --request` beside the running daemon
-   (the update hands over to it at once), or `pinakesd catalogue import musicbrainz` with the
-   daemon stopped. There is no such check under a `limit`.
-3. The second pass writes only the cards that are new or changed; an unchanged card is not written.
-   The text index takes the changes through its queue.
-4. The listed cards are removed.
+2. A first pass lists the stored cards the dump no longer has.
+3. The second pass writes only the cards that are new or changed; an unchanged card is not
+   written. The text index takes the changes through its queue.
+4. The listed cards are removed, and so are the cards whose items the dump now makes refused
+   cards of (no name, say).
 
 The cards are as current as the dump's `TIMESTAMP` (`current_as_of`). MusicBrainz publishes on
 Wednesdays and Saturdays, and a dump's files appear about 15 hours after its `TIMESTAMP`, so the
 cards fall up to about 4 days and 17 hours behind before the next update lands;
 `CatalogueUpdateLag` allows five days.
 
-A run cut off by a restart or a failure resumes after the last item it wrote, from the merged
-runs once its read had finished them, so the dump is not read again. A read cut off keeps the files
-it had read whole and checked (with a manifest each) and reads the others. When the dump a cut-off
-run needs again is gone from the mirror, the run starts over on the newest dump. A run cut off in
-its removals goes on with the rest of its list.
+### A dump that is refused
+
+A dump is refused, and no card is removed for it, when:
+
+- an update would remove more than a tenth of the cards (counted after the first pass, before any
+  card is written, and again before the removals, counting the refused cards too; the new and
+  changed cards are written by then);
+- a full import of a catalogue that holds cards reads no record, or refuses more than a tenth of
+  them;
+- its files don't match their checksums, don't parse, or hold more than a file may (`checksum`,
+  `parse`, `archive`, `size`).
+
+The refusal is recorded once (`last_error`, which `catalogue status` shows with its counts, and
+`CatalogueImportFailed`), and the refused dump is not read again: an update waits for `LATEST` to
+name a newer dump, which it reads after the usual disk check; a refused full import fails at once
+on each try until then. If the dump is right, ask for a full import of it, which removes every
+card it does not read: `pinakesd catalogue import musicbrainz --request` beside the running
+daemon, or `pinakesd catalogue import musicbrainz` with the daemon stopped (a full import by hand
+begins anew, also after a refused one). There is no removal check under a `limit`.
+
+### Runs cut off
+
+A run cut off by a restart or a failure resumes after the last item it wrote. Once its read has
+merged its runs, it resumes from them, so the dump is not read again; a read cut off keeps the
+files it had read whole and checked (with a manifest each) and reads the others. A run cut off
+after its writes reads nothing again. When the dump a cut-off run needs again is gone from the
+mirror, the run starts over on the newest dump (a full import then keeps, until the next update,
+the items the older dump had and the newer one lacks). A run cut off in its removals goes on with
+the rest of its list.
 
 ## A small instance
 
@@ -126,7 +145,8 @@ recordings, release groups and credited artists fit in N, then only those releas
 artists. Recordings on no release are not read. The read stops once the releases are full, so a
 small limit reads a few megabytes of the release file, but the release group and artist files are
 read until every one wanted is found. A changed `limit` makes the next update a full import of the
-new subset, which removes the cards outside it.
+new subset, which removes the cards outside it. So does a `catalogue import --limit` by hand that
+differs from the daemon's: the daemon's next update imports its own subset again.
 
 ## Run it by hand
 
@@ -142,11 +162,13 @@ started by hand takes up one that was cut off, else begins a new one.
 - `--from` reads a local directory holding one dump's files, named after the dump
   (`20261125-001001`), with its `SHA256SUMS` when they are to be checked, or another mirror's
   `json-dumps/` URL (`https://`). The official mirror needs `http.contact`.
-- `--limit` takes the place of the configured limit. Below the cards stored it would remove the
-  others, so it needs `--force` then.
+- `--limit` takes the place of the configured limit. Another limit than the cards were read with,
+  below the cards stored, would remove the others (an update hands over to a full import of the
+  new subset), so it needs `--force` then, with `--update` too.
 
-`--request` only asks for a full import: the daemon that runs the importer starts it after the run
-under way (an update hands over at once), with its turn and disk checks.
+`--request` only asks for a full import: the process running the importer starts it, with its
+turn and disk checks, when the run under way ends or at its next step (within the hour when idle).
+The command says when no process holds the catalogue.
 
 `scripts/catalogue-sample musicbrainz` imports a sample of the two newest dumps (the first
 megabytes of each file) into a throwaway database and checks it end to end: the cards, a search,
