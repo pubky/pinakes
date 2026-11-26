@@ -289,7 +289,8 @@ pub fn isbn13(number: &str) -> String {
     format!("{body}{}", (10 - sum % 10) % 10)
 }
 /// An ISBN's page, Open Library's ISBN page `https://openlibrary.org/isbn/{ISBN}` (it redirects to
-/// the edition with that ISBN): an alias of the `isbn:` card ([`isbn_of_page`]).
+/// the edition with that ISBN when Open Library has one): an alias of the `isbn:` card
+/// ([`isbn_of_page`]).
 pub fn isbn_page(isbn13: &str) -> String {
     format!("https://openlibrary.org/isbn/{isbn13}")
 }

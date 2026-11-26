@@ -132,9 +132,8 @@ fn render(about: &str, tracking: &[Tracking], vectors: &[Vector], pages: &[Page]
 }
 
 /// A rule change that changes an answer (or the tracking parameters) fails here until the file
-/// says the same, which also
-/// changes the version (`/v1/info` `spelling_rules`). The file this build would write is left in
-/// the test's temporary directory, to compare and copy.
+/// says the same, which also changes the version (`/v1/info` `spelling_rules`). The file this
+/// build would write is left in the test's temporary directory, to compare and copy.
 #[test]
 fn every_vector_is_what_this_build_answers() {
     let file = file();
@@ -288,13 +287,18 @@ fn every_page_rule_has_vectors() {
     }
 }
 
-/// Every tracking parameter has a vector: a link that carries it on a host where it tracks, whose
-/// root drops it. A link whose rule is `tracking` drops nothing but listed parameters.
+/// Every tracking parameter has a vector of the tracking rule: a link that carries it on a host
+/// where it tracks, whose root drops it (a service's or source's rule drops the whole query, so
+/// its vectors show nothing of the list). A link whose rule is `tracking` drops nothing but listed
+/// parameters.
 #[test]
 fn every_tracking_parameter_has_a_vector() {
     let file = file();
+    // A link `url` cannot parse (a vector of an invalid port, a non-web scheme) has none.
     let params = |link: &str| -> Vec<(String, String)> {
-        let u = url::Url::parse(link).unwrap();
+        let Ok(u) = url::Url::parse(link) else {
+            return vec![];
+        };
         let host = u.host_str().unwrap_or_default().to_owned();
         u.query_pairs()
             .map(|(k, _)| (host.clone(), k.into_owned()))
@@ -302,9 +306,10 @@ fn every_tracking_parameter_has_a_vector() {
     };
     for t in alias::TRACKING {
         let shown = file.vectors.iter().any(|v| {
-            params(&v.link)
-                .iter()
-                .any(|(host, name)| t.matches(host, name))
+            v.rule == "tracking"
+                && params(&v.link)
+                    .iter()
+                    .any(|(host, name)| t.matches(host, name))
                 && !params(&v.root)
                     .iter()
                     .any(|(host, name)| t.matches(host, name))

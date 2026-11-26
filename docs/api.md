@@ -1599,7 +1599,7 @@ Aliases follow these rules:
   soundcloud.com; `feature` on youtube.com and youtu.be; `igsh` on instagram.com; and `s`, `t`,
   `ref_src` and `ref_url` on x.com and twitter.com (each host with its subdomains). They are
   dropped from the raw query, and every other value keeps its encoding. A URI that had any is an
-  alias of the URI without them. `data/spellings.json` lists them ([Spelling
+  alias of the URI without them, as `data/spellings.json` `tracking` lists them ([Spelling
   vectors](#spelling-vectors)).
 - **OSM spellings and object shortlinks** are aliases of
   `https://www.openstreetmap.org/{type}/{id}` ([OpenStreetMap and locations](#openstreetmap-and-locations)).
@@ -1738,14 +1738,17 @@ tracking rule above), so a client can remove them before it writes a link:
 | `match` | `exact`: the name is `param`; `prefix`: the name starts with it (`utm_`) |
 | `hosts` | The hosts it tracks on, each with its subdomains; empty for every host |
 
+- Only `http` and `https` links are cleaned. A host matches an entry when, in lower case (a
+  non-ASCII name in its punycode form), it equals one of `hosts` or ends with `.` and one of
+  them: `x.com` matches `mobile.x.com`, never `netflix.com`.
 - A parameter is dropped from the raw query string (split at `&`, the name before the first
   `=`); every other parameter keeps its place and encoding, and a query left empty goes with its
   `?`. Nothing else in the link changes.
 - Only parameters that never change the page are listed. Read-side folds that change the
   address (`www.`, a trailing slash, a service's other URL forms) are rules, not tracking.
-- A test holds the list equal to the code that drops them and gives each parameter a vector, and
-  `spelling_rules` covers it. Parameters are only ever added: a client with an older list writes
-  a link Pinakes still folds to the same root.
+- A test holds the list equal to the code that drops them and gives each parameter a vector of
+  the tracking rule, and `spelling_rules` covers it. A client with an older list writes a link
+  that keeps a parameter added since; Pinakes folds that link to the same root.
 
 ### Identifier pages
 
@@ -1773,17 +1776,18 @@ Each entry is one identifier and what Pinakes answers for it:
 
 - A join key's page (Wikidata, MusicBrainz, OSM) is a card's `uri` itself. A `doi:` or `isbn:`
   card's page and a source's page are aliases of the card's root ([Aliases](#aliases)). Open
-  Library's ISBN page redirects to the edition with that ISBN. The source's page may
-  differ from the page the card's `open_in` names after a read (the Federal Register's dated page
+  Library's ISBN page redirects to the edition with that ISBN when Open Library has one. The
+  source's page may differ from the page the card's `open_in` names after a read (the Federal
+  Register's dated page
   with its title, a Figshare portal's page, a Hugging Face repository in its own letter case);
   both are aliases of the same root. An LEI's page is its gleif.org address
   (`https://www.gleif.org/lei/{LEI}`), which redirects to the record page `open_in` names: that
   page names the LEI only in its fragment, which a link drops. A `%`, `?` or `#` in a DOI is
   percent-encoded in its page.
 - No single page (`null`): an MBID without its entity (`mbid:`), a barcode (`upc:`, `gtin:`) and
-  the podcast keys. The keys of the also-on
-  lookups (`imdb:`, `crate:`, `arxiv:`, `steam:`, …) have none here either: their pages are the
-  links those lookups list in [Also on](#also-on). A web link is its own page.
+  the podcast keys. The keys of the also-on lookups (`imdb:`, `crate:`, `arxiv:`, `steam:`, …)
+  have none here either: their pages are the links those lookups list in [Also on](#also-on). A
+  web link is its own page.
 - A test runs every entry through the code that builds the pages and checks that each page is an
   address of its card. Every source with roots of its own scheme has entries, and every such root
   among the spelling vectors has its page. `spelling_rules` covers the pages as it covers the
