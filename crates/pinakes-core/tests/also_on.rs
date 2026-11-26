@@ -4970,3 +4970,32 @@ async fn a_run_that_finds_nothing_and_holds_nothing_records_nothing(pool: PgPool
     assert_eq!(keys(pool.clone(), id.clone()).await, 0);
     assert_eq!(quiet.calls.lock().unwrap().len(), 2);
 }
+
+/// A lookup that failed and waits its backoff starts over when `reextract` queues it again
+/// (`also-on` or `all`): due now, with no attempts and no error, so its next failure waits the
+/// first backoff, not the one its old streak had reached.
+#[sqlx::test(migrations = "../../migrations")]
+async fn reextract_starts_a_failed_lookup_over(pool: PgPool) {
+    let id = page(&pool, "https://example.org/failed-lookup", "A page").await;
+    for routes in [["also-on"], ["all"]] {
+        sqlx::query(
+            "INSERT INTO also_on_dirty(resource_id,next_attempt_at,attempts,last_error) VALUES($1,now()+interval '1 hour',6,'http_5xx') \
+             ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at,attempts=excluded.attempts,last_error=excluded.last_error",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pinakes_core::queue::reextract(&pool, &routes.map(String::from))
+            .await
+            .unwrap();
+        let row: (bool, i32, Option<String>) = sqlx::query_as(
+            "SELECT next_attempt_at<=now(),attempts,last_error FROM also_on_dirty WHERE resource_id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, (true, 0, None), "{routes:?}");
+    }
+}

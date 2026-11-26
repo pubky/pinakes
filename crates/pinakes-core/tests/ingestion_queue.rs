@@ -3784,3 +3784,289 @@ async fn a_derived_link_nothing_keeps_is_not_pending(pool: PgPool) {
     );
     assert_eq!(pending(&pool).await, 0);
 }
+
+/// A batch's lease outlives the batch's deadline (`RESOLVE_TIMEOUT` a link): a claim of fifty
+/// links leases each for 15 s a link and 10 s more (760 s), though `lease_secs` is 60; a link
+/// claimed alone is leased `lease_secs`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_batch_claim_is_leased_for_the_whole_batch(pool: PgPool) {
+    for n in 0..50 {
+        store::ensure_resource(&pool, &format!("https://lease.example.org/{n:02}"))
+            .await
+            .unwrap();
+    }
+    let cfg = QueueConfig::default();
+    assert_eq!(cfg.lease_secs, 60);
+    let jobs = queue::claim_batch(&pool, "web", &cfg, 50).await.unwrap();
+    assert_eq!(jobs.len(), 50);
+    let ids: Vec<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
+    let lease = |ids: Vec<String>| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (f64, f64)>(
+                "SELECT min(extract(epoch FROM lease_until-now()))::float8,max(extract(epoch FROM lease_until-now()))::float8 FROM resource WHERE id=ANY($1)",
+            )
+            .bind(ids)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (shortest, longest) = lease(ids.iter().map(|s| s.to_string()).collect()).await;
+    let deadline = queue::RESOLVE_TIMEOUT.as_secs_f64() * 50.0;
+    assert!(
+        shortest > deadline && longest <= 760.0,
+        "{shortest} {longest}"
+    );
+    store::ensure_resource(&pool, "https://lease.example.org/alone")
+        .await
+        .unwrap();
+    let alone = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let (shortest, longest) = lease(vec![alone.id]).await;
+    assert!(shortest > 55.0 && longest <= 60.0, "{shortest} {longest}");
+}
+
+/// A page that says what it is called, with no service of its own.
+struct Says(Status);
+#[async_trait::async_trait]
+impl Resolver for Says {
+    fn name(&self) -> &'static str {
+        "web"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let mut doc = ResourceMeta::new(uri, "web", 86400);
+        doc.name = Some("Douglas Adams".into());
+        doc.site = "A page's own name".into();
+        doc.service = None;
+        doc.status = self.0.clone();
+        Ok(doc)
+    }
+    fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+        Duration::from_secs(86400)
+    }
+}
+/// A card read from a service the lookups know is named after the service and takes its
+/// service, whatever its page says; a card found gone keeps what it had.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_service_card_is_named_after_its_service(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    for (uri, status, site, service) in [
+        (
+            "https://www.wikidata.org/wiki/Q42",
+            Status::Ok,
+            "Wikidata",
+            Some("Wikidata"),
+        ),
+        (
+            "https://www.wikidata.org/wiki/Q5",
+            Status::Missing,
+            "A page's own name",
+            None,
+        ),
+    ] {
+        assert_eq!(pinakes_core::lookups::service_name(uri), Some("Wikidata"));
+        let id = store::ensure_resource(&pool, uri).await.unwrap();
+        let route: Option<String> = sqlx::query_scalar("SELECT resolver FROM resource WHERE id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let route = route.expect("a routed link");
+        // A missing answer is saved once a second read confirms it.
+        let reads = if status == Status::Missing { 2 } else { 1 };
+        for _ in 0..reads {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let job = queue::claim(&pool, &route, &cfg).await.unwrap().unwrap();
+            assert_eq!(job.id, id);
+            queue::run_job(&pool, &Says(status.clone()), &cfg, &job)
+                .await
+                .unwrap();
+        }
+        let stored: (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status,doc->>'site',doc->>'service' FROM resource WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            (
+                status.as_str().into(),
+                Some(site.into()),
+                service.map(Into::into)
+            ),
+            "{uri}"
+        );
+    }
+}
+
+/// A refusal is fenced by its claim's generation: a worker whose lease ran out, and whose link
+/// another worker has claimed since, puts nothing off; the new claim keeps its lease. A refusal
+/// of the current claim puts the link off.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_stale_refusal_puts_nothing_off(pool: PgPool) {
+    let a = change("https://example.org/one", "a", "/pub/app/tags/a");
+    let b = change("https://example.org/two", "a", "/pub/app/tags/b");
+    batch(&pool, vec![a, b], Some("one")).await;
+    let cfg = QueueConfig::default();
+    let budget = queue::AuthorBudget::default();
+    let first = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    let stale = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert!(budget.admit(&pool, &first, 0.1).await.unwrap());
+    sqlx::query("UPDATE resource SET lease_until=now()-interval '1 second' WHERE id=$1")
+        .bind(&stale.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let current = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(
+        (current.id.as_str(), current.generation),
+        (stale.id.as_str(), stale.generation + 1)
+    );
+    // Whether a lease holds the link, its generation, and whether it is due.
+    let held = || {
+        let (pool, id) = (pool.clone(), current.id.clone());
+        async move {
+            sqlx::query_as::<_, (bool, i64, bool)>(
+                "SELECT coalesce(lease_until>now(),false),generation,next_attempt_at<=now() FROM resource WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(!budget.admit(&pool, &stale, 0.1).await.unwrap());
+    assert_eq!(
+        held().await,
+        (true, current.generation, true),
+        "the stale refusal moved nothing"
+    );
+    assert!(!budget.admit(&pool, &current, 0.1).await.unwrap());
+    assert_eq!(
+        held().await,
+        (false, current.generation, false),
+        "the current refusal puts it off"
+    );
+}
+
+/// A card an official API names as another link's root keeps that link as its alias when the
+/// card is found gone: only a feed item that has left its feed lets go of its pages.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_root_found_gone_keeps_its_source_aliases(pool: PgPool) {
+    /// An API that names each filing's filer as its root, and finds the filer gone.
+    struct Filings {
+        root: String,
+    }
+    #[async_trait::async_trait]
+    impl Resolver for Filings {
+        fn name(&self) -> &'static str {
+            "web"
+        }
+        fn matches(&self, _: &str) -> bool {
+            true
+        }
+        async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+            let mut doc = ResourceMeta::new(uri, "web", 86400);
+            if uri == self.root {
+                doc.status = Status::Missing;
+            } else {
+                doc.name = Some("A filing".into());
+                doc.source_root = Some(self.root.clone());
+            }
+            Ok(doc)
+        }
+        fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+            Duration::from_secs(86400)
+        }
+    }
+    let cfg = QueueConfig::default();
+    let filings = Filings {
+        root: "https://filings.example.org/filer/1".into(),
+    };
+    let filing = store::ensure_resource(&pool, "https://filings.example.org/filing/1")
+        .await
+        .unwrap();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(job.id, filing);
+    queue::run_job(&pool, &filings, &cfg, &job).await.unwrap();
+    let (root, _, _) = identity(&filings.root).unwrap();
+    let alias = || {
+        let (pool, filing) = (pool.clone(), filing.clone());
+        async move {
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT root_id,basis FROM resource_alias WHERE alias_id=$1",
+            )
+            .bind(filing)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(alias().await, Some((root.clone(), "source".into())));
+    // The filer is read twice and found gone.
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&root)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        assert_eq!(job.id, root);
+        queue::run_job(&pool, &filings, &cfg, &job).await.unwrap();
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM resource WHERE id=$1")
+        .bind(&root)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "missing");
+    assert_eq!(
+        alias().await,
+        Some((root, "source".into())),
+        "the filing stays its alias"
+    );
+}
+
+/// A claim never waits for a row another claim is taking (its row lock): it takes the next due
+/// row at once, and the held row once it is let go.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_claim_passes_over_a_row_another_claim_holds(pool: PgPool) {
+    let held = store::ensure_resource(&pool, "https://example.org/held")
+        .await
+        .unwrap();
+    let free = store::ensure_resource(&pool, "https://example.org/free")
+        .await
+        .unwrap();
+    // The held row is first in the claim's order.
+    sqlx::query("UPDATE resource SET next_attempt_at=now()-interval '1 minute' WHERE id=$1")
+        .bind(&held)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut other = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        .bind(&held)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    let cfg = QueueConfig::default();
+    let job = tokio::time::timeout(Duration::from_secs(10), queue::claim(&pool, "web", &cfg))
+        .await
+        .expect("the claim waited for a row another claim holds")
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.id, free);
+    other.rollback().await.unwrap();
+    let job = queue::claim(&pool, "web", &cfg).await.unwrap().unwrap();
+    assert_eq!(job.id, held);
+}

@@ -2054,3 +2054,65 @@ async fn a_read_among_units_that_are_no_candidates_visits_a_bounded_number(pool:
     .unwrap();
     assert_eq!((due, stopped), (0, 0), "every read ended");
 }
+
+/// A resource's entry in the pass's queue, if it has one (whether it is due now), and how many
+/// of its units were read.
+async fn entry(pool: &PgPool, id: &str) -> (Option<bool>, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT next_attempt_at<=now() FROM same_event_dirty WHERE resource_id=$1),\
+         (SELECT count(*) FROM same_event_unit WHERE resource_id=$1)",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// A pass that runs out of its budget leaves what it claimed and did not read due again at once,
+/// not held for the claim's lease: a feed with more dates than the budget, part read, and a page
+/// the budget did not reach. The next passes read the rest.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_pass_out_of_budget_leaves_the_rest_due_at_once(pool: PgPool) {
+    let config = Config::default();
+    let start = soon();
+    // A weekly meetup's feed: four dates, four units.
+    let feed = "https://example.org/budget.ics";
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:weekly\r\nDTSTART:{}\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:Bitcoin Meetup Wattwil\r\nGEO:47.2991;9.0866\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        start.format("%Y%m%dT%H%M%SZ")
+    );
+    let parsed = calendar::parse(feed, ics.as_bytes(), &Default::default(), Utc::now()).unwrap();
+    let feed_id = save(&pool, &parsed).await;
+    // A budget of two units: half the feed is read, and it is due again at once.
+    assert_eq!(same_event::drain(&pool, &config, 2).await.unwrap(), 1);
+    assert_eq!(entry(&pool, &feed_id).await, (Some(true), 2));
+    pass(&pool, &config).await;
+    assert_eq!(entry(&pool, &feed_id).await, (None, 4));
+    // Two pages of one event and a budget of one: the page read first is settled, the other is
+    // not reached and is due again at once.
+    let later = start + Duration::days(1);
+    let pages = [
+        event(
+            &pool,
+            "https://example.org/budget-a",
+            "Lightning Meetup Wattwil",
+            later,
+            Some(WATTWIL),
+        )
+        .await,
+        event(
+            &pool,
+            "https://example.org/budget-b",
+            "Lightning Meetup Wattwil",
+            later,
+            Some(WATTWIL),
+        )
+        .await,
+    ];
+    assert_eq!(same_event::drain(&pool, &config, 1).await.unwrap(), 2);
+    let mut entries = vec![entry(&pool, &pages[0]).await, entry(&pool, &pages[1]).await];
+    entries.sort();
+    assert_eq!(entries, [(None, 1), (Some(true), 0)]);
+    pass(&pool, &config).await;
+    assert_eq!(named(&card(&pool, &pages[0]).await), [pages[1].as_str()]);
+}

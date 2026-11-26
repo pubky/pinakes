@@ -5545,3 +5545,46 @@ fn a_feed_item_with_too_long_an_id_is_left_out() {
     assert_eq!(uids, ["id1"]);
     assert!(c.warnings.contains(&"invalid_feed_item_uid".into()));
 }
+
+/// A date before the feed's horizon that ended more than its retention ago is purged when the
+/// feed is read again, listed or not: its occurrence row goes, the feed's other dates stay.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_date_past_retention_is_purged_on_the_next_read(pool: PgPool) {
+    let uri = "https://example.org/retention.ics";
+    let id = pinakes_core::store::ensure_resource(&pool, uri)
+        .await
+        .unwrap();
+    let at = |days: i64| (Utc::now() + Duration::days(days)).format("%Y%m%dT%H%M%S");
+    let past = event(&format!(
+        "UID:past\nDTSTART:{}Z\nDURATION:PT1H\nSUMMARY:Three days ago",
+        at(-3)
+    ));
+    let next = event(&format!(
+        "UID:next\nDTSTART:{}Z\nDURATION:PT1H\nSUMMARY:Next week",
+        at(7)
+    ));
+    let uids = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT uid FROM occurrence WHERE resource_id=$1 ORDER BY uid",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let first = fresh(&dynamic_parse(uri, &cal(&format!("{past}\n{next}"))));
+    pinakes_core::store::save_document(&pool, &id, 0, &first)
+        .await
+        .unwrap();
+    assert_eq!(uids().await, ["next", "past"]);
+    // Read again without it: it is now before the horizon, and ended more than a day (the
+    // retention) ago.
+    let mut second = fresh(&dynamic_parse(uri, &cal(&next)));
+    let container = second.container.as_mut().unwrap();
+    container.horizon_start = Utc::now();
+    container.limits.retention_days = 1;
+    pinakes_core::store::save_document(&pool, &id, 0, &second)
+        .await
+        .unwrap();
+    assert_eq!(uids().await, ["next"]);
+}

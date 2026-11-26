@@ -2458,4 +2458,237 @@ mod tests {
         .unwrap();
         assert_eq!(pending, (24_500, 24_500));
     }
+
+    /// A batch whose first link's author is over budget runs nothing: the first link waits the
+    /// author's turn, every other link of the batch is put back (no lease, its claim's
+    /// generation, due in a second), and none is charged. The refusal put no other link off, so
+    /// the worker keeps its pacing slot.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_refused_batch_is_put_back_whole(pool: PgPool) {
+        let slot = Instant::now() + Duration::from_secs(3600);
+        let mut worker = worker(&pool, slot);
+        // One link in a hundred seconds for the author, spent just now.
+        worker.cfg.author_requests_per_second = 0.01;
+        let rate = worker.cfg.author_requests_per_second;
+        let spent = claimed(&pool, "https://refused-batch.example.org/spent").await;
+        assert!(worker.authors.admit(&pool, &spent, rate).await.unwrap());
+        let batch = [
+            claimed(&pool, "https://refused-batch.example.org/first").await,
+            claimed(&pool, "https://refused-batch.example.org/second").await,
+        ];
+        worker.finish(&batch, slot).await;
+        let ids: Vec<&str> = batch.iter().map(|j| j.id.as_str()).collect();
+        let waits: Vec<f64> = sqlx::query_scalar(
+            "SELECT extract(epoch FROM next_attempt_at-now())::float8 FROM resource WHERE id=ANY($1) ORDER BY array_position($1,id)",
+        )
+        .bind(&ids)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for job in &batch {
+            assert_eq!(
+                lease(&pool, &job.id).await,
+                (false, job.generation),
+                "{}",
+                job.uri
+            );
+            assert_eq!(
+                row(&pool, &job.id).await,
+                ("pending".into(), 0, 0, false, None),
+                "{}: not run, nothing charged",
+                job.uri
+            );
+        }
+        assert!(
+            (90.0..=100.5).contains(&waits[0]),
+            "the author's turn: {waits:?}"
+        );
+        assert!((0.0..=1.0).contains(&waits[1]), "put back: {waits:?}");
+        assert_eq!(*worker.rate.lock().await, slot, "the slot is kept");
+    }
+
+    /// The put-back is fenced by the claim's generation: a link of the batch whose lease ran out
+    /// and that another worker claimed since keeps that worker's lease.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_put_back_leaves_a_link_claimed_again_alone(pool: PgPool) {
+        let slot = Instant::now() + Duration::from_secs(3600);
+        let mut worker = worker(&pool, slot);
+        worker.cfg.author_requests_per_second = 0.01;
+        let rate = worker.cfg.author_requests_per_second;
+        let spent = claimed(&pool, "https://refused-batch.example.org/spent").await;
+        assert!(worker.authors.admit(&pool, &spent, rate).await.unwrap());
+        let first = claimed(&pool, "https://refused-batch.example.org/first").await;
+        let second = claimed(&pool, "https://refused-batch.example.org/second").await;
+        sqlx::query("UPDATE resource SET lease_until=now()-interval '1 second' WHERE id=$1")
+            .bind(&second.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let again = claim(&pool, "web", &QueueConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (again.id.as_str(), again.generation),
+            (second.id.as_str(), second.generation + 1)
+        );
+        worker.finish(&[first.clone(), second.clone()], slot).await;
+        assert_eq!(lease(&pool, &first.id).await, (false, first.generation));
+        assert_eq!(
+            lease(&pool, &second.id).await,
+            (true, again.generation),
+            "the new claim keeps its lease"
+        );
+    }
+
+    /// One link read alone (`resolve`: a job run alone, a 304's re-read) is cut off at
+    /// `RESOLVE_TIMEOUT`: a timeout, to be read again in a minute, whatever the resolver was
+    /// doing. A read that ends just inside it is its answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_past_the_resolve_timeout_is_a_timeout() {
+        let uri = "https://slow.example.org/page";
+        let started = Instant::now();
+        let error = resolve(&After(Duration::from_secs(3600)), uri, false)
+            .await
+            .expect_err("cut off");
+        let took = started.elapsed();
+        assert!(
+            took >= RESOLVE_TIMEOUT && took < RESOLVE_TIMEOUT + Duration::from_secs(1),
+            "{took:?}"
+        );
+        let retry = error
+            .downcast_ref::<crate::resolver::RetryLater>()
+            .expect("a wait");
+        assert_eq!((retry.class, retry.seconds), ("timeout", 60));
+        assert_eq!(crate::resolver::error_class(&error), "timeout");
+        let doc = resolve(
+            &After(RESOLVE_TIMEOUT - Duration::from_millis(1)),
+            uri,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(doc.name.as_deref(), Some("A page"));
+    }
+
+    /// The same read through the finish: the job waits as a timeout (the first in a row charges
+    /// no attempt). Only the read runs on the paused clock: no statement is in flight then.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_job_read_past_the_resolve_timeout_waits_as_a_timeout(pool: PgPool) {
+        let cfg = QueueConfig::default();
+        let job = claimed(&pool, "https://slow.example.org/alone").await;
+        let slow = After(Duration::from_secs(3600));
+        tokio::time::pause();
+        let result = resolve(&slow, &job.uri, false).await;
+        tokio::time::resume();
+        guarded_finish_job(&pool, &slow, &cfg, &Default::default(), &job, result)
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&pool, &job.id).await,
+            ("pending".into(), 0, 1, false, Some("timeout".into()))
+        );
+    }
+
+    /// A keyless event platform's card (its manifest's mode `none`) is read again after the
+    /// platform's cadence floor; a platform with a mode of its own follows the refresh tiers
+    /// (an undated card: the first, a week).
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_keyless_platform_s_card_waits_its_cadence_floor(pool: PgPool) {
+        struct Platform(crate::adapter::Mode);
+        #[async_trait::async_trait]
+        impl Resolver for Platform {
+            fn name(&self) -> &'static str {
+                "event_platform"
+            }
+            fn matches(&self, _: &str) -> bool {
+                true
+            }
+            fn manifest_for(&self, _: &str) -> crate::adapter::Manifest {
+                crate::adapter::Manifest {
+                    mode: self.0,
+                    cadence_floor: 86400,
+                    ..crate::adapter::manifest("event_platform")
+                }
+            }
+            async fn resolve(&self, uri: &str) -> Result<ResourceMeta> {
+                let mut doc = ResourceMeta::new(uri, "event_platform", 100);
+                doc.name = Some("A platform's page".into());
+                Ok(doc)
+            }
+            fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+                Duration::from_secs(100)
+            }
+        }
+        let cfg = QueueConfig::default();
+        let week = crate::config::RefreshConfig::default().resource_secs[0] as f64;
+        for (n, mode, wait) in [
+            (0, crate::adapter::Mode::None, 86400.0),
+            (1, crate::adapter::Mode::Resource, week),
+        ] {
+            let job = claimed(&pool, &format!("https://platform.example.org/{n}")).await;
+            run_job(&pool, &Platform(mode), &cfg, &job).await.unwrap();
+            let (_, is_final, _, refresh) = schedule(&pool, &job.id).await;
+            assert!(!is_final, "{mode:?}");
+            assert!(
+                refresh.is_some_and(|s| (wait - 60.0..=wait).contains(&s)),
+                "{mode:?}: {refresh:?}"
+            );
+        }
+    }
+
+    /// A page answered 304 is a success of its source: its health records no error.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_not_modified_answer_is_a_success_of_its_source(pool: PgPool) {
+        /// A page fetched and answered 304.
+        struct Unchanged;
+        #[async_trait::async_trait]
+        impl Resolver for Unchanged {
+            fn name(&self) -> &'static str {
+                "web"
+            }
+            fn matches(&self, _: &str) -> bool {
+                true
+            }
+            async fn resolve(&self, _: &str) -> Result<ResourceMeta> {
+                let mut fetch = crate::telemetry::FetchGuard::start();
+                fetch.status(304);
+                drop(fetch);
+                Err(crate::resolver::NotModified.into())
+            }
+            fn refresh_after(&self, _: &ResourceMeta) -> Duration {
+                Duration::from_secs(100)
+            }
+        }
+        let cfg = QueueConfig::default();
+        let job = claimed(&pool, "https://unchanged.example.org/page").await;
+        // An accepted card first, read outside any observed fetch (no health is written).
+        run_batch(
+            &pool,
+            &Page { ended: false },
+            &cfg,
+            std::slice::from_ref(&job),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE resource SET next_attempt_at=now() WHERE id=$1")
+            .bind(&job.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = claim(&pool, "web", &cfg).await.unwrap().unwrap();
+        let metrics = crate::telemetry::Metrics::new().unwrap();
+        let manifest = Unchanged.manifest_for(&job.uri);
+        let run = run_batch(&pool, &Unchanged, &cfg, std::slice::from_ref(&job));
+        let (result, _) = crate::telemetry::observe(&metrics, &manifest, run).await;
+        result.unwrap();
+        let health: (Option<String>, i32, bool) = sqlx::query_as(
+            "SELECT last_error,consecutive_failures,last_success_at IS NOT NULL FROM source_state WHERE source=$1",
+        )
+        .bind(&manifest.source)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(health, (None, 0, true));
+    }
 }
