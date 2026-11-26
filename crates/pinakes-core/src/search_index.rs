@@ -2530,7 +2530,7 @@ pub struct Candidate {
 }
 
 /// One item of the text: words to find (one word, or several as a phrase), with its sign.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Item {
     /// Words, and whether the word was written with letters and digits alone (`c++` is not), so
     /// it may be the start of a longer one.
@@ -2543,83 +2543,140 @@ enum Item {
 /// `-word` to leave out, and `or` between two items. Each word is split and folded as the index
 /// splits the fields; a word that is several tokens (`pinakes-test`) is a phrase.
 fn items(index: &Index, text: &str) -> Vec<Item> {
+    let push = |out: &mut Vec<Item>, item: Item| match item {
+        // `or` between two items: never first, never twice.
+        Item::Or => {
+            if !matches!(out.last(), None | Some(Item::Or)) {
+                out.push(Item::Or);
+            }
+        }
+        item => out.push(item),
+    };
     let mut out = vec![];
     let mut rest = text;
     // At most MAX_ITEMS items: a longer text's rest is Postgres' alone to check.
     while out.len() < MAX_ITEMS {
-        let Some(start) = rest.find(|c: char| !c.is_whitespace()) else {
+        let Some((item, after)) = next_item(index, rest) else {
             break;
         };
-        rest = &rest[start..];
-        let negated = rest.starts_with('-');
-        if negated {
-            rest = &rest[1..];
-        }
-        let (raw, quoted) = if let Some(inner) = rest.strip_prefix('"') {
-            let end = inner.find('"').unwrap_or(inner.len());
-            let raw = &inner[..end];
-            rest = inner.get(end + 1..).unwrap_or("");
-            (raw, true)
-        } else {
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            let raw = &rest[..end];
-            rest = &rest[end..];
-            (raw, false)
-        };
-        if !quoted && !negated && raw.eq_ignore_ascii_case("or") {
-            if !matches!(out.last(), None | Some(Item::Or)) {
-                out.push(Item::Or);
-            }
-            continue;
-        }
-        let words = tokens(index, WORDS, raw);
-        if !words.is_empty() {
-            let whole = !quoted
-                && raw.chars().all(|c| {
-                    crate::api::word_char(c)
-                        || (crate::api::unspaced_script(c) && c.is_alphanumeric())
-                });
-            out.push(if negated {
-                Item::Not(words)
-            } else {
-                Item::Words(words, whole)
-            });
+        rest = after;
+        if let Some(item) = item {
+            push(&mut out, item);
         }
     }
-    // A cut inside an `or` chain (the next item past it is `or`, also right after a closing
-    // quote, or the last item kept is `or`): the whole chain leaves the index's query, which would
-    // otherwise require its part before the cut and miss what only a later item finds. The chain
-    // is the items `or` joins as the query joins them (a `-word` between them is no part of it),
-    // back to the first; leaving out more only widens what the index finds.
-    let next_is_or = rest
-        .split_whitespace()
-        .next()
-        .is_some_and(|w| w.eq_ignore_ascii_case("or"));
-    let or_last = matches!(out.last(), Some(Item::Or)) && !rest.trim().is_empty();
-    if out.len() == MAX_ITEMS && (next_is_or || or_last) {
-        while matches!(out.last(), Some(Item::Or | Item::Not(..))) {
-            out.pop();
-        }
-        out.pop();
+    // A cut inside an `or` chain (the next item past it that holds a word is `or`, a `-word` or a
+    // piece of no word between, also right after a closing quote; or the last item kept is `or`):
+    // the chain would be required in part, and what only a later item finds missed.
+    let joins_next = {
+        let mut ahead = rest;
         loop {
-            let mut at = out.len();
-            while at > 0 && matches!(out[at - 1], Item::Not(..)) {
-                at -= 1;
+            match next_item(index, ahead) {
+                Some((None | Some(Item::Not(..)), after)) => ahead = after,
+                Some((Some(Item::Or), _)) => break true,
+                _ => break false,
             }
-            if at == 0 || !matches!(out[at - 1], Item::Or) {
-                break;
+        }
+    };
+    let or_last = matches!(out.last(), Some(Item::Or)) && !rest.trim().is_empty();
+    if out.len() == MAX_ITEMS && (joins_next || or_last) {
+        let kept = out.clone();
+        drop_last_chain(&mut out);
+        if !out.iter().any(|i| matches!(i, Item::Words(..))) {
+            // The chain held every word to find: it is read on past the cut, whole, as main's
+            // index read it (with no cut), up to MAX_PIECES words; a longer one leaves the query.
+            out = kept;
+            let mut words = out.iter().filter(|i| matches!(i, Item::Words(..))).count();
+            let mut whole = true;
+            while let Some((item, after)) = next_item(index, rest) {
+                rest = after;
+                match item {
+                    None | Some(Item::Not(..)) => {}
+                    Some(Item::Or) => push(&mut out, Item::Or),
+                    Some(item) if matches!(out.last(), Some(Item::Or)) => {
+                        words += 1;
+                        if words > MAX_PIECES {
+                            whole = false;
+                            break;
+                        }
+                        out.push(item);
+                    }
+                    // A word `or` does not join: the chain ended (the rest, past the cut, is
+                    // Postgres' alone to check).
+                    Some(_) => break,
+                }
             }
-            out.truncate(at - 1);
-            while matches!(out.last(), Some(Item::Not(..))) {
-                out.pop();
+            if !whole {
+                drop_last_chain(&mut out);
             }
-            out.pop();
         }
     }
     while matches!(out.last(), Some(Item::Or)) {
         out.pop();
     }
     out
+}
+/// One item at the start of `rest` and what follows it; `None` at the end, and no item for a piece
+/// that holds no word to find.
+fn next_item<'a>(index: &Index, rest: &'a str) -> Option<(Option<Item>, &'a str)> {
+    let start = rest.find(|c: char| !c.is_whitespace())?;
+    let mut rest = &rest[start..];
+    let negated = rest.starts_with('-');
+    if negated {
+        rest = &rest[1..];
+    }
+    let (raw, quoted) = if let Some(inner) = rest.strip_prefix('"') {
+        let end = inner.find('"').unwrap_or(inner.len());
+        let raw = &inner[..end];
+        rest = inner.get(end + 1..).unwrap_or("");
+        (raw, true)
+    } else {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let raw = &rest[..end];
+        rest = &rest[end..];
+        (raw, false)
+    };
+    if !quoted && !negated && raw.eq_ignore_ascii_case("or") {
+        return Some((Some(Item::Or), rest));
+    }
+    let words = tokens(index, WORDS, raw);
+    if words.is_empty() {
+        return Some((None, rest));
+    }
+    let whole = !quoted
+        && raw.chars().all(|c| {
+            crate::api::word_char(c) || (crate::api::unspaced_script(c) && c.is_alphanumeric())
+        });
+    Some((
+        Some(if negated {
+            Item::Not(words)
+        } else {
+            Item::Words(words, whole)
+        }),
+        rest,
+    ))
+}
+/// Leaves out the last `or` chain of `out`: the items `or` joins as the query joins them (a
+/// `-word` between them is no part of it, and goes too), back to the first. Leaving out more only
+/// widens what the index finds.
+fn drop_last_chain(out: &mut Vec<Item>) {
+    while matches!(out.last(), Some(Item::Or | Item::Not(..))) {
+        out.pop();
+    }
+    out.pop();
+    loop {
+        let mut at = out.len();
+        while at > 0 && matches!(out[at - 1], Item::Not(..)) {
+            at -= 1;
+        }
+        if at == 0 || !matches!(out[at - 1], Item::Or) {
+            break;
+        }
+        out.truncate(at - 1);
+        while matches!(out.last(), Some(Item::Not(..))) {
+            out.pop();
+        }
+        out.pop();
+    }
 }
 
 /// A text search's time: its deadline, and whether a part of it ran past it.
@@ -4016,7 +4073,19 @@ mod tests {
                 ..Default::default()
             };
             let parts = items(&open.index, &text);
-            assert!(parts.len() <= MAX_ITEMS, "{round}: {text:?}");
+            // MAX_ITEMS items, or one chain of `or`s read whole, up to MAX_PIECES words.
+            let chain_words = parts
+                .iter()
+                .filter(|i| matches!(i, Item::Words(..)))
+                .count();
+            assert!(
+                parts.len() <= MAX_ITEMS
+                    || (chain_words <= MAX_PIECES
+                        && parts
+                            .iter()
+                            .all(|i| matches!(i, Item::Words(..) | Item::Or))),
+                "{round}: {text:?}"
+            );
             let searcher = open.reader.searcher();
             for word in text.split_whitespace().take(4) {
                 let word = word.to_lowercase();
@@ -4047,8 +4116,8 @@ mod tests {
             }
         }
         // Near the measured count with the fixed seed (282; the run prints it): the index answers
-        // all but texts of one character found inside names, and texts whose words are all left
-        // out (`-x`) or none the index holds.
+        // every text but those of one character found inside names, which Postgres reads alone
+        // (the `None` arm above accepts no other).
         assert!(served >= 270, "{served} of 300 answered");
         eprintln!(
             "most posting steps of one search: {most_steps} (ceiling {step_ceiling}); {served} of 300 answered"
@@ -4246,8 +4315,40 @@ mod tests {
         assert_ne!(key("192.0.2.1"), key("192.0.2.2"));
     }
 
+    /// A text that is one chain of `or`s, cut at MAX_ITEMS and read whole, finds a unit only its
+    /// last word names.
+    #[test]
+    fn a_long_or_chain_finds_what_only_its_last_word_names() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let names: Vec<String> = (0..20).map(|n| format!("c{n}")).collect();
+        named(&open, &names);
+        let q = TextQuery {
+            text: (0..20)
+                .map(|n| format!("c{n}"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            at: chrono::Utc::now(),
+            ..Default::default()
+        };
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let found = open.search(&q, 500, &budget).unwrap().unwrap();
+        assert!(
+            found.iter().any(|c| c.unit_id == format!("{:032x}", 19)),
+            "{found:?}"
+        );
+        assert_eq!(found.len(), 20);
+    }
+
     /// A text cut at MAX_ITEMS inside an `or` chain leaves the whole chain out of the index's query
-    /// (Postgres checks it on every candidate): `… w32 or w33` would otherwise require `w32`.
+    /// (Postgres checks it on every candidate): `… w32 or w33` would otherwise require `w32`. A text
+    /// that is one chain is read whole instead, as main's index reads it, up to MAX_PIECES words.
     #[test]
     fn a_cut_inside_an_or_chain_drops_the_chain() {
         let open = Open::new(
@@ -4277,8 +4378,9 @@ mod tests {
             words(&format!("{} a or b", shorter.join(" "))),
             MAX_ITEMS - 1
         );
-        // A chain of `or`s: 16 words are 31 items, whole; 20 words are cut with `or` the 32nd,
-        // and the whole chain goes.
+        // A text that is one chain of `or`s is read whole, as main's index reads it (with no cut),
+        // up to MAX_PIECES words: 16 words are 31 items, 20 are cut with `or` the 32nd and read on;
+        // a longer chain leaves the query (dropping it leaves no word to find).
         let chain = |n: usize| {
             (0..n)
                 .map(|n| format!("c{n}"))
@@ -4286,7 +4388,19 @@ mod tests {
                 .join(" or ")
         };
         assert_eq!(words(&chain(16)), 16);
-        assert_eq!(words(&chain(20)), 0, "the chain is not cut short");
+        assert_eq!(words(&chain(20)), 20, "read whole, as main reads it");
+        assert_eq!(words(&chain(MAX_PIECES)), MAX_PIECES);
+        assert_eq!(words(&chain(MAX_PIECES + 6)), 0);
+        // A chain that goes on past the cut through a `-word`: the cut is inside it.
+        assert_eq!(
+            words(&format!("{} a -n or b", head.join(" "))),
+            MAX_ITEMS - 1
+        );
+        // … or through a piece of no word to find (`""`).
+        assert_eq!(
+            words(&format!("{} a \"\" or b", head.join(" "))),
+            MAX_ITEMS - 1
+        );
         // `or` right after a closing quote, past the cut: the quoted phrase it joins goes.
         assert_eq!(
             words(&format!("{} \"p q\"or z", head.join(" "))),

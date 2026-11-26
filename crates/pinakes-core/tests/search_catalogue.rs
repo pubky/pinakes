@@ -1317,6 +1317,32 @@ async fn a_later_import_is_not_read_again_but_a_first_one_after_a_drop_is(pool: 
     assert_eq!(held.len(), 1, "only the new import's card: {held:?}");
 }
 
+/// The rows of `catalogue_card` itself the plans read (its indexes' entries left out): those each
+/// scan of the table returned or filtered out, over all its loops.
+fn card_heap_rows_read(plans: &[Value]) -> u64 {
+    fn walk(node: &Value) -> u64 {
+        let rows = |k: &str| node[k].as_f64().unwrap_or(0.0);
+        let own = if node["Relation Name"] == "catalogue_card" {
+            ((rows("Actual Rows")
+                + rows("Rows Removed by Filter")
+                + rows("Rows Removed by Index Recheck"))
+                * rows("Actual Loops").max(1.0)) as u64
+        } else {
+            0
+        };
+        own + node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(walk)
+            .sum::<u64>()
+    }
+    plans
+        .iter()
+        .flat_map(|p| p.as_array().cloned().unwrap_or_default())
+        .map(|p| walk(&p["Plan"]))
+        .sum()
+}
 /// The catalogue rows the plans read: those each scan of `catalogue_card` or of its indexes
 /// returned or filtered out, over all its loops.
 fn card_rows_read(plans: &[Value]) -> u64 {
@@ -1498,13 +1524,18 @@ async fn one_character_reads_each_catalogue_s_best_known(pool: PgPool) {
 }
 
 /// Whether a key two catalogues' listed cards share names one card of each (so the cards merge)
-/// is read through the key index: a catalogue of many cards that holds the key once is not read
-/// through to prove there is no second card.
+/// is read through the key index, at most two cards per key and catalogue: a catalogue of many
+/// cards that holds the key once is not read through to prove there is no second card, and a key
+/// 400 cards of one catalogue hold costs two of them for that catalogue. The other catalogue's
+/// check of it goes once through the key's holders (the key index does not tell catalogues
+/// apart), not once per catalogue as a count of every holder did (828 rows here).
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_shared_key_is_checked_through_the_key_index(pool: PgPool) {
     const MBID: &str = "0383dadf-2a4e-4d10-a46a-e9e041da8eb3";
+    const ISRC: &str = "isrc:GBUM71029604";
     let mut item = card(1, "Shared Band", "MusicGroup", &[], None, 1.0);
     item.keys.push(format!("mb:artist:{MBID}"));
+    item.keys.push(ISRC.into());
     import(&pool, Catalogue::Wikidata, &[item]).await;
     let mut artist = card(2, "Shared Band", "MusicGroup", &[], None, 1.0);
     artist.source_id = format!("artist/{MBID}");
@@ -1520,6 +1551,24 @@ async fn a_shared_key_is_checked_through_the_key_index(pool: PgPool) {
         })
         .collect();
     others.push(artist);
+    // 400 recordings holding one ISRC, better known than the other bands.
+    others.extend((0..400).map(|n| {
+        let mut c = card(
+            5000 + n,
+            &format!("Dup {n}"),
+            "MusicRecording",
+            &[],
+            None,
+            0.9,
+        );
+        c.source_id = format!("recording/{n:08}-0000-4000-8000-000000000001");
+        c.uri = format!("https://musicbrainz.org/recording/{n:08}-0000-4000-8000-000000000001");
+        c.keys = vec![
+            format!("mb:recording:{n:08}-0000-4000-8000-000000000001"),
+            ISRC.into(),
+        ];
+        c
+    }));
     import(&pool, Catalogue::Musicbrainz, &others).await;
     sqlx::query("ANALYZE catalogue_card")
         .execute(&pool)
@@ -1530,13 +1579,60 @@ async fn a_shared_key_is_checked_through_the_key_index(pool: PgPool) {
     let app = app(&pool, config);
     api::record_card_read_plans();
     let page = names(&common::get(&app, "/v1/search?limit=20").await);
-    let read = card_rows_read(&api::card_read_plans());
+    let read = card_heap_rows_read(&api::card_read_plans());
     assert_eq!(
         page.iter().filter(|n| *n == "Shared Band").count(),
         1,
         "merged: {page:?}"
     );
-    assert!(read <= 100, "{read} card rows read");
+    assert!(page.iter().any(|n| n.starts_with("Dup ")), "{page:?}");
+    assert!(read <= 500, "{read} card rows read from the table");
+}
+
+/// Every read a one-character search makes while it holds its turn stops with the turn's budget,
+/// the catalogue cards' too: held up past it (here by a lock on `catalogue_card`), the search
+/// answers 503 with `Retry-After: 1`, counted as `budget`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_one_character_card_read_stops_with_the_budget(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(
+            1,
+            "東京タワー",
+            "LandmarksOrHistoricalBuildings",
+            &[],
+            None,
+            0.9,
+        )],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=%E6%9D%B1").await),
+        ["東京タワー"]
+    );
+    index.set_bounds(1, std::time::Duration::from_millis(500));
+    let spent = pinakes_core::telemetry::search_index_busy_count("budget");
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE catalogue_card IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let (status, _) = common::get_from(&app, "127.0.0.2:1234", "/v1/search?q=%E6%9D%B1").await;
+    let took = started.elapsed();
+    lock.rollback().await.unwrap();
+    assert_eq!(status, 503);
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "{took:?}: the budget, not the pool's 5 s"
+    );
+    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
 }
 
 /// Each catalogue has its own two `point` indexes (geometry and geography, partial on it), which

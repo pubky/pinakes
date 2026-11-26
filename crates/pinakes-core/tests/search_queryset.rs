@@ -925,6 +925,17 @@ async fn the_query_set_finds_what_postgres_finds(pool: PgPool) {
             .collect();
         println!("or, main's reading: {query}: Postgres alone also finds {alone:?}");
     }
+    // The chain of 20, cut at 32 items, is read whole as main's index reads it (no cut): the same
+    // units as `daft or kraftwerk`.
+    let sorted = |page: &Value| {
+        let mut ids = ids_of(page);
+        ids.sort();
+        ids
+    };
+    let whole = sorted(&common::get(&indexed, &path(&format!("q={chain}&limit=50"))).await);
+    let short = sorted(&common::get(&indexed, &path("q=daft or kraftwerk&limit=50")).await);
+    assert!(!short.is_empty());
+    assert_eq!(whole, short, "the chain of 20 as main reads it");
     // The orders that differ (BM25 and the activity's weight against the former tiers), for the
     // record: run with --nocapture to read them.
     for line in report {

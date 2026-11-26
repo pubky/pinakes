@@ -1181,13 +1181,16 @@ with `x` and with `a` or `b`, as people mostly mean it (Postgres alone, `websear
 binds `or` looser: `x a` or `b`); a word left out with `-` is left out of every unit. When the 32
 items end inside a list of `or`s (the next item is `or`, also right after a closing quote, or the
 32nd is `or`), the whole list leaves the index's query: the index finds what the rest of the text
-finds (for a text that is one long list, the names similar to it), and Postgres checks every
-candidate against the whole text. A search waits for a free turn; one client address (an IPv6 address by its /64) that
+finds, and Postgres checks every candidate against the whole text. A text that is one list of
+`or`s is read whole instead, as before, up to 64 words; a longer one finds the names similar to
+it. A search waits for a free turn; one client address (an IPv6 address by its /64) that
 already runs half the turns waits while another client's search does, and alone it takes every
 free turn. A search that gets no turn within its budget, or runs past it, answers `503` with
 `Retry-After: 1`: the index stops it at its next check (between the posting steps of a word or
 phrase, and before each word set, which reads its words' lists in one go). A text of one character
-found inside names, which Postgres reads alone, takes a turn too.
+found inside names, which Postgres reads alone, takes a turn too, and that read stops with the
+search's budget (what is left of `limits.search_index_budget_ms`, not the 5 s of every other read):
+past it the search answers `503` with `Retry-After: 1`.
 
 People's tags and catalogue labels add to a card's relevance but never match `q` alone. A post
 whose author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's

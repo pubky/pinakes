@@ -199,7 +199,8 @@ started by hand takes up one that was cut off, else begins a new one.
 - `--limit` takes the place of the configured limit. Another limit than the cards were read with,
   below the cards stored, would remove the others (an update hands over to a full import of the
   new subset), so it needs `--force` then, with `--update` too. `--force` also lets that import
-  remove the other cards past the shrink floor (they are what the lower limit drops). A full
+  remove the other cards past the shrink floor (they are what the lower limit drops), when the
+  limit is below both the cards held and the limit they were read with. A full
   import with `--force` and no lower `--limit` keeps the floor: a dump that reads under half the
   cards fails `shrunk`, and `pinakesd catalogue allow-shrink musicbrainz` lets it through.
 

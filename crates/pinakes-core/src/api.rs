@@ -2486,7 +2486,7 @@ async fn with_replacers(
 /// catalogues among the rows) but name more than one card of one of those catalogues (two
 /// MusicBrainz recordings of one ISRC): each with that catalogue. Such a key merges nothing
 /// ([`units_of`]). One read for the few keys two catalogues' found cards share, through the key
-/// index, of the catalogues of the rows only (which are on).
+/// index, at most two cards per key and catalogue of the rows (which are on).
 async fn ambiguous_keys(
     pool: &PgPool,
     rows: &[CardRow],
@@ -2511,14 +2511,16 @@ async fn ambiguous_keys(
     if keys.is_empty() {
         return Ok(Default::default());
     }
-    // Through the key index (a key's cards, of that catalogue): a key held once is one index
-    // entry, however many cards the catalogue holds.
-    let ambiguous: Vec<(String, String)> = read_cards(pool, Plan::Ordered, |sql| {
+    // Through the key index (the bitmap of a key's cards), at most two cards of the catalogue per
+    // key: a key held once is one index entry however many cards the catalogue holds, and a key
+    // many cards of the catalogue hold costs two of them. Another catalogue's check of that key
+    // goes once through its holders (the key index does not tell catalogues apart).
+    let ambiguous: Vec<(String, String)> = read_cards(pool, Plan::KeyIndex, |sql| {
         sql.push("SELECT p.k,p.catalogue FROM unnest(")
             .push_bind(keys.clone())
             .push("::text[],")
             .push_bind(catalogues.clone())
-            .push("::text[]) AS p(k,catalogue) JOIN catalogue_card c ON c.keys@>ARRAY[p.k] AND c.catalogue=p.catalogue GROUP BY p.k,p.catalogue HAVING count(*)>1");
+            .push("::text[]) AS p(k,catalogue) CROSS JOIN LATERAL (SELECT count(*) AS n FROM (SELECT 1 FROM catalogue_card c WHERE c.keys@>ARRAY[p.k] AND c.catalogue=p.catalogue LIMIT 2) two) m WHERE m.n>1");
     })
     .await?;
     Ok(ambiguous.into_iter().collect())
@@ -2647,6 +2649,9 @@ enum Plan {
     /// The nearest to a point in the `point` indexes' nearest-first order: the planner would rather
     /// read every card in the circle or box and sort them, which reads far more.
     Nearest,
+    /// Through the key index's bitmap alone (no plain index or table scan): a bounded read per
+    /// key that the planner would otherwise take in a btree's order, or across the table.
+    KeyIndex,
 }
 /// The rows the statement `build` writes reads, in a transaction of its own planned as `plan`
 /// says, never with parallel workers (they take longer to start than a bounded read takes); its
@@ -2664,6 +2669,7 @@ where
     sqlx::query(match plan {
         Plan::Ordered => "SELECT set_config('max_parallel_workers_per_gather','0',true)",
         Plan::Nearest => "SELECT set_config('max_parallel_workers_per_gather','0',true),set_config('enable_bitmapscan','off',true),set_config('enable_seqscan','off',true)",
+        Plan::KeyIndex => "SELECT set_config('max_parallel_workers_per_gather','0',true),set_config('enable_indexscan','off',true),set_config('enable_seqscan','off',true)",
     })
     .execute(&mut *tx)
     .await?;
@@ -3060,6 +3066,24 @@ fn not_hidden(set: &str, present: &str) -> String {
     format!(
         "SELECT * FROM {set} x WHERE x.hidden_by IS NULL OR NOT x.hidden_by && ARRAY(SELECT h.unit FROM (SELECT DISTINCT unnest(y.hidden_by) AS unit FROM {set} y WHERE y.hidden_by IS NOT NULL) h WHERE h.unit IN (SELECT z.unit_id FROM {present} z))"
     )
+}
+/// `read`, within a held text-search turn's budget (`deadline`; none: as it is): `None` when the
+/// budget ran out first (counted as `budget`). Every read a search makes while it holds a turn
+/// goes through here or a `statement_timeout` of what is left, so the turn is held no longer.
+async fn within_turn<T>(
+    deadline: Option<std::time::Instant>,
+    read: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline.into(), read).await {
+            Ok(done) => Some(done),
+            Err(_) => {
+                crate::telemetry::search_index_busy("budget");
+                None
+            }
+        },
+        None => Some(read.await),
+    }
 }
 /// The answer to a text search the text index could not serve in time: `503` with
 /// `Retry-After: 1` (a turn is likely free a second later).
@@ -3720,7 +3744,7 @@ pub async fn search(
                 && related.is_none()
                 && query_text(&q).is_some_and(|t| t.trim().chars().count() == 1) =>
         {
-            best_known_cards(
+            let read = best_known_cards(
                 &state.pool,
                 &q,
                 &tags,
@@ -3729,21 +3753,27 @@ pub async fn search(
                 sort,
                 state.config.search.text_candidates,
                 query_text(&q),
-            )
-            .await?
+            );
+            match within_turn(postgres_deadline, read).await {
+                Some(units) => units?,
+                None => return Ok(text_search_busy()),
+            }
         }
         _ => CardUnits::default(),
     };
     // Cards built from a catalogue card are listed with the labels they show, which count as tags
     // as a card's do (with cards listed, in the referenced branch beside them; else in the plain
     // read, `backed`).
-    let backed = cards_allowed
-        && card_units.units.is_empty()
-        && sqlx::query_scalar::<_, bool>(
+    let backed = cards_allowed && card_units.units.is_empty() && {
+        let read = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM resource WHERE catalogue_card IS NOT NULL)",
         )
-        .fetch_one(&state.pool)
-        .await?;
+        .fetch_one(&state.pool);
+        match within_turn(postgres_deadline, read).await {
+            Some(backed) => backed?,
+            None => return Ok(text_search_busy()),
+        }
+    };
     let with_cards = !card_units.units.is_empty();
     let labelled: Vec<String> = crate::catalogue::join::joinable(&state.config.catalogues)
         .into_iter()

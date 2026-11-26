@@ -699,7 +699,7 @@ async fn import(
     if let Some(limit) = config.catalogues.limit(catalogue) {
         // A limit other than the one the cards were read with makes a full import of the new
         // subset (an update hands over to one), which removes the others.
-        if stored_limit != Some(limit) && (limit as i64) < cards && !force {
+        if stored_limit != Some(limit) && i64::try_from(limit).is_ok_and(|l| l < cards) && !force {
             bail!("catalogue {catalogue} holds {cards} cards: a full import with --limit {limit} removes all but at most {limit} of them; add --force to do so");
         }
     }
@@ -722,8 +722,10 @@ async fn import(
     // one the cards were read with (none stored: every card): the shrink floor then lets the run
     // remove the rest. A full import with `--force` keeps the floor (`catalogue allow-shrink` lets
     // a real shrink through).
-    let expect_shrink =
-        force && limit.is_some_and(|l| (l as i64) < cards && stored_limit.is_none_or(|s| l < s));
+    let expect_shrink = force
+        && limit.is_some_and(|l| {
+            i64::try_from(l).is_ok_and(|l| l < cards) && stored_limit.is_none_or(|s| l < s)
+        });
     let (state, written) = run::run_once_with(
         std::sync::Arc::new(importer),
         &ctx,
@@ -1655,16 +1657,19 @@ mod tests {
             "{failed:#}"
         );
         assert_eq!(olds().await, 40);
-        // Forced with a limit above the cards held drops nothing by its limit: the floor holds.
-        let mut out = Vec::new();
-        let failed = catalogue_command(&pool, &config, import(Some(100_000_000), true), &mut out)
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{failed:#}").ends_with("failed: shrunk"),
-            "{failed:#}"
-        );
-        assert_eq!(olds().await, 40);
+        // Forced with a limit above the cards held drops nothing by its limit: the floor holds,
+        // also for a limit past what a signed count holds.
+        for limit in [100_000_000, u64::MAX] {
+            let mut out = Vec::new();
+            let failed = catalogue_command(&pool, &config, import(Some(limit), true), &mut out)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{failed:#}").ends_with("failed: shrunk"),
+                "{limit}: {failed:#}"
+            );
+            assert_eq!(olds().await, 40);
+        }
         // Forced with a limit below the cards held and the stored scope (none: every card): the
         // rest goes.
         let mut out = Vec::new();

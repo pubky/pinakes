@@ -778,6 +778,38 @@ async fn one_character_inside_names_is_read_by_postgres(pool: PgPool) {
     assert_eq!(status_of(&app, "/v1/search?q=%E2%82%AC").await.0, 200);
 }
 
+/// A text the index leaves to Postgres keeps its turn for the Postgres read, which stops with the
+/// turn's budget (its `statement_timeout`, not the pool's 5 s): held up past it (here by a lock on
+/// `resource`), the search answers 503 with `Retry-After: 1`, counted as `budget`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_postgres_read_that_holds_a_turn_stops_with_its_budget(pool: PgPool) {
+    card(&pool, 1, "Price € list", "A page.", "money", 1).await;
+    let index = SearchIndex::in_memory();
+    let mut config = Config::default();
+    config.catalogues.enabled = false;
+    let mut state = AppState::new(pool.clone(), config).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(status_of(&app, "/v1/search?q=%E2%82%AC").await.0, 200);
+    index.set_bounds(1, Duration::from_millis(500));
+    let spent = pinakes_core::telemetry::search_index_busy_count("budget");
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE resource IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let (status, retry) = status_of(&app, "/v1/search?q=%E2%82%AC").await;
+    let took = started.elapsed();
+    lock.rollback().await.unwrap();
+    assert_eq!((status, retry.as_deref()), (503, Some("1")));
+    assert!(
+        took < Duration::from_secs(4),
+        "{took:?}: the budget, not the pool's 5 s"
+    );
+    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
+}
+
 /// The last pass's time starts at the index's open, so when every pass fails from the start the
 /// time stays there and `SearchIndexStalled` fires (`ops/alerts.yml`).
 #[sqlx::test(migrations = "../../migrations")]
