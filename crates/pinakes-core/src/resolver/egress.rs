@@ -978,11 +978,12 @@ impl Egress {
             if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
                 bail!("relay DNS resolved to non-public address");
             }
+            // Held while the socket is open: it connects to whichever address answers first.
+            let _permits = self.relay_permits(&host, &addresses).await?;
             anyhow::ensure!(
                 self.network_relays,
                 "relay network disabled for injected transports"
             );
-            let _permit = self.host_permit(&host).await?;
             let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await?;
             let config = WebSocketConfig::default()
                 .max_message_size(Some(BODY_CAP))
@@ -1321,13 +1322,13 @@ impl Egress {
         let mut permanent = true;
         // A redirect within the same host keeps the host's slot; a slow host's next slot is
         // further away than a fetch may wait, so a new one would always answer RetryLater. Each
-        // request holds its host's slot and its first pinned address's (the address with its
-        // slot), so many names on one server are paced together; a same-host hop to another
-        // address takes that address's turn.
+        // request holds its host's slot and the slot of every address pinned to it, whichever it
+        // connects to (`address_permits_until`), so many names on one server are paced together;
+        // a same-host hop to other addresses takes their turns.
         type Slots = (
             String,
             OwnedMutexGuard<Instant>,
-            Option<(String, OwnedMutexGuard<Instant>)>,
+            Vec<(String, OwnedMutexGuard<Instant>)>,
         );
         let mut permit: Option<Slots> = None;
         for redirects in 0..=3 {
@@ -1380,26 +1381,28 @@ impl Egress {
             }
             // Pin checked addresses to the connection; a second DNS lookup could rebind to a private IP.
             // A service's own host, which no link can multiply, is paced by its name alone.
-            let address = (!options.host_slot_only && !self.service_host(&host))
-                .then(|| address_slot(addresses[0].ip()));
+            let slots = if options.host_slot_only || self.service_host(&host) {
+                vec![]
+            } else {
+                address_slots(&addresses)
+            };
             match &mut permit {
-                Some((held, guard, at_address)) if *held == host => {
+                Some((held, guard, at_addresses)) if *held == host => {
                     **guard = Instant::now() + self.host_interval(&host);
-                    match (at_address.as_mut(), &address) {
-                        (Some((held_address, at)), Some(address)) if held_address == address => {
+                    if at_addresses.iter().map(|(slot, _)| slot).eq(slots.iter()) {
+                        for (address, at) in at_addresses.iter_mut() {
                             **at = Instant::now() + self.address_interval(address, &host);
                         }
-                        (_, Some(address)) => {
-                            // A new DNS answer: the other address's slot goes before this
-                            // one's turn is waited for.
-                            *at_address = None;
-                            let wait = options
-                                .slot_wait
-                                .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
-                            let at = self.address_permit_within(address, &host, wait).await?;
-                            *at_address = Some((address.clone(), at));
-                        }
-                        (_, None) => *at_address = None,
+                    } else {
+                        // A new DNS answer: the other addresses' slots go before these ones'
+                        // turns are waited for.
+                        at_addresses.clear();
+                        let wait = options
+                            .slot_wait
+                            .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
+                        *at_addresses = self
+                            .address_permits_until(&slots, &host, Instant::now() + wait)
+                            .await?;
                     }
                 }
                 _ => {
@@ -1410,29 +1413,24 @@ impl Egress {
                         .map_or(MAX_SLOT_WAIT, |w| w.min(MAX_SLOT_WAIT));
                     let deadline = Instant::now() + wait;
                     let mut guard = self.host_permit_within(&host, wait).await?;
-                    let at_address = match &address {
-                        Some(address) => {
-                            let left = deadline.saturating_duration_since(Instant::now());
-                            match self.address_permit_within(address, &host, left).await {
-                                Ok(at_address) => Some((address.clone(), at_address)),
-                                Err(error) => {
-                                    // No request is sent: the host's turn is not used up.
-                                    *guard = Instant::now();
-                                    return Err(error);
-                                }
+                    let at_addresses =
+                        match self.address_permits_until(&slots, &host, deadline).await {
+                            Ok(at_addresses) => at_addresses,
+                            Err(error) => {
+                                // No request is sent: the host's turn is not used up.
+                                *guard = Instant::now();
+                                return Err(error);
                             }
-                        }
-                        None => None,
-                    };
-                    permit = Some((host.clone(), guard, at_address));
+                        };
+                    permit = Some((host.clone(), guard, at_addresses));
                 }
             }
             // The site may have refused this address while this request waited for its slot:
             // the slot goes back unused and nothing is sent.
             if let Some(wait) = self.site_pause(&host) {
-                if let Some((_, guard, at_address)) = permit.as_mut() {
+                if let Some((_, guard, at_addresses)) = permit.as_mut() {
                     **guard = Instant::now();
-                    if let Some((_, at)) = at_address.as_mut() {
+                    for (_, at) in at_addresses.iter_mut() {
                         **at = Instant::now();
                     }
                 }
@@ -1590,6 +1588,56 @@ impl Egress {
         self.slot_permit_within(address, self.address_interval(address, host), wait)
             .await
     }
+    /// The turns of the address slots `slots` ([`address_slots`]) for a request to `host`, taken
+    /// one after another in their order, waiting until `deadline` at most. When one is not to be
+    /// had, the turns already taken go back unused.
+    async fn address_permits_until(
+        &self,
+        slots: &[String],
+        host: &str,
+        deadline: Instant,
+    ) -> Result<Vec<(String, OwnedMutexGuard<Instant>)>> {
+        let mut held: Vec<(String, OwnedMutexGuard<Instant>)> = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.address_permit_within(slot, host, left).await {
+                Ok(at) => held.push((slot.clone(), at)),
+                Err(error) => {
+                    for (_, at) in &mut held {
+                        **at = Instant::now();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(held)
+    }
+    /// The slots a relay connection to `host` at `addresses` holds while it is open: its host's
+    /// and every address's, as a fetch's (`fetch_options_inner`), since the socket connects to
+    /// whichever address answers first.
+    async fn relay_permits(
+        &self,
+        host: &str,
+        addresses: &[SocketAddr],
+    ) -> Result<(
+        OwnedMutexGuard<Instant>,
+        Vec<(String, OwnedMutexGuard<Instant>)>,
+    )> {
+        let deadline = Instant::now() + MAX_SLOT_WAIT;
+        let mut guard = self.host_permit(host).await?;
+        let slots = if self.service_host(host) {
+            vec![]
+        } else {
+            address_slots(addresses)
+        };
+        match self.address_permits_until(&slots, host, deadline).await {
+            Ok(at_addresses) => Ok((guard, at_addresses)),
+            Err(error) => {
+                *guard = Instant::now();
+                Err(error)
+            }
+        }
+    }
     /// Whether `host` is a service's own, named in the code with its pace: a source's or an
     /// also-on source's (`budgets`, in `source_rates`) or a published one (`PUBLISHED_RATES`, an
     /// exact rule: a `*.` rule's names are as many as links make). The fixed API hosts sources
@@ -1711,6 +1759,13 @@ struct SiteRefusals {
 /// The pacing slot of an address, apart from every host name's.
 fn address_slot(ip: IpAddr) -> String {
     format!("address {ip}")
+}
+/// The slots of every distinct address of a DNS answer, in one order (sorted), so two requests
+/// whose answers share addresses take them in the same order and never wait on each other the
+/// other way round.
+fn address_slots(addresses: &[SocketAddr]) -> Vec<String> {
+    let ips: std::collections::BTreeSet<IpAddr> = addresses.iter().map(|a| a.ip()).collect();
+    ips.into_iter().map(address_slot).collect()
 }
 impl Egress {
     /// The least time between two requests to a host: its rate plus a stable per-host jitter,
@@ -3510,6 +3565,138 @@ mod tests {
                 "{a} {b} shared {shared}"
             );
         }
+    }
+
+    /// Two names whose DNS answers share only their second address are paced together: the
+    /// transport may connect to either address, so a request holds the slot of each.
+    #[tokio::test(start_paused = true)]
+    async fn a_shared_second_address_is_paced() {
+        struct Two;
+        #[async_trait]
+        impl Dns for Two {
+            async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                let first = if host == "a.example.org" {
+                    "9.9.9.1"
+                } else {
+                    "9.9.9.2"
+                };
+                Ok(vec![
+                    SocketAddr::new(first.parse()?, port),
+                    SocketAddr::new("8.8.8.8".parse()?, port),
+                ])
+            }
+        }
+        #[derive(Default)]
+        struct Slow {
+            now: AtomicUsize,
+            most: AtomicUsize,
+        }
+        #[async_trait]
+        impl Transport for Slow {
+            async fn get(&self, url: &Url, addresses: &[SocketAddr]) -> Result<Fetched> {
+                assert_eq!(addresses.len(), 2, "both addresses go to the transport");
+                let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                self.now.fetch_sub(1, Ordering::SeqCst);
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "text/plain".into(),
+                    b"ok".to_vec(),
+                ))
+            }
+        }
+        let transport = Arc::new(Slow::default());
+        let egress = Egress::with_backends(
+            EgressConfig {
+                host_requests_per_second: 1000.0,
+                ..Default::default()
+            },
+            Arc::new(Two),
+            transport.clone(),
+        );
+        let (one, two) = tokio::join!(
+            egress.fetch("https://a.example.org/"),
+            egress.fetch("https://b.example.org/")
+        );
+        one.unwrap();
+        two.unwrap();
+        assert_eq!(transport.most.load(Ordering::SeqCst), 1);
+    }
+
+    /// A relay connection holds the slot of every address of its answer while it is open: a
+    /// fetch to another name that shares one of them waits for it, and so does a relay request
+    /// (`nostr_request_inner`, which takes its permits before an injected transport stops it).
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_connection_holds_each_address_slot() {
+        struct Shared;
+        #[async_trait]
+        impl Dns for Shared {
+            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                Ok(vec![
+                    SocketAddr::new("9.9.9.2".parse()?, port),
+                    SocketAddr::new("8.8.8.8".parse()?, port),
+                ])
+            }
+        }
+        struct Ok200;
+        #[async_trait]
+        impl Transport for Ok200 {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                Ok(Fetched::answer(
+                    url.clone(),
+                    200,
+                    "text/plain".into(),
+                    b"ok".to_vec(),
+                ))
+            }
+        }
+        let egress = Egress::with_backends(
+            EgressConfig {
+                host_requests_per_second: 1000.0,
+                ..Default::default()
+            },
+            Arc::new(Shared),
+            Arc::new(Ok200),
+        );
+        // The relay's answer: its own first address, the fetch's second.
+        let relay = [
+            SocketAddr::new("9.9.9.1".parse().unwrap(), 443),
+            SocketAddr::new("8.8.8.8".parse().unwrap(), 443),
+        ];
+        let permits = egress
+            .relay_permits("relay.example.org", &relay)
+            .await
+            .unwrap();
+        let error = egress.fetch("https://b.example.org/").await.unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .is_some_and(|r| r.class == "rate_limited"),
+            "{error:#}"
+        );
+        // A relay request whose answer shares the held address waits for it too.
+        let relay_error = |error: anyhow::Error| {
+            error
+                .downcast_ref::<crate::resolver::RetryLater>()
+                .map(|r| r.class)
+        };
+        let waited = egress
+            .nostr_request_inner("wss://other.example.org/", serde_json::json!({}), 60_000)
+            .await
+            .unwrap_err();
+        assert_eq!(relay_error(waited), Some("rate_limited"));
+        drop(permits);
+        egress.fetch("https://b.example.org/").await.unwrap();
+        let stopped = egress
+            .nostr_request_inner("wss://other.example.org/", serde_json::json!({}), 60_000)
+            .await
+            .unwrap_err();
+        assert!(
+            stopped.to_string().contains("relay network disabled"),
+            "{stopped:#}"
+        );
     }
 
     /// A same-host redirect whose new DNS answer is another address takes that address's slot:
