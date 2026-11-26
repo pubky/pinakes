@@ -128,10 +128,9 @@ async fn page_links(
             cx.egress.config().discovery_secs,
         )
         .await?;
-    match fetched.status {
-        200 => {}
-        429 | 500..=599 => return Err(super::media::busy("spotify_busy", &fetched)),
-        _ => return Ok(None),
+    crate::resolver::busy(&fetched, "spotify_busy")?;
+    if fetched.status != 200 {
+        return Ok(None);
     }
     let body = String::from_utf8_lossy(&fetched.body).into_owned();
     Ok(Some(

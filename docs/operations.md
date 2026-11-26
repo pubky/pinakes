@@ -656,6 +656,19 @@ Discogs, GitHub). The page fetch of web resolution and most official-API reads d
 | TIDAL's and Spotify's 401 and 403; GitHub's and TMDB's 401 | Never, so a new token asks again |
 | A wait for Pinakes's own host budget | Never |
 
+### Busy services
+
+A service that answers 408, 429 or 5xx is busy for now. The readers of a service (official sources, event
+platforms, also-on sources, lookups, the hubs) and the egress's own 429 turn such an answer into a wait of
+the same length:
+
+| Answer | Wait |
+| --- | --- |
+| Names a wait (`Retry-After`, or a spent quota's reset) | That wait, at least a minute and at most an hour |
+| A 429 that names no wait | Five minutes |
+| A 408 or 5xx that names no wait | A minute |
+| The egress's own 429 read again from the discovery cache | What is left of its time there, at most 300 seconds |
+
 ### User-Agent and contact
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with

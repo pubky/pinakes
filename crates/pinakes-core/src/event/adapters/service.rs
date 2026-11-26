@@ -30,18 +30,12 @@ fn parse_error(e: impl std::fmt::Display) -> anyhow::Error {
     ParseFailure(e.to_string()).into()
 }
 pub(super) fn upstream_status(f: &Fetched) -> Result<()> {
-    if f.status >= 500 || matches!(f.status, 408 | 429) {
-        return Err(anyhow::Error::new(crate::resolver::RetryLater {
-            class: if f.status >= 500 {
-                "http_5xx"
-            } else {
-                "http_4xx"
-            },
-            seconds: f.retry_after_secs.max(60),
-        })
-        .context(crate::resolver::Upstream(f.status)));
-    }
-    Ok(())
+    let class = if f.status >= 500 {
+        "http_5xx"
+    } else {
+        "http_4xx"
+    };
+    crate::resolver::busy(f, class).context(crate::resolver::Upstream(f.status))
 }
 
 pub(crate) fn enrichment_status(f: &Fetched) -> Result<()> {

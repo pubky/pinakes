@@ -502,6 +502,7 @@ impl Books {
                 cx.egress.config().discovery_secs,
             )
             .await?;
+        crate::resolver::busy(&f, "upstream")?;
         let Some(edition) = parse_edition(f.status, &f.body, book)? else {
             return Ok(Found::default());
         };
@@ -529,6 +530,7 @@ impl Books {
                         cx.egress.config().discovery_secs,
                     )
                     .await?;
+                crate::resolver::busy(&f, "upstream")?;
                 parse_itunes(f.status, &f.body, storefront)
             };
             let apple = deferred.take("itunes", apple.await);
@@ -613,6 +615,7 @@ impl Books {
                     cx.egress.config().discovery_secs,
                 )
                 .await?;
+            crate::resolver::busy(&f, "upstream")?;
             match parse_work(f.status, &f.body, &id)? {
                 WorkRecord::Work => {
                     let mut found = Found::default();

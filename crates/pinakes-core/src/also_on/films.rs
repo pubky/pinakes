@@ -303,6 +303,7 @@ impl Films {
             .egress
             .discover(url, &options, cx.egress.config().discovery_secs)
             .await?;
+        crate::resolver::busy(&f, "upstream")?;
         parse_tvmaze(f.status, &f.body)
     }
     /// Letterboxd's film for the title; a refusal (e.g. a challenge page) is no answer, a rate
@@ -317,12 +318,10 @@ impl Films {
             )
             .await
         {
-            Ok(f) if f.status >= 500 => Err(crate::resolver::RetryLater {
-                class: "upstream",
-                seconds: 60,
+            Ok(f) => {
+                crate::resolver::busy(&f, "upstream")?;
+                Ok(parse_letterboxd(f.status, &f.url))
             }
-            .into()),
-            Ok(f) => Ok(parse_letterboxd(f.status, &f.url)),
             Err(e) if e.is::<crate::resolver::RetryLater>() => Err(e),
             Err(e) => {
                 tracing::debug!(

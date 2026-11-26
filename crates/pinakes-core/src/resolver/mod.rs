@@ -225,6 +225,32 @@ impl std::fmt::Display for RetryLater {
     }
 }
 impl std::error::Error for RetryLater {}
+/// The least and the most a busy service is waited for, in seconds: the wait it asks for
+/// (`Retry-After`, or a spent quota's reset; read up to an hour), at least a minute.
+pub const BUSY_WAIT: std::ops::RangeInclusive<u64> = 60..=3600;
+/// `seconds`, the wait a service asked for, held to [`BUSY_WAIT`].
+pub fn busy_wait(seconds: u64) -> u64 {
+    seconds.clamp(*BUSY_WAIT.start(), *BUSY_WAIT.end())
+}
+/// Whether `status` says a service is busy for now: a request timeout or a rate limit (408,
+/// 429), or a server error (5xx).
+pub fn busy_status(status: u16) -> bool {
+    matches!(status, 408 | 429) || status >= 500
+}
+/// A busy service's answer ([`busy_status`]) as `RetryLater` under `class`, after the wait it
+/// asked for ([`busy_wait`]); `Ok` for any other answer. The one reading of "busy, retry later"
+/// for every reader of a service's answer: official sources (`sources::retry`), also-on sources
+/// and lookups. The egress's own 429 (without `FetchOptions::error_json`) waits the same.
+pub fn busy(fetched: &egress::Fetched, class: &'static str) -> anyhow::Result<()> {
+    if !busy_status(fetched.status) {
+        return Ok(());
+    }
+    Err(RetryLater {
+        class,
+        seconds: busy_wait(fetched.retry_after_secs),
+    }
+    .into())
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ErrorClass(pub &'static str);
@@ -432,6 +458,35 @@ pub fn unreached(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A busy answer (408, 429, 5xx) is a wait under the caller's class, for what the service
+    /// asked held to a minute to an hour; any other answer is the caller's.
+    #[test]
+    fn a_busy_answer_waits_what_it_asks_within_a_minute_and_an_hour() {
+        let url = url::Url::parse("https://api.example.org/").unwrap();
+        let answer = |status: u16, retry_after_secs: u64| egress::Fetched {
+            retry_after_secs,
+            ..egress::Fetched::answer(url.clone(), status, "application/json".into(), vec![])
+        };
+        for (status, asked, wait) in [
+            (429, 5, 60),
+            (429, 900, 900),
+            (503, 120, 120),
+            (500, 7200, 3600),
+            (408, 60, 60),
+        ] {
+            let error = busy(&answer(status, asked), "x_busy").unwrap_err();
+            let retry = error.downcast_ref::<RetryLater>().unwrap();
+            assert_eq!(
+                (retry.class, retry.seconds),
+                ("x_busy", wait),
+                "{status} {asked}"
+            );
+        }
+        for status in [200, 301, 400, 403, 404, 410] {
+            assert!(busy(&answer(status, 900), "x_busy").is_ok(), "{status}");
+            assert!(!busy_status(status));
+        }
+    }
     /// A logged error never carries what a URL's query, fragment or user info holds, whatever
     /// punctuation follows the URL and whatever the scheme's letter case.
     #[test]

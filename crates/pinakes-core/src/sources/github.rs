@@ -128,7 +128,7 @@ pub async fn read(
     let wait = |class: &'static str| -> Result<Answer> {
         Err(crate::resolver::RetryLater {
             class,
-            seconds: f.retry_after_secs.clamp(60, 3600),
+            seconds: crate::resolver::busy_wait(f.retry_after_secs),
         }
         .into())
     };

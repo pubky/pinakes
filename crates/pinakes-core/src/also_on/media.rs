@@ -84,32 +84,15 @@ pub(crate) fn uuid(v: &str) -> bool {
     crate::hubs::mbid(v).is_some_and(|m| m == v)
 }
 
-/// A service's JSON answer: `None` for "no such thing" (one of `missing`), a retry for 429 and
-/// 5xx (a minute later), an error for anything else.
+/// A service's JSON answer: `None` for "no such thing" (one of `missing`), an error for anything
+/// else. A busy answer (408, 429, 5xx) never gets here: the request's reader made it a wait
+/// first ([`crate::resolver::busy`]), with the wait the service asked for.
 pub(crate) fn json(status: u16, raw: &[u8], missing: &[u16]) -> Result<Option<Value>> {
     match status {
         200 => Ok(Some(serde_json::from_slice(raw)?)),
         s if missing.contains(&s) => Ok(None),
-        429 | 500..=599 => Err(RetryLater {
-            class: "upstream",
-            seconds: 60,
-        }
-        .into()),
         s => bail!("unexpected status {s}"),
     }
-}
-
-/// A service's 429 or 5xx as a wait: a retry under `class` after the time the answer asked for,
-/// held to a minute to an hour.
-pub(crate) fn busy(
-    class: &'static str,
-    fetched: &crate::resolver::egress::Fetched,
-) -> anyhow::Error {
-    RetryLater {
-        class,
-        seconds: fetched.retry_after_secs.clamp(60, 3600),
-    }
-    .into()
 }
 
 /// When a run comes back after a request of its failed: the wait a `RetryLater` in the error's

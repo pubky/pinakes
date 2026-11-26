@@ -224,9 +224,9 @@ async fn watch(cx: &Context, id: &str) -> Result<Watch> {
         Err(error) if crate::resolver::egress::over_cap(&error) => return Ok(Watch::Nothing),
         Err(error) => return Err(error),
     };
+    crate::resolver::busy(&fetched, "youtube_busy")?;
     match fetched.status {
         200 => {}
-        429 | 500..=599 => return Err(super::media::busy("youtube_busy", &fetched)),
         // YouTube's answer to a host it blocks: no answer either.
         403 => return Ok(Watch::LoginRequired),
         _ => return Ok(Watch::Nothing),

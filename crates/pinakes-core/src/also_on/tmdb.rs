@@ -330,6 +330,7 @@ impl Tmdb {
                 cx.egress.config().discovery_secs,
             )
             .await?;
+        crate::resolver::busy(&fetched, "upstream")?;
         match fetched.status {
             401 => {
                 crate::telemetry::also_on_service_error("tmdb", "refused");

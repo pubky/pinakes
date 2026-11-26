@@ -904,7 +904,7 @@ pub async fn confirming<F: std::future::Future>(work: F) -> F::Output {
 /// `RetryLater` with its `Retry-After`), or a client error the caller names in
 /// [`FetchOptions::waits`].
 pub fn names_a_wait(status: u16, waits: &[u16]) -> bool {
-    matches!(status, 408 | 429) || status >= 500 || waits.contains(&status)
+    super::busy_status(status) || waits.contains(&status)
 }
 #[derive(Clone)]
 pub struct Egress {
@@ -1549,7 +1549,7 @@ impl Egress {
             if response.status == 429 && !options.error_json {
                 return Err(super::RetryLater {
                     class: "http_4xx",
-                    seconds: response.retry_after_secs,
+                    seconds: super::busy_wait(response.retry_after_secs),
                 }
                 .into());
             }
@@ -4316,6 +4316,45 @@ mod tests {
         let refused = PinnedTransport.get(&url, &[addr]).await.unwrap_err();
         assert!(refused.to_string().contains("not allowed"), "{refused:#}");
         task.await.unwrap();
+    }
+    /// The egress's own 429 (a reader that did not ask for the error's body) waits as every busy
+    /// answer does (`resolver::busy_wait`): what the service asked, a minute at least.
+    #[tokio::test]
+    async fn a_429_waits_what_it_asks_a_minute_at_least() {
+        struct One;
+        #[async_trait]
+        impl Dns for One {
+            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+            }
+        }
+        struct Limited;
+        #[async_trait]
+        impl Transport for Limited {
+            async fn get(&self, url: &Url, _: &[SocketAddr]) -> Result<Fetched> {
+                let retry_after_secs = url.path()[1..].parse().unwrap();
+                Ok(Fetched {
+                    retry_after_secs,
+                    ..Fetched::answer(url.clone(), 429, "text/plain".into(), vec![])
+                })
+            }
+        }
+        let egress = Egress::with_backends(
+            EgressConfig {
+                host_requests_per_second: 1000.0,
+                ..Default::default()
+            },
+            Arc::new(One),
+            Arc::new(Limited),
+        );
+        for (asked, wait) in [(5, 60), (900, 900)] {
+            let error = egress
+                .fetch(&format!("https://a.example.org/{asked}"))
+                .await
+                .unwrap_err();
+            let retry = error.downcast_ref::<crate::resolver::RetryLater>().unwrap();
+            assert_eq!((retry.class, retry.seconds), ("http_4xx", wait));
+        }
     }
     #[tokio::test]
     async fn a_429_without_retry_after_waits_five_minutes() {

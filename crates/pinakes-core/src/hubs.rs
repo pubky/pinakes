@@ -106,7 +106,7 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
             } else {
                 "wikidata_busy"
             },
-            seconds: fetched.retry_after_secs.clamp(60, 3600),
+            seconds: crate::resolver::busy_wait(fetched.retry_after_secs),
         }
         .into()
     };
@@ -120,7 +120,7 @@ fn json(fetched: &Fetched, hub: &'static str) -> Result<Option<Value>> {
         }
         404 => Ok(None),
         410 => Err(Gone { hub }.into()),
-        500..=599 => Err(busy()),
+        status if crate::resolver::busy_status(status) => Err(busy()),
         status => bail!("{hub} answered {status}"),
     }
 }
@@ -1008,16 +1008,10 @@ pub mod cover_art {
     /// redirect to another address, another status) proves nothing and is an error, so the
     /// caller keeps what it had.
     pub fn read_front(kind: MbKind, mbid: &str, fetched: &Fetched) -> Result<Option<Front>> {
+        crate::resolver::busy(fetched, "cover_art_busy")?;
         match fetched.status {
             301 | 302 | 303 | 307 | 308 => {}
             404 | 410 => return Ok(None),
-            429 | 500..=599 => {
-                return Err(RetryLater {
-                    class: "cover_art_busy",
-                    seconds: fetched.retry_after_secs.clamp(60, 3600),
-                }
-                .into())
-            }
             status => bail!("the Cover Art Archive answered {status}"),
         }
         let Some(release) = fetched.location.as_deref().and_then(redirect_release) else {
