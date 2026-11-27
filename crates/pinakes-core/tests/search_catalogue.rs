@@ -1700,8 +1700,9 @@ async fn no_statement_waits(pool: &PgPool) -> bool {
 /// walk of a catalogue's cards in fame order or of every point in the box: `exclude_type` that
 /// covers every type a catalogue's cards have reads none of its cards, other excluded types read
 /// the types let in each in its index's order, a rare label is read through the labels index
-/// (in a box too), and a type in a box wider than `NEAREST_FILTERED_DEGREES` is read in the
-/// type's index order, kept in the box.
+/// (in a box too), a rare type in a place dense with other cards is read in the type's index
+/// order kept in the place (beside the nearest, which look at a bounded number of cards), and a
+/// host with a type is read by the type.
 #[sqlx::test(migrations = "../../migrations")]
 async fn card_reads_without_text_stay_bounded_for_excluded_types_labels_and_wide_boxes(
     pool: PgPool,
@@ -1749,6 +1750,22 @@ async fn card_reads_without_text_stay_bounded_for_excluded_types_labels_and_wide
             "/v1/search?bbox=-20.0,30.0,20.0,60.0&type=Mountain&limit=20",
             20,
         ),
+        (
+            "/v1/search?bbox=6.9,45.9,7.5,46.5&type=Mountain&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?near=46.0,7.0&radius=100000&type=Mountain&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?host=en.wikipedia.org&type=Mountain&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?host=en.wikipedia.org&exclude_type=Person&limit=20",
+            20,
+        ),
     ] {
         api::record_card_read_plans();
         let page = names(&common::get(&app, path).await);
@@ -1758,8 +1775,50 @@ async fn card_reads_without_text_stay_bounded_for_excluded_types_labels_and_wide
             page.iter().all(|n| n.starts_with("Peak")),
             "{path}: {page:?}"
         );
-        assert!(read <= 200, "{path}: {read} card rows read");
+        // CARD_SCAN (20) times the 20 candidates at most for a filtered nearest read, and a
+        // few probes: never the 3,020 cards.
+        assert!(read <= 600, "{path}: {read} card rows read");
     }
+}
+
+/// More types let in than one read has branches (64) are read in several reads, merged by fame:
+/// the best known of the types past the first 64 are listed too, not left to a read of the
+/// catalogue in fame order that the excluded, better known cards fill.
+#[sqlx::test(migrations = "../../migrations")]
+async fn more_types_than_branches_are_read_in_several_reads(pool: PgPool) {
+    let mut types: Vec<String> = pinakes_core::model::subtypes(&["Thing".to_string()])
+        .into_iter()
+        .filter(|t| t != "Person" && t != "Thing")
+        .collect();
+    types.sort();
+    types.truncate(80);
+    // 2,000 well known people, then one card of each of 80 types, better known the later its
+    // type sorts: the best known 20 are of types past the first 64.
+    let mut cards: Vec<Card> = (0..2000)
+        .map(|n| card(n + 1, &format!("Person {n}"), "Person", &[], None, 0.9))
+        .collect();
+    cards.extend(types.iter().enumerate().map(|(i, t)| {
+        card(
+            5000 + i,
+            &format!("Kind {i:02}"),
+            t,
+            &[],
+            None,
+            0.1 + i as f32 / 1000.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    let mut page = names(&common::get(&app, "/v1/search?exclude_type=Person&limit=20").await);
+    page.sort();
+    let best: Vec<String> = (60..80).map(|i| format!("Kind {i:02}")).collect();
+    assert_eq!(page, best);
 }
 
 /// A search without text that may list catalogue cards takes a turn of the text searches (their

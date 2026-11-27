@@ -1261,16 +1261,18 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   every filter; when they are fewer, with `tags` also the best known of the cards holding the
   labels (read through the labels index, so a rare label is a short read), else the best known
   of the twice `limits.search_text_candidates` cards nearest to the circle's centre (or to each
-  box's centre) inside it, so a large area reads a bounded number of cards. With `type`, `host` or
-  `exclude_type` and a box more than 10 degrees wide or tall, the best known of each type (or
-  host) let in are read instead of the nearest, kept when inside the box. With `type` or
-  `exclude_type`, a catalogue none of whose cards' types the filter lets in is not read at all
-  (`exclude_type=Thing` lists no card), and the others are read by the types let in. With
-  `host`, each catalogue's best known of each host; with `type` or `exclude_type`, each
-  catalogue's best known of each type let in; both merged. A catalogue switched off but not
-  dropped costs these reads nothing. These reads take a turn of the text searches and stop with
-  its budget, as a text search does ([Text search](#text-search)): with no turn in time or past
-  the budget the search answers `503` with `Retry-After: 1`;
+  box's centre) inside it, and with `type`, `host` or `exclude_type` also the best known of each
+  type (or host) let in that are inside it. With `type` or `exclude_type`, a catalogue none of
+  whose cards' types the filter lets in is not read at all (`exclude_type=Thing` lists no card),
+  and the others are read by the types let in. With `type` or `exclude_type`, each catalogue's
+  best known of each type let in (a host is checked on them); with `host` alone, each
+  catalogue's best known of each host. A read whose index does not serve every filter looks at
+  no more than 20 times `limits.search_text_candidates` cards in all (at least twice it per
+  type, host or catalogue), the best known first, or the nearest first near a place: a card past
+  them is not listed. So a large area or a large catalogue reads a bounded number of cards. A
+  catalogue switched off but not dropped costs these reads nothing. These reads take a turn of
+  the text searches and stop with its budget, as a text search does ([Text search](#text-search)):
+  with no turn in time or past the budget the search answers `503` with `Retry-After: 1`;
 - a catalogue switched off leaves every search at once.
 
 ### Search by key
