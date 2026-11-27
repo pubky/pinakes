@@ -356,6 +356,33 @@ async fn download(
     Ok(true)
 }
 
+/// A local file's version as a refusal names it: its path, size and modification time.
+fn local_version(file: &Path) -> Option<Value> {
+    let meta = std::fs::metadata(file).ok()?;
+    let modified = meta
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from)
+        .map_or(0, |t| t.timestamp());
+    Some(json!(format!(
+        "{}:{}:{modified}",
+        file.display(),
+        meta.len()
+    )))
+}
+/// A bulk file's version as its `HEAD` answer names it (a strong ETag, else Last-Modified), or
+/// none when the answer names none (or does not come): the file is then read as any.
+async fn remote_version(client: &reqwest::Client, url: &str) -> Option<Value> {
+    let input = super::fetch::Input::Url(url::Url::parse(url).ok()?);
+    let (version, _) = input.version(client).await.ok()?;
+    Some(json!(version))
+}
+/// A version as a message names it.
+fn shown(version: &Value) -> String {
+    version
+        .as_str()
+        .map_or_else(|| version.to_string(), str::to_owned)
+}
 /// What one pass sends to be written: cards, removals, and the cursor saved with them.
 struct Batch {
     cards: Vec<Card>,
@@ -792,33 +819,13 @@ pub async fn touch_shared(pool: &PgPool, source_ids: &[String]) -> Result<()> {
 
 impl OsmImporter {
     /// The end of a full import whose file was read whole (`cursor` at stage `done`, holding
-    /// what it needs): refuse a file that held no place, keep where the updates start, remove the
-    /// cards the file no longer holds and mark their shared links due, and remove the temporary
-    /// files.
+    /// what it needs): keep where the updates start, remove the temporary files, and after the
+    /// runner's checks ([`Job::check_shrink`]: a file that held no place is refused as `empty`,
+    /// and not downloaded again) remove the cards the file no longer holds and mark their shared
+    /// links due.
     async fn finish(&self, job: &mut Job<'_>, cursor: &Value) -> Result<()> {
         let pool = job.pool();
         let generation = job.generation();
-        // A file that holds no place is no import: removing every card for it would empty the
-        // catalogue. Counted over the whole run (its earlier attempts too).
-        let read: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM catalogue_card WHERE catalogue='osm' AND seen_generation=$1)",
-        )
-        .bind(generation)
-        .fetch_one(pool)
-        .await?;
-        if !read {
-            // Not this file again: the next attempt starts over, on a new download or another
-            // `--from` file.
-            job.new_generation().await?;
-            if cursor["downloaded"] == true {
-                if let Some(file) = cursor["file"].as_str() {
-                    let _ = tokio::fs::remove_file(Path::new(file).with_extension("done")).await;
-                }
-            }
-            return Err(Failure::new("empty_file")
-                .at(cursor["file"].as_str().unwrap_or_default().to_owned())
-                .into());
-        }
         let region = job.config().catalogues.osm.region.clone();
         let base = self.sources(&region).1;
         let header = &cursor["header"];
@@ -857,8 +864,9 @@ impl OsmImporter {
                 let _ = tokio::fs::remove_file(Path::new(file).with_extension("done")).await;
             }
         }
-        // Removing more than the shrink floor allows (a cut-off file, another region) waits for
-        // the operator's allowance, as any catalogue's full import does: nothing is removed.
+        // A file that held no place is refused; removing more than the shrink floor allows (a
+        // cut-off file, another region) waits for the operator's allowance, as any catalogue's
+        // full import does: nothing is removed.
         job.check_shrink().await?;
         let mut after = String::new();
         loop {
@@ -939,6 +947,13 @@ impl OsmImporter {
 impl Importer for OsmImporter {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Osm
+    }
+    /// The file `--from` names.
+    fn source(&self) -> Option<String> {
+        match &self.input {
+            Input::Files(files) => files.first().map(|f| f.display().to_string()),
+            Input::Region => None,
+        }
     }
     fn disk_need(&self, run: Run, state: &State) -> u64 {
         match run {
@@ -1025,7 +1040,22 @@ impl Importer for OsmImporter {
         // The file was read whole and its last part written (a run cut off after it, in the
         // runner's sweep or before): only the end is left, without the file.
         if cursor["stage"] == "done" {
+            if let Some(version) = cursor.get("version").filter(|v| !v.is_null()) {
+                job.reading(version.clone());
+            }
             return self.finish(job, &cursor).await;
+        }
+        // The file's version, before it is downloaded: one refused before (it held no place) is
+        // not downloaded again until the file changes; a full import asked for reads it.
+        let newest = match &given {
+            Some(file) => local_version(file),
+            None if job.config().egress.contact.trim().is_empty() => None,
+            None => remote_version(&http(job.config())?, &url).await,
+        };
+        if let Some(version) = &newest {
+            if job.refused_before(version) {
+                return Err(job.still_refused(format!("the file {}", shown(version))));
+            }
         }
         let (file, downloaded, url) = match given {
             Some(file) => (file, false, None),
@@ -1102,6 +1132,15 @@ impl Importer for OsmImporter {
         }
         let size = std::fs::metadata(&file)?.len();
         let fresh = cursor["stage"].as_str().is_none();
+        // The version of the file read: a run taken up on its file keeps the one it began with.
+        let version = if fresh {
+            newest
+        } else {
+            cursor.get("version").filter(|v| !v.is_null()).cloned()
+        };
+        if let Some(version) = &version {
+            job.reading(version.clone());
+        }
         // The planet's index is dense (8 bytes per node ID); a region's is sparse (16 bytes per node).
         let layout = match cursor["layout"].as_str() {
             Some("dense") => nodes::Layout::Dense,
@@ -1124,6 +1163,7 @@ impl Importer for OsmImporter {
         }
         // What the end needs, kept in every cursor of the run (so a run at `done` needs no file).
         let fixed = json!({
+            "version": version,
             "file": file.display().to_string(),
             "downloaded": downloaded,
             "url": url,
@@ -1370,7 +1410,7 @@ pub struct Changes {
 }
 /// Read one change file, holding at most `cap` bytes of its changes in memory (every object's
 /// version, the changed nodes' locations and the kept changes; [`MAX_CHANGES_HELD`]): past it
-/// the file is `too_large`.
+/// the file is `size`.
 async fn read_changes(
     input: impl std::io::Read + Send + 'static,
     at: &str,
@@ -1422,7 +1462,7 @@ async fn read_changes(
                 kept.insert(key, c);
             }
             // What one file's changes may hold in memory, whatever it states.
-            anyhow::ensure!(held <= cap, Failure::new("too_large").at(at.clone()));
+            anyhow::ensure!(held <= cap, Failure::new("size").at(at.clone()));
             Ok(())
         })
         // A failure of its own (a cap) keeps its class; anything else is the file's `parse`.

@@ -319,7 +319,7 @@ impl OpenAlex {
         let cursor = |done: &BTreeSet<usize>| json!({"snapshot": snapshot, "done": done});
         // An update's removals wait for its end, so it can be refused before removing anything
         // when they are more than a tenth of the cards (a work written again later leaves them).
-        let limit = diff::REMOVAL_FLOOR.max(job.state().cards.max(0) as u64 / diff::REMOVAL_SHARE);
+        let held = job.state().cards.max(0) as u64;
         let mut pending: HashSet<u64> = HashSet::new();
         let mut ended = 0;
         let result: Result<Option<Vec<String>>> = async {
@@ -374,15 +374,15 @@ impl OpenAlex {
             if ended != todo.len() {
                 anyhow::bail!(Failure::new("download"));
             }
-            if pending.len() as u64 > limit {
+            if diff::too_many(pending.len() as u64, held) {
                 tracing::warn!(
                     catalogue = "openalex",
                     gone = pending.len(),
-                    limit,
+                    held,
                     "catalogue update refused: it would remove more than a tenth of the cards"
                 );
-                job.set_position(diff::refusing(job.position(), json!(snapshot)));
-                return Err(diff::refusal());
+                let note = format!("snapshot {snapshot}: {} cards gone, over a tenth", pending.len());
+                return Err(job.refuse(json!(snapshot), "refused", note));
             }
             if !pending.is_empty() {
                 let ids: Vec<String> = pending.drain().map(|n| format!("W{n}")).collect();
@@ -1077,6 +1077,9 @@ impl Importer for OpenAlex {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Openalex
     }
+    fn source(&self) -> Option<String> {
+        diff::source_of(&self.base, BUCKET)
+    }
     /// Nothing is downloaded to disk; a full import's cards take about 26 GB of the database,
     /// which on one disk with `catalogues.dir` is what it needs free. An update: a few GB. A local
     /// snapshot (`--from DIR`, a sample): 1 GB.
@@ -1089,9 +1092,11 @@ impl Importer for OpenAlex {
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         let manifest = self.manifest().await?;
-        // A manifest with no works file would have the import remove every card.
-        if manifest.works.is_empty() {
-            anyhow::bail!(Failure::new("manifest").at(self.at(MANIFEST)?.at()));
+        // A snapshot that holds no work (a manifest with no works file) reads no record: the
+        // runner refuses it (`empty`), and it is not read again.
+        job.reading(json!(manifest.date));
+        if job.refused_before(&json!(manifest.date)) {
+            return Err(job.still_refused(format!("snapshot {}", manifest.date)));
         }
         let all: Vec<usize> = (0..manifest.works.len()).collect();
         let done = cursor_done(job, &manifest.date);
@@ -1121,9 +1126,8 @@ impl Importer for OpenAlex {
         if last.get("snapshot").and_then(Value::as_str) == Some(manifest.date.as_str()) {
             return Ok(UpdateEnd::Done);
         }
-        if diff::refused(job, &manifest.date) {
-            tracing::info!(catalogue = "openalex", "this snapshot's update was refused before: it waits for the next one, or a full import (--request)");
-            return Ok(UpdateEnd::Done);
+        if job.refused_before(&json!(manifest.date)) {
+            return Err(job.still_refused(format!("snapshot {}", manifest.date)));
         }
         if job
             .state()

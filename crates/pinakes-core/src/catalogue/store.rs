@@ -414,6 +414,32 @@ pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<Allowan
         None => Allowance::NoState,
     })
 }
+/// Clear the refusal `catalogue`'s position holds (`run::REFUSED`, `pinakesd catalogue
+/// clear-refusal`): its importer reads the refused version again at its next run, an update as
+/// any. Needs no lock (a run under way that refuses again sets it again). What was refused, if
+/// anything.
+pub async fn clear_refusal(
+    pool: &PgPool,
+    catalogue: Catalogue,
+) -> Result<Option<serde_json::Value>> {
+    let mut tx = pool.begin().await?;
+    let refused: Option<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT position->'refused' FROM catalogue_state WHERE catalogue=$1 FOR UPDATE",
+    )
+    .bind(catalogue.name())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let refused = refused.flatten().filter(|v| !v.is_null());
+    if refused.is_some() {
+        sqlx::query("UPDATE catalogue_state SET position=position-$2::text[],updated_at=now() WHERE catalogue=$1")
+            .bind(catalogue.name())
+            .bind(&super::run::REFUSAL_KEYS[..])
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(refused)
+}
 /// What [`allow_shrink`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Allowance {
@@ -582,23 +608,27 @@ async fn sweep(
     }
 }
 
-/// The table's `waiting` cell: a full import an update asked for, with its reason, a dump its
-/// importer refused (`refused` in its position), and why the importer waits.
+/// The table's `waiting` cell: a full import an update asked for, with its reason, what its
+/// importer refused (`refused` in its position: a version, or each registry's), and why the
+/// importer waits.
 fn waiting_cell(state: Option<&State>) -> String {
     let position = state.and_then(|s| s.position.as_ref());
-    let refused = position
-        .and_then(|p| p.get("refused"))
-        .and_then(|v| v.as_str())
-        .map(|v| format!("dump {v} refused"))
-        // A file catalogue's refused file: its version, or each registry's.
-        .or_else(|| match super::diff::refused_in(position)? {
-            serde_json::Value::String(v) => Some(format!("file {v} refused")),
-            serde_json::Value::Object(m) => Some(format!(
-                "{} file refused",
-                m.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
-            )),
-            _ => None,
-        })
+    let refused = match position.and_then(|p| p.get(super::run::REFUSED)) {
+        Some(serde_json::Value::String(v)) => Some(format!("refused: {v}")),
+        Some(serde_json::Value::Object(m)) => Some(format!(
+            "refused: {}",
+            m.iter()
+                .map(|(k, v)| match v {
+                    serde_json::Value::String(v) => format!("{k} {v}"),
+                    v => format!("{k} {v}"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Some(serde_json::Value::Null) | None => None,
+        Some(other) => Some(format!("refused: {other}")),
+    };
+    let refused = refused
         // Tranco's homepage reads that wait for a large catalogue's full import (its last run).
         .or_else(|| {
             let p = position?;
@@ -825,7 +855,7 @@ mod tests {
             current_as_of: None,
             import_requested: None,
             waiting: Some("free disk 1.0 GB".into()),
-            last_error: Some("removals (8 of 17 cards gone)".into()),
+            last_error: Some("refused (8 of 17 cards gone)".into()),
             error_count: 1,
             updated_at: Utc::now(),
             scope: None,
@@ -840,18 +870,26 @@ mod tests {
                 .to_owned()
         };
         assert!(
-            row(&refused).contains("dump 20261125-001001 refused; free disk 1.0 GB"),
+            row(&refused).contains("refused: 20261125-001001; free disk 1.0 GB"),
             "{}",
             row(&refused)
         );
         refused.waiting = None;
         assert!(
-            row(&refused).contains("dump 20261125-001001 refused  removals"),
+            row(&refused).contains("refused: 20261125-001001  refused"),
+            "{}",
+            row(&refused)
+        );
+        // The software catalogue's: each registry's file.
+        refused.position =
+            Some(serde_json::json!({"refused": {"crates.io": "c2", "flathub": "f9"}}));
+        assert!(
+            row(&refused).contains("refused: crates.io c2, flathub f9"),
             "{}",
             row(&refused)
         );
         refused.position = Some(serde_json::json!({"version": "20261121-001001"}));
-        assert!(!row(&refused).contains("refused "), "{}", row(&refused));
+        assert!(!row(&refused).contains("refused:"), "{}", row(&refused));
     }
 
     /// The table's own checks refuse a row `Card::checked` let through (here a link over the

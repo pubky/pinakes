@@ -400,13 +400,13 @@ async fn a_real_extract_part_imports(pool: PgPool) {
     .await
     .unwrap();
     assert!(!read.changed.is_empty() && read.latest.is_some());
-    // Held to a cap below what the file takes in memory: `too_large`.
+    // Held to a cap below what the file takes in memory: `size`.
     let failed = read_changes(std::fs::File::open(&changes).unwrap(), "fixture", 4096)
         .await
         .map(|_| ())
         .unwrap_err();
     assert!(
-        crate::catalogue::failure::shown(&failed).starts_with("too_large"),
+        crate::catalogue::failure::shown(&failed).starts_with("size"),
         "{failed:#}"
     );
     std::fs::remove_dir_all(dir).unwrap();
@@ -701,7 +701,8 @@ async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
 }
 
 /// A local mirror: each path's status, extra headers and body (`Content-Length` from the body
-/// unless given). Counts the requests by path.
+/// unless given). Counts the requests by path, but the `HEAD`s an import asks a file's version
+/// with.
 type Route = (&'static str, u16, Vec<(&'static str, String)>, Vec<u8>);
 async fn mirror(
     routes: Vec<Route>,
@@ -726,7 +727,9 @@ async fn mirror(
                 let n = socket.read(&mut buf).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..n]).to_string();
                 let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                *counted.lock().unwrap().entry(path.clone()).or_default() += 1;
+                if !request.starts_with("HEAD ") {
+                    *counted.lock().unwrap().entry(path.clone()).or_default() += 1;
+                }
                 let route = routes.iter().find(|r| r.0 == path);
                 let (status, headers, body) = match route {
                     Some((_, status, headers, body)) => (*status, headers.clone(), body.clone()),
@@ -1493,8 +1496,8 @@ async fn a_reimport_far_smaller_waits_for_the_allowance(pool: PgPool) {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A file that holds no place fails `empty_file` and is not read again: the next attempt starts
-/// over, on another file.
+/// A file that holds no place is refused (`empty`) and is not read again (asked again, the same
+/// file ends the run at once); the next attempt on another file starts over.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_empty_file_does_not_hold_up_the_next_one(pool: PgPool) {
     let dir = tempfile_dir();
@@ -1512,15 +1515,25 @@ async fn an_empty_file_does_not_hold_up_the_next_one(pool: PgPool) {
     let cfg = config(&dir);
     let mut ctx = Context::new(pool.clone(), cfg.clone());
     ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
-    let failed = runner::step(&files_importer(&cfg, vec![empty]), &ctx)
+    let failed = runner::step(&files_importer(&cfg, vec![empty.clone()]), &ctx)
         .await
         .unwrap_err();
     assert!(
-        crate::catalogue::failure::shown(&failed).starts_with("empty_file"),
+        crate::catalogue::failure::shown(&failed).starts_with("empty (no record read in "),
         "{failed:#}"
     );
     let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
     assert!(state.cursor.is_none(), "{:?}", state.cursor);
+    assert!(state.last_import_at.is_none());
+    let position = state.position.unwrap();
+    assert_eq!(
+        position["refused_source"],
+        json!(empty.display().to_string())
+    );
+    let again = runner::step(&files_importer(&cfg, vec![empty]), &ctx)
+        .await
+        .unwrap_err();
+    assert!(again.is::<runner::StillRefused>(), "{again:#}");
     assert_eq!(
         runner::step(&files_importer(&cfg, vec![full]), &ctx)
             .await

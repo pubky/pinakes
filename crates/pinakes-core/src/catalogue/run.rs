@@ -78,11 +78,12 @@ pub enum UpdateEnd {
     NeedsImport(&'static str),
 }
 /// A run its importer abandons (`Err(Abandoned(..).into())` from [`Importer::import`] or
-/// [`Importer::update`]): what it read can't be applied (a dump refused for its checksums, its
-/// shape or what it would remove). The run ends without a full import's removal of the cards it
-/// did not read: its run and cursor are cleared, the position the importer set
-/// ([`Job::set_position`]) is kept, so its plan can tell what it refused, and the failure is
-/// recorded as any. Nothing else of the run is kept.
+/// [`Importer::update`], made by [`Job::refuse`]): what it read can't be applied (a dump refused
+/// for its checksums, its shape, for holding no record or for what it would remove). The run
+/// ends without a full import's removal of the cards it did not read: its run and cursor are
+/// cleared, which frees the large-import turn, the position the importer set
+/// ([`Job::set_position`], with the refusal [`Job::refuse`] adds) is kept, so its next runs can
+/// tell what it refused, and the failure is recorded once. Nothing else of the run is kept.
 #[derive(Debug)]
 pub struct Abandoned(pub Failure);
 impl std::fmt::Display for Abandoned {
@@ -94,6 +95,66 @@ impl std::error::Error for Abandoned {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.0)
     }
+}
+/// A run that finds the version it would read refused before ([`Job::refused_before`]): it ends
+/// at once, reading nothing, with no failure recorded (the refusal was, once). The runner clears
+/// the run and its cursor, frees the large-import turn and asks again after [`refused_wait`].
+/// `pinakesd catalogue import` says so and stops.
+#[derive(Debug)]
+pub struct StillRefused(pub String);
+impl std::fmt::Display for StillRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} was refused before", self.0)
+    }
+}
+impl std::error::Error for StillRefused {}
+
+/// The key of a position that names what a run refused ([`Job::refuse`]): a dump's or a file's
+/// version, a change file, an update's window, or for the software catalogue each registry's
+/// file. Beside it, `refused_source` (where it was read: null for the catalogue's own source,
+/// else what `--from` named, [`Importer::source`]) and `refused_limit` (the `limit` it was read
+/// with). It stands until a run applies a newer version (its position replaces this one), a full
+/// import asked for reads it again, or the operator clears it (`pinakesd catalogue
+/// clear-refusal`, [`store::clear_refusal`]).
+pub const REFUSED: &str = "refused";
+/// The keys a refusal keeps in the position ([`REFUSED`]).
+pub const REFUSAL_KEYS: [&str; 3] = [REFUSED, "refused_source", "refused_limit"];
+/// What `position` says was refused when read from `source` with `limit`: none when nothing was,
+/// or when it was read from another source or with another limit (that is not this importer's
+/// refusal: it reads the version again).
+pub fn refusal<'p>(
+    position: Option<&'p serde_json::Value>,
+    source: Option<&str>,
+    limit: Option<u64>,
+) -> Option<&'p serde_json::Value> {
+    let position = position?;
+    let refused = position.get(REFUSED).filter(|v| !v.is_null())?;
+    let from = position.get("refused_source").and_then(|v| v.as_str());
+    let with = position.get("refused_limit").and_then(|v| v.as_u64());
+    (from == source && with == limit).then_some(refused)
+}
+/// `position` (an object, else a new one) with `version` refused from `source` with `limit`
+/// ([`REFUSED`]); the rest of it (where the next update starts) is kept.
+pub fn refusing(
+    position: Option<&serde_json::Value>,
+    version: serde_json::Value,
+    source: Option<&str>,
+    limit: Option<u64>,
+) -> serde_json::Value {
+    let mut position = match position {
+        Some(serde_json::Value::Object(map)) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    position.insert(REFUSED.into(), version);
+    position.insert("refused_source".into(), source.into());
+    position.insert("refused_limit".into(), limit.into());
+    serde_json::Value::Object(position)
+}
+/// How long the task waits after a run found its version refused before ([`StillRefused`]): six
+/// times [`Pace::retry`], an hour. Finding a newer version costs one small request (a `HEAD`, a
+/// dump list).
+pub fn refused_wait(pace: &Pace) -> Duration {
+    pace.retry * 6
 }
 
 /// What an importer does next.
@@ -157,6 +218,12 @@ pub trait Importer: Send + Sync + 'static {
     fn asked(&self) -> bool {
         false
     }
+    /// Where this importer reads instead of its catalogue's own source, as a refusal names it
+    /// (`refused_source`, [`REFUSED`]): what `pinakesd catalogue import --from` named; none for
+    /// the catalogue's own files, which the daemon's importer reads.
+    fn source(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
@@ -200,6 +267,12 @@ pub struct Job<'a> {
     config: &'a Config,
     report: WriteReport,
     free_disk: FreeDisk,
+    /// [`Importer::source`].
+    source: Option<String>,
+    /// The version this run reads ([`Job::reading`]).
+    reading: Option<serde_json::Value>,
+    /// The records this step read that are no card of their own ([`Job::count_read`]).
+    records: u64,
 }
 /// A run that can't go on yet (short free disk once its download's size is known, a setting it
 /// needs): the runner records why in `waiting`, keeps the run and its cursor, and steps again
@@ -318,18 +391,114 @@ impl<'a> Job<'a> {
         }
         Ok(())
     }
-    /// The shrink floor of a full import, before it removes the cards it did not read: past a
-    /// first import, one that read under [`SHRINK_FLOOR`] of the cards held fails (`shrunk`) and
-    /// removes nothing, unless the drop is expected ([`Job::expect_shrink`]), allowed
-    /// (`pinakesd catalogue allow-shrink`) or the scope is narrower. The runner checks it before
-    /// its sweep; an importer that removes cards itself checks it first.
-    pub async fn check_shrink(&self) -> Result<()> {
+    /// Where this run reads instead of the catalogue's own source ([`Importer::source`]).
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+    /// Name the version this run reads (a dump's date, a file's version): what the runner's
+    /// refusal of a full import that read no record remembers ([`Job::check_shrink`]), so that
+    /// version is not read again ([`Job::refused_before`]).
+    pub fn reading(&mut self, version: serde_json::Value) {
+        self.reading = Some(version);
+    }
+    /// Count `n` records read that are no card of their own (Tranco's listed sites): a full
+    /// import that read some is not empty, though it wrote no card.
+    pub fn count_read(&mut self, n: u64) {
+        self.records += n;
+    }
+    /// What the last refusal of this importer's source and limit names ([`refusal`]), if one
+    /// stands.
+    pub fn refused(&self) -> Option<&serde_json::Value> {
+        refusal(self.state.position.as_ref(), self.source(), self.limit())
+    }
+    /// Whether `version` was refused before from this source and limit, and is not to be read
+    /// again: no full import is asked for ([`Job::asked`], which reads it again). The run then
+    /// ends with [`Job::still_refused`].
+    pub fn refused_before(&self, version: &serde_json::Value) -> bool {
+        !self.asked && self.refused() == Some(version)
+    }
+    /// The error that ends a run finding its version refused before ([`StillRefused`]), naming it
+    /// (`what`: "dump 20261125-001001").
+    pub fn still_refused(&self, what: impl Into<String>) -> anyhow::Error {
+        StillRefused(what.into()).into()
+    }
+    /// Refuse what this run read: `version` (its dump's or file's version, or what names the
+    /// changes) is kept in the position with this run's source and limit ([`REFUSED`]), on the
+    /// position this run set or else the one it started from, and the run is abandoned
+    /// ([`Abandoned`]: the failure `class` with our own `note` recorded once, nothing removed for
+    /// it, the run cleared and the large-import turn freed). Returned as the error that ends the
+    /// run. `note` names counts and versions, never an upstream's text.
+    pub fn refuse(
+        &mut self,
+        version: serde_json::Value,
+        class: &'static str,
+        note: impl Into<String>,
+    ) -> anyhow::Error {
+        let base = self
+            .position
+            .clone()
+            .or_else(|| self.state.position.clone());
+        self.refuse_on(base, version, class, note.into())
+    }
+    fn refuse_on(
+        &mut self,
+        base: Option<serde_json::Value>,
+        version: serde_json::Value,
+        class: &'static str,
+        note: String,
+    ) -> anyhow::Error {
+        tracing::warn!(
+            catalogue = self.catalogue.name(),
+            run = self.run.name(),
+            class,
+            note = %note,
+            "catalogue run refused what it read: nothing is removed for it, and it is not read again until a newer version comes, a full import is asked for (pinakesd catalogue import <name> --request) or the refusal is cleared (pinakesd catalogue clear-refusal <name>)"
+        );
+        let limit = self.limit();
+        self.position = Some(refusing(
+            base.as_ref(),
+            version,
+            self.source.as_deref(),
+            limit,
+        ));
+        Abandoned(Failure::new(class).at(note)).into()
+    }
+    /// The checks of a full import before it removes the cards it did not read. A full import
+    /// that read no record at all (no card of its generation written or stamped, nothing counted
+    /// with [`Job::count_read`]) is refused (`empty`, [`Job::refuse`] of the version it named with
+    /// [`Job::reading`]; with none named, abandoned as `empty` alone): an empty or broken file
+    /// never empties a catalogue, and a first import never finishes on nothing. Then the shrink
+    /// floor: past a first import, one that read under [`SHRINK_FLOOR`] of the cards held fails
+    /// (`shrunk`) and removes nothing, unless the drop is expected ([`Job::expect_shrink`]),
+    /// allowed (`pinakesd catalogue allow-shrink`) or the scope is narrower. The runner checks
+    /// both before its sweep; an importer that removes cards itself checks them first.
+    pub async fn check_shrink(&mut self) -> Result<()> {
         let (held, read, allowed): (i64, i64, bool) = sqlx::query_as(
             "SELECT cards,generation_cards,shrink_allowed FROM catalogue_state WHERE catalogue=$1",
         )
         .bind(self.catalogue.name())
         .fetch_one(self.pool)
         .await?;
+        if read <= 0 && self.records == 0 {
+            // Nothing of the run is applied: the version it read is shown as before.
+            sqlx::query("UPDATE catalogue_state SET upstream_version=$2,updated_at=now() WHERE catalogue=$1")
+                .bind(self.catalogue.name())
+                .bind(self.state.upstream_version.as_deref())
+                .execute(self.pool)
+                .await?;
+            let base = self.state.position.clone();
+            return Err(match self.reading.clone() {
+                Some(version) => {
+                    let note = format!("no record read in {}", shown_version(&version));
+                    self.refuse_on(base, version, "empty", note)
+                }
+                None => {
+                    // Nothing of the run is applied: the position stays as it started.
+                    self.position = None;
+                    Abandoned(Failure::new("empty")).into()
+                }
+            });
+        }
         // A state row from before scopes were kept: the limit its position records.
         let old_scope = self.state.scope.clone().or_else(|| {
             self.state
@@ -720,6 +889,11 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             Ok(Next::Wait(wait)) => wait,
             // The state row may already be another daemon's, which took the lock: only the log
             // says so. The run resumes from its cursor once this task holds the lock again.
+            // Nothing read, nothing recorded: the version it would read is still refused.
+            Err(refused) if refused.is::<StillRefused>() => {
+                tracing::debug!(catalogue = catalogue.name(), error = %refused, "catalogue run waits for a version not refused");
+                refused_wait(&ctx.pace)
+            }
             Err(failed) if failed.is::<CatalogueLockLost>() => {
                 tracing::warn!(
                     catalogue = catalogue.name(),
@@ -890,6 +1064,9 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         config: &ctx.config,
         report: WriteReport::default(),
         free_disk: ctx.free_disk.clone(),
+        source: importer.source(),
+        reading: None,
+        records: 0,
     };
     // The large-import lock is watched while the run goes on: lost while this task still holds
     // the catalogue lock, the run stops as a recorded failure (`turn_lost`) and resumes from its
@@ -913,23 +1090,9 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     };
     let ended = match ended {
         Ok(ended) => ended,
-        Err(error) if error.is::<Abandoned>() => {
-            // A full import abandoned answers its request (the dump it read can't be applied).
-            sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,position=coalesce($2,position),import_requested=CASE WHEN $3='import' THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1")
-                .bind(catalogue.name())
-                .bind(job.position.take())
-                .bind(run.name())
-                .execute(pool)
-                .await?;
-            if let Some(lock) = large {
-                lock.release().await;
-            }
-            tracing::info!(
-                catalogue = catalogue.name(),
-                run = run.name(),
-                "catalogue run abandoned: what it read can't be applied"
-            );
-            return Err(error);
+        Err(error) if error.is::<Abandoned>() || error.is::<StillRefused>() => {
+            let position = job.position.take();
+            return abandon(pool, catalogue, run, job.asked, position, large, error).await;
         }
         Err(error) => match error.downcast::<Waits>() {
             Ok(Waits(why)) => {
@@ -969,7 +1132,13 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         // expected, the operator allows it (`pinakesd catalogue allow-shrink`, or `catalogue import
         // --force`), or the import's scope is narrower than the last finished import's (a lower
         // `limit`, a higher `min_citations`). No scope recorded: the limit the position records.
-        job.check_shrink().await?;
+        if let Err(error) = job.check_shrink().await {
+            if error.is::<Abandoned>() {
+                let position = job.position.take();
+                return abandon(pool, catalogue, run, job.asked, position, large, error).await;
+            }
+            return Err(error);
+        }
         report.removed += store::finish_import(pool, catalogue, generation).await?;
     }
     sqlx::query(
@@ -1003,6 +1172,39 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     );
     Ok(Next::Again)
 }
+/// End a run that was abandoned ([`Abandoned`]: what it read can't be applied) or that found its
+/// version refused before ([`StillRefused`]): its run, cursor and `waiting` are cleared, the
+/// large-import turn is freed, and `position` (the importer's, with its refusal) is kept. A full
+/// import abandoned answers its request only when it was the import asked for (`asked`): a
+/// request made while it ran stands. `error` is returned for the task to record (a
+/// [`StillRefused`] is recorded as no failure).
+async fn abandon(
+    pool: &PgPool,
+    catalogue: Catalogue,
+    run: Run,
+    asked: bool,
+    position: Option<serde_json::Value>,
+    large: Option<SessionLock>,
+    error: anyhow::Error,
+) -> Result<Next> {
+    sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,phase=CASE WHEN phase IN ('import','update') THEN 'idle' ELSE phase END,position=coalesce($2,position),import_requested=CASE WHEN $3 THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1")
+        .bind(catalogue.name())
+        .bind(position)
+        .bind(run == Run::Import && asked)
+        .execute(pool)
+        .await?;
+    if let Some(lock) = large {
+        lock.release().await;
+    }
+    if error.is::<Abandoned>() {
+        tracing::info!(
+            catalogue = catalogue.name(),
+            run = run.name(),
+            "catalogue run abandoned: what it read can't be applied"
+        );
+    }
+    Err(error)
+}
 /// An importer whose plan is always `run` (`pinakesd catalogue import`); it keeps what its runs
 /// wrote.
 struct Forced {
@@ -1025,6 +1227,9 @@ impl Importer for Forced {
     }
     fn asked(&self) -> bool {
         self.run == Run::Import
+    }
+    fn source(&self) -> Option<String> {
+        self.inner.source()
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         if self.expect_shrink {
@@ -1123,6 +1328,9 @@ pub async fn run_once_with(
                     }
                     tokio::time::sleep(wait.min(Duration::from_secs(60))).await;
                 }
+                Err(refused) if refused.is::<StillRefused>() => {
+                    anyhow::bail!("catalogue {catalogue}: {refused}; nothing is read until a newer one comes (a full import reads it again, and pinakesd catalogue clear-refusal {catalogue} lets an update read it)");
+                }
                 Err(failed) => {
                     let shown = failure::shown(&failed);
                     record_failure(&ctx.pool, catalogue, &shown).await?;
@@ -1185,6 +1393,13 @@ impl std::error::Error for CatalogueLockLost {}
 /// The words every wait for the large-import turn ends with;
 /// `pinakes_catalogue_waiting_for_turn` counts the state rows whose `waiting` holds them.
 pub const TURN: &str = "one large import runs at a time";
+/// A refused version as a note shows it: a text as it is, anything else as JSON.
+fn shown_version(version: &serde_json::Value) -> String {
+    match version {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
 fn gigabytes(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }

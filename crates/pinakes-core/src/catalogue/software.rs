@@ -22,7 +22,7 @@ use super::{
     diff::{self, Sink},
     failure::Failure,
     fetch::{self, Input},
-    run::{Importer, Job, Run, UpdateEnd},
+    run::{self, Importer, Job, Run, UpdateEnd},
     store::State,
     Card, Catalogue,
 };
@@ -204,10 +204,13 @@ impl Software {
             .unwrap_or_default()
     }
     /// The run: each registry whose file is new (every one in a full import) and not read in this
-    /// run already is read. An update refused for one registry's file leaves the others to be
-    /// read; the run then names the file refused in its position ([`diff::REFUSED`]: registry ->
-    /// version) and is abandoned ([`diff::refusal`], recorded once). The next updates read that
-    /// registry again only when it has a newer file; a full import reads every one.
+    /// run already is read. A registry's file that would remove more than a tenth of its cards in
+    /// an update (`refused`), or that makes no card in a full import (`empty`), is refused and
+    /// the others are read; the run then names the files refused in its position
+    /// ([`run::REFUSED`]: registry -> version) and is abandoned ([`Job::refuse`], recorded once).
+    /// The next updates read that registry again only when it has a newer file; a full import of
+    /// the importer's own waits while one of them is still the newest ([`Job::still_refused`]);
+    /// one asked for reads every one.
     async fn run(&self, job: &mut Job<'_>) -> Result<()> {
         let import = job.run() == Run::Import;
         let mut done = Self::done(job);
@@ -215,25 +218,44 @@ impl Software {
             .position()
             .and_then(|p| serde_json::from_value(p.clone()).ok())
             .unwrap_or_default();
-        // The files refused before (none count in a full import, which reads every registry).
-        let standing: BTreeMap<String, Value> = match position.remove(diff::REFUSED) {
-            Some(refused) if !import => serde_json::from_value(refused).unwrap_or_default(),
-            _ => BTreeMap::new(),
-        };
-        // The files this run refused (kept in its cursor, so a run taken up after another
-        // registry failed does not read them again).
-        let mut refused: BTreeMap<String, Value> = job
-            .cursor()
-            .and_then(|c| c.get("refused"))
-            .and_then(|d| serde_json::from_value(d.clone()).ok())
+        for key in run::REFUSAL_KEYS {
+            position.remove(key);
+        }
+        // The files refused before, by registry.
+        let standing: BTreeMap<String, Value> = job
+            .refused()
+            .and_then(|r| serde_json::from_value(r.clone()).ok())
+            .unwrap_or_default();
+        // A full import must read every registry: while a file refused before is still the
+        // newest, one of the importer's own reads nothing.
+        if import && !job.asked() {
+            for (name, version) in &standing {
+                let Some(registry) = Registry::parse(name) else {
+                    continue;
+                };
+                let (newest, _) = self.version(registry).await?;
+                if version.as_str() == Some(newest.as_str()) {
+                    return Err(job.still_refused(format!("the {name} file {newest}")));
+                }
+            }
+        }
+        // The files this run refused, and those of them that made no card (kept in its cursor,
+        // so a run taken up after another registry failed does not read them again).
+        let from_cursor = |key: &str| job.cursor().and_then(|c| c.get(key)).cloned();
+        let mut refused: BTreeMap<String, Value> = from_cursor("refused")
+            .and_then(|d| serde_json::from_value(d).ok())
+            .unwrap_or_default();
+        let mut empty: Vec<String> = from_cursor("empty")
+            .and_then(|d| serde_json::from_value(d).ok())
             .unwrap_or_default();
         // A registry that fails leaves the others to be read; the run then fails with the first
         // failure and is taken up again from its cursor (the registries done are not read again).
         let mut failed: Option<anyhow::Error> = None;
         let cursor = |done: &BTreeMap<String, Value>,
                       refused: &BTreeMap<String, Value>,
+                      empty: &[String],
                       reading: Option<&str>| {
-            let mut c = json!({"done": done, "refused": refused});
+            let mut c = json!({"done": done, "refused": refused, "empty": empty});
             if let Some(name) = reading {
                 c["reading"] = json!(name);
             }
@@ -260,24 +282,27 @@ impl Software {
                         return Ok(());
                     }
                     if same(standing.get(name)) {
-                        tracing::info!(catalogue = "software", registry = name, "this registry's file was refused before: it waits for a newer one, or a full import (--request)");
+                        tracing::debug!(catalogue = "software", registry = name, "this registry's file was refused before: it waits for a newer one, or a full import (--request)");
                         return Ok(());
                     }
                 }
-                let reading = cursor(&done, &refused, Some(name));
+                let reading = cursor(&done, &refused, &empty, Some(name));
                 let mut sink = Sink::new(job, Some(name));
                 let cards = self.read(job, &mut sink, registry, &reading).await?;
                 // A full import reading no card of a registry would remove all its cards.
-                if import && cards == 0 {
-                    anyhow::bail!(Failure::new("parse").at(registry.source().to_owned()));
-                }
-                if sink.finish(job, reading.clone()).await? == diff::Finished::Refused {
+                let refuse = if import && cards == 0 {
+                    empty.push(name.to_owned());
+                    true
+                } else {
+                    sink.finish(job, reading.clone()).await? == diff::Finished::Refused
+                };
+                if refuse {
                     refused.insert(name.to_owned(), json!(version));
-                    job.remove(&[], cursor(&done, &refused, None)).await?;
+                    job.remove(&[], cursor(&done, &refused, &empty, None)).await?;
                     return Ok(());
                 }
                 done.insert(name.to_owned(), entry);
-                job.remove(&[], cursor(&done, &refused, None)).await?;
+                job.remove(&[], cursor(&done, &refused, &empty, None)).await?;
                 job.upstream_version(&versions(&done)).await?;
                 Ok(())
             }
@@ -312,15 +337,42 @@ impl Software {
             .filter(|(name, _)| !done.contains_key(name))
             .collect();
         let refused_now = !refused.is_empty();
+        let note = refused
+            .iter()
+            .map(|(name, version)| {
+                let why = if empty.contains(name) {
+                    "no card"
+                } else {
+                    "over a tenth of its cards gone"
+                };
+                format!(
+                    "{name} file {}: {why}",
+                    version.as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let class = if refused.keys().all(|name| empty.contains(name)) {
+            "empty"
+        } else {
+            "refused"
+        };
         standing.extend(refused);
-        let mut kept = serde_json::to_value(kept)?;
-        if !standing.is_empty() {
-            kept = diff::refusing(Some(&kept), serde_json::to_value(standing)?);
-        }
-        job.set_position(kept);
+        let kept = serde_json::to_value(kept)?;
         if refused_now {
-            return Err(diff::refusal());
+            job.set_position(kept);
+            return Err(job.refuse(serde_json::to_value(standing)?, class, note));
         }
+        job.set_position(if standing.is_empty() {
+            kept
+        } else {
+            run::refusing(
+                Some(&kept),
+                serde_json::to_value(standing)?,
+                job.source(),
+                job.limit(),
+            )
+        });
         Ok(())
     }
 }
@@ -339,6 +391,22 @@ fn versions(done: &BTreeMap<String, Value>) -> String {
 impl Importer for Software {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Software
+    }
+    /// The registries read from elsewhere than their own files (`REGISTRY=FILE|URL`).
+    fn source(&self) -> Option<String> {
+        let official = Sources::official();
+        let given: Vec<String> = Registry::ALL
+            .into_iter()
+            .filter(|r| self.sources.of(*r) != official.of(*r))
+            .map(|r| {
+                let at = match self.sources.of(r) {
+                    Input::Url(url) => url.to_string(),
+                    Input::File(file) => file.display().to_string(),
+                };
+                format!("{}={at}", r.source())
+            })
+            .collect();
+        (!given.is_empty()).then(|| given.join(" "))
     }
     /// Everything is read as a stream; the cards take about 0.4 GB of the database.
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {

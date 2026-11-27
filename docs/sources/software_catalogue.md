@@ -72,12 +72,15 @@ F-Droid's entry's time and digest. A registry whose file is new is read again wh
 cards are written, unchanged ones are not touched, and that registry's packages no longer listed
 are removed. An update that would remove more than a tenth of a registry's cards (and more than
 ten) is refused for that registry: nothing of it is removed, the other registries are still
-updated, and the run's failure (`removals`) is recorded once (`catalogue status` shows
-`<registry> file refused`, and `pinakes_catalogue_refused{catalogue="software"}` is 1). The daily
-updates then pass over the refused file until that registry has a newer one, or until a full
+updated, and the run's failure (`refused`) is recorded once (`catalogue status` shows
+`refused: <registry> <version>`, and `pinakes_catalogue_refused{catalogue="software"}` is 1). The
+daily updates then pass over the refused file until that registry has a newer one, until a full
 import is asked for (`pinakesd catalogue import software --request` with the daemon running, or
-`catalogue import software` with it stopped). A full import that reads no card of a registry
-fails (`parse`) and removes nothing. A registry whose file can't be read (a download error)
+`catalogue import software` with it stopped), or until `pinakesd catalogue clear-refusal
+software` clears it ([a refused dump or file](../operations.md#a-refused-dump-or-file)). A full
+import that reads no card of a registry refuses that registry's file the same way (`empty`) and
+removes nothing; a full import of the importer's own ends at once while a refused file is still
+its registry's newest. A registry whose file can't be read (a download error)
 leaves the others to be read too; the run then fails and is tried again. The cards are as
 current as the newest of the three files (`current_as_of`; F-Droid publishes every few days);
 the allowed lag is 2 days.

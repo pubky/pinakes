@@ -168,7 +168,7 @@ impl Dump {
 /// A body read whole, at most `cap` bytes.
 async fn body(response: reqwest::Response, cap: usize, url: &str) -> Result<Vec<u8>> {
     if response.content_length().is_some_and(|n| n > cap as u64) {
-        return Err(failure("oversized", url).into());
+        return Err(failure("size", url).into());
     }
     let mut out = Vec::new();
     let mut response = response;
@@ -178,7 +178,7 @@ async fn body(response: reqwest::Response, cap: usize, url: &str) -> Result<Vec<
         .map_err(|_| failure("download", url))?
     {
         if out.len() + chunk.len() > cap {
-            return Err(failure("oversized", url).into());
+            return Err(failure("size", url).into());
         }
         out.extend_from_slice(&chunk);
     }
@@ -670,7 +670,7 @@ impl std::io::Read for ChannelReader {
 pub async fn api(client: &reqwest::Client, base: &str, query: &[(&str, &str)]) -> Result<Value> {
     api_capped(client, base, query, API_CAP).await
 }
-/// [`api`], with answers of at most `cap` bytes (larger: `oversized`).
+/// [`api`], with answers of at most `cap` bytes (larger: `size`).
 pub async fn api_capped(
     client: &reqwest::Client,
     base: &str,

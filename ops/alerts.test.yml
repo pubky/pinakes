@@ -138,7 +138,7 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: musicbrainz}
             exp_annotations:
-              summary: "The musicbrainz catalogue's importer refused the newest dump it read and waits for another: pinakesd catalogue status shows which and why; if the dump is right, ask for a full import of it"
+              summary: "The musicbrainz catalogue's importer refused the newest dump or file it read and waits for another: pinakesd catalogue status shows which and why; if it is right, ask for a full import of it or clear the refusal (pinakesd catalogue clear-refusal)"
       - eval_time: 4h
         alertname: CatalogueImportFailed
         exp_alerts: []

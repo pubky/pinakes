@@ -30,7 +30,7 @@ description 4,096, the rest 512). The archive may hold 8 GiB and the database 12
 the read's two passes over the table at most 50 million rows (`size`), and the reading at most
 six hours. Podcast Index's server does not answer ranged requests, so a broken download starts
 again; each attempt writes a part file of its own, and a run that is cut off stops its download
-within a megabyte. A full import that finds no live feed fails (`parse`) and removes nothing.
+within a megabyte. A full import that finds no live feed is refused (`empty`) and removes nothing.
 
 Private feeds are never imported: a feed on a host that serves paid subscribers' feeds
 (`patreon.com`, `supercast.com`, `supercast.tech`, `supportingcast.fm`, `glow.fm`,
@@ -74,12 +74,15 @@ its next refresh, or the next time it is shared, not when the card is written.
 Each day the importer asks for the archive's version (its ETag). When it is new, the whole
 database is read again: changed cards are written, unchanged ones are not touched, and feeds no
 longer listed are removed. An update that would remove more than a tenth of the cards (and more
-than ten) is refused, `removals`: nothing is removed, the unpacked database is deleted, and the
-failure is recorded once (`catalogue status` shows `file … refused`, and
-`pinakes_catalogue_refused{catalogue="podcastindex"}` is 1). The daily updates then finish
-without reading that archive again until a newer one appears, or until a full import is asked
-for (`pinakesd catalogue import podcastindex --request` with the daemon running, or
-`catalogue import podcastindex` with it stopped). The allowed lag is 9 days.
+than ten) is refused, `refused`: nothing is removed, the unpacked database is deleted, and the
+failure is recorded once (`catalogue status` shows `refused: <version>`, and
+`pinakes_catalogue_refused{catalogue="podcastindex"}` is 1). So is an archive that can't be read
+as it is (`archive`, `size`: broken or over its cap; `database`, `schema`: no Podcast Index
+database in it), and a full import that reads no live feed (`empty`). The daily runs then end at
+once without downloading that archive again until a newer one appears, until a full import is
+asked for (`pinakesd catalogue import podcastindex --request` with the daemon running, or
+`catalogue import podcastindex` with it stopped), or until `pinakesd catalogue clear-refusal
+podcastindex` clears it ([a refused dump or file](../operations.md#a-refused-dump-or-file)). The allowed lag is 9 days.
 
 ## Sample run
 

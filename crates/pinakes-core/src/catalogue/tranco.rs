@@ -138,6 +138,8 @@ impl Tranco {
         })
         .await
         .map_err(|_| Failure::new("panic"))??;
+        // A full import whose list names no site reads no record: the runner refuses it.
+        job.count_read(sites.len() as u64);
         let pool = job.pool().clone();
         for part in sites.chunks(10_000) {
             let hosts: Vec<&str> = part.iter().map(|(h, _)| h.as_str()).collect();
@@ -393,7 +395,15 @@ impl Tranco {
             Some(Err(error)) => return Err(error),
         };
         if let Some((version, input, at)) = latest {
-            let known = position.get("list").and_then(Value::as_str) == Some(version.as_str());
+            // A list refused before is not loaded again: a full import of the importer's own
+            // ends at once, an update reads the homepages due on the list it has.
+            let refused = job.refused_before(&json!(version));
+            if refused && job.run() == Run::Import {
+                return Err(job.still_refused(format!("list {version}")));
+            }
+            job.reading(json!(version));
+            let known =
+                refused || position.get("list").and_then(Value::as_str) == Some(version.as_str());
             // A list's day is never ahead of now (a server clock or a file's time could say so,
             // and every site not on it would then count as off the list).
             let now = chrono::Utc::now();
@@ -613,6 +623,13 @@ impl Importer for Tranco {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Tranco
     }
+    /// A list file or URL given (`--from`).
+    fn source(&self) -> Option<String> {
+        match &self.list {
+            ListSource::Official => None,
+            ListSource::Given(input) => super::diff::source_of(input, LATEST_ID),
+        }
+    }
     /// The list and the cards take about 1 GB of the database.
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
         1 << 30
@@ -722,9 +739,6 @@ pub fn list<R: BufRead>(body: R, at: &str) -> Result<Vec<(String, i32)>> {
             anyhow::bail!(Failure::new("size").at(at.to_owned()));
         }
         out.push((host, rank));
-    }
-    if out.is_empty() {
-        anyhow::bail!(Failure::new("parse").at(at.to_owned()));
     }
     Ok(out)
 }
@@ -1058,7 +1072,8 @@ mod tests {
                 ("xn--80ak6aa92e.com".to_owned(), 6)
             ]
         );
-        assert!(list(&b"nothing\n"[..], "t").is_err());
+        // A list of no site is read as one (a full import of it is refused, `empty`).
+        assert!(list(&b"nothing\n"[..], "t").unwrap().is_empty());
         // A rank past the cap is no list's.
         let sites = list(
             &b"2000001,big.example\n2147483647,bigger.example\n2,ok.example\n"[..],

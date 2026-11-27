@@ -77,12 +77,15 @@ Each day the importer reads the manifest. When its date is new, it reads the wor
 dates after the last date it read, and that last date's files again when their list changed.
 Changed cards are written, unchanged ones are not touched, and the works in those files that no
 longer qualify are removed at the update's end. An update that would remove more than a tenth of
-the cards (and more than ten) is refused, `removals`: nothing is removed, and the failure is
-recorded once (`catalogue status` shows `file … refused`, and
-`pinakes_catalogue_refused{catalogue="openalex"}` is 1). The daily updates then finish without
-reading that snapshot again until a newer one appears, or until a full import is asked for
+the cards (and more than ten) is refused, `refused`: nothing is removed, and the failure is
+recorded once (`catalogue status` shows `refused: <snapshot>`, and
+`pinakes_catalogue_refused{catalogue="openalex"}` is 1). The daily updates then end at once
+without reading that snapshot again until a newer one appears, until a full import is asked for
 (`pinakesd catalogue import openalex --request` with the daemon running, or
-`catalogue import openalex` with it stopped). A line that may qualify but does not parse removes
+`catalogue import openalex` with it stopped), or until `pinakesd catalogue clear-refusal
+openalex` clears it ([a refused dump or file](../operations.md#a-refused-dump-or-file)). A full
+import whose snapshot holds no work (a manifest that lists no works file) is refused the same way
+(`empty`). A line that may qualify but does not parse removes
 nothing (its card stays); more than 100 such lines, and more than one in a thousand of a file's
 lines, stop the run (`parse`). A line without a citation count is passed over.
 
@@ -90,7 +93,7 @@ OpenAlex's snapshot lists no merged or deleted works (its `merged_ids` lists end
 are no longer in `data/`), so an update can't see that a work went. A new snapshot that comes
 180 days or more after the last full import is read by a full import instead of an update: the
 works it no longer lists lose their cards. A changed `min_citations` also makes the next update
-a full import. A full import whose manifest lists no works file fails (`manifest`) and removes
+a full import. A full import whose manifest lists no works file is refused (`empty`) and removes
 nothing. `current_as_of` is the snapshot's date; the
 allowed lag is 100 days.
 

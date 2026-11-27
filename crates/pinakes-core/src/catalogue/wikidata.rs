@@ -10,8 +10,9 @@
 //! `[catalogues.wikidata] limit` the file is read as a stream over HTTP instead, and only up to
 //! the limit. The read resumes from its last written batch ([`pipeline::Position`]). The
 //! downloaded file is deleted when the import finishes. A dump that fails its checksum, changed
-//! or went upstream, reads as empty or broken, or whose work files were lost, starts the import
-//! over from the newest dump (at most [`RESTARTS`] times for one dump).
+//! or went upstream, reads as broken, or whose work files were lost, starts the import over
+//! from the newest dump; one that fails so [`RESTARTS`] times is refused (`run::REFUSED`), as
+//! is one that makes no card (the runner's `empty`), and the import waits for the next dump.
 //!
 //! **Labels:** a card's labels are the English labels of its genres and classes. The dump holds
 //! those items too, but often after the cards that name them, so their labels are collected as
@@ -204,6 +205,14 @@ impl Source {
         match self {
             Source::Download { dump } | Source::Stream { dump, .. } => Some(dump),
             Source::File { .. } => None,
+        }
+    }
+    /// What a refusal of what it reads names (`run::REFUSED`): the dump's date, or the local
+    /// file's path.
+    fn version(&self) -> serde_json::Value {
+        match self {
+            Source::Download { dump } | Source::Stream { dump, .. } => dump.date.clone().into(),
+            Source::File { path, .. } => path.display().to_string().into(),
         }
     }
     fn since(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -530,6 +539,13 @@ impl Importer for Wikidata {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Wikidata
     }
+    /// The dump `--from` names.
+    fn source(&self) -> Option<String> {
+        self.from.as_ref().map(|from| match from {
+            From::File(path) => path.display().to_string(),
+            From::Url(url) => url.clone(),
+        })
+    }
     fn disk_need(&self, run: Run, state: &State) -> u64 {
         disk_need(run, state, self.from.is_some() || self.limit.is_some())
     }
@@ -611,6 +627,7 @@ impl Importer for Wikidata {
                 self.start(job, &client, restarted.as_ref()).await?
             }
         };
+        job.reading(cursor.source.version());
         let client = net::client(&contact(job)?, false, self.http)?;
         match self.run_import(job, &client, &mut cursor).await {
             Ok(()) => Ok(()),
@@ -630,6 +647,12 @@ impl Importer for Wikidata {
                     _ => 1,
                 };
                 remove_files(job.dir(), &cursor.source);
+                if count >= RESTARTS {
+                    // The dump failed as often as one may: refused, it waits for the next one,
+                    // and the large-import turn is free meanwhile.
+                    let note = format!("dump {date} failed {count} times ({class})");
+                    return Err(job.refuse(cursor.source.version(), "refused", note));
+                }
                 tracing::warn!(
                     catalogue = "wikidata",
                     class,
@@ -672,8 +695,10 @@ impl Importer for Wikidata {
         if (!position.import && gap > LONGEST_GAP) || gap > RECENT_CHANGES_REACH {
             let latest = net::latest_dump(&client, &self.endpoints.dumps).await?;
             let imported = job.state().upstream_version.clone().unwrap_or_default();
+            // A dump refused before is no newer dump to import.
             if latest.date.as_str() > imported.as_str()
                 && latest.time().is_some_and(|t| t > position.time)
+                && job.refused() != Some(&serde_json::Value::from(latest.date.clone()))
             {
                 return Ok(UpdateEnd::NeedsImport(
                     "the changes are more than five days behind; a newer dump is imported",
@@ -934,8 +959,7 @@ fn starts_over(class: &str, source: &Source) -> bool {
     let local = matches!(source, Source::File { .. });
     match class {
         "checksum" | "dump_changed" | "dump_gone" | "label_files" | "dump_missing" => !local,
-        "bz2_header" | "bz2_block" | "bz2_truncated" | "bz2_oversized" | "empty_dump"
-        | "bad_dump" => !local,
+        "bz2_header" | "bz2_block" | "bz2_truncated" | "bz2_oversized" | "bad_dump" => !local,
         _ => false,
     }
 }
@@ -1048,6 +1072,12 @@ async fn look_up_labels(
     }
     Ok(items.len())
 }
+/// A refused version as a message names it.
+fn shown(version: &serde_json::Value) -> String {
+    version
+        .as_str()
+        .map_or_else(|| version.to_string(), str::to_owned)
+}
 /// The day a dump's file name names (`wikidata-20261123-all.json.bz2`), as a time.
 fn named_date(name: &str) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
     let date = name
@@ -1071,13 +1101,10 @@ impl Wikidata {
         let sticky = self.cli_limit.or_else(|| inherited_limit(job.state()));
         let limit = job.limit().or(sticky);
         let source = self.source(client, limit).await?;
-        if let (Some(r), Some(dump)) = (restarted, source.dump()) {
-            if r.date == dump.date && r.count >= RESTARTS {
-                // The newest dump failed again and again: wait for the next one.
-                return Err(Failure::new("dump_rejected")
-                    .at(net::host(&dump.url))
-                    .into());
-            }
+        // A dump refused before (it failed again and again, or read no record) waits for the
+        // next one; a full import asked for reads it again.
+        if job.refused_before(&source.version()) {
+            return Err(job.still_refused(format!("dump {}", shown(&source.version()))));
         }
         let files = LabelFiles::new(job.dir());
         for path in [&files.labels, &files.pending] {
@@ -1086,7 +1113,7 @@ impl Wikidata {
         let step = match &source {
             Source::Download { dump } => {
                 if dump.size > DUMP_SIZE_MAX {
-                    return Err(Failure::new("oversized").at(net::host(&dump.url)).into());
+                    return Err(Failure::new("size").at(net::host(&dump.url)).into());
                 }
                 room(job, dump.size + dump.size / 25)?;
                 preallocate(&job.dir().join(dump.file_name()), dump.size)?;
@@ -1462,12 +1489,9 @@ impl Wikidata {
                 .await?;
         }
         ended?;
-        // A dump that gave nothing, or mostly lines that are not entities, is not a dump: no
-        // card is removed for it.
+        // A dump of mostly lines that are not entities is not a dump: no card is removed for it.
+        // One that gave no card at all is refused by the runner (`empty`).
         let c = cursor.counts;
-        if c.lines == 0 || cursor.kept == 0 {
-            return Err(Failure::new("empty_dump").into());
-        }
         if c.bad + c.oversized > (c.lines / 100).max(100) {
             return Err(Failure::new("bad_dump").into());
         }
@@ -1624,12 +1648,12 @@ impl Wikidata {
                     }
                     take(got)?;
                 }
-                Err(e) if class(&e) == Some("oversized") && part.len() > 1 => {
+                Err(e) if class(&e) == Some("size") && part.len() > 1 => {
                     let (a, b) = part.split_at(part.len() / 2);
                     todo.push(b);
                     todo.push(a);
                 }
-                Err(e) if class(&e) == Some("oversized") => {
+                Err(e) if class(&e) == Some("size") => {
                     skipped += 1;
                     crate::telemetry::catalogue_items_skipped("wikidata", "over_cap", 1);
                     tracing::warn!(
@@ -1970,7 +1994,6 @@ mod tests {
             "label_files",
             "dump_missing",
             "bz2_block",
-            "empty_dump",
             "bad_dump",
         ] {
             assert!(starts_over(class, &download), "{class}");
@@ -1983,6 +2006,7 @@ mod tests {
             "disk",
             "no_contact",
             "rate_limited",
+            "empty",
         ] {
             assert!(!starts_over(class, &download), "{class}");
         }

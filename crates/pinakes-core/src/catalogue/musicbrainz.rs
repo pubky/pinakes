@@ -400,10 +400,8 @@ impl MusicBrainz {
         }
         // `LATEST` may name another dump than the one the run was planned on: a refused one is
         // read again only when a full import is asked for.
-        if resumed.is_none() && !job.asked() && self.refused(job.state(), &version) {
-            bail!(super::run::Abandoned(
-                Failure::new("refused").at(format!("dump {version} was refused before"))
-            ));
+        if resumed.is_none() && job.refused_before(&serde_json::json!(version)) {
+            return Err(job.still_refused(format!("dump {version}")));
         }
         // A run cut off whose dump the mirror no longer has, and that must read it again, starts
         // over on the newest dump.
@@ -433,8 +431,10 @@ impl MusicBrainz {
         let (source, limit) = (self.source_id(), job.limit());
         // A full import asked for (by hand, or by an update handing over for a changed limit)
         // removes what its dump no longer has, however much; one of the importer's own may
-        // remove at most a tenth. Kept in the cursor: a resumed import is still the one asked for.
-        let forced = resumed.as_ref().map_or(job.asked(), |c| c.forced);
+        // remove at most a tenth. Kept in the cursor: a resumed import is still the one asked for,
+        // and one asked for while it ran (`--request`) is asked for from then on.
+        let forced = resumed.as_ref().map_or(job.asked(), |c| c.forced) || job.asked();
+        job.reading(serde_json::json!(version));
         let cards_before = resumed
             .as_ref()
             .map_or(Some(job.state().cards.max(0) as u64), |c| c.cards_before);
@@ -479,17 +479,15 @@ impl MusicBrainz {
                 job.write_rows(&[], 0, cursor(Phase::Write, None, 0, as_of)?)
                     .await?;
             }
-            let cards = job.state().cards.max(0) as u64;
-            // A read that found no record, or a file that found none while cards of its kind are
-            // stored, never empties them, even in a run asked for (`catalogue drop` empties a
-            // catalogue): a file of one kind is a small share of the cards, below the removal
-            // check's tenth, and a `limit` has no removal check.
-            if cards > 0 {
-                if let Some(note) = self.empty_read(job, &done, &version).await? {
-                    return self
-                        .refuse(job, mode, &version, "empty", &note, &spill_dir)
-                        .await;
-                }
+            // A read that found no record (a first import too), or a file that found none while
+            // cards of its kind are stored, is refused before anything is written, even in a run
+            // asked for (`catalogue drop` empties a catalogue): a file of one kind is a small
+            // share of the cards, below the removal check's tenth, and a `limit` has no removal
+            // check.
+            if let Some(note) = self.empty_read(job, &done, &version).await? {
+                return self
+                    .refuse(job, mode, &version, "empty", &note, &spill_dir)
+                    .await;
             }
             if mode == Run::Update {
                 // The first pass, or (a run cut off after it) the tally it kept: checked again
@@ -504,7 +502,7 @@ impl MusicBrainz {
                 };
                 if let Some(note) = tally.too_many(job.limit(), "gone", &version) {
                     return self
-                        .refuse(job, mode, &version, "removals", &note, &spill_dir)
+                        .refuse(job, mode, &version, "refused", &note, &spill_dir)
                         .await;
                 }
             }
@@ -554,7 +552,7 @@ impl MusicBrainz {
                 }
                 if let Some(note) = tally.too_many(None, "not", &version) {
                     return self
-                        .refuse(job, mode, &version, "removals", &note, &spill_dir)
+                        .refuse(job, mode, &version, "refused", &note, &spill_dir)
                         .await;
                 }
             }
@@ -579,7 +577,7 @@ impl MusicBrainz {
                 .too_many(job.limit(), "gone or refused", &version);
                 if let Some(note) = note {
                     return self
-                        .refuse(job, mode, &version, "removals", &note, &spill_dir)
+                        .refuse(job, mode, &version, "refused", &note, &spill_dir)
                         .await;
                 }
             }
@@ -606,10 +604,11 @@ impl MusicBrainz {
     }
 
     /// Refuse the dump `version` (`class`, with our own `note`): its runs are removed and the run
-    /// is abandoned ([`super::run::Abandoned`]: no card removed for it, the failure recorded,
-    /// the run cleared), and the position remembers the dump and its source (`refused`,
-    /// `refused_source`), so the dump is read again only when `LATEST` names another, or a full
-    /// import is asked for.
+    /// is abandoned ([`Job::refuse`]: no card removed for it, the failure recorded once, the run
+    /// cleared), and the position remembers the dump with its source and limit (`refused`,
+    /// `refused_source`, `refused_limit`), so the dump is read again only when `LATEST` names
+    /// another, a full import is asked for, or the refusal is cleared (`catalogue
+    /// clear-refusal`).
     async fn refuse(
         &self,
         job: &mut Job<'_>,
@@ -619,29 +618,9 @@ impl MusicBrainz {
         note: &str,
         dir: &Path,
     ) -> Result<()> {
-        tracing::warn!(
-            catalogue = "musicbrainz",
-            version,
-            class,
-            note,
-            "musicbrainz dump refused: it waits for another dump, or `pinakesd catalogue import musicbrainz --request` asks for a full import"
-        );
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(job.dir().join(format!("removals-{version}")));
-        let failure = Failure::new(class).at(note.to_owned());
-        let mut position = job
-            .state()
-            .position
-            .clone()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(p) = position.as_object_mut() {
-            p.insert("refused".into(), version.into());
-            p.insert("refused_source".into(), self.source_id().into());
-            p.insert("refused_limit".into(), job.limit().into());
-        }
-        job.set_position(position);
-        bail!(super::run::Abandoned(failure));
+        Err(job.refuse(serde_json::json!(version), class, note))
     }
 
     /// The dump read into sorted runs under `dir` and merged down to at most the fan-in: the
@@ -2079,21 +2058,6 @@ fn position_limit(state: &State) -> Option<u64> {
 fn cursor_of(state: &State) -> Option<Cursor> {
     serde_json::from_value(state.cursor.clone()?).ok()
 }
-/// The dump a run refused and the source it read it from (`refused`, `refused_source` in the
-/// position; `refused_limit` the limit it read with).
-fn position_refused(state: &State) -> (String, String) {
-    let get = |name: &str| {
-        state
-            .position
-            .as_ref()
-            .and_then(|p| p.get(name))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    (get("refused"), get("refused_source"))
-}
-
 impl MusicBrainz {
     /// Why a read can't be applied as it is: no record at all, or none from a file whose kind of
     /// card the catalogue holds (`None`: it can).
@@ -2136,22 +2100,28 @@ async fn holds_kind(pool: &sqlx::PgPool, prefix: &str) -> Result<bool> {
     Ok(first.is_some_and(|id| id.starts_with(prefix)))
 }
 impl MusicBrainz {
-    /// Whether `latest` is the dump a run refused from this source with this limit: not read
-    /// again (another limit reads it once more, as a new subset).
+    /// What a run refused from this source with this limit ([`run::refusal`]): not read again
+    /// (another limit reads it once more, as a new subset).
+    fn refusal<'s>(&self, state: &'s State) -> Option<&'s serde_json::Value> {
+        super::run::refusal(
+            state.position.as_ref(),
+            self.source().as_deref(),
+            self.limit,
+        )
+    }
+    /// Whether `latest` is the dump a run refused from this source with this limit.
     fn refused(&self, state: &State, latest: &str) -> bool {
-        let (version, source) = position_refused(state);
-        let limit = state
-            .position
-            .as_ref()
-            .and_then(|p| p.get("refused_limit"))
-            .and_then(|v| v.as_u64());
-        version == latest && source == self.source_id() && limit == self.limit
+        self.refusal(state).and_then(|v| v.as_str()) == Some(latest)
     }
 }
 #[async_trait]
 impl Importer for MusicBrainz {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Musicbrainz
+    }
+    /// A directory or another mirror (`--from`).
+    fn source(&self) -> Option<String> {
+        (self.source != Source::official()).then(|| self.source_id())
     }
     /// A read's disk ([`DISK_NEED`], or what a `limit` takes), less what the catalogue's
     /// directory already holds (a cut-off run's runs, which it reuses or removes first); a run
@@ -2181,7 +2151,7 @@ impl Importer for MusicBrainz {
     async fn plan(&self, state: &State) -> Result<Plan> {
         let never = state.current_at().is_none();
         // A first import whose dump was refused waits for another, as an update does.
-        if never && position_refused(state).0.is_empty() {
+        if never && self.refusal(state).is_none() {
             return Ok(Plan::Run(Run::Import));
         }
         {
@@ -2222,9 +2192,7 @@ impl Importer for MusicBrainz {
             let latest = self.latest().await?;
             if self.refused(job.state(), &latest) {
                 // Only a run by hand asks for it (the task's plan waits): it reads nothing.
-                bail!(super::run::Abandoned(
-                    Failure::new("refused").at(format!("dump {latest} was refused before"))
-                ));
+                return Err(job.still_refused(format!("dump {latest}")));
             }
             if position_limit(job.state()) != job.limit() {
                 return Ok(UpdateEnd::NeedsImport("the limit changed"));

@@ -402,16 +402,18 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert!(
+        failed.to_string().contains("refused (crates.io file"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "software", Some("crates.io")).await, 66);
     let state = state_of(&pool, Catalogue::Software).await;
     assert_eq!((state.run.as_deref(), state.cursor.as_ref()), (None, None));
     assert_eq!(state.error_count, 1);
     let position = state.position.clone().unwrap();
-    assert_eq!(
-        position["refused_file"]["crates.io"], "\"c2\"",
-        "{position}"
-    );
+    assert_eq!(position["refused"]["crates.io"], "\"c2\"", "{position}");
+    // Read from the test's files, not the registries' own.
+    assert!(position["refused_source"].is_string(), "{position}");
     // The registries' versions are kept: the next update starts from them.
     assert_eq!(position["crates.io"]["version"], "\"c1\"", "{position}");
     // The task's next step: an update that reads nothing, finishes and fails nothing.
@@ -422,7 +424,7 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     assert_eq!(state.error_count, 1);
     assert!(state.last_update_at.is_some());
     assert_eq!(
-        state.position.as_ref().unwrap()["refused_file"]["crates.io"],
+        state.position.as_ref().unwrap()["refused"]["crates.io"],
         "\"c2\""
     );
     // And the next day's too.
@@ -438,12 +440,7 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     assert_eq!(count(&pool, "software", Some("crates.io")).await, 61);
     let state = state_of(&pool, Catalogue::Software).await;
     assert_eq!(state.run, None);
-    assert!(state
-        .position
-        .as_ref()
-        .unwrap()
-        .get("refused_file")
-        .is_none());
+    assert!(state.position.as_ref().unwrap().get("refused").is_none());
     // F-Droid and Flathub were left as they were.
     assert_eq!(count(&pool, "software", Some("f-droid")).await, 3);
     // Refused again (15 of 61 crates gone); then a full import asked for while the refusal
@@ -455,7 +452,7 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
         .await
         .position
         .unwrap()
-        .get("refused_file")
+        .get("refused")
         .is_some());
     run::request_import(
         &pool,
@@ -468,16 +465,12 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     assert_eq!(count(&pool, "software", Some("crates.io")).await, 46);
     let state = state_of(&pool, Catalogue::Software).await;
     assert!(state.import_requested.is_none());
-    assert!(state
-        .position
-        .as_ref()
-        .unwrap()
-        .get("refused_file")
-        .is_none());
+    assert!(state.position.as_ref().unwrap().get("refused").is_none());
     assert_eq!(state.run, None);
 }
 
-/// A full import of a registry whose file holds no card fails and removes nothing.
+/// A full import of a registry whose file holds no card is refused (`empty`) and removes
+/// nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_software_import_that_reads_no_card_fails(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -499,8 +492,15 @@ async fn a_software_import_that_reads_no_card_fails(pool: PgPool) {
     let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("parse"), "{failed}");
+    assert!(
+        failed.to_string().contains("empty (flathub file"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
+    // Refused: the file is named in the position, with the others' versions.
+    let position = state_of(&pool, Catalogue::Software).await.position.unwrap();
+    assert_eq!(position["refused"]["flathub"], "\"f2\"", "{position}");
+    assert!(position.get("crates.io").is_some(), "{position}");
 }
 
 // --- Podcast Index -------------------------------------------------------------------------------
@@ -626,8 +626,9 @@ fn edited_db(dir: &std::path::Path, name: &str, sql: &str) -> Vec<u8> {
 
 /// A Podcast Index update that would remove every feed is refused once: nothing is removed, the
 /// unpacked database is deleted, and the task's next update does not download that archive
-/// again; a full import asked for then runs, and fails (`parse`) on a database with no live feed,
-/// removing nothing; a newer archive is then imported.
+/// again (it ends at once, recording nothing); a full import asked for then reads it, and is
+/// refused (`empty`) on a database with no live feed, removing nothing; a newer archive is then
+/// read by the next update.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -652,7 +653,10 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert!(
+        failed.to_string().contains("refused (database \"p2\""),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
     let work = ctx.config.catalogues.work_dir(Catalogue::Podcastindex);
     assert!(
@@ -661,18 +665,24 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     );
     let state = state_of(&pool, Catalogue::Podcastindex).await;
     assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
-    assert_eq!(state.position.as_ref().unwrap()["refused_file"], "\"p2\"");
+    let position = state.position.clone().unwrap();
+    assert_eq!(position["refused"], "\"p2\"");
+    assert_eq!(
+        position["refused_source"],
+        format!("{base}/podcastindex_feeds.db.tgz")
+    );
     let table = store::status_table(&ctx.config.catalogues, std::slice::from_ref(&state));
-    assert!(table.contains("file \"p2\" refused"), "{table}");
+    assert!(table.contains("refused: \"p2\""), "{table}");
     // The task's next update: no download, no failure.
     let gets = files.gets("/podcastindex_feeds.db.tgz");
-    run::step(&*importer, &ctx).await.unwrap();
+    let again = run::step(&*importer, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
     assert_eq!(files.gets("/podcastindex_feeds.db.tgz"), gets);
     assert_eq!(
         state_of(&pool, Catalogue::Podcastindex).await.error_count,
         1
     );
-    // A full import asked for: it runs, finds no live feed and fails, removing nothing.
+    // A full import asked for: it runs, finds no live feed and is refused, removing nothing.
     run::request_import(
         &pool,
         Catalogue::Podcastindex,
@@ -682,12 +692,16 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     .unwrap();
     let failed = run::step(&*importer, &ctx).await.unwrap_err();
     assert!(
-        pinakes_core::catalogue::failure::shown(&failed).contains("parse"),
+        pinakes_core::catalogue::failure::shown(&failed).starts_with("empty"),
         "{failed}"
     );
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
     assert_eq!(files.gets("/podcastindex_feeds.db.tgz"), gets + 1);
-    // A newer archive, one feed gone: the import under way takes it.
+    assert!(state_of(&pool, Catalogue::Podcastindex)
+        .await
+        .import_requested
+        .is_none());
+    // A newer archive, one feed gone: the next update takes it.
     let fewer = edited_db(dir.path(), "fewer.db", "DELETE FROM podcasts WHERE id=4");
     files.put("/podcastindex_feeds.db.tgz", podcast_archive(&fewer), "p3");
     run::step(&*importer, &ctx).await.unwrap();
@@ -886,8 +900,8 @@ async fn openalex_imports_the_newest_copy_and_updates_by_date(pool: PgPool) {
 }
 
 /// An OpenAlex update whose newer files would remove more than a tenth of the cards is refused:
-/// nothing is removed and its failure counted once; the task's next update finishes without
-/// reading that snapshot; a full import asked for (`--request`) applies it.
+/// nothing is removed and its failure counted once; the task's next update ends at once without
+/// reading that snapshot, recording nothing; a full import asked for (`--request`) applies it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -921,21 +935,26 @@ async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) 
     let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert!(
+        failed
+            .to_string()
+            .contains("refused (snapshot 2026-11-14: 15 cards gone"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "openalex", None).await, 40);
     let state = state_of(&pool, Catalogue::Openalex).await;
     assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
     let position = state.position.unwrap();
-    assert_eq!(position["refused_file"], "2026-11-14");
+    assert_eq!(position["refused"], "2026-11-14");
     assert_eq!(position["snapshot"], "2026-10-14");
     // The task's next update reads nothing (the newer file is gone from disk: reading it would
     // fail) and fails nothing.
     let newer = snap.path().join("data/jsonl/works/updated_date=2026-11-01");
     std::fs::rename(&newer, snap.path().join("aside")).unwrap();
-    run::step(&*importer, &ctx).await.unwrap();
+    let again = run::step(&*importer, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
     let state = state_of(&pool, Catalogue::Openalex).await;
-    assert_eq!(state.error_count, 1);
-    assert!(state.last_update_at.is_some());
+    assert_eq!((state.error_count, state.run), (1, None));
     std::fs::rename(snap.path().join("aside"), &newer).unwrap();
     // A full import asked for: the task runs it and takes the snapshot as it is.
     run::request_import(
@@ -949,12 +968,12 @@ async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) 
     assert_eq!(count(&pool, "openalex", None).await, 25);
     let state = state_of(&pool, Catalogue::Openalex).await;
     assert!(state.import_requested.is_none());
-    assert!(state.position.unwrap().get("refused_file").is_none());
+    assert!(state.position.unwrap().get("refused").is_none());
 }
 
 /// A new snapshot 180 days after the last full import is read by a full import, which removes
 /// the works the snapshot no longer lists (merged or deleted upstream); before that, an update
-/// keeps them. A full import whose manifest lists no works file fails and removes nothing.
+/// keeps them. A full import whose manifest lists no works file is refused and removes nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn openalex_imports_in_full_again_after_180_days(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -1003,12 +1022,17 @@ async fn openalex_imports_in_full_again_after_180_days(pool: PgPool) {
     assert_eq!(count(&pool, "openalex", None).await, 5);
     assert!(versions(&pool, "openalex").await.contains_key("W1"));
     assert!(state.last_import_at.unwrap() > chrono::Utc::now() - chrono::Duration::minutes(5));
-    // An empty manifest: the import fails, every card stays.
+    // An empty manifest: the import is refused (`empty`), every card stays.
     snapshot(snap.path(), "2026-12-15", &[]);
     let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("manifest"), "{failed}");
+    assert!(
+        failed
+            .to_string()
+            .contains("empty (no record read in 2026-12-15)"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "openalex", None).await, 5);
 }
 

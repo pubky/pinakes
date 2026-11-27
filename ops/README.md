@@ -74,7 +74,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Catalogue join checks (`joins`, `catalogue_join_due`), extras reads (`extras`, `catalogue_extras`) and Tranco homepage reads (`homepages`, `catalogue_site`) due now, and how long the oldest has been due. Alert `CatalogueJoinsBehind` past six hours of joins; extras follow Wikipedia's pace and lag after a first import by design; homepages wait for the large catalogues' first imports and take about two days for a first pass, so the `homepages` age grows by design during a first pass; a stall is no page read while sites are due (alert `CatalogueHomepageReadsStalled`). The `homepages` count stops at 100,000 (a bounded count per scrape) |
 | `pinakes_catalogue_enabled{catalogue}` | Whether the catalogue is on (1) or off (0) in the configuration the daemon started with |
 | `pinakes_catalogue_catching_up{catalogue}` | Whether the catalogue's updates catch up after a full import whose data was already behind (1) or not (0): `import: true` in its state row's position (Wikidata after a dump import, until it is less than an hour behind). `CatalogueUpdateLag` holds back meanwhile, up to five days past the allowed lag |
-| `pinakes_catalogue_refused{catalogue}` | Whether the catalogue's importer refused the newest dump it read and waits for another (1) or not (0): `refused` in its state row's position, newer than the dump applied (or before any), until a dump is applied (MusicBrainz), or `refused_file` in the position (an update that would remove more than a tenth of its cards: OpenAlex, Podcast Index, software) until a newer file is read or a full import finishes; a refused trial of an older dump by hand is not counted. Alert `CatalogueDumpRefused` after an hour |
+| `pinakes_catalogue_refused{catalogue}` | Whether the catalogue's importer refused what it read (a dump, a file, a change file, an update's window) and waits for something newer (1) or not (0): `refused` in its state row's position, read from the catalogue's own files (`refused_source` null) with the configured `limit` (`refused_limit`), until a newer version is applied, a full import reads it again or `pinakesd catalogue clear-refusal` clears it; a refused trial by hand from another source (`--from`) or with another `--limit` is not counted. Alert `CatalogueDumpRefused` after an hour |
 | `pinakes_catalogue_items_skipped_total{catalogue,reason}` | Items or labels an importer left out of the catalogue (each also in the log; Wikidata, each series at 0 from the start): `over_cap` (a changed item whose answer alone is over the API cap: its card stays as it was until it changes again), `bad_line` and `oversized_line` (dump lines that are no entity or over 32 MB), `label_dropped` and `pending_dropped` (past the import's label caps). Alert `CatalogueItemsSkipped` on `over_cap`: see the runbook "A Wikidata import that keeps failing" |
 | `pinakes_catalogue_needs_contact{catalogue}` | Whether the catalogue is on but its importer does not start for want of `http.contact` (1) or not (0): MusicBrainz, OpenStreetMap, Wikidata, OpenAlex, Podcast Index, software and Tranco |
 | `pinakes_catalogue_last_import_timestamp_seconds{catalogue}` | When its last full import finished; 0 before the first |
@@ -140,16 +140,18 @@ alert shows only at the next refusal.
 
 `CatalogueImportFailed` (warning) fires for an hour after a catalogue's import or update run
 failed: `pinakesd catalogue status` shows the error, and the run is tried again from its cursor
-every ten minutes, so a failure that persists keeps it firing. A dump an importer refuses (its
-checksums, its shape, or what it would remove) fires it once: that run is abandoned and the dump
-is not read again until another appears; `catalogue status` keeps the phase `failed` and the
+every ten minutes, so a failure that persists keeps it firing. A dump or file an importer refuses
+(its checksums, its shape, an empty read, or what it would remove) fires it once: that run is
+abandoned and what it read is not read again until a newer version appears
+([a refused dump or file](../docs/operations.md#a-refused-dump-or-file)); `catalogue status` keeps the phase `failed` and the
 reason, and `CatalogueUpdateLag` follows if no good dump comes in time
 ([MusicBrainz](../docs/sources/musicbrainz_catalogue.md#a-dump-that-is-refused)). `CatalogueUpdateLag` (warning)
 fires when a catalogue's cards are further behind upstream than its source's publication rhythm
 allows (`pinakes_catalogue_max_update_lag_seconds`). Both read only catalogues that are on; a
 catalogue that is off raises neither. `CatalogueImportFailed` also fires for a first import that
 fails or is refused; `CatalogueUpdateLag` waits for a first finished import. `CatalogueDumpRefused`
-(warning) fires once a refusal has stood for an hour and holds until a dump is applied, so a
+(warning) fires once a refusal has stood for an hour and holds until a newer version is applied
+or the refusal is cleared, so a
 refused first import, which no lag alert covers, keeps alerting. A catalogue that is on
 but whose importer can't start (one with an importer but no `http.contact`) raises
 neither: its `waiting` in `catalogue status` and `pinakes_catalogue_needs_contact` say so, and

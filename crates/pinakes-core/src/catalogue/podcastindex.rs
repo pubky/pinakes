@@ -11,10 +11,11 @@
 //! fetched for its episodes, and every link of the podcast joins the card's group (`join`).
 //!
 //! The database is new each week: an update checks the archive's version, and when it is new,
-//! reads it whole and writes only the changed cards ([`diff::Sink`]). An update refused for
-//! what it would remove deletes the unpacked database and waits for the next week's
-//! ([`diff::refusal`]); a full import that reads no live feed fails (`parse`) and removes
-//! nothing.
+//! reads it whole and writes only the changed cards ([`diff::Sink`]). A database that can't be
+//! read as it is (a broken archive, no Podcast Index table), an update that would remove more
+//! than a tenth of the cards, and a full import that reads no live feed (the runner's `empty`)
+//! are refused ([`Job::refuse`]): the unpacked database is deleted, nothing is removed for it,
+//! and that version is not downloaded again; the importer waits for the next week's.
 use super::{
     bulk,
     diff::{self, Sink},
@@ -163,10 +164,18 @@ impl PodcastIndex {
             .and_then(|c| c.get("after"))
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        // A database refused before is not downloaded again (a full import asked for reads it).
+        job.reading(json!(version));
+        if job.refused_before(&json!(version)) {
+            return Err(job.still_refused(format!("database {version}")));
+        }
         // The download's and the read's threads stop when this run is over, however it ends.
         let stop = Stop::default();
         let _stop = StopOnDrop(stop.clone());
-        let db = self.database(job.dir(), &version, &stop).await?;
+        let db = match self.database(job.dir(), &version, &stop).await {
+            Ok(db) => db,
+            Err(error) => return Err(self.broken(job, &version, error).await),
+        };
         let mut sink = Sink::new(job, None);
         // An update reads the whole file again (its removals are the cards it did not read);
         // a full import resumes after the last feed it wrote.
@@ -180,10 +189,11 @@ impl PodcastIndex {
         let reading = stop.clone();
         let mut parts =
             fetch::batches(move |sink| read(&path, after, &at_text, &reading, FEEDS_CAP, sink));
-        let mut cards = 0u64;
         while let Some(part) = parts.recv().await {
-            let part = part?;
-            cards += part.len() as u64;
+            let part = match part {
+                Ok(part) => part,
+                Err(error) => return Err(self.broken(job, &version, error).await),
+            };
             let last = part
                 .last()
                 .and_then(|c| c.source_id.parse::<i64>().ok())
@@ -191,19 +201,13 @@ impl PodcastIndex {
             sink.write(job, part, json!({"version": version, "after": last}))
                 .await?;
         }
-        // A full import that read no live feed (an empty or emptied database) would remove every
-        // card when it finishes: it fails instead.
-        if job.run() == Run::Import && after == 0 && cards == 0 {
-            self.cleanup(job.dir()).await;
-            anyhow::bail!(Failure::new("parse").at(self.input.at()));
-        }
         let finished = sink
             .finish(job, json!({"version": version, "phase": "removing"}))
             .await?;
         self.cleanup(job.dir()).await;
         if finished == diff::Finished::Refused {
-            job.set_position(diff::refusing(job.position(), json!(version)));
-            return Err(diff::refusal());
+            let note = format!("database {version} would remove more than a tenth of the cards");
+            return Err(job.refuse(json!(version), "refused", note));
         }
         job.upstream_version(
             &at.map_or_else(|| version.clone(), |a| a.format("%Y-%m-%d").to_string()),
@@ -214,6 +218,29 @@ impl PodcastIndex {
             job.set_current_as_of(at);
         }
         Ok(())
+    }
+    /// The end of a run whose database can't be read as it is (a broken archive, one over a cap,
+    /// a database that is no Podcast Index database: `archive`, `size`, `database`, `schema`):
+    /// its file is removed and the version refused ([`Job::refuse`]), so it is not downloaded
+    /// again. Any other failure (a download that broke off, the disk) is the run's own, tried
+    /// again.
+    async fn broken(
+        &self,
+        job: &mut Job<'_>,
+        version: &str,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let class = error
+            .downcast_ref::<Failure>()
+            .or_else(|| error.chain().find_map(|c| c.downcast_ref::<Failure>()))
+            .map(|f| f.class);
+        match class {
+            Some(class @ ("archive" | "size" | "database" | "schema")) => {
+                self.cleanup(job.dir()).await;
+                job.refuse(json!(version), class, format!("database {version}"))
+            }
+            _ => error,
+        }
     }
     /// The unpacked database and its marker, once a run has read it.
     async fn cleanup(&self, dir: &Path) {
@@ -229,6 +256,9 @@ impl PodcastIndex {
 impl Importer for PodcastIndex {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Podcastindex
+    }
+    fn source(&self) -> Option<String> {
+        diff::source_of(&self.input, DATABASE)
     }
     /// [`DISK_NEED`], less what an unpacked database a cut-off run kept already holds; for a local
     /// database (`--from FILE.db`, a sample), 1 GB for the cards.
@@ -248,7 +278,8 @@ impl Importer for PodcastIndex {
         self.run(job, version, at).await
     }
     /// An update; a full import instead when one was asked for (`--request`). The version read
-    /// last, or one refused, is not read again: the update finishes without a change.
+    /// last is not read again: the update finishes without a change; one refused ends it at once
+    /// ([`Job::still_refused`]).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
             return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
@@ -260,10 +291,6 @@ impl Importer for PodcastIndex {
             .and_then(Value::as_str)
             == Some(version.as_str())
         {
-            return Ok(UpdateEnd::Done);
-        }
-        if diff::refused(job, &version) {
-            tracing::info!(catalogue = "podcastindex", "the database's update was refused before: it waits for the next one, or a full import (--request)");
             return Ok(UpdateEnd::Done);
         }
         self.run(job, version, at).await?;

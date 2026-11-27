@@ -774,7 +774,7 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     assert!(
         failed
             .to_string()
-            .contains("removals (3 of 4 artist cards gone in dump"),
+            .contains("refused (3 of 4 artist cards gone in dump"),
         "{failed}"
     );
     let state = store::state(&pool, Catalogue::Musicbrainz)
@@ -789,14 +789,15 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     assert!(state
         .last_error
         .unwrap()
-        .starts_with("removals (3 of 4 artist cards gone in dump"));
+        .starts_with("refused (3 of 4 artist cards gone in dump"));
     let position = state.position.unwrap();
     assert_eq!(
         (position["refused"].as_str(), position["version"].as_str()),
         (Some(B), Some(A))
     );
     assert_eq!(rows(&pool).await, before);
-    // Again by hand, its files gone: nothing is read; the run fails as refused before.
+    // Again by hand, its files gone: nothing is read; the run ends as refused before, recording
+    // nothing.
     for e in ENTITIES {
         std::fs::remove_file(b.join(format!("{e}.tar.xz"))).unwrap();
     }
@@ -811,7 +812,7 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((state.error_count, state.run.as_deref()), (2, None));
+    assert_eq!((state.error_count, state.run.as_deref()), (1, None));
     assert_eq!(
         state.position.as_ref().unwrap()["refused"].as_str(),
         Some(B)
@@ -911,7 +912,7 @@ async fn a_kind_losing_more_than_a_tenth_is_refused(pool: PgPool) {
     assert!(
         failed
             .to_string()
-            .contains(&format!("removals (1 of 4 artist cards gone in dump {B}")),
+            .contains(&format!("refused (1 of 4 artist cards gone in dump {B}")),
         "{failed}"
     );
     assert_eq!(rows(&pool).await, before);
@@ -938,22 +939,24 @@ async fn a_dump_whose_cards_are_refused_removes_nothing(pool: PgPool) {
     assert!(
         failed
             .to_string()
-            .contains("removals (4 of 4 artist cards gone or refused"),
+            .contains("refused (4 of 4 artist cards gone or refused"),
         "{failed}"
     );
     assert_eq!(rows(&pool).await, before);
-    // A full import of its own (here one cut off at its start in generation 2) would remove the
-    // refused cards: refused, nothing removed.
+    // A full import of its own (here one cut off at its start in generation 2, taken up by the
+    // task) would remove the refused cards: refused, nothing removed.
     sqlx::query("UPDATE catalogue_state SET run='import',phase='import',generation=2,cursor=$1 WHERE catalogue='musicbrainz'")
         .bind(json!({"version": B, "phase": "write", "after": null, "removed": 0, "as_of": null, "source": source_id(&Source::Dir(b.clone())), "forced": false}))
         .execute(&pool)
         .await
         .unwrap();
-    let failed = run(&s, &b, Run::Import).await.unwrap_err();
+    let failed = run::step(&importer(&s, Source::Dir(b.clone())), &s.ctx)
+        .await
+        .unwrap_err();
     assert!(
         failed
             .to_string()
-            .contains("removals (4 of 4 artist cards not in dump"),
+            .contains("refused (4 of 4 artist cards not in dump"),
         "{failed}"
     );
     let names = |rows: Vec<Row>| -> Vec<(String, String)> {
@@ -1231,7 +1234,7 @@ async fn a_by_hand_import_that_fails_leaves_no_request(pool: PgPool) {
     let failed = run::step(&importer(&s, Source::Dir(shrunk)), &s.ctx)
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert!(failed.to_string().contains("refused ("), "{failed}");
     assert_eq!(rows(&pool).await, before);
     // One that fails leaves none either.
     std::fs::write(broken.join("artist.tar.xz"), b"not xz").unwrap();
@@ -1493,7 +1496,7 @@ async fn a_resumed_update_checks_its_removals_again_first(pool: PgPool) {
     assert!(
         failed
             .to_string()
-            .contains(&format!("removals (3 of 4 artist cards gone in dump {B}")),
+            .contains(&format!("refused (3 of 4 artist cards gone in dump {B}")),
         "{failed}"
     );
     assert_eq!(
@@ -2008,7 +2011,9 @@ async fn a_read_cut_off_keeps_the_files_it_finished(pool: PgPool) {
     );
 }
 
-/// A run cut off whose dump the mirror no longer has starts over on the newest one.
+/// A run cut off whose dump the mirror no longer has starts over on the newest one, in a
+/// generation of its own: a card the cut-off attempt wrote from the gone dump, which the newest
+/// does not hold, is removed at its end.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_whose_dump_is_gone_starts_over_on_the_newest(pool: PgPool) {
     let s = setup(&pool, None);
@@ -2016,6 +2021,18 @@ async fn a_run_whose_dump_is_gone_starts_over_on_the_newest(pool: PgPool) {
     store::ensure_state(&pool, Catalogue::Musicbrainz)
         .await
         .unwrap();
+    // What the cut-off attempt wrote of dump A (generation 1): an artist dump B does not hold.
+    let only_in_a = pinakes_core::catalogue::Card {
+        source_id: "artist/00000000-0000-4000-8000-00000000000a".into(),
+        uri: "https://musicbrainz.org/artist/00000000-0000-4000-8000-00000000000a".into(),
+        r#type: "MusicGroup".into(),
+        name: "Only in A".into(),
+        ..Default::default()
+    };
+    let written = store::upsert(&pool, Catalogue::Musicbrainz, 1, &[only_in_a], None)
+        .await
+        .unwrap();
+    assert_eq!(written.inserted, 1);
     sqlx::query("UPDATE catalogue_state SET run='import',phase='import',generation=1,cursor=$1 WHERE catalogue='musicbrainz'")
         .bind(json!({"version": A, "phase": "write", "after": null, "removed": 0, "as_of": null}))
         .execute(&pool)
@@ -2033,8 +2050,13 @@ async fn a_run_whose_dump_is_gone_starts_over_on_the_newest(pool: PgPool) {
     let state = run_with(&s, importer(&s, source), Run::Import)
         .await
         .unwrap();
+    assert_eq!(state.generation, 2);
     assert_eq!(state.cards, CARDS as i64);
     assert_eq!(state.position.unwrap()["version"], B);
+    assert!(!rows(&pool)
+        .await
+        .iter()
+        .any(|r| r.source_id == "artist/00000000-0000-4000-8000-00000000000a"));
 }
 fn source_id(source: &Source) -> String {
     match source {

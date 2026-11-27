@@ -630,6 +630,19 @@ async fn catalogue_command(
                 "the next full import of catalogue {catalogue} removes the cards it does not read, whatever their share; a run that failed as shrunk goes through at its next try"
             )?;
         }
+        CatalogueCommand::ClearRefusal(catalogue) => {
+            let Some(refused) = store::clear_refusal(pool, catalogue).await? else {
+                bail!("catalogue {catalogue} has refused nothing: there is no refusal to clear");
+            };
+            let refused = match refused {
+                serde_json::Value::String(version) => version,
+                other => other.to_string(),
+            };
+            writeln!(
+                out,
+                "catalogue {catalogue}: the refusal of {refused} is cleared; its importer reads it again at its next run (refused again if it still can't be applied)"
+            )?;
+        }
         CatalogueCommand::Drop(catalogue) => {
             let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
                 bail!("an importer of catalogue {catalogue} is running (a pinakesd started with it enabled): switch it off and restart that daemon, then drop");
@@ -1149,6 +1162,8 @@ enum CatalogueCommand {
     },
     /// `catalogue allow-shrink NAME`: the next full import may remove what it did not read.
     AllowShrink(Catalogue),
+    /// `catalogue clear-refusal NAME`: the importer reads what it refused again.
+    ClearRefusal(Catalogue),
 }
 /// How long the joins task waits before its next drain after one that checked `drained` rows:
 /// none after a full batch; a second while a catalogue is joined; ten minutes with none to join
@@ -1232,7 +1247,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 let what = args.next().unwrap_or_default();
                 catalogue = Some(match what.as_str() {
                     "status" => CatalogueCommand::Status,
-                    "drop" | "allow-shrink" => {
+                    "drop" | "allow-shrink" | "clear-refusal" => {
                         let name = args
                             .next()
                             .with_context(|| format!("catalogue {what} requires a catalogue name"))?;
@@ -1242,10 +1257,10 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                                 Catalogue::ALL.map(Catalogue::name).join(", ")
                             )
                         })?;
-                        if what == "drop" {
-                            CatalogueCommand::Drop(catalogue)
-                        } else {
-                            CatalogueCommand::AllowShrink(catalogue)
+                        match what.as_str() {
+                            "drop" => CatalogueCommand::Drop(catalogue),
+                            "allow-shrink" => CatalogueCommand::AllowShrink(catalogue),
+                            _ => CatalogueCommand::ClearRefusal(catalogue),
                         }
                     }
                     "import" => {
@@ -1346,7 +1361,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             since,
                         }
                     }
-                    _ => bail!("catalogue takes status, drop NAME, import NAME or allow-shrink NAME"),
+                    _ => bail!("catalogue takes status, drop NAME, import NAME, allow-shrink NAME or clear-refusal NAME"),
                 });
             }
             "--config" => {
@@ -1372,7 +1387,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue import NAME [--from FILE|DIR|URL]… [--limit N] [--update [--since TIME]] [--force] | catalogue import NAME --request | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue clear-refusal NAME | catalogue import NAME [--from FILE|DIR|URL]… [--limit N] [--update [--since TIME]] [--force] | catalogue import NAME --request | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -1543,6 +1558,11 @@ mod tests {
         assert!(matches!(
             command,
             Command::Catalogue(CatalogueCommand::AllowShrink(Catalogue::Musicbrainz))
+        ));
+        let (_, command) = parse(&["catalogue", "clear-refusal", "podcastindex"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::ClearRefusal(Catalogue::Podcastindex))
         ));
         let (_, command) = parse(&[
             "catalogue",

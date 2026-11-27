@@ -1251,7 +1251,7 @@ async fn a_dump_that_fails_its_checksum_is_downloaded_again(pool: PgPool) {
     assert!(state.cards > 20);
 }
 
-/// A dump that holds no entity is no import: it fails, and no card is removed. One that holds far
+/// A dump that holds no entity is no import: it is refused (`empty`), and no card is removed. One that holds far
 /// fewer cards than the catalogue meets the catalogue's shrink floor: it removes nothing until the
 /// operator allows it.
 #[sqlx::test(migrations = "../../migrations")]
@@ -1271,7 +1271,12 @@ async fn an_empty_dump_removes_nothing(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(state.last_error.as_deref(), Some("empty_dump"));
+    assert!(
+        state.last_error.as_deref().unwrap().starts_with("empty"),
+        "{:?}",
+        state.last_error
+    );
+    assert!(state.position.unwrap()["refused"].is_string());
     assert_eq!(rows(&pool).await.len(), held);
     // A whole dump with one item, where the catalogue holds dozens, is not taken either.
     let packed = fixture();
@@ -1566,32 +1571,50 @@ async fn a_broken_stream_is_taken_up_where_it_broke(pool: PgPool) {
     assert_eq!(ids, kept_ids());
 }
 
-/// A dump that fails three times is not read a fourth: the import fails with `dump_rejected`
-/// without asking for the file, until a newer dump is out.
+/// A dump that fails three times is refused at the third: the run is cleared (the large-import
+/// turn is free) and the position names the dump; the task's next import does not ask for the
+/// file and records nothing, until a newer dump is out.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_dump_that_keeps_failing_is_rejected(pool: PgPool) {
     let m = mock();
     *m.sha1.lock().unwrap() = Some("0".repeat(40));
     let base = serve(m.clone()).await;
     let (ctx, _dir) = context(&pool, None);
-    for count in 1..=3 {
-        assert!(import(&pool, &ctx, &base).await.is_err());
-        let state = store::state(&pool, Catalogue::Wikidata)
+    let state = || async {
+        store::state(&pool, Catalogue::Wikidata)
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(state.cursor.as_ref().unwrap()["restart"]["count"], count);
+            .unwrap()
+    };
+    for count in 1..=2 {
+        assert!(import(&pool, &ctx, &base).await.is_err());
+        assert_eq!(
+            state().await.cursor.as_ref().unwrap()["restart"]["count"],
+            count
+        );
     }
-    m.ranges.lock().unwrap().clear();
-    assert!(import(&pool, &ctx, &base).await.is_err());
-    let state = store::state(&pool, Catalogue::Wikidata)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        state.last_error.as_deref(),
-        Some("dump_rejected (127.0.0.1)")
+    let failed = import(&pool, &ctx, &base).await.unwrap_err();
+    assert!(
+        failed.to_string().contains("failed 3 times (checksum)"),
+        "{failed}"
     );
+    let refused = state().await;
+    assert_eq!(
+        (refused.run.as_deref(), refused.cursor.as_ref()),
+        (None, None)
+    );
+    assert_eq!(refused.error_count, 3);
+    let position = refused.position.unwrap();
+    assert!(position["refused"].is_string(), "{position}");
+    m.ranges.lock().unwrap().clear();
+    let mut w = Wikidata::for_config(&ctx.config);
+    let base_importer = importer(&base);
+    w.endpoints = base_importer.endpoints.clone();
+    w.threads = base_importer.threads;
+    w.http = true;
+    let again = run::step(&w, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    assert_eq!(state().await.error_count, 3);
     assert!(m.ranges.lock().unwrap().is_empty());
 }
 
@@ -1954,10 +1977,7 @@ async fn redirects_and_oversized_dumps_are_refused(pool: PgPool) {
     m.index_redirects.store(false, Ordering::SeqCst);
     *m.head_size.lock().unwrap() = Some(600_000_000_000);
     assert!(import(&pool, &ctx, &base).await.is_err());
-    assert_eq!(
-        last_error(&pool).await.as_deref(),
-        Some("oversized (127.0.0.1)")
-    );
+    assert_eq!(last_error(&pool).await.as_deref(), Some("size (127.0.0.1)"));
     assert!(m.ranges.lock().unwrap().is_empty());
 }
 
@@ -2232,7 +2252,7 @@ async fn a_stream_taken_up_again_is_checked(pool: PgPool) {
 }
 
 /// A page answered in chunks without a `Content-Length` is read only up to its cap (4 MB): past
-/// it the run fails (`oversized`); under it the page is read as any other.
+/// it the run fails (`size`); under it the page is read as any other.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_page_without_its_length_is_read_only_up_to_the_cap(pool: PgPool) {
     let m = mock();
@@ -2240,10 +2260,7 @@ async fn a_page_without_its_length_is_read_only_up_to_the_cap(pool: PgPool) {
     let base = serve(m.clone()).await;
     let (ctx, _dir) = context(&pool, Some(3));
     assert!(import(&pool, &ctx, &base).await.is_err());
-    assert_eq!(
-        last_error(&pool).await.as_deref(),
-        Some("oversized (127.0.0.1)")
-    );
+    assert_eq!(last_error(&pool).await.as_deref(), Some("size (127.0.0.1)"));
     m.index_padding.store(1 << 20, Ordering::SeqCst);
     let Once::Finished(state) = import(&pool, &ctx, &base).await.unwrap() else {
         panic!()

@@ -89,8 +89,12 @@ OpenStreetMap's buckets (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amaz
   run kept, until `pinakesd catalogue allow-shrink osm` lets the next try through. The file and
   the node index are removed first: the run's end needs neither, so a run waiting there holds no
   disk.
-- A file that holds no place is refused (`empty_file`): it would empty the catalogue. The next
-  attempt starts over on another file (a new download, or another `--from` file).
+- A file that holds no place is refused (`empty`): it would empty the catalogue, and a first
+  import never finishes on nothing. The file is not downloaded again while its version (its
+  `HEAD` answer's ETag or Last-Modified; a `--from` file's size and time) is the same: each try,
+  an hour apart, asks only for it ([a refused dump or file](../operations.md#a-refused-dump-or-file)).
+  A new file, another `--from` file, a full import asked for or `catalogue clear-refusal osm` reads
+  again.
 - A change file must end with its `</osmChange>`: one cut off between two actions is refused
   (`parse`), so an update never moves past changes it did not read.
 - The file and the index are removed once the import has finished.
@@ -111,7 +115,7 @@ start at the last change file published before the file's time.
 An update reads the change files after that sequence, at most 30 a run. Each file is read to
 `catalogues.dir/osm` first (at most 4 GB, with room for twice its length), and an object it holds
 several edits of is read at its last one (a delete wins a tie). A file whose changes would hold
-more than 1 GiB in memory is refused (`too_large`). The update:
+more than 1 GiB in memory is refused (`size`). The update:
 
 - writes the cards of created and modified objects the filter keeps, and removes deleted ones and
   those that no longer pass the filter. A way's geometry comes from the nodes the file holds; when
