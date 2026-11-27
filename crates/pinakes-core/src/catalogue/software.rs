@@ -423,10 +423,11 @@ impl Importer for Software {
             .collect();
         (!given.is_empty()).then(|| given.join(" "))
     }
-    /// None: everything is read as a stream, and nothing is written under `catalogues.dir` (the
-    /// cards' 0.4 GB of the database are sized apart).
+    /// F-Droid's index at its largest ([`FDROID_INDEX_MAX`]): it is written under `catalogues.dir`
+    /// while it is hashed; the other files are read as streams (the cards' 0.4 GB of the database
+    /// are sized apart).
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
-        0
+        FDROID_INDEX_MAX
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         self.run(job).await

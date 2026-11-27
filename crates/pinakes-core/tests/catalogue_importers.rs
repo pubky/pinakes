@@ -2273,10 +2273,10 @@ async fn tranco_plans_from_its_stored_position(pool: PgPool) {
     assert!(minutes(plan) > 59.0, "{plan:?}");
 }
 
-/// The free-disk check counts the files a run writes under `catalogues.dir` only: OpenAlex,
-/// software and Tranco write none there (they read streams; their cards' share of the database is
-/// sized apart); Podcast Index needs room for its unpacked database alone, less what a kept one
-/// holds, and a local `.db` none.
+/// The free-disk check counts the files a run writes under `catalogues.dir` only: OpenAlex and
+/// Tranco write none there (they read streams; their cards' share of the database is sized
+/// apart), software only F-Droid's index while it is hashed (at most 512 MiB); Podcast Index needs
+/// room for its unpacked database alone, less what a kept one holds, and a local `.db` none.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_file_catalogues_ask_disk_for_their_own_files_only(pool: PgPool) {
     use pinakes_core::catalogue::run::Importer;
@@ -2294,7 +2294,8 @@ async fn the_file_catalogues_ask_disk_for_their_own_files_only(pool: PgPool) {
     let tranco = tranco_over(&list, &Sites::default(), &[]);
     for run in [Run::Import, Run::Update] {
         assert_eq!(openalex.disk_need(run, &state), 0);
-        assert_eq!(software.disk_need(run, &state), 0);
+        // F-Droid's index, at most 512 MiB, is written while it is hashed.
+        assert_eq!(software.disk_need(run, &state), 512 << 20);
         assert_eq!(tranco.disk_need(run, &state), 0);
     }
     let podcasts = podcastindex::PodcastIndex::new(url(podcastindex::DATABASE), "test@example.org")
