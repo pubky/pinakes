@@ -605,6 +605,8 @@ pub const SUBSCRIPTION_WORDS: &[&str] = &[
     "members",
     "subscriber",
     "subscribers",
+    "subscription",
+    "subscriptions",
     "supporter",
     "supporters",
     "patron",
@@ -629,21 +631,30 @@ fn url_words(url: &url::Url) -> Vec<String> {
 }
 /// Whether a path segment holds an opaque token: a run of letters and digits (no `-`, `_` or
 /// `.` between them) of at least 32 characters with both a letter and a digit, or of at least 20
-/// with a lower-case letter, an upper-case letter and a digit. Public hosts name shows by such
-/// IDs too (Castbox, Fountain): a token makes a feed private only beside a
-/// [`SUBSCRIPTION_WORDS`] word.
+/// with a lower-case letter, an upper-case letter and a digit; or a run of hex digits and dashes
+/// (a UUID) with at least 32 hex digits, a letter and a digit among them. Public hosts name
+/// shows by such IDs too (Castbox, Fountain, Omny's UUIDs): a token makes a feed private only
+/// beside a [`SUBSCRIPTION_WORDS`] word.
 fn token_segment(segment: &str) -> bool {
-    segment
-        .split(|c: char| !c.is_ascii_alphanumeric())
+    let dashed_hex = segment
+        .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
         .any(|run| {
-            let (lower, upper, digit) = (
-                run.bytes().any(|b| b.is_ascii_lowercase()),
-                run.bytes().any(|b| b.is_ascii_uppercase()),
-                run.bytes().any(|b| b.is_ascii_digit()),
-            );
-            (run.len() >= 32 && (lower || upper) && digit)
-                || (run.len() >= 20 && lower && upper && digit)
-        })
+            run.bytes().filter(u8::is_ascii_hexdigit).count() >= 32
+                && run.bytes().any(|b| b.is_ascii_digit())
+                && run.bytes().any(|b| b.is_ascii_alphabetic())
+        });
+    dashed_hex
+        || segment
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|run| {
+                let (lower, upper, digit) = (
+                    run.bytes().any(|b| b.is_ascii_lowercase()),
+                    run.bytes().any(|b| b.is_ascii_uppercase()),
+                    run.bytes().any(|b| b.is_ascii_digit()),
+                );
+                (run.len() >= 32 && (lower || upper) && digit)
+                    || (run.len() >= 20 && lower && upper && digit)
+            })
 }
 /// Whether a feed URL is a private feed: on a host of [`PRIVATE_FEED_HOSTS`], with a path
 /// segment `private` ([`private_segment`]) or an opaque token ([`token_segment`]) beside a word
@@ -989,6 +1000,12 @@ mod tests {
             "https://members.example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
             "https://example.org/supporters-feed/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c",
             "https://vip.example.fm/rss/aB3dE5fG7hJ9kL1mN3pQ.xml",
+            // A UUID (or other long hex with dashes) beside a subscription word.
+            "https://example.org/subscriber/8f1c2d3e-4b5a-6789-abcd-ef0123456789.rss",
+            "https://example.org/subscription/8F1C2D3E-4B5A-6789-ABCD-EF0123456789",
+            "https://example.org/subscriptions/feed/8f1c2d3e4b5a-6789abcd-ef0123456789-0a1b2c3d",
+            "https://members.example.org/feed/8f1c2d3e-4b5a-6789-abcd-ef0123456789/podcast.xml",
+            "https://subscriptions.example.org/feed/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c",
         ] {
             assert!(private_feed(private), "{private}");
             assert!(card(&feed(private), |_| false).is_none(), "{private}");
@@ -1015,6 +1032,10 @@ mod tests {
             "https://feeds.buzzsprout.com/1234567.rss",
             "https://example.org/rss/aB3dE5fG7hJ9kL1mN3pQ",
             "https://example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
+            // A UUID alone names a show on public hosts.
+            "https://feeds.redcircle.com/8f1c2d3e-4b5a-6789-abcd-ef0123456789",
+            "https://example.org/feeds/8f1c2d3e-4b5a-6789-abcd-ef0123456789.rss",
+            "https://example.org/subscribe-to-the-show/feed.xml",
         ] {
             assert!(!private_feed(public), "{public}");
             assert!(card(&feed(public), |_| false).is_some(), "{public}");
@@ -1131,6 +1152,9 @@ mod tests {
             token in prop_oneof![
                 "[a-z][A-Z][0-9][A-Za-z0-9]{17,60}(\\.rss)?",
                 "[0-9][a-f][0-9a-f]{30,62}(\\.rss)?",
+                "[0-9][a-f][0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\\.rss)?",
+                "[0-9][A-F][0-9A-F]{6}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
+                "[0-9][a-f][0-9a-f]{10}(-[0-9a-f]{12}){2}(-[0-9a-f]{4,12}){0,4}",
             ],
             at in any::<proptest::sample::Index>(),
             word_at in any::<proptest::sample::Index>(),
