@@ -8,8 +8,10 @@ directories, its own test file, its e2e samples and its spelling vectors), check
 own is left, and builds every test target with warnings as errors. With `--tests`, it then runs
 the workspace's tests (`cargo test --workspace`, as scripts/test does, every target even after one
 fails: set DATABASE_URL and RUST_TEST_THREADS as for it), which a source's removal can break where
-the build does not: a test of another source that relied on it, a recording it took along. A
-source whose removal needs any other edit fails, with its first errors or failed tests. `--list`
+the build does not: a test of another source that relied on it, a recording it took along. The
+tests run with `PINAKES_REMOVING=<name>`: a test whose `test_support::needs_*` guard names what
+the removal took returns early instead of failing, and those tests are listed (the ones whose
+guard names the source, and every test that returned early), to be deleted with it. A source whose removal needs any other edit fails, with its first errors or failed tests. `--list`
 names the sources and stops; `--spellings-layout FILE` checks that FILE is in the layout this
 script writes `data/spellings.json` in, and stops; `--self-test` checks the deletion and the
 leftover check on a synthetic tree of their own, independent of the repository and of which
@@ -482,6 +484,32 @@ def verify(wt, kind, name, title, kept=(), nulls=()):
     return sorted(set(left)), mentions
 
 
+# A test asks for what it needs through `test_support::needs_*`, which fails on a name the build
+# does not register: the tests whose guard names a source go with it. A part of a test that runs
+# only with a source asks `has_*`: that part goes with it.
+NEEDS = re.compile(r"\b(needs|has)_(?:sources|also_on|families|attributes)\(\s*&\[([^\]]*)\]")
+
+
+def needing(wt, name):
+    """`file:line test` for each test whose literal `needs_*` guard names `name` in the tree at
+    `wt` (the tests the removal deletes with the source), and `file:line test (a part)` for a
+    `has_*` part (the part goes). A name the removal takes that is not the source's own (a
+    family's also-on sources), or one in a list that is not literal, is found when the tests run:
+    each such test writes a line to `PINAKES_REMOVING_LOG`, which `check` returns."""
+    out = []
+    for rel in list(files_under(wt, CORE + "src")) + list(files_under(wt, CORE + "tests")):
+        if not rel.endswith(".rs") or rel.endswith("src/test_support.rs"):
+            continue
+        text = read(rel, wt)
+        for m in NEEDS.finditer(text):
+            if '"%s"' % name in re.findall(r'"\w+"', m.group(2)):
+                fns = re.findall(r"\bfn (\w+)", text[: m.start()])
+                line = text.count("\n", 0, m.start()) + 1
+                part = " (a part)" if m.group(1) == "has" else ""
+                out.append(f"{rel}:{line} {fns[-1] if fns else '?'}{part}")
+    return out
+
+
 def failures(output):
     """The lines that say what failed: compile errors and their places, failed tests and where
     they panicked."""
@@ -496,6 +524,15 @@ def failures(output):
         ):
             keep.append(l)
     return keep
+
+
+def skipped(log):
+    """The lines of the tests that returned early for the removal, each once."""
+    try:
+        with open(log, encoding="utf-8") as f:
+            return sorted(set(f.read().splitlines()))
+    except OSError:
+        return []
 
 
 def worktree():
@@ -522,12 +559,18 @@ def check(kind, name, tests):
         remove(wt, kind, name)
         left, mentions = verify(wt, kind, name, title, kept, nulls)
         if left:
-            return "the removal left:\n" + "\n".join(left), mentions
+            return "the removal left:\n" + "\n".join(left), mentions, []
         env = dict(os.environ)
         env.setdefault("CARGO_TARGET_DIR", os.path.join(ROOT, "target"))
         # As scripts/test: the tests that run scripts/verify-osm-boundary fail without its tools
         # (psql, pg_dump, rg) instead of skipping.
         env["PINAKES_REQUIRE_BOUNDARY_TOOLS"] = "1"
+        # The tests that need the source return early, as they go with it (`needing`); without
+        # this, a name a test needs and the build lacks fails the test. Each writes a line to the
+        # log (`test_support::REMOVING_LOG`), whatever form its names take.
+        env["PINAKES_REMOVING"] = name
+        log = os.path.join(wt, "removing.log")
+        env["PINAKES_REMOVING_LOG"] = log
         steps = [["cargo", "clippy", "-q", "--all-targets", "--", "-D", "warnings"]]
         if tests:
             # Every target runs, so one run names everything the removal broke.
@@ -536,8 +579,8 @@ def check(kind, name, tests):
             run = subprocess.run(step, cwd=wt, env=env, capture_output=True, text=True)
             if run.returncode != 0:
                 output = run.stderr + run.stdout
-                return "\n".join(failures(output)[:16]) or output[-2000:], mentions
-        return None, mentions
+                return "\n".join(failures(output)[:16]) or output[-2000:], mentions, skipped(log)
+        return None, mentions, skipped(log)
     finally:
         drop_worktree(wt)
 
@@ -629,6 +672,8 @@ PINAKES_DELTA_KEY=
     CORE + "tests/fixtures/media/README.md": "Recorded answers.\n",
     CORE + "tests/fixtures/lookups/README.md": "Recorded answers.\n",
     CORE + "tests/alpha_beta.rs": "\n",
+    # Another source's test that needs it: deleted with it (`needing`).
+    CORE + "tests/delta.rs": 'fn uses_both() {\n    if !needs_also_on(&["delta", "alpha_beta"]) {\n        return;\n    }\n    if has_sources(&["alpha_beta"]) {}\n}\n',
     "scripts/e2e": "#!/bin/sh\nexec node e2e/run.mjs\n",
     # The samples: the source's own file, a shared file, and another source's sample that joins
     # one of the source's and needs it (it leaves the run with the source).
@@ -791,6 +836,8 @@ def self_test():
                     f.write(before)
         left, _ = verify(wt, "sources", name, title, kept, nulls)
         assert not left, f"after the cases: {left}"
+        assert needing(tree, "alpha_beta") == [CORE + "tests/delta.rs:2 uses_both", CORE + "tests/delta.rs:5 uses_both (a part)"], needing(tree, "alpha_beta")
+        assert needing(tree, "gamma") == [], needing(tree, "gamma")
         SPELLINGS_HANDOVER.pop("gamma")
         print("self-test ok (%d removals, %d leftovers named)" % (len(sources), len(cases)))
         return 0
@@ -825,13 +872,20 @@ def main(argv):
     failed = 0
     for kind, name in chosen:
         started = time.monotonic()
-        error, mentions = check(kind, name, tests)
+        error, mentions, without = check(kind, name, tests)
         took = f"{time.monotonic() - started:.0f} s"
         if error is None:
             print(f"{name}: ok ({took})", flush=True)
         else:
             failed += 1
             print(f"{name}: FAIL ({took})\n" + "\n".join("  " + l for l in error.splitlines()), flush=True)
+        tests_needing = needing(ROOT, name)
+        if tests_needing:
+            shown = "".join("\n    " + m for m in tests_needing)
+            print(f"  {len(tests_needing)} test(s) or parts name it, deleted with it:{shown}", flush=True)
+        if without:
+            shown = "".join("\n    " + m for m in without)
+            print(f"  {len(without)} test(s) went without what it took (delete the test, or its case or switch that names it):{shown}", flush=True)
         if mentions:
             shown = "".join("\n    " + m for m in mentions[:8]) + ("\n    …" if len(mentions) > 8 else "")
             print(f"  {len(mentions)} line(s) of prose name it, for a reader:{shown}", flush=True)

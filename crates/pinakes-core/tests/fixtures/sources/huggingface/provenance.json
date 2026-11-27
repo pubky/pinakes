@@ -11,9 +11,9 @@
   "dataset-gsm8k-legacy": {
     "bytes": 61,
     "content_type": "text/plain",
-    "file": "dataset-gsm8k-legacy.txt",
+    "file": null,
     "location": "/api/datasets/openai/gsm8k",
-    "note": "legacy dataset id: 307 to openai/gsm8k",
+    "note": "legacy dataset id: 307 to openai/gsm8k. Status only: no test reads the body.",
     "recorded_at": "2026-10-19T16:25:15+00:00",
     "sha256": "1f2757fe84223d9077f2b1917b3b705a1ca3d1fa1cc27e3c0bddb70d697c6aea",
     "status": 307,
@@ -22,9 +22,9 @@
   "model-case-redirect": {
     "bytes": 71,
     "content_type": "text/plain",
-    "file": "model-case-redirect.txt",
+    "file": null,
     "location": "/api/models/meta-llama/Llama-2-7b-hf",
-    "note": "repo ids are case-insensitive: 307 to the canonical case",
+    "note": "repo ids are case-insensitive: 307 to the canonical case. Status only: no test reads the body.",
     "recorded_at": "2026-10-19T16:25:13+00:00",
     "sha256": "0493ee7354b5ecffcacfce7fd72e49bcf5e83c278ffa232e9c91d16759e221bd",
     "status": 307,

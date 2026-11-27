@@ -592,7 +592,7 @@ mod tests {
     fn official_api_spellings_and_named_roots() {
         let r = |u: &str| root(u).map(|a| (a.root, a.basis));
         // An official source's own spelling (the Federal Register's, in a build that has it).
-        if crate::sources::by_name("federal_register").is_some() {
+        if crate::test_support::has_sources(&["federal_register"]) {
             assert_eq!(
                 r("https://www.federalregister.gov/d/2026-18291"),
                 Some(("fr:2026-18291".into(), "identifier"))

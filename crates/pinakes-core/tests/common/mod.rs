@@ -1,5 +1,5 @@
 //! Shared test helpers: a small OpenAPI 3.1 response check, an official source's card from its
-//! recorded answers for a test that needs one source (and skips without it), and what several
+//! recorded answers for a test that needs one source (`test_support::needs_one`), and what several
 //! test files use alike: a transport's answer (`fetched`), a resolver (`PublicDns`), `GET`
 //! through the router (`get`, `get_from`), a saved card, a log buffer.
 #![allow(dead_code)]
@@ -230,14 +230,17 @@ pub fn check_response(method: &str, path: &str, status: u16, value: &Value) {
 
 /// The card a registered official source makes of `uri` from recorded answers (`(url, status,
 /// content type, file)`, the files in `tests/fixtures/sources/{name}/`; a `.gz` file is served
-/// unpacked, as the service sent it), or `None` when this build has no source named `name`: a
-/// test that needs one source returns early without it.
+/// unpacked, as the service sent it). `None` only while `scripts/check-removals` takes the source
+/// (`test_support::needs_one`): a name this build does not register panics.
 pub async fn source_card(
     name: &str,
     uri: &str,
     answers: &[(&str, u16, &str, &str)],
 ) -> Option<pinakes_core::model::ResourceMeta> {
-    let source = pinakes_core::sources::by_name(name)?;
+    let source = pinakes_core::test_support::needs_one(
+        pinakes_core::sources::by_name(name),
+        &format!("official source {name:?}"),
+    )?;
     let dir = format!(
         "{}/tests/fixtures/sources/{name}",
         env!("CARGO_MANIFEST_DIR")
@@ -599,4 +602,33 @@ pub fn unique_dir(name: &str) -> std::path::PathBuf {
             Err(error) => panic!("{}: {error}", dir.display()),
         }
     }
+}
+
+/// Deezer's API as recorded in `tests/fixtures/hubs`: the answers its fakes serve, each named by
+/// the path it answers (`track/67238735` is `deezer-track-67238735.json`). A path with no
+/// recording here gets Deezer's own answer for something it has no data for.
+pub const DEEZER_RECORDED: &[&str] = &[
+    "deezer-album-41839661.json",
+    "deezer-album-upc-4018939306052.json",
+    "deezer-track-2271581007.json",
+    "deezer-track-3750996073.json",
+    "deezer-track-67238735.json",
+    "deezer-track-isrc-GBUM71029604.json",
+    "deezer-track-isrc-GBUM72103841.json",
+];
+/// Deezer's answer to an API `path` (`/track/67238735`, `/track/isrc:…`), from
+/// [`DEEZER_RECORDED`].
+pub fn deezer_answer(path: &str) -> Vec<u8> {
+    let name = format!(
+        "deezer-{}.json",
+        path.trim_start_matches('/').replace(['/', ':'], "-")
+    );
+    if !DEEZER_RECORDED.contains(&name.as_str()) {
+        return br#"{"error":{"type":"DataException","message":"no data","code":800}}"#.to_vec();
+    }
+    std::fs::read(format!(
+        "{}/tests/fixtures/hubs/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }

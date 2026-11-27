@@ -95,13 +95,12 @@ impl Transport for Services {
 #[sqlx::test(migrations = "../../migrations")]
 async fn refusals_and_outages_log_and_store_no_credential(pool: sqlx::PgPool) {
     // (source, its section of the configuration, the name its lines carry)
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     let services: Vec<(&str, &str, &str)> = [
         ("tidal_isrc", "tidal", "TIDAL"),
         ("spotify_isrc", "spotify", "Spotify"),
     ]
     .into_iter()
-    .filter(|(source, ..)| registered.contains(source))
+    .filter(|(source, ..)| pinakes_core::test_support::needs_also_on(&[source]))
     .collect();
     if services.is_empty() {
         return;

@@ -1,6 +1,7 @@
 //! The `spotify_isrc` also-on source through Egress, against the Spotify answers of
 //! `common::spotify_api`: another service's track found on Spotify by its ISRC, an album by its
 //! barcode, each read back; refusals and rate limits keep what Spotify gave before.
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     also_on::{self, SourceOptions},
     model::ResourceMeta,
@@ -32,8 +33,7 @@ async fn isrc_key(pool: &sqlx::PgPool, id: &str) {
 /// no ISRC key asks nothing, and the switch turns it off.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"spotify_isrc") {
+    if !needs_also_on(&["spotify_isrc"]) {
         return;
     }
     // TIDAL's own page states its ISRC (a key: TIDAL vouches for it) and its length.
@@ -115,8 +115,7 @@ async fn a_track_with_an_isrc_key_gets_its_spotify_link(pool: sqlx::PgPool) {
 /// links stop showing on the card while their rows stay.
 #[sqlx::test(migrations = "../../migrations")]
 async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool: sqlx::PgPool) {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"spotify_isrc") {
+    if !needs_also_on(&["spotify_isrc"]) {
         return;
     }
     let tidal = "https://tidal.com/track/534050211";
@@ -237,8 +236,7 @@ async fn spotify_isrc_is_on_by_default_and_keeps_its_rows_through_refusals(pool:
 /// read and a refusal of the app keep it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_album_with_a_barcode_key_gets_its_spotify_album(pool: sqlx::PgPool) {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"spotify_isrc") {
+    if !needs_also_on(&["spotify_isrc"]) {
         return;
     }
     let keyed = |uri: &'static str, upc: &'static str| {

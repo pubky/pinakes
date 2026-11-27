@@ -42,7 +42,8 @@
   "subreddit-announcements-refused": {
     "bytes": 190240,
     "content_type": "text/html",
-    "file": "subreddit-announcements-refused.html.gz",
+    "file": null,
+    "note": "Status only: the same page as post-1k3d0pk-refused.",
     "recorded_at": "2026-10-26T00:43:18+00:00",
     "sha256": "dc131f91303300301ab1b23a7e3b0a084b9e325b318b2722d00fc637247b8b7a",
     "status": 403,

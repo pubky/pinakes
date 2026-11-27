@@ -299,8 +299,8 @@ smaller MBID, changes the recording that stands for a set; rows heal at each res
 
 ## Removing a source
 
-Every source (official, also-on or a lookup family) is removed by deleting its own files and its
-registry lines, nothing else. `scripts/test` and `scripts/e2e --mock` then pass as they are. Delete:
+Every source (official, also-on or a lookup family) is removed by deleting its own files, its
+registry lines and the tests that need it, nothing else. `scripts/test` and `scripts/e2e --mock` then pass as they are. Delete:
 
 - its module: `crates/pinakes-core/src/sources/<name>.rs` (an official source, with its also-on
   half when it has one), `crates/pinakes-core/src/also_on/<id>.rs` or
@@ -323,7 +323,18 @@ registry lines, nothing else. `scripts/test` and `scripts/e2e --mock` then pass 
   (`null`) in its schemes ([Spelling vectors](../api.md#spelling-vectors),
   [Identifier pages](../api.md#identifier-pages));
   Discogs's stay, with rule `music/discogs` and basis `service`, since `music.rs` roots those
-  links the same way.
+  links the same way;
+- the tests that need it. A test asks for the sources it needs first
+  (`if !needs_also_on(&["deezer"]) { return; }`, from `pinakes_core::test_support`, with
+  `needs_sources`, `needs_families` and `needs_attributes` for the other registries). A name
+  the build does not register fails the test, so a misspelled or renamed source never skips one
+  silently. A case of a test's loop asks `needs_*` with its name too, and is skipped only during
+  a removal. A part of a test that runs only with a source (an extra check) asks `has_sources`
+  or `has_also_on`, and a configuration helper sets a source's switch only after
+  `switch_also_on`, which fails on a misspelled name; such parts go with the source too. A test
+  (`guards_name_registered_sources`) checks the names of every call written as a literal list
+  against the registries; a test that returns early during a removal says so in
+  `PINAKES_REMOVING_LOG`.
 
 An instance that runs a build without the source may keep a `[sources.<name>]` block (or
 `PINAKES__SOURCES__<NAME>__ENABLED`) that only sets `enabled`: the daemon logs a warning and
@@ -338,7 +349,9 @@ configuration, `.env.example` and the spelling vectors, and finds a link to its 
 independently of what it deleted; prose elsewhere that names the source is listed for a reader.
 It then builds every test target with warnings as errors, and with `--tests` runs the workspace's
 tests too, which catch what the build cannot (a test of another source that relied on it, a
-recording it took along). A removal that would need any other edit is named.
+recording it took along). Those tests run with `PINAKES_REMOVING=<name>`: a guard whose names the
+removal took returns early instead of failing, as its test goes with the source, and the tests
+whose guard names the source are listed. A removal that would need any other edit is named.
 
 Shared code stays: `sources/kit.rs`, `sources/social.rs`, `sources/biodiversity.rs`, `music.rs`,
 `music_sources.rs`, `wikipedia.rs`, `lookups/mod.rs`, `lookups/wikidata.rs`, `also_on/media.rs`,
@@ -351,7 +364,6 @@ also when the removed source was the only one to fill them: a card type in
 `data/local-types.json` or `kit::DATED` (the Bitcoin types), a related entry's `amount_sat`.
 
 A source that needs to know whether another one runs asks by its ID (`also_on::runs_by_id`,
-`also_on::enabled_by_id`), never by its module. Tests that need a source skip without it, so none
-has to change. The keys a removed source recorded stay until they expire (up to their lifetime)
+`also_on::enabled_by_id`), never by its module. The keys a removed source recorded stay until they expire (up to their lifetime)
 and keep their single-object rule: the daemon writes every registered namespace's rule to the
 database at start (`single_object_namespace`), so grouping reads it after the code is gone.

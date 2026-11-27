@@ -536,4 +536,29 @@ mod tests {
         assert_eq!(doc.name.as_deref(), Some("u/spez"));
         assert_eq!(doc.attributes["karma"], "1000000");
     }
+
+    /// Reddit's network-security page (its 403 to a read without a browser, as recorded) gives
+    /// the post's blocked card, rooted at the post: never an error, never `missing`.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_read_is_the_blocked_card() {
+        let post = "https://www.reddit.com/comments/1k3d0pk/";
+        let json = "https://www.reddit.com/comments/1k3d0pk.json?raw_json=1";
+        let (egress, recorded) = crate::sources::fixture::egress(vec![(
+            json,
+            403,
+            "text/html",
+            crate::sources::fixture::read("reddit", "post-1k3d0pk-refused.html.gz"),
+        )]);
+        let cx = Context {
+            egress: &egress,
+            ttl: 3600,
+        };
+        let doc = Reddit.resolve(&cx, post).await.unwrap();
+        assert_eq!(recorded.asked(), [json]);
+        assert_eq!(doc.status, crate::model::Status::Ok);
+        assert_eq!(doc.type_name, "DiscussionForumPosting");
+        assert_eq!(doc.attributes["blocked"], "true");
+        assert_eq!(doc.description.as_deref(), Some("Blocked by the site."));
+        assert_eq!(doc.source_root.as_deref(), Some(post));
+    }
 }

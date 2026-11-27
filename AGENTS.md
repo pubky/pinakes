@@ -128,8 +128,8 @@ the table in `docs/operations.md` (a test checks every limit is listed).
 `tests/fixtures/sources/<name>/` with `provenance.json`, and examples (`Source::examples`).
 Tests check the docs, the example config and the examples against the registry.
 
-**Removing a source** (official, also-on, or a lookup family) is deleting its own files and its
-registry lines, nothing else ([docs/sources](docs/sources/README.md#removing-a-source) has the
+**Removing a source** (official, also-on, or a lookup family) is deleting its own files, its
+registry lines and the tests that need it, nothing else ([docs/sources](docs/sources/README.md#removing-a-source) has the
 full list):
 - its module: `sources/<name>.rs`, `also_on/<id>.rs` or `lookups/<family>.rs`;
 - its `pub mod` line and its entry in `sources::REGISTRY`, `also_on::registry()` or
@@ -139,10 +139,13 @@ full list):
 - its fixture directories (those named after it) and its own test file, if any;
 - `e2e/samples/<name>.json`;
 - its lines in `data/spellings.json`, vectors and pages (rule `source/<name>`, and the `null` pages
-  in its schemes; Discogs's vectors become rule `music/discogs`, basis `service`).
+  in its schemes; Discogs's vectors become rule `music/discogs`, basis `service`);
+- the tests that need it, and the parts of tests that run only with it: a test asks for the
+  sources it needs with `test_support::needs_*`, which fails on a name the build does not
+  register, so a typo or a rename never skips a test (`has_*` for a part).
+  `scripts/check-removals` lists them.
 
-Shared code stays. A test that needs a source returns early without it, so no test changes. A
-removed source's keys stay in the database until they expire, and keep their grouping rule
+Shared code stays. A source's keys stay in the database until they expire, and keep their grouping rule
 (`single_object_namespace` remembers it). If removing a source would need any other edit, first
 move what it needs into its own files or into shared code; `scripts/check-removals --tests <name>` proves it. Recordings several modules
 read are in a fixtures `shared/` directory, never one named after a source.

@@ -47,6 +47,8 @@ pub mod sources;
 pub mod spatial;
 pub mod store;
 pub mod telemetry;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_support;
 pub mod wikimedia;
 pub mod wikipedia;
 

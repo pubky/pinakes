@@ -121,6 +121,7 @@ impl Sections {
         )
     }
     /// Set a section as the file would (its secrets in clear).
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set(&mut self, name: &str, value: serde_json::Value) {
         self.0.insert(name.to_owned(), value);
     }
@@ -1749,11 +1750,13 @@ mod tests {
     /// unset; the file (or the `PINAKES__…` form) wins; an empty variable is none.
     #[test]
     fn a_token_variable_fills_what_the_file_leaves_unset() {
-        // Whichever registered source has one: a build without any has nothing to check.
-        let Some(source) = crate::sources::REGISTRY
-            .iter()
-            .find(|s| s.takes_token() && s.token_variable().is_some())
-        else {
+        // Whichever registered source has one.
+        let Some(source) = crate::test_support::needs_one(
+            crate::sources::REGISTRY
+                .iter()
+                .find(|s| s.takes_token() && s.token_variable().is_some()),
+            "an official source with a token variable",
+        ) else {
             return;
         };
         let (name, variable) = (source.name(), source.token_variable().unwrap());
@@ -2251,10 +2254,7 @@ mod tests {
     /// and only those: Deezer's API while it is off, never deezer.com's pages.
     #[test]
     fn a_switched_off_source_s_api_is_refused_at_the_egress() {
-        if !crate::also_on::registered()
-            .iter()
-            .any(|s| s.id() == "deezer")
-        {
+        if !crate::test_support::needs_also_on(&["deezer"]) {
             return;
         }
         let api = "https://api.deezer.com/track/3135556";

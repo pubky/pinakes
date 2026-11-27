@@ -281,17 +281,7 @@ impl Transport for Recorded {
                 answer(200, body, "text/javascript")
             }
             ("api.deezer.com", path) => {
-                let name = format!(
-                    "deezer-{}.json",
-                    path.trim_start_matches('/').replace(['/', ':'], "-")
-                );
-                let recorded = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
-                let none = br#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
-                answer(
-                    200,
-                    std::fs::read(recorded).unwrap_or_else(|_| none.to_vec()),
-                    "application/json",
-                )
+                answer(200, super::deezer_answer(path), "application/json")
             }
             _ => panic!("unexpected request {url}"),
         })
@@ -309,7 +299,6 @@ pub fn config(pair: Option<(&str, &str)>) -> Config {
         );
     }
     // Only the sources this build has: a switch for one it lacks is refused at validation.
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     for (source, enabled) in [
         ("deezer", true),
         ("spotify_isrc", true),
@@ -317,7 +306,7 @@ pub fn config(pair: Option<(&str, &str)>) -> Config {
         ("musicbrainz_entity", false),
         ("wikidata", false),
     ] {
-        if !registered.contains(&source) {
+        if !pinakes_core::test_support::switch_also_on(&[source]) {
             continue;
         }
         config.also_on.sources.insert(

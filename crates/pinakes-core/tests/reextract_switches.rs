@@ -1,5 +1,6 @@
 //! `reextract` with a source switched off, in a process of its own: the switches are global
 //! (`sources::configure`), as `pinakesd reextract` sets them from the operator's configuration.
+use pinakes_core::test_support::needs_sources;
 use pinakes_core::{config::Config, queue, store};
 use sqlx::PgPool;
 
@@ -9,7 +10,7 @@ use sqlx::PgPool;
 /// as before.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_switched_off_sources_aliases_stay_through_reextract(pool: PgPool) {
-    if pinakes_core::sources::by_name("reddit").is_none() {
+    if !needs_sources(&["reddit"]) {
         return;
     }
     let mut config = Config::default();
@@ -64,4 +65,54 @@ async fn a_switched_off_sources_aliases_stay_through_reextract(pool: PgPool) {
         "a weaker rule never moves a switched-off source's alias"
     );
     assert_eq!(root_of(comment).await, None, "no source reads a comment");
+}
+
+/// The same rule where nothing else holds the alias in place: the shared link is the post's alias
+/// and its untracked spelling is stored nowhere, so only the switched-off guard on the move arm
+/// keeps it on the post through `reextract all` (the tracking-parameter rule names the untracked
+/// spelling as its root).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_weaker_rule_never_moves_a_switched_off_alias_to_a_new_root(pool: PgPool) {
+    if !needs_sources(&["reddit"]) {
+        return;
+    }
+    let mut config = Config::default();
+    config.sources.0.insert(
+        "reddit".into(),
+        pinakes_core::sources::Switch {
+            enabled: false,
+            ..Default::default()
+        },
+    );
+    pinakes_core::configure_sources(&config);
+    let post = "https://www.reddit.com/comments/1k3d0pk/";
+    let shared =
+        "https://old.reddit.com/r/announcements/comments/1k3d0pk/a_title/?utm_source=share";
+    let post_id = store::ensure_resource(&pool, post).await.unwrap();
+    let shared_id = store::ensure_resource(&pool, shared).await.unwrap();
+    // As a build with Reddit on stored it: the shared link is the post's (with Reddit off,
+    // `ensure_resource` made it its untracked spelling's).
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'identifier') ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
+        .bind(&shared_id)
+        .bind(&post_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(pinakes_core::sources::switched_off(shared));
+    assert!(
+        pinakes_core::alias::root(shared).is_some(),
+        "the tracking rule names another root"
+    );
+    queue::reextract(&pool, &["all".into()]).await.unwrap();
+    let root: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(&shared_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        root,
+        Some(post_id),
+        "a weaker rule never moves a switched-off source's alias"
+    );
 }

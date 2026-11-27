@@ -2,6 +2,7 @@
 //! answers (`tests/fixtures/media/youtube_match`): Queen's Topic upload of Bohemian Rhapsody
 //! matches one Deezer track (unkeyed) and none on TIDAL (two candidates); a sign-in page is a
 //! retry hours later; an artist's own upload asks nothing.
+use pinakes_core::test_support::{has_also_on, needs_also_on};
 use pinakes_core::{
     also_on::{self, SourceOptions},
     config::Config,
@@ -130,7 +131,6 @@ impl Transport for Recorded {
 /// The switches (`youtube_match`, `deezer`, `tidal_isrc`) and TIDAL's pair with `tidal_isrc`.
 fn config(on: bool, deezer: bool, tidal: Option<(&str, &str)>) -> Config {
     let mut config = Config::default();
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
     if let Some((id, secret)) = tidal {
         config.sections.set(
             "tidal",
@@ -142,8 +142,8 @@ fn config(on: bool, deezer: bool, tidal: Option<(&str, &str)>) -> Config {
         ("deezer", deezer),
         ("tidal_isrc", tidal.is_some()),
     ] {
-        // Only the sources this build has: a switch for one it lacks is refused.
-        if !registered.contains(&source) {
+        // Only the sources this build has (`switch_also_on`: a misspelled one fails): a switch for one it lacks is refused.
+        if !pinakes_core::test_support::switch_also_on(&[source]) {
             continue;
         }
         config.also_on.sources.insert(
@@ -213,13 +213,12 @@ async fn links(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
 /// VEVO channel is no label upload: nothing is asked for it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"deezer") {
+    if !needs_also_on(&["deezer"]) {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
     let vevo = save(&pool, "5NV6Rdv1a3I").await;
-    let tidal = registered.contains(&"tidal_isrc");
+    let tidal = has_also_on(&["tidal_isrc"]);
     let seen = run(
         &pool,
         config(true, true, Some(("match-id", "match-secret"))),
@@ -265,7 +264,7 @@ async fn a_topic_upload_matches_one_deezer_track(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
     // Deezer is the one service this test's configuration searches.
-    if !also_on::registry().iter().any(|s| s.id() == "deezer") {
+    if !needs_also_on(&["deezer"]) {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
@@ -294,7 +293,7 @@ async fn a_sign_in_page_is_retried_hours_later(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_watch_page_over_the_cap_is_not_retried(pool: sqlx::PgPool) {
     // Deezer is the one service this test's configuration searches.
-    if !also_on::registry().iter().any(|s| s.id() == "deezer") {
+    if !needs_also_on(&["deezer"]) {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
@@ -325,7 +324,7 @@ async fn a_watch_page_over_the_cap_is_not_retried(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::PgPool) {
     // Deezer is the one service this test's configuration searches.
-    if !also_on::registry().iter().any(|s| s.id() == "deezer") {
+    if !needs_also_on(&["deezer"]) {
         return;
     }
     save(&pool, "bSnlKl_PoQU").await;
@@ -349,8 +348,7 @@ async fn without_its_switch_or_a_service_to_search_nothing_is_asked(pool: sqlx::
 /// bring no run back early.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"tidal_isrc") || !registered.contains(&"deezer") {
+    if !needs_also_on(&["tidal_isrc", "deezer"]) {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;
@@ -408,8 +406,7 @@ async fn a_tidal_failure_keeps_the_deezer_match(pool: sqlx::PgPool) {
 /// one too): a rate limit fails the run, which retries; refused credentials fail no run.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_tidal_failure_without_a_deezer_match_keeps_the_earlier_links(pool: sqlx::PgPool) {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    if !registered.contains(&"tidal_isrc") || !registered.contains(&"deezer") {
+    if !needs_also_on(&["tidal_isrc", "deezer"]) {
         return;
     }
     let queen = save(&pool, "bSnlKl_PoQU").await;

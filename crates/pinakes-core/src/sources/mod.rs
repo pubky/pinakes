@@ -1554,7 +1554,7 @@ mod tests {
     /// spelling folds to nothing through `alias_root_with` once the source is off.
     #[test]
     fn root_pages_fold_a_spelling() {
-        if by_name("pdb").is_none() {
+        if !crate::test_support::needs_sources(&["pdb"]) {
             return;
         }
         let page = Some(("pdb", "https://www.rcsb.org/structure/4HHB".to_owned()));
@@ -1600,12 +1600,15 @@ mod tests {
     /// official source read or that a page hook made.
     #[test]
     fn own_keys_read_the_declared_facts() {
-        let Some((source, prefix)) = REGISTRY.iter().find_map(|s| {
-            s.own_ids().iter().find_map(|o| match o {
-                kit::OwnId::Doi(prefix) => Some((*s, *prefix)),
-                kit::OwnId::Wikidata => None,
-            })
-        }) else {
+        let Some((source, prefix)) = crate::test_support::needs_one(
+            REGISTRY.iter().find_map(|s| {
+                s.own_ids().iter().find_map(|o| match o {
+                    kit::OwnId::Doi(prefix) => Some((*s, *prefix)),
+                    kit::OwnId::Wikidata => None,
+                })
+            }),
+            "an official source with a DOI prefix of its own",
+        ) else {
             return;
         };
         let mut doc = ResourceMeta::new("https://example.org/r/1", source.name(), 60);
@@ -2087,13 +2090,16 @@ mod tests {
     }
 
     /// A registered source (whichever this build has) and an example link of it whose alias root
-    /// differs from the link.
+    /// differs from the link. `None` only while a removal takes the last one.
     fn aliased_example() -> Option<(&'static dyn Source, &'static str, String)> {
-        REGISTRY.iter().find_map(|s| {
-            s.examples()
-                .iter()
-                .find_map(|e| Some((*s, e.uri, s.alias_root(e.uri)?)))
-        })
+        crate::test_support::needs_one(
+            REGISTRY.iter().find_map(|s| {
+                s.examples()
+                    .iter()
+                    .find_map(|e| Some((*s, e.uri, s.alias_root(e.uri)?)))
+            }),
+            "an official source with an example its rule roots elsewhere",
+        )
     }
 
     #[test]
@@ -2169,7 +2175,7 @@ mod tests {
             ),
             ("federal_register", "fr:e9-12345", "fr:E9-12345"),
         ] {
-            if by_name(source).is_none() {
+            if !crate::test_support::needs_sources(&[source]) {
                 continue;
             }
             assert!(!invalid(spelling), "{spelling}");
@@ -2220,9 +2226,10 @@ mod tests {
                 Some("twitch"),
             ),
         ] {
-            let Some(s) = by_name(source) else {
+            if !crate::test_support::needs_sources(&[source]) {
                 continue;
-            };
+            }
+            let s = by_name(source).unwrap();
             let (egress, recorded) = fixture::egress(vec![]);
             let cx = Context {
                 egress: &egress,
@@ -2245,9 +2252,10 @@ mod tests {
     /// A social profile is social content, and its bio is published without e-mail addresses.
     #[tokio::test(start_paused = true)]
     async fn a_profiles_bio_publishes_no_address() {
-        let Some(x) = by_name("x") else {
+        if !crate::test_support::needs_sources(&["x"]) {
             return;
-        };
+        }
+        let x = by_name("x").unwrap();
         let uri = "https://x.com/someone";
         let page = br#"<html><head><meta property="og:title" content="Some One (@someone) on X"><meta property="og:description" content="Builds bridges. Write to someone@example.org or mailto:me@example.org"></head></html>"#;
         let (egress, _) = fixture::egress(vec![(uri, 200, "text/html", page.to_vec())]);
@@ -2318,9 +2326,10 @@ mod tests {
                 "Profile on x.com",
             ),
         ] {
-            let Some(s) = by_name(source) else {
+            if !crate::test_support::needs_sources(&[source]) {
                 continue;
-            };
+            }
+            let s = by_name(source).unwrap();
             let (egress, _) = fixture::egress(vec![
                 (own, 200, "text/html", fixture::read(source, file)),
                 (moved, 302, "text/html", own.as_bytes().to_vec()),
@@ -2343,10 +2352,12 @@ mod tests {
     #[test]
     fn switches_and_names() {
         let mut config = Config::default();
-        let Some(source) = REGISTRY
-            .iter()
-            .find(|s| !s.takes_token() && s.reads(s.examples()[0].uri))
-        else {
+        let Some(source) = crate::test_support::needs_one(
+            REGISTRY
+                .iter()
+                .find(|s| !s.takes_token() && s.reads(s.examples()[0].uri)),
+            "an official source without a token that reads its first example",
+        ) else {
             return;
         };
         let uri = source.examples()[0].uri;
@@ -2604,7 +2615,8 @@ mod tests {
 
     #[test]
     fn attribution_reaches_the_card() {
-        let Some(source) = REGISTRY.first() else {
+        let Some(source) = crate::test_support::needs_one(REGISTRY.first(), "an official source")
+        else {
             return;
         };
         let mut doc = ResourceMeta::new("fr:2026-18291", source.name(), 60);
@@ -2629,13 +2641,16 @@ mod tests {
     fn facts_only_on_source_cards() {
         // A source with two facts, neither of them a web attribute.
         let web = crate::resolver::web::ATTRIBUTES;
-        let Some((source, fact, blank)) = REGISTRY.iter().find_map(|s| {
-            if s.facts().contains(&"author") {
-                return None;
-            }
-            let mut own = s.facts().iter().filter(|f| !web.contains(f));
-            Some((*s, *own.next()?, *own.next()?))
-        }) else {
+        let Some((source, fact, blank)) = crate::test_support::needs_one(
+            REGISTRY.iter().find_map(|s| {
+                if s.facts().contains(&"author") {
+                    return None;
+                }
+                let mut own = s.facts().iter().filter(|f| !web.contains(f));
+                Some((*s, *own.next()?, *own.next()?))
+            }),
+            "an official source with two facts of its own and no author",
+        ) else {
             return;
         };
         let mut doc = ResourceMeta::new("fr:2026-18291", source.name(), 60);

@@ -1,6 +1,7 @@
 //! The hub clients through Egress, against recorded MusicBrainz and Wikidata answers.
 mod common;
 use common::{hubs_fixture as fixture, media::PublicDns};
+use pinakes_core::test_support::{has_also_on, needs_also_on};
 use pinakes_core::{
     also_on,
     api::{self, AppState},
@@ -491,19 +492,7 @@ impl Transport for Recorded {
             }
             "/lookup" => (200, fixture("itunes-upc-many.json")),
             // Deezer's API: its own records, and its lookups by ISRC and barcode.
-            path if url.host_str() == Some("api.deezer.com") => {
-                let name = format!(
-                    "deezer-{}.json",
-                    path.trim_start_matches('/').replace(['/', ':'], "-")
-                );
-                let recorded = format!("{}/tests/fixtures/hubs/{name}", env!("CARGO_MANIFEST_DIR"));
-                // What Deezer answers for anything it has no data for.
-                let none = br#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
-                (
-                    200,
-                    std::fs::read(recorded).unwrap_or_else(|_| none.to_vec()),
-                )
-            }
+            path if url.host_str() == Some("api.deezer.com") => (200, common::deezer_answer(path)),
             // A Wikipedia's own API: the article's Wikidata item.
             "/w/api.php" if url.host_str() != Some("www.wikidata.org") => {
                 match (url.host_str().unwrap_or(""), query("titles").as_str()) {
@@ -766,13 +755,6 @@ async fn wikidata_reads_back_every_hit_before_choosing_one() {
     assert_eq!(t.seen.lock().unwrap().len(), before);
 }
 
-/// Whether this build has every also-on source a test needs: a test of some sources returns
-/// early without them.
-fn has(ids: &[&str]) -> bool {
-    let registered: Vec<&str> = also_on::registry().iter().map(|s| s.id()).collect();
-    ids.iter().all(|id| registered.contains(id))
-}
-
 /// Deezer's API is never called while its source is switched off, whatever path asks, and
 /// switching it off hides nothing of deezer.com: a tagged Deezer album
 /// resolves from its own page, the album's other editions list it from MusicBrainz and
@@ -780,14 +762,14 @@ fn has(ids: &[&str]) -> bool {
 #[sqlx::test(migrations = "../../migrations")]
 async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
     use tower::ServiceExt;
-    if !has(&["musicbrainz", "wikidata"]) {
+    if !needs_also_on(&["musicbrainz", "wikidata"]) {
         return;
     }
     // The default configuration (stated here: nothing of the process environment is read) with
     // Deezer switched off, and the egress rule the daemon derives from it
     // (`also_on::off_hosts`).
     let mut config = Config::default();
-    if has(&["deezer"]) {
+    if has_also_on(&["deezer"]) {
         config.also_on.sources.insert(
             "deezer".into(),
             also_on::SourceOptions {
@@ -797,7 +779,11 @@ async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
         );
         config.egress.off_hosts = also_on::off_hosts(&config);
     }
-    if let Some(deezer) = also_on::registered().iter().find(|s| s.id() == "deezer") {
+    if has_also_on(&["deezer"]) {
+        let deezer = also_on::registered()
+            .iter()
+            .find(|s| s.id() == "deezer")
+            .unwrap();
         assert!(!config.also_on.source_on(deezer.as_ref()), "switched off");
     }
     let t = Arc::new(Recorded {
@@ -866,7 +852,7 @@ async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
     assert!(seen.contains(&"www.deezer.com/album/14879699".to_owned()));
     // Nor at the egress itself: a request there is refused before it is made, while the source
     // that names the host as its API's is in the build and off.
-    if has(&["deezer"]) {
+    if has_also_on(&["deezer"]) {
         assert!(guarded
             .discover(
                 "https://api.deezer.com/album/14879699",
@@ -936,9 +922,13 @@ async fn deezer_s_api_stays_off_and_its_links_stay(pool: sqlx::PgPool) {
 /// lookup by ISRC. On, the same lookups ask Deezer's API.
 #[tokio::test]
 async fn the_deezer_source_off_calls_nothing_even_asked_directly() {
-    let Some(deezer) = also_on::registered().iter().find(|s| s.id() == "deezer") else {
+    if !needs_also_on(&["deezer"]) {
         return;
-    };
+    }
+    let deezer = also_on::registered()
+        .iter()
+        .find(|s| s.id() == "deezer")
+        .unwrap();
     let subjects = [
         ("https://www.deezer.com/album/41839661", vec![]),
         (
@@ -993,7 +983,7 @@ async fn the_deezer_source_off_calls_nothing_even_asked_directly() {
 #[sqlx::test(migrations = "../../migrations")]
 async fn music_links_join_through_the_hubs_and_list_each_others_links(pool: sqlx::PgPool) {
     use tower::ServiceExt;
-    if !has(&["musicbrainz", "wikidata"]) {
+    if !needs_also_on(&["musicbrainz", "wikidata"]) {
         return;
     }
     let first = "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE";
@@ -1155,7 +1145,7 @@ async fn music_links_join_through_the_hubs_and_list_each_others_links(pool: sqlx
         apple,
         ["musicbrainz mb:release:30702389-5c67-4438-9ea0-2351c8de0f1d"]
     );
-    if has(&["itunes"]) {
+    if has_also_on(&["itunes"]) {
         assert!(
             t.seen
                 .lock()
@@ -1190,7 +1180,7 @@ async fn music_links_join_through_the_hubs_and_list_each_others_links(pool: sqlx
 async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     // The articles' cards are the wikipedia source's.
-    if !has(&["wikipedia"]) {
+    if !needs_also_on(&["wikipedia"]) {
         return;
     }
     let en = "https://en.m.wikipedia.org/wiki/Kant";
@@ -1281,7 +1271,7 @@ async fn wikipedia_editions_join_through_their_item(pool: sqlx::PgPool) {
 async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool) {
     use tower::ServiceExt;
     // The item's card is the wikidata_item source's.
-    if !has(&["wikidata_item"]) {
+    if !needs_also_on(&["wikidata_item"]) {
         return;
     }
     let spelled = "https://m.wikidata.org/wiki/Q9312";
@@ -1362,7 +1352,7 @@ async fn a_wikidata_item_lists_its_editions_and_encyclopedias(pool: sqlx::PgPool
 /// alone, and the links every release has. A configured mirror is asked instead of musicbrainz.org.
 #[sqlx::test(migrations = "../../migrations")]
 async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
-    if !has(&["musicbrainz"]) {
+    if !needs_also_on(&["musicbrainz"]) {
         return;
     }
     let uri = "https://tidal.com/album/495402659";
@@ -1442,7 +1432,7 @@ async fn editions_of_one_release_group_take_the_group(pool: sqlx::PgPool) {
 /// knows keeps its key and stays alone; one MusicBrainz gives to two recordings is no key.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
-    if !has(&["service", "musicbrainz"]) {
+    if !needs_also_on(&["service", "musicbrainz"]) {
         return;
     }
     let tracks = [
@@ -1645,7 +1635,7 @@ async fn a_service_pages_own_isrc_joins_its_recording(pool: sqlx::PgPool) {
 /// 4.5 s apart) keep today's rule: the duration picks one or the ISRC stays a fact.
 #[sqlx::test(migrations = "../../migrations")]
 async fn duplicate_recordings_of_one_isrc_are_one_recording(pool: sqlx::PgPool) {
-    if !has(&["service", "musicbrainz", "musicbrainz_entity"]) {
+    if !needs_also_on(&["service", "musicbrainz", "musicbrainz_entity"]) {
         return;
     }
     let first = "4da0e503-0cef-4dd7-a5b7-b08bea3db145";
@@ -1812,7 +1802,7 @@ async fn duplicate_recordings_of_one_isrc_are_one_recording(pool: sqlx::PgPool) 
 /// the other duplicate's MBID still finds its page.
 #[sqlx::test(migrations = "../../migrations")]
 async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPool) {
-    if !has(&["service", "musicbrainz", "musicbrainz_entity", "wikidata"]) {
+    if !needs_also_on(&["service", "musicbrainz", "musicbrainz_entity", "wikidata"]) {
         return;
     }
     use tower::ServiceExt;
@@ -1987,7 +1977,7 @@ async fn one_recording_stands_for_its_duplicates_on_every_path(pool: sqlx::PgPoo
 /// recording, joins the track to that recording's page.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
-    if !has(&["spotify", "musicbrainz", "musicbrainz_entity"]) {
+    if !needs_also_on(&["spotify", "musicbrainz", "musicbrainz_entity"]) {
         return;
     }
     let mut ids = vec![];
@@ -2060,7 +2050,7 @@ async fn a_spotify_track_joins_the_musicbrainz_recording(pool: sqlx::PgPool) {
 /// Spotify refusing the app (403, its owner without Premium) or having no credentials at all,
 /// the lookup by URL is the same: it starts from no Spotify key.
 async fn spotify_falls_back_to_musicbrainz(pool: sqlx::PgPool, spotify: Option<&str>) {
-    if !has(&["spotify", "musicbrainz"]) {
+    if !needs_also_on(&["spotify", "musicbrainz"]) {
         return;
     }
     let mut ids = vec![];
@@ -2173,7 +2163,7 @@ async fn a_spotify_track_without_credentials_joins_by_its_musicbrainz_url(pool: 
 /// hints give it as a preview. Another track iTunes has no song for hears of none.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_apple_music_track_plays_its_itunes_preview(pool: sqlx::PgPool) {
-    if !has(&["itunes"]) {
+    if !needs_also_on(&["itunes"]) {
         return;
     }
     let mut ids = vec![];
@@ -2237,7 +2227,7 @@ async fn an_apple_music_track_plays_its_itunes_preview(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_deezer_barcode_names_the_apple_album_as_a_maybe(pool: sqlx::PgPool) {
     // Deezer's barcode and iTunes' album for it are the two sources' work.
-    if !has(&["deezer", "itunes"]) {
+    if !needs_also_on(&["deezer", "itunes"]) {
         return;
     }
     let deezer = "https://www.deezer.com/album/41839661";
@@ -2354,7 +2344,7 @@ async fn a_deezer_barcode_names_the_apple_album_as_a_maybe(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
     // The items' reads are the wikidata_item source's.
-    if !has(&["wikidata_item"]) {
+    if !needs_also_on(&["wikidata_item"]) {
         return;
     }
     for q in ["Q202996", "Q33328630"] {
@@ -2401,7 +2391,10 @@ async fn item_links_are_read_in_one_request(pool: sqlx::PgPool) {
 async fn a_musicbrainz_page_is_its_own_hub(pool: sqlx::PgPool) {
     // A MusicBrainz page's keys are the musicbrainz_entity source's; the event pages are read by
     // `performers`. Each part is checked when the build has its source.
-    let (entity_pages, event_pages) = (has(&["musicbrainz_entity"]), has(&["performers"]));
+    let (entity_pages, event_pages) = (
+        has_also_on(&["musicbrainz_entity"]),
+        has_also_on(&["performers"]),
+    );
     if !entity_pages && !event_pages {
         return;
     }
@@ -3143,7 +3136,7 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
         // The article's own Wikipedia named the item: that key stays.
         (&ids[2], "wikidata:Q999999999".to_owned(), "wikipedia"),
     ] {
-        if !has(&[source]) {
+        if !needs_also_on(&[source]) {
             continue;
         }
         let keys: Vec<String> = sqlx::query_scalar(
@@ -3178,7 +3171,7 @@ async fn an_entity_over_the_cap_is_no_answer(pool: sqlx::PgPool) {
 /// either) asks once, in both spellings, and finds nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool) {
-    if !has(&["musicbrainz"]) {
+    if !needs_also_on(&["musicbrainz"]) {
         return;
     }
     let mut ids = vec![];
@@ -3263,7 +3256,7 @@ async fn an_album_s_barcode_key_finds_its_musicbrainz_release(pool: sqlx::PgPool
 /// finds that release again once the URL relation is gone: an editor's removal stands.
 #[sqlx::test(migrations = "../../migrations")]
 async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool) {
-    if !has(&["musicbrainz"]) {
+    if !needs_also_on(&["musicbrainz"]) {
         return;
     }
     let uri = "https://tidal.com/album/199574241";
@@ -3318,7 +3311,7 @@ async fn musicbrainz_s_own_barcode_never_re_finds_its_release(pool: sqlx::PgPool
 /// 83182 is one edition: its own release and barcode, never the release group.
 #[sqlx::test(migrations = "../../migrations")]
 async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
-    if !has(&["discogs", "musicbrainz"]) {
+    if !needs_also_on(&["discogs", "musicbrainz"]) {
         return;
     }
     let links = [
@@ -3455,7 +3448,7 @@ async fn discogs_joins_at_its_level(pool: sqlx::PgPool) {
 /// the MusicBrainz source records nothing for it, not the first release's group.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPool) {
-    if !has(&["musicbrainz", "discogs"]) {
+    if !needs_also_on(&["musicbrainz", "discogs"]) {
         return;
     }
     let uri = "https://www.discogs.com/release/1";
@@ -3501,7 +3494,7 @@ async fn a_discogs_release_of_two_release_groups_joins_nothing(pool: sqlx::PgPoo
 /// same way. The `musicbrainz` source follows the page's pick too.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::PgPool) {
-    if !has(&["service", "musicbrainz"]) {
+    if !needs_also_on(&["service", "musicbrainz"]) {
         return;
     }
     let album = "mb:recording:8f3471b5-7e6a-48da-86a9-c1c07a0f47ae";
@@ -3525,7 +3518,7 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
     // Deezer's own record of its track is the deezer source's.
     let deezer = "https://www.deezer.com/track/3750996073";
     let mut deezer_id = None;
-    if has(&["deezer"]) {
+    if has_also_on(&["deezer"]) {
         let id = store::ensure_resource(&pool, deezer).await.unwrap();
         let mut d = ResourceMeta::new(deezer, "jsonld", 86400);
         d.set_type("MusicRecording");
@@ -3540,7 +3533,7 @@ async fn a_shared_isrc_names_the_recording_the_tracks_length_picks(pool: sqlx::P
         "https://tidal.com/track/491206015",
     ] {
         // The page is read by its own source.
-        if uri.starts_with("https://musicbrainz.org/") && !has(&["musicbrainz_entity"]) {
+        if uri.starts_with("https://musicbrainz.org/") && !has_also_on(&["musicbrainz_entity"]) {
             continue;
         }
         let id = store::ensure_resource(&pool, uri).await.unwrap();
@@ -3679,7 +3672,7 @@ fn a_duration_picks_the_one_recording_within_the_window() {
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool) {
     use tower::ServiceExt;
-    if !has(&["service", "musicbrainz"]) {
+    if !needs_also_on(&["service", "musicbrainz"]) {
         return;
     }
     let rec = |n: &str| format!("00000000-0000-4000-8000-0000000000{n}");
@@ -3832,7 +3825,7 @@ async fn the_whole_set_agrees_and_only_its_own_isrcs_are_keys(pool: sqlx::PgPool
 #[sqlx::test(migrations = "../../migrations")]
 async fn wikidata_alone_keys_the_standing_recording_and_keeps_the_other(pool: sqlx::PgPool) {
     use tower::ServiceExt;
-    if !has(&["wikidata", "service", "musicbrainz", "musicbrainz_entity"]) {
+    if !needs_also_on(&["wikidata", "service", "musicbrainz", "musicbrainz_entity"]) {
         return;
     }
     let first = "4da0e503-0cef-4dd7-a5b7-b08bea3db145";
@@ -4017,7 +4010,7 @@ async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
 /// P4404 MBID).
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_secondary_read_over_the_cap_settles_nothing(pool: sqlx::PgPool) {
-    if !has(&["musicbrainz", "wikidata"]) {
+    if !needs_also_on(&["musicbrainz", "wikidata"]) {
         return;
     }
     let related = "https://tidal.com/track/1000071";

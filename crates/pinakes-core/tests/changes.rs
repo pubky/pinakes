@@ -1459,7 +1459,7 @@ async fn retention_preserves_normalized_current_and_cached_osm_versions(pool: Pg
 #[sqlx::test(migrations = "../../migrations")]
 async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: PgPool) {
     let uri = "https://mastodon.social/@Gargron/1";
-    // The post's card from the Mastodon source; without it in this build there is nothing to test.
+    // The post's card from the Mastodon source (`common::source_card` needs it).
     let card = |file: &'static str, at: i64| async move {
         let api = "https://mastodon.social/api/v1/statuses/1";
         let mut doc =
@@ -1515,7 +1515,7 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
         async move { store::save_document(&pool, &id, 0, &opted).await }
     });
     let held = || async {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'UPDATE resource SET name=NULL%')")
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'UPDATE resource SET name=NULL%')")
             .fetch_one(&pool)
             .await
             .unwrap()
@@ -1532,7 +1532,19 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
         let pool = pool.clone();
         async move { changes::retain(&pool, 90).await }
     });
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Retention ends while the save still waits for the alias, holding the post's old lines: it
+    // skipped them instead of waiting for them. Only then may the save go on.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !retained.is_finished() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retention ends while the save holds the post's lines");
+    assert!(
+        held().await && !save.is_finished(),
+        "the save still waits for the alias"
+    );
     hold.commit().await.unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
         save.await.unwrap().expect("the save commits");
@@ -1883,6 +1895,57 @@ async fn a_venue_its_event_drops_keeps_the_full_grace(pool: PgPool) {
         ],
         "a two-day-old venue keeps the 7-day grace however it was let go"
     );
+}
+
+/// The alias root of what a preview held (a derived link stored as another link's spelling)
+/// keeps the full grace once the preview goes, as the derived link does: the derivation that
+/// kept it is gone with the preview, and nothing else marks it as more than a preview.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_alias_root_of_what_a_preview_held_keeps_the_full_grace(pool: PgPool) {
+    let mut ids = std::collections::HashMap::new();
+    for name in ["calendar", "child", "root"] {
+        let uri = format!("https://example.org/held-root/{name}");
+        ids.insert(name, store::ensure_resource(&pool, &uri).await.unwrap());
+    }
+    // Never referenced, all created 25 hours ago.
+    sqlx::query("UPDATE resource SET created_at=now()-interval '25 hours', orphaned_at=now()-interval '25 hours'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_derivation(parent_id,child_id,adapter) VALUES($1,$2,'ics')")
+        .bind(&ids["calendar"])
+        .bind(&ids["child"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,'canonical')")
+        .bind(&ids["child"])
+        .bind(&ids["root"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let left = || async {
+        sqlx::query_scalar::<_, String>("SELECT id FROM resource")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    for _ in 0..3 {
+        store::cleanup(&pool, 7, 24).await.unwrap();
+    }
+    let kept = left().await;
+    assert!(!kept.contains(&ids["calendar"]), "the preview goes");
+    assert!(
+        kept.contains(&ids["root"]),
+        "the alias root keeps the full grace"
+    );
+    // An ordinary orphan now: gone once the full grace has passed.
+    sqlx::query("UPDATE resource SET orphaned_at=orphaned_at-interval '8 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::cleanup(&pool, 7, 24).await.unwrap();
+    assert!(!left().await.contains(&ids["root"]));
 }
 
 /// A change line names its occurrence by the key as it is stored (`changes::stored_key`): a UID

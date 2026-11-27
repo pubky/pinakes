@@ -42,6 +42,7 @@ impl Site {
         let body = String::from_utf8_lossy(&page.body);
         body.contains("data-key") && body.contains("content=\"Ghost")
     }
+    #[cfg(test)]
     pub fn of_page(page: &Fetched) -> Option<Self> {
         if !Self::marked(page) {
             return None;

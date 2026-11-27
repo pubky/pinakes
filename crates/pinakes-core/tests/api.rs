@@ -4235,7 +4235,7 @@ async fn a_deleted_pubky_post_loses_its_excerpt(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_opted_out_post_is_not_searched_and_keeps_no_history_text(pool: PgPool) {
     let uri = "https://mastodon.social/@Gargron/1";
-    // The post's card from the Mastodon source; without it in this build there is nothing to test.
+    // The post's card from the Mastodon source (`common::source_card` needs it).
     let card = |file: &'static str, at: i64| async move {
         let api = "https://mastodon.social/api/v1/statuses/1";
         let mut doc =

@@ -85,7 +85,13 @@ name = "e2e_stack"
 # Its unit tests (the live sample selection) run with the workspace's tests.
 test = true
 
+[features]
+# What the integration tests share with the unit tests (`test_support`, and setters no
+# production path calls). Only the dev-dependency below turns it on: never in the daemon.
+test-util = []
+
 [dev-dependencies]
+pinakes-core = { path = ".", features = ["test-util"] }
 # scraper's tree nodes, named by a test of the rebuilt tree (`resolver::html`).
 ego-tree = "=0.10.0"
 secp256k1 = "=0.30.0"

@@ -1088,8 +1088,10 @@ mod tests {
 
     #[test]
     fn mutual_links() {
-        let items =
-            wikidata::parse_entities(200, &fixture::read("wikidata-places.json.gz")).unwrap();
+        let items = wikidata::entities(
+            serde_json::from_slice(&fixture::read("wikidata-places.json.gz")).unwrap(),
+        )
+        .unwrap();
         let tags = tags();
         assert_eq!(tags["relation/2888417"], "Q7024");
         let lugano = from_item(

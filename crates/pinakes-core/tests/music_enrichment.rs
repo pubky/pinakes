@@ -5,6 +5,7 @@ mod common;
 use axum::{body::Body, http::Request, Router};
 use common::{author, media::PublicDns};
 use http_body_util::BodyExt;
+use pinakes_core::test_support::needs_also_on;
 use pinakes_core::{
     api::{self, AppState},
     config::{Config, IngestConfig, QueueConfig, ResolverConfig},
@@ -35,6 +36,42 @@ const KIND_OF_BLUE: &str =
     "https://musicbrainz.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7";
 const GET_LUCKY: &str = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
 const COLBURN: &str = "https://musicbrainz.org/artist/e7528aba-c5e2-4917-9a52-9b61d56f9a13";
+
+/// The Wikidata answers the fake serves by the item asked (`wd-entities-{Q}`, `wd-pages-{Q}`,
+/// `wd-p18-{Q}`): a request for any other is a request the tests never expect.
+const WIKIDATA_RECORDED: &[&str] = &[
+    "wd-entities-Q11510350.json",
+    "wd-entities-Q139827657.json",
+    "wd-entities-Q185828.json",
+    "wd-entities-Q283221.json",
+    "wd-entities-Q3780426.json",
+    "wd-entities-Q5554322.json",
+    "wd-entities-Q55825905.json",
+    "wd-entities-Q93341.json",
+    "wd-p18-Q139827657.json",
+    "wd-p18-Q185828.json",
+    "wd-p18-Q283221.json",
+    "wd-p18-Q3780426.json",
+    "wd-p18-Q5554322.json",
+    "wd-p18-Q55825905.json",
+    "wd-p18-Q93341.json",
+    "wd-pages-Q11510350.json",
+    "wd-pages-Q139827657.json",
+    "wd-pages-Q185828.json",
+    "wd-pages-Q283221.json",
+    "wd-pages-Q3780426.json",
+    "wd-pages-Q5554322.json",
+    "wd-pages-Q55825905.json",
+    "wd-pages-Q93341.json",
+];
+/// `name` when it is a recorded Wikidata answer; a panic otherwise.
+fn recorded(name: String) -> String {
+    assert!(
+        WIKIDATA_RECORDED.contains(&name.as_str()),
+        "an unrecorded Wikidata request: {name}"
+    );
+    name
+}
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -460,7 +497,7 @@ impl Transport for Recorded {
                 // An item read back, however it was found: its claims and sitelinks.
                 "wbgetentities" if query("props") == "claims|sitelinks/urls" => {
                     let ids = query("ids");
-                    let file = format!("wd-entities-{ids}.json");
+                    let file = recorded(format!("wd-entities-{ids}.json"));
                     let body = if mode.disambiguation_unclassed && ids == "Q5554322" {
                         edited(&file, |v| {
                             v["entities"][&ids]["claims"]
@@ -542,7 +579,7 @@ impl Transport for Recorded {
                 // An item's pages and English description.
                 "wbgetentities" => {
                     let ids = query("ids");
-                    let file = format!("wd-pages-{ids}.json");
+                    let file = recorded(format!("wd-pages-{ids}.json"));
                     let body = if mode.no_en_description && ids == "Q55825905" {
                         edited(&file, |v| v["entities"][&ids]["descriptions"] = json!({}))
                     } else if mode.recording_item_links_disambiguation && ids == "Q139827657" {
@@ -563,7 +600,7 @@ impl Transport for Recorded {
                     let mut body = if mode.album_has_image && entity == "Q283221" {
                         fixture("wd-p18-Q93341.json")
                     } else {
-                        fixture(&format!("wd-p18-{entity}.json"))
+                        fixture(&recorded(format!("wd-p18-{entity}.json")))
                     };
                     if mode.no_author && entity == "Q185828" {
                         // The one edit of a recorded answer (provenance.json, wd-p18-no-author).
@@ -2346,12 +2383,13 @@ impl pinakes_core::also_on::Source for Keys {
 async fn a_musicbrainz_page_keys_its_own_wikidata_item_and_a_disagreeing_one_stays_apart(
     pool: PgPool,
 ) {
-    let Some(entity_source) = pinakes_core::also_on::registry()
+    if !needs_also_on(&["musicbrainz_entity"]) {
+        return;
+    }
+    let entity_source = pinakes_core::also_on::registry()
         .into_iter()
         .find(|s| s.id() == "musicbrainz_entity")
-    else {
-        return;
-    };
+        .unwrap();
     let other = "https://open.spotify.com/album/0000000000000000000001";
     let item_only = "https://open.spotify.com/album/0000000000000000000003";
     let group = "mb:release-group:8e8a594f-2175-38c7-a871-abb68ec363e7";
@@ -2526,9 +2564,14 @@ async fn entity_lookup(
     mode: Mode,
     stored: &[&str],
 ) -> Option<pinakes_core::also_on::Found> {
+    // `None` only while a removal of the source is checked.
+    if !needs_also_on(&["musicbrainz_entity"]) {
+        return None;
+    }
     let source = pinakes_core::also_on::registry()
         .into_iter()
-        .find(|s| s.id() == "musicbrainz_entity")?;
+        .find(|s| s.id() == "musicbrainz_entity")
+        .unwrap();
     let cx = pinakes_core::also_on::Context {
         egress: Egress::with_backends(
             common::unpaced_egress_config(),
