@@ -1234,6 +1234,114 @@ async fn an_openalex_update_cut_off_after_its_removals_shares_dois_again(pool: P
     assert!(keys.contains(&doi_key.to_owned()), "{keys:?}");
 }
 
+/// An update taken up after its removals and cut off again while it reads (before its DOI pass)
+/// still ends, when it is taken up once more, with the pass over every DOI: each cursor it saves
+/// keeps saying the removals began.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_openalex_update_cut_off_twice_after_its_removals_shares_dois_again(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let original = with(&w[0], |v| v["cited_by_count"] = 900.into());
+    let twin = with(&w[0], |v| {
+        v["id"] = "https://openalex.org/W2".into();
+        v["cited_by_count"] = 60.into();
+    });
+    let first = ("2026-10-14", vec![original, twin]);
+    snapshot(snap.path(), "2026-10-14", std::slice::from_ref(&first));
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let doi_key = "doi:10.1016/j.kint.2022.02.042";
+    let (held_uri, _, _, _, _, _) = row(&pool, "openalex", "W4225145323").await;
+    // The update's files: the holder fallen below the threshold and a new work in the first, a
+    // long file of works under the threshold after it (so the run is still reading when it is
+    // cut off again).
+    let fallen = with(&w[0], |v| v["cited_by_count"] = 10.into());
+    let new_work = with(&w[3], |v| {
+        v["id"] = "https://openalex.org/W5".into();
+        v["doi"] = "https://doi.org/10.5555/new.5".into();
+    });
+    let long: Vec<String> = (0..300_000)
+        .map(|n| format!("{{\"id\":\"https://openalex.org/W8{n:07}\",\"cited_by_count\":1}}"))
+        .collect();
+    snapshot(
+        snap.path(),
+        "2026-11-14",
+        &[
+            first,
+            ("2026-11-01", vec![fallen, new_work]),
+            ("2026-11-02", long),
+        ],
+    );
+    // Cut off the first time after its removals: the holder removed, no DOI pass.
+    sqlx::query(
+        "UPDATE catalogue_state SET run='update',phase='update' WHERE catalogue='openalex'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store::remove(
+        &pool,
+        Catalogue::Openalex,
+        &["W4225145323".to_owned()],
+        Some(&serde_json::json!({"snapshot": "2026-11-14", "phase": "removing"})),
+    )
+    .await
+    .unwrap();
+    // Taken up, and cut off again (a restart) once it saved a cursor of its own.
+    let running = tokio::spawn({
+        let (importer, ctx) = (importer.clone(), ctx.clone());
+        async move { run::run_once(importer, &ctx, Run::Update, |_| {}).await }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let cursor: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT cursor FROM catalogue_state WHERE catalogue='openalex'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if cursor.as_ref().is_some_and(|c| c.get("done").is_some()) {
+            break;
+        }
+        assert!(
+            !running.is_finished(),
+            "the update ended before it was cut off"
+        );
+        assert!(std::time::Instant::now() < deadline, "no cursor saved");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    running.abort();
+    let _ = running.await;
+    let state = state_of(&pool, Catalogue::Openalex).await;
+    assert_eq!(
+        state.run.as_deref(),
+        Some("update"),
+        "cut off while reading"
+    );
+    let (_, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert!(!keys.contains(&doi_key.to_owned()), "{keys:?}");
+    // Taken up once more (its catalogue lock goes with the cut-off run's connection).
+    let ended = loop {
+        match run::run_once(importer.clone(), &ctx, Run::Update, |_| {}).await {
+            Ok(ended) => break ended,
+            Err(error) if error.to_string().contains("lock is held") => {
+                assert!(std::time::Instant::now() < deadline, "{error}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    assert_eq!(ended.0.run, None);
+    let (uri, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert_eq!(uri, held_uri);
+    assert!(keys.contains(&doi_key.to_owned()), "{keys:?}");
+}
+
 // --- Tranco --------------------------------------------------------------------------------------
 
 /// What one URL answers.

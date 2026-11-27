@@ -318,7 +318,16 @@ impl OpenAlex {
         drop(tx);
         let snapshot = manifest.date.clone();
         let mut sink = Sink::new(job, None);
-        let cursor = |done: &BTreeSet<usize>| json!({"snapshot": snapshot, "done": done});
+        // An update taken up after its removals began keeps saying so in every cursor it saves,
+        // so it ends with the pass over every DOI however often it is cut off ([`REMOVING`]).
+        let removals_began = update && removed_before(job);
+        let cursor = |done: &BTreeSet<usize>| {
+            let mut c = json!({"snapshot": snapshot, "done": done});
+            if removals_began {
+                c["phase"] = json!(REMOVING);
+            }
+            c
+        };
         // An update's removals wait for its end, so it can be refused before removing anything
         // when they are more than a tenth of the cards (a work written again later leaves them).
         let held = job.state().cards.max(0) as u64;
@@ -420,6 +429,11 @@ impl OpenAlex {
 /// removed holders of DOIs whose other holders `share_dois` has not looked at yet, so it ends
 /// with a pass over every card's DOIs.
 const REMOVING: &str = "removing";
+/// Whether the run was taken up from a cursor that says its removals began ([`REMOVING`]).
+fn removed_before(job: &Job<'_>) -> bool {
+    job.cursor()
+        .is_some_and(|c| c.get("phase").and_then(Value::as_str) == Some(REMOVING))
+}
 /// Which DOIs [`share_dois`] looks at.
 pub enum DoiScope<'a> {
     /// The cards a full import wrote (its generation): the others go with its end.
@@ -1136,9 +1150,7 @@ impl Importer for OpenAlex {
         }
         // Taken up after its removals began: the DOIs of the works removed are not known any
         // more, so the pass looks at every DOI.
-        let removed_before = job
-            .cursor()
-            .is_some_and(|c| c.get("phase").and_then(Value::as_str) == Some(REMOVING));
+        let whole_pass = removed_before(job);
         let manifest = self.manifest().await?;
         if last.get("snapshot").and_then(Value::as_str) == Some(manifest.date.as_str()) {
             return Ok(UpdateEnd::Done);
@@ -1166,7 +1178,7 @@ impl Importer for OpenAlex {
         let dois = self
             .read(job, &manifest, &parts, BTreeSet::new())
             .await?
-            .filter(|_| !removed_before);
+            .filter(|_| !whole_pass);
         match &dois {
             Some(dois) => share_dois(job.pool(), DoiScope::Dois(dois)).await?,
             // Past a million DOIs written, or taken up after its removals: a whole pass.
