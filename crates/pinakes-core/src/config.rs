@@ -2865,6 +2865,12 @@ mod tests {
                     assert_eq!(catalogues.wikidata.limit, None);
                     assert_eq!(catalogues.musicbrainz.limit, None);
                     assert_eq!(catalogues.openalex.min_citations, 50);
+                    // "These are the defaults": every catalogue key as a configuration without a
+                    // `[catalogues]` section has it.
+                    assert_eq!(
+                        serde_json::to_value(catalogues).unwrap(),
+                        serde_json::to_value(&Config::default().catalogues).unwrap()
+                    );
                 }
                 other => panic!("a TOML block of docs/deployment.md with region {other}"),
             }
