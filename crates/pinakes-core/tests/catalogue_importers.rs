@@ -8,7 +8,7 @@ mod common;
 use pinakes_core::{
     catalogue::{
         fetch::Input,
-        join, podcastindex,
+        join, openalex, podcastindex,
         run::{self, Context, Pace, Run},
         software, store, Catalogue,
     },
@@ -727,4 +727,422 @@ async fn an_update_counts_its_refused_and_unchanged_cards(pool: PgPool) {
     assert!(counted("rejected") > rejected);
     assert!(counted("unchanged") >= unchanged + 10);
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
+}
+
+// --- OpenAlex ------------------------------------------------------------------------------------
+
+/// A local snapshot: a manifest of `date` and its works files (`(day, lines)`).
+fn snapshot(dir: &std::path::Path, date: &str, parts: &[(&str, Vec<String>)]) {
+    let mut files = vec![];
+    for (n, (day, lines)) in parts.iter().enumerate() {
+        let path = format!("data/jsonl/works/updated_date={day}/part_{n:04}.gz");
+        let full = dir.join(&path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        let body = gzip(lines.join("\n").as_bytes());
+        files.push(serde_json::json!({"url": format!("s3://openalex/{path}"), "meta": {"content_length": body.len(), "record_count": lines.len()}}));
+        std::fs::write(full, body).unwrap();
+    }
+    let manifest =
+        serde_json::json!({"date": date, "entities": [{"entity": "works", "files": files}]});
+    std::fs::create_dir_all(dir.join("data/jsonl")).unwrap();
+    std::fs::write(dir.join("data/jsonl/manifest.json"), manifest.to_string()).unwrap();
+}
+fn works() -> Vec<String> {
+    String::from_utf8(fixture("openalex", "works.jsonl"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+fn with(line: &str, edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+    edit(&mut v);
+    v.to_string()
+}
+
+/// OpenAlex: works cited more than the threshold become cards; a work in two dates' files
+/// takes its newest copy; an update reads only the newer dates' files, rewrites what changed and
+/// removes works that fell below the threshold; a changed threshold asks for a full import;
+/// shared DOI, PubMed, arXiv and OpenAlex links join the card.
+#[sqlx::test(migrations = "../../migrations")]
+async fn openalex_imports_the_newest_copy_and_updates_by_date(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let newer = with(&w[0], |v| {
+        v["display_name"] = "A newer title".into();
+        v["cited_by_count"] = 90.into();
+    });
+    // Many files of the older date, so the newer one is read beside them; the older copy comes
+    // after 50,000 lines of works under the threshold, so the newer file is read long before it
+    // and must wait for the older date to be written.
+    let mut parts: Vec<(&str, Vec<String>)> = (0..9).map(|_| ("2026-05-21", vec![])).collect();
+    let mut older: Vec<String> = (0..50_000)
+        .map(|n| format!("{{\"id\":\"https://openalex.org/W9{n:07}\",\"cited_by_count\":1}}"))
+        .collect();
+    older.extend(w.clone());
+    parts.push(("2026-05-21", older));
+    parts.push(("2026-10-14", vec![newer]));
+    snapshot(snap.path(), "2026-10-14", &parts);
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 5);
+    let (uri, name, keys, labels, _, _) = row(&pool, "openalex", "W4225145323").await;
+    assert_eq!(name, "A newer title", "the newest copy wins");
+    assert!(uri.contains("10.1016/j.kint.2022.02.042"), "{uri}");
+    assert!(
+        keys.contains(&"pmid:35490842".to_owned())
+            && keys.contains(&"openalex:W4225145323".to_owned()),
+        "{keys:?}"
+    );
+    assert!(!labels.is_empty());
+    let state = store::state(&pool, Catalogue::Openalex)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.position.as_ref().unwrap()["snapshot"], "2026-10-14");
+    assert_eq!(
+        state.current_as_of.unwrap().date_naive().to_string(),
+        "2026-10-14"
+    );
+
+    // Shared links of the same paper join its card.
+    for link in [
+        "https://doi.org/10.1016/j.kint.2022.02.042",
+        "https://pubmed.ncbi.nlm.nih.gov/35490842/",
+        "https://openalex.org/W4225145323",
+    ] {
+        let found = join::find(&pool, &["openalex"], link).await.unwrap();
+        assert_eq!(
+            found.card.map(|c| c.source_id).as_deref(),
+            Some("W4225145323"),
+            "{link}"
+        );
+    }
+    let found = join::find(&pool, &["openalex"], "https://arxiv.org/abs/2104.04167")
+        .await
+        .unwrap();
+    assert_eq!(
+        found.card.map(|c| c.source_id).as_deref(),
+        Some("W3205276578")
+    );
+
+    // A new snapshot: one newer date's file, where a review fell to 10 citations and a work new
+    // to the catalogue appears; the older files are not read again.
+    let before = versions(&pool, "openalex").await;
+    let fallen = with(&w[4], |v| v["cited_by_count"] = 10.into());
+    let fresh = with(&w[3], |v| {
+        v["id"] = "https://openalex.org/W1".into();
+        v["doi"] = serde_json::Value::Null;
+    });
+    // The old files are gone from disk: reading one would fail the update.
+    let mut parts2: Vec<(&str, Vec<String>)> = parts.clone();
+    parts2.push(("2026-11-01", vec![fallen, fresh]));
+    snapshot(snap.path(), "2026-11-14", &parts2);
+    std::fs::remove_dir_all(snap.path().join("data/jsonl/works/updated_date=2026-05-21")).unwrap();
+    let (_, written) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!((written.inserted, written.removed), (1, 1), "{written:?}");
+    let after = versions(&pool, "openalex").await;
+    assert!(!after.contains_key("W2131279082"));
+    for (id, version) in &before {
+        if id != "W2131279082" {
+            assert_eq!(after.get(id), Some(version), "{id} rewritten");
+        }
+    }
+    let state = store::state(&pool, Catalogue::Openalex)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.position.as_ref().unwrap()["through"], "2026-11-01");
+
+    // A higher threshold: the update hands over to a full import, which keeps only the works
+    // cited more than 100 times, by their newest copy (the review's 232 citations were in an
+    // older file; its newest says 10).
+    snapshot(snap.path(), "2026-11-14", &parts2);
+    let ctx = context(&pool, dir.path(), |c| {
+        c.catalogues.openalex.min_citations = 100
+    });
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert!(state.import_requested.is_none());
+    let mut left: Vec<String> = versions(&pool, "openalex").await.into_keys().collect();
+    left.sort();
+    assert_eq!(left, ["W1", "W2148189974"]);
+    assert_eq!(state.position.as_ref().unwrap()["min_citations"], 100);
+}
+
+/// An OpenAlex update whose newer files would remove more than a tenth of the cards is refused:
+/// nothing is removed and its failure counted once; the task's next update finishes without
+/// reading that snapshot; a full import asked for (`--request`) applies it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let many: Vec<String> = (1..=40)
+        .map(|n| {
+            with(&w[0], |v| {
+                v["id"] = format!("https://openalex.org/W{n}").into();
+                v["doi"] = serde_json::Value::Null;
+            })
+        })
+        .collect();
+    snapshot(snap.path(), "2026-10-14", &[("2026-10-14", many.clone())]);
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 40);
+    age(&pool, Catalogue::Openalex).await;
+    // Fifteen works fall to 3 citations in a newer file.
+    let fallen: Vec<String> = many[..15]
+        .iter()
+        .map(|l| with(l, |v| v["cited_by_count"] = 3.into()))
+        .collect();
+    let parts = [("2026-10-14", many.clone()), ("2026-11-01", fallen)];
+    snapshot(snap.path(), "2026-11-14", &parts);
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert_eq!(count(&pool, "openalex", None).await, 40);
+    let state = state_of(&pool, Catalogue::Openalex).await;
+    assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
+    let position = state.position.unwrap();
+    assert_eq!(position["refused_file"], "2026-11-14");
+    assert_eq!(position["snapshot"], "2026-10-14");
+    // The task's next update reads nothing (the newer file is gone from disk: reading it would
+    // fail) and fails nothing.
+    let newer = snap.path().join("data/jsonl/works/updated_date=2026-11-01");
+    std::fs::rename(&newer, snap.path().join("aside")).unwrap();
+    run::step(&*importer, &ctx).await.unwrap();
+    let state = state_of(&pool, Catalogue::Openalex).await;
+    assert_eq!(state.error_count, 1);
+    assert!(state.last_update_at.is_some());
+    std::fs::rename(snap.path().join("aside"), &newer).unwrap();
+    // A full import asked for: the task runs it and takes the snapshot as it is.
+    run::request_import(
+        &pool,
+        Catalogue::Openalex,
+        pinakes_core::catalogue::musicbrainz::REQUESTED,
+    )
+    .await
+    .unwrap();
+    run::step(&*importer, &ctx).await.unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 25);
+    let state = state_of(&pool, Catalogue::Openalex).await;
+    assert!(state.import_requested.is_none());
+    assert!(state.position.unwrap().get("refused_file").is_none());
+}
+
+/// A new snapshot 180 days after the last full import is read by a full import, which removes
+/// the works the snapshot no longer lists (merged or deleted upstream); before that, an update
+/// keeps them. A full import whose manifest lists no works file fails and removes nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn openalex_imports_in_full_again_after_180_days(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    snapshot(snap.path(), "2026-05-21", &[("2026-05-21", w.clone())]);
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 5);
+    // A newer snapshot where the last work is gone (merged into another): an update keeps it.
+    let kept: Vec<String> = w[..4].to_vec();
+    let fresh = with(&w[3], |v| {
+        v["id"] = "https://openalex.org/W1".into();
+        v["doi"] = serde_json::Value::Null;
+    });
+    snapshot(
+        snap.path(),
+        "2026-06-14",
+        &[
+            ("2026-05-21", kept.clone()),
+            ("2026-06-01", vec![fresh.clone()]),
+        ],
+    );
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 6);
+    // 200 days after the full import, the next snapshot's update is a full import.
+    sqlx::query("UPDATE catalogue_state SET last_import_at=now()-interval '200 days' WHERE catalogue='openalex'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    snapshot(
+        snap.path(),
+        "2026-12-14",
+        &[("2026-05-21", kept), ("2026-06-01", vec![fresh])],
+    );
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 5);
+    assert!(versions(&pool, "openalex").await.contains_key("W1"));
+    assert!(state.last_import_at.unwrap() > chrono::Utc::now() - chrono::Duration::minutes(5));
+    // An empty manifest: the import fails, every card stays.
+    snapshot(snap.path(), "2026-12-15", &[]);
+    let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("manifest"), "{failed}");
+    assert_eq!(count(&pool, "openalex", None).await, 5);
+}
+
+/// A full import cut off after its older date's file is taken up from its cursor: the file
+/// written is not read again, the newer date's file is, and its newer copy of a work wins.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cut_off_openalex_import_resumes_across_dates(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let newer = with(&w[0], |v| v["display_name"] = "A newer title".into());
+    // The import as it stood when it was cut off: the older date's file written.
+    snapshot(snap.path(), "2026-10-14", &[("2026-05-21", w.clone())]);
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let generation = state_of(&pool, Catalogue::Openalex).await.generation;
+    sqlx::query("UPDATE catalogue_state SET run='import',phase='import',cursor='{\"snapshot\":\"2026-10-14\",\"done\":[0]}' WHERE catalogue='openalex'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The whole snapshot: the older file (now gone from disk: reading it would fail) and a newer
+    // date's.
+    snapshot(
+        snap.path(),
+        "2026-10-14",
+        &[("2026-05-21", w.clone()), ("2026-10-01", vec![newer])],
+    );
+    std::fs::remove_dir_all(snap.path().join("data/jsonl/works/updated_date=2026-05-21")).unwrap();
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.generation, generation, "taken up, not begun anew");
+    assert_eq!(state.run, None);
+    assert_eq!(count(&pool, "openalex", None).await, 5);
+    let (_, name, _, _, _, _) = row(&pool, "openalex", "W4225145323").await;
+    assert_eq!(name, "A newer title");
+}
+
+/// Two works that share a DOI: the more cited one holds the DOI link and keys, so a shared DOI
+/// link joins it (not neither); the other one's link is its openalex.org page. An update that
+/// reads neither work leaves them so. When the holder goes, the other one takes the DOI back, and
+/// that move reaches the joins (a stored DOI link is checked again) and the text index.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_openalex_card_holds_a_shared_doi(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let original = with(&w[0], |v| v["cited_by_count"] = 900.into());
+    let twin = with(&w[0], |v| {
+        v["id"] = "https://openalex.org/W2".into();
+        v["cited_by_count"] = 60.into();
+    });
+    let first = ("2026-10-14", vec![original.clone(), twin.clone()]);
+    snapshot(snap.path(), "2026-10-14", std::slice::from_ref(&first));
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let doi_link = "https://doi.org/10.1016/j.kint.2022.02.042";
+    let doi_key = "doi:10.1016/j.kint.2022.02.042";
+    let holds = |keys: &[String]| keys.contains(&doi_key.to_owned());
+    let (held_uri, _, keys, _, _, _) = row(&pool, "openalex", "W4225145323").await;
+    assert!(holds(&keys), "{keys:?}");
+    let (uri, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert_eq!(uri, "https://openalex.org/W2");
+    assert!(!holds(&keys), "{keys:?}");
+    let joined = || async {
+        join::find(&pool, &["openalex"], doi_link)
+            .await
+            .unwrap()
+            .card
+            .map(|c| c.source_id)
+    };
+    assert_eq!(joined().await.as_deref(), Some("W4225145323"));
+    // A resource stored on the DOI link (as the holder's link is stored).
+    sqlx::query("INSERT INTO resource(id,uri) VALUES (md5($1),$1)")
+        .bind(&held_uri)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // An update that reads neither work (a newer date's file of another work, with a DOI of its
+    // own, so the pass runs over the DOIs it wrote): nothing moves.
+    let other = with(&w[3], |v| {
+        v["id"] = "https://openalex.org/W1".into();
+        v["doi"] = "https://doi.org/10.5555/other.1".into();
+    });
+    let second = ("2026-11-01", vec![other]);
+    snapshot(snap.path(), "2026-11-14", &[first.clone(), second.clone()]);
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    let (uri, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert_eq!(uri, "https://openalex.org/W2");
+    assert!(!holds(&keys), "{keys:?}");
+    assert_eq!(joined().await.as_deref(), Some("W4225145323"));
+    // The holder falls to 10 citations in a newer file: its card goes, the twin takes the DOI.
+    sqlx::query("DELETE FROM catalogue_join_due")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let queued: i64 =
+        sqlx::query_scalar("SELECT coalesce(max(seq),0) FROM search_index_catalogue_queue")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let fallen = with(&w[0], |v| v["cited_by_count"] = 10.into());
+    snapshot(
+        snap.path(),
+        "2026-12-14",
+        &[first, second, ("2026-12-01", vec![fallen])],
+    );
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert!(!versions(&pool, "openalex")
+        .await
+        .contains_key("W4225145323"));
+    let (uri, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert_eq!(uri, held_uri);
+    assert!(holds(&keys), "{keys:?}");
+    assert_eq!(joined().await.as_deref(), Some("W2"));
+    // The move is a change: the stored DOI link is checked again, the text index reads the card.
+    let due: i64 = sqlx::query_scalar("SELECT count(*) FROM catalogue_join_due j JOIN resource r ON r.id=j.resource_id WHERE r.uri=$1")
+        .bind(&held_uri)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(due, 1);
+    let reindexed: i64 = sqlx::query_scalar("SELECT count(*) FROM search_index_catalogue_queue q JOIN catalogue_card c ON c.id=q.card_id WHERE c.source_id='W2' AND q.seq>$1")
+        .bind(queued)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(reindexed >= 1);
 }

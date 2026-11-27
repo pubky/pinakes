@@ -30,6 +30,7 @@ pub mod failure;
 pub mod fetch;
 pub mod join;
 pub mod musicbrainz;
+pub mod openalex;
 pub mod osm;
 pub mod podcastindex;
 pub mod run;

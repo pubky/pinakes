@@ -1,0 +1,73 @@
+{
+ "date": "2026-10-14",
+ "format": "jsonl",
+ "meta": {
+  "record_count": 586176148,
+  "content_length": 755513952946
+ },
+ "entities": [
+  {
+   "entity": "works",
+   "record_count": 464765485,
+   "content_length": 675298563638,
+   "files": [
+    {
+     "url": "s3://openalex/data/jsonl/works/updated_date=2016-06-24/part_0000.gz",
+     "meta": {
+      "content_length": 224592,
+      "record_count": 489
+     }
+    },
+    {
+     "url": "s3://openalex/data/jsonl/works/updated_date=2016-07-22/part_0000.gz",
+     "meta": {
+      "content_length": 7523,
+      "record_count": 7
+     }
+    },
+    {
+     "url": "s3://openalex/data/jsonl/works/updated_date=2016-08-23/part_0000.gz",
+     "meta": {
+      "content_length": 8913,
+      "record_count": 7
+     }
+    },
+    {
+     "url": "s3://openalex/data/jsonl/works/updated_date=2026-10-14/part_0157.gz",
+     "meta": {
+      "content_length": 668225499,
+      "record_count": 316757
+     }
+    },
+    {
+     "url": "s3://openalex/data/jsonl/works/updated_date=2026-10-14/part_0158.gz",
+     "meta": {
+      "content_length": 662593287,
+      "record_count": 316032
+     }
+    },
+    {
+     "url": "s3://openalex/data/jsonl/works/updated_date=2026-10-14/part_0159.gz",
+     "meta": {
+      "content_length": 663136079,
+      "record_count": 315805
+     }
+    }
+   ]
+  },
+  {
+   "entity": "authors",
+   "record_count": 1,
+   "content_length": 1,
+   "files": [
+    {
+     "url": "s3://openalex/data/jsonl/authors/updated_date=2026-10-14/part_0000.gz",
+     "meta": {
+      "content_length": 1,
+      "record_count": 1
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1657,6 +1657,10 @@ CREATE TABLE catalogue_extras (
 );
 CREATE INDEX catalogue_extras_due_idx ON catalogue_extras USING btree (due_at, resource_id) WHERE due_at IS NOT NULL;
 
+-- The OpenAlex cards that gave up a DOI another work holds (`catalogue::openalex::share_dois`),
+-- by that DOI: an update looks at the DOIs it read only.
+CREATE INDEX catalogue_card_shared_doi_idx ON catalogue_card USING btree (((details->'shared_doi'->>'key'))) WHERE catalogue = 'openalex' AND details ? 'shared_doi';
+
 -- The canonical links a join key names (`catalogue::join::link_keys` reads each back to the key):
 -- a row with one of these links joins a card holding the key when the card is written. A crate's
 -- key spells `_` as `-` (crates.io takes them for one name): its pages with each, so a link to a

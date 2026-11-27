@@ -166,6 +166,7 @@ pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
     importers.extend(super::musicbrainz::importer(config));
     importers.extend(super::osm::importer(config));
     importers.extend(super::wikidata::importer(config));
+    importers.extend(super::openalex::importer(config));
     importers.extend(super::podcastindex::importer(config));
     importers.extend(super::software::importer(config));
     importers
@@ -600,10 +601,11 @@ pub enum Next {
 
 /// The catalogues with an importer in this build, in the order they start; each starts only
 /// with `http.contact` set.
-pub const WITH_IMPORTER: [Catalogue; 5] = [
+pub const WITH_IMPORTER: [Catalogue; 6] = [
     Catalogue::Musicbrainz,
     Catalogue::Osm,
     Catalogue::Wikidata,
+    Catalogue::Openalex,
     Catalogue::Podcastindex,
     Catalogue::Software,
 ];

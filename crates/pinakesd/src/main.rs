@@ -854,7 +854,7 @@ async fn import_files(
     args: &ImportArgs,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    use pinakes_core::catalogue::{fetch::Input, podcastindex, run, software, store};
+    use pinakes_core::catalogue::{fetch::Input, openalex, podcastindex, run, software, store};
     let catalogue = args.catalogue;
     let contact = &config.egress.contact;
     let from = |n: usize| args.from.get(n).map(String::as_str);
@@ -874,6 +874,13 @@ async fn import_files(
         "--limit is MusicBrainz's; the other catalogues read their whole file"
     );
     let importer: std::sync::Arc<dyn run::Importer> = match catalogue {
+        Catalogue::Openalex => {
+            let base = match from(0) {
+                Some(from) => Input::parse(from)?,
+                None => Input::parse(openalex::BUCKET)?,
+            };
+            std::sync::Arc::new(openalex::OpenAlex::new(base, contact)?)
+        }
         Catalogue::Podcastindex => {
             let input = Input::parse(from(0).unwrap_or(podcastindex::DATABASE))?;
             std::sync::Arc::new(podcastindex::PodcastIndex::new(input, contact)?.configured(config))
@@ -1237,6 +1244,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                                 Catalogue::Musicbrainz
                                     | Catalogue::Osm
                                     | Catalogue::Wikidata
+                                    | Catalogue::Openalex
                                     | Catalogue::Podcastindex
                                     | Catalogue::Software
                             ),
