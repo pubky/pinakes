@@ -1665,7 +1665,7 @@ An undated card that answers the same at a refresh waits twice as long the next 
 `limits.refresh_max_secs` (90 days); a change starts it over at the interval above. Such a link
 whose page two fresh fetches found gone for good (404, 410) is read again every
 `limits.refresh_max_secs` until it answers again. Events, calendars, podcast shows, Pubky objects,
-dated and social cards keep the intervals above ([backoff](operations.md#refresh-backoff)). Opening
+Nostr and ActivityPub profiles, dated and social cards keep the intervals above ([backoff](operations.md#refresh-backoff)). Opening
 a card whose refresh is due reads it again in the background.
 
 One fetch at the end plus 24 hours (the start plus 24 hours without an end) makes a resource

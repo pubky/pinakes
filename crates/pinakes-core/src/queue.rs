@@ -883,8 +883,9 @@ async fn finish_job(
         }
         // An undated card read from its link waits longer each time it answers the same, and a
         // link found gone waits longest (`scheduler::Backoff`, applied by the save): not an
-        // event (dated or not), a calendar or feed, social content, a Pubky object (its author
-        // edits or deletes it), an OSM object, a point, or a card that names when it changes.
+        // event (dated or not), a calendar or feed, social content or a Nostr or ActivityPub
+        // profile, a Pubky object (its author edits or deletes it), an OSM object, a point, or a
+        // card that names when it changes.
         if matches!(
             resolver.name(),
             "web" | "media" | "isbn" | "doi" | "nostr" | "activitypub" | "official"
@@ -897,6 +898,7 @@ async fn finish_job(
             && doc.refresh_by.is_none()
             && !invalid_identifier
             && !crate::resolver::cards::social(&doc)
+            && !crate::resolver::cards::social_profile(resolver.name(), &doc)
             // A podcast show's new episodes are no change to its card: it keeps its schedule.
             && doc.episodes.is_none()
             && !doc.type_path.iter().any(|t| t == "PodcastSeries")

@@ -1323,6 +1323,82 @@ async fn the_backoff_covers_a_304_and_official_cards_and_spares_shows_and_dates(
     assert_eq!(read(official).await, 4.0);
 }
 
+/// A resolver of one route whose read is the stored card asked again.
+struct Route(&'static str, Mutex<ResourceMeta>);
+#[async_trait::async_trait]
+impl Resolver for Route {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        let mut doc = self.1.lock().unwrap().clone();
+        doc.fetched_at = chrono::Utc::now().timestamp_millis();
+        Ok(doc)
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        Duration::from_secs(doc.ttl_secs)
+    }
+}
+
+/// A Nostr or ActivityPub profile is social content: one that answers the same keeps its weekly
+/// read (a deleted or edited profile is read again within a week), where an undated web card of
+/// a person waits longer each time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn nostr_and_activitypub_profiles_keep_their_weekly_read(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let read = |resolver: &'static dyn Resolver| {
+        let (pool, cfg) = (pool.clone(), cfg.clone());
+        async move {
+            due_now(&pool).await;
+            let job = queue::claim_sources(&pool, &[resolver.name()], &cfg, 1)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            queue::run_job(&pool, resolver, &cfg, &job).await.unwrap();
+            wait_days(&pool).await
+        }
+    };
+    for (route, uri, kind) in [
+        ("nostr", "https://example.org/nostr-profile", "Person"),
+        ("activitypub", "https://example.org/@someone", "Person"),
+        (
+            "activitypub",
+            "https://example.org/@a-group",
+            "Organization",
+        ),
+        ("web", "https://example.org/about-me", "Person"),
+    ] {
+        sqlx::query("DELETE FROM resource")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tagged(&pool, uri).await;
+        sqlx::query("UPDATE resource SET resolver=$1")
+            .bind(route)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut card = ResourceMeta::new(uri, route, 0);
+        card.set_type(kind);
+        card.name = Some("Someone".into());
+        let resolver: &'static Route = Box::leak(Box::new(Route(route, Mutex::new(card))));
+        let waits = [
+            read(resolver).await,
+            read(resolver).await,
+            read(resolver).await,
+        ];
+        if route == "web" {
+            assert_eq!(waits, [7.0, 14.0, 28.0], "{route} {kind}");
+        } else {
+            assert_eq!(waits, [7.0, 7.0, 7.0], "{route} {kind}");
+        }
+    }
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn opening_a_card_the_backoff_put_off_leaves_its_wait(pool: PgPool) {
     let id = tagged(&pool, "https://example.org/slow").await;
