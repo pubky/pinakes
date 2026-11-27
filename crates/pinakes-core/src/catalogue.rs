@@ -32,6 +32,7 @@ pub mod join;
 pub mod musicbrainz;
 pub mod osm;
 pub mod run;
+pub mod software;
 pub mod spill;
 pub mod store;
 pub mod wikidata;

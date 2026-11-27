@@ -1,0 +1,12 @@
+category,crates_cnt,created_at,description,id,path,slug
+Text processing,7583,2017-01-17 19:13:05.112025+00,Crates to deal with the complexities of human language when expressed in textual form.,312,root.text_processing,text-processing
+No standard library,15444,2017-02-10 01:52:09.447906+00,Crates that are able to function without the Rust standard library.,3420,root.no_std,no-std
+Command line utilities,37743,2017-01-17 19:13:05.112025+00,Applications to run at the command line.,273,root.command_line_utilities,command-line-utilities
+No standard library::No dynamic allocation,1767,2023-01-23 10:07:45.986892+00,Crates that are able to function without the Rust alloc crate.,315439,root.no_std.no_alloc,no-std::no-alloc
+Algorithms,9477,2017-01-17 19:13:05.112025+00,"Rust implementations of core algorithms such as hashing, sorting, searching, and more.",267,root.algorithms,algorithms
+Asynchronous,13265,2017-01-17 19:13:05.112025+00,"Crates to help you deal with events independently of the main program flow, using techniques like futures, promises, waiting, or eventing.",269,root.asynchronous,asynchronous
+Web programming,12202,2017-01-17 19:13:05.112025+00,Crates to create applications for the web.,318,root.web_programming,web-programming
+Encoding,8699,2017-01-17 19:13:05.112025+00,Encoding and/or decoding data from one data format to another.,289,root.encoding,encoding
+Network programming,17055,2017-01-17 19:13:05.112025+00,"Crates dealing with higher-level network protocols such as FTP, HTTP, or SSH, or lower-level network protocols such as TCP or UDP.",302,root.network_programming,network-programming
+Parser implementations,9603,2017-02-05 21:31:23.444608+00,Parsers implemented for particular formats or languages.,2833,root.parser_implementations,parser-implementations
+Rust patterns,4608,2017-01-17 19:13:05.112025+00,Shared solutions for particular situations specific to programming in Rust.,308,root.rust_patterns,rust-patterns

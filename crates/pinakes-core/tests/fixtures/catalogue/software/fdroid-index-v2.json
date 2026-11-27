@@ -1,0 +1,151 @@
+{
+ "repo": {
+  "name": {
+   "ar": "F-Droid",
+   "ba": "F-Droid",
+   "ca": "F-Droid",
+   "cs": "F-Droid",
+   "de": "F-Droid",
+   "en-GB": "F-Droid",
+   "en-US": "F-Droid",
+   "es": "F-Droid",
+   "fa": "اف‌دروید",
+   "fr": "F-Droid",
+   "ga": "F-Droid",
+   "id": "F-Droid",
+   "ja": "F-Droid",
+   "ko": "F-Droid",
+   "lt": "F-Droid",
+   "lv": "F-Droid",
+   "pl": "F-Droid",
+   "pt-BR": "F-Droid",
+   "ru": "F-Droid",
+   "sq": "F-Droid",
+   "sr": "F-Droid",
+   "sv": "F-Droid",
+   "sw": "F-Droid",
+   "ta": "எஃப்-டிராய்டு",
+   "tr": "F-Droid",
+   "ug": "F-Droid",
+   "uk": "F-Droid",
+   "yue": "F-Droid",
+   "zh-CN": "F-Droid",
+   "zh-TW": "F-Droid"
+  },
+  "timestamp": 1795453653400
+ },
+ "packages": {
+  "org.fdroid.fdroid": {
+   "metadata": {
+    "added": 1295222400000,
+    "categories": [
+     "App Store & Updater",
+     "System"
+    ],
+    "changelog": "https://gitlab.com/fdroid/fdroidclient/-/blob/HEAD/CHANGELOG.md",
+    "issueTracker": "https://gitlab.com/fdroid/fdroidclient/issues",
+    "lastUpdated": 1793985223464,
+    "license": "GPL-3.0-or-later",
+    "sourceCode": "https://gitlab.com/fdroid/fdroidclient",
+    "translation": "https://hosted.weblate.org/projects/f-droid/f-droid",
+    "webSite": "https://f-droid.org",
+    "authorEmail": "team@f-droid.org",
+    "authorName": "F-Droid",
+    "bitcoin": "bc1qd8few44yaxc3wv5ceeedhdszl238qkvu50rj4v",
+    "liberapay": "F-Droid-Data",
+    "openCollective": "F-Droid-Euro",
+    "name": {
+     "de": "F-Droid",
+     "en-US": "F-Droid",
+     "fr": "F-Droid"
+    },
+    "summary": {
+     "de": "Der App-Store, der Freiheit und Privatsphäre respektiert",
+     "en-US": "The app store that respects freedom and privacy",
+     "fr": "Le magasin d'applications qui respecte votre liberté et votre vie privée"
+    },
+    "donate": [
+     "https://f-droid.org/donate"
+    ],
+    "preferredSigner": "43238d512c1e5eb2d6569f4a3afbf5523418b82e0a3ed1552770abb9a9c9ccab"
+   },
+   "versions": {
+    "dac55a0d17b1edf7e7286b48cfbd70c7c52fbb32a00af062c68830a437c47959": {
+     "added": 1793985223464,
+     "manifest": {
+      "versionName": "2.0.3"
+     }
+    }
+   }
+  },
+  "de.danoeh.antennapod": {
+   "metadata": {
+    "added": 1348099200000,
+    "categories": [
+     "Multimedia",
+     "News",
+     "Podcast"
+    ],
+    "changelog": "https://github.com/AntennaPod/AntennaPod/releases",
+    "issueTracker": "https://github.com/AntennaPod/AntennaPod/issues",
+    "lastUpdated": 1792083575173,
+    "license": "GPL-3.0-only",
+    "sourceCode": "https://github.com/AntennaPod/AntennaPod",
+    "translation": "https://hosted.weblate.org/engage/antennapod",
+    "webSite": "https://antennapod.org",
+    "authorEmail": "info@antennapod.org",
+    "name": {
+     "en-US": "AntennaPod - Podcast Player"
+    },
+    "summary": {
+     "en-US": "Easy-to-use, flexible and open-source podcast manager and player"
+    },
+    "preferredSigner": "179430565a4a04bfe7827483243099bd10870410800cd7c4c7b48d8d3226df55"
+   },
+   "versions": {
+    "6e79f28f69cef1a8b2e4f5f88c9c3cf3c3d7c51356f01394ac23b0dc5d56a00b": {
+     "added": 1792083575173,
+     "manifest": {
+      "versionName": "3.12.3"
+     }
+    }
+   }
+  },
+  "org.videolan.vlc": {
+   "metadata": {
+    "added": 1363910400000,
+    "categories": [
+     "Cast",
+     "Local Media Player"
+    ],
+    "changelog": "https://code.videolan.org/videolan/vlc-android/blob/HEAD/NEWS",
+    "issueTracker": "https://code.videolan.org/videolan/vlc-android/issues",
+    "lastUpdated": 1792186385612,
+    "license": "GPL-3.0-only",
+    "sourceCode": "https://code.videolan.org/videolan/vlc-android",
+    "translation": "https://explore.transifex.com/yaron/vlc-trans/dashboard/",
+    "webSite": "https://www.videolan.org/vlc/download-android.html",
+    "name": {
+     "en-US": "VLC"
+    },
+    "summary": {
+     "de": "Der beste Video- und Musikplayer. Schnell und „funktioniert“, spielt alles ab",
+     "en-US": "The best video and music player. Fast and “just works”, plays any file",
+     "fr": "Le meilleur lecteur vidéo et de musique open source, rapide et facile d'emploi"
+    },
+    "donate": [
+     "https://www.videolan.org/contribute.html#money"
+    ],
+    "preferredSigner": "80535be61eedb9a03b0476a6f493d496c3498770404339ea7a8000f5e61d22c0"
+   },
+   "versions": {
+    "727693d59c4d678c046386812a103209a25423460c9d22e38e12460f12402ab6": {
+     "added": 1792186385612,
+     "manifest": {
+      "versionName": "3.7.2"
+     }
+    }
+   }
+  }
+ }
+}

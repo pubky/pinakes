@@ -669,9 +669,10 @@ async fn an_update_reads_the_change_files_after_its_sequence(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
     let mut config = crate::config::Config::default();
-    // OpenStreetMap's importer alone (MusicBrainz's and Wikidata's have their own tests).
+    // OpenStreetMap's importer alone (the others have their own tests).
     config.catalogues.musicbrainz.enabled = false;
     config.catalogues.wikidata.enabled = false;
+    config.catalogues.software.enabled = false;
     assert!(runner::to_start(runner::importers(&config), &config).is_empty());
     runner::note_unstarted(&pool, &config).await.unwrap();
     let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();

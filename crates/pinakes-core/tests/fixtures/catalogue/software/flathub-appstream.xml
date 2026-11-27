@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="flatpak">
+  <component type="desktop-application">
+    <id>org.gnome.Maps</id>
+    <name>Maps</name>
+    <name xml:lang="de">Karten</name>
+    <summary>Find places around the world</summary>
+    <summary xml:lang="de">Orte in der ganzen Welt finden</summary>
+    <project_license>GPL-2.0-or-later</project_license>
+    <project_group>GNOME</project_group>
+    <url type="homepage">https://apps.gnome.org/Maps/</url>
+    <url type="bugtracker">https://gitlab.gnome.org/GNOME/gnome-maps/issues</url>
+    <url type="donation">https://www.gnome.org/donate/</url>
+    <url type="translate">https://l10n.gnome.org/module/gnome-maps/</url>
+    <url type="vcs-browser">https://gitlab.gnome.org/GNOME/gnome-maps</url>
+    <url type="contribute">https://welcome.gnome.org/app/Maps/</url>
+    <categories>
+      <category>Utility</category>
+    </categories>
+    <keywords>
+      <keyword>maps</keyword>
+      <keyword>location finder</keyword>
+      <keyword>place search</keyword>
+      <keyword>google maps alternative</keyword>
+      <keyword>free map app</keyword>
+    </keywords>
+    <keywords xml:lang="de">
+      <keyword>Karten</keyword>
+      <keyword>Ortfinder</keyword>
+      <keyword>Ortsuche</keyword>
+      <keyword>Alternative zu Google Maps</keyword>
+      <keyword>Anwendung für freie Karten</keyword>
+    </keywords>
+  </component>
+  <component type="desktop">
+    <id>org.mozilla.firefox</id>
+    <name>Firefox</name>
+    <summary>Fast, Private &amp; Safe Web Browser</summary>
+    <developer_name>Mozilla</developer_name>
+    <categories>
+      <category>Network</category>
+      <category>WebBrowser</category>
+    </categories>
+    <keywords>
+      <keyword>Browser</keyword>
+      <keyword>Explorer</keyword>
+      <keyword>Internet</keyword>
+      <keyword>WWW</keyword>
+      <keyword>Web</keyword>
+      <keyword>internet</keyword>
+      <keyword>mozilla</keyword>
+      <keyword>web</keyword>
+    </keywords>
+    <project_license>MPL-2.0</project_license>
+    <url type="bugtracker">https://bugzilla.mozilla.org/</url>
+    <url type="donation">https://donate.mozilla.org/</url>
+    <url type="help">https://support.mozilla.org/</url>
+    <url type="homepage">https://www.mozilla.org/firefox/</url>
+    <url type="translate">https://wiki.mozilla.org/L10n:Starting_a_localization</url>
+  </component>
+  <component type="desktop-application">
+    <id>org.videolan.VLC</id>
+    <name>VLC</name>
+    <name xml:lang="de">VLC</name>
+    <summary>VLC media player, the open-source multimedia player</summary>
+    <project_license>GPL-2.0+</project_license>
+    <project_group>VideoLAN</project_group>
+    <url type="homepage">https://www.videolan.org/vlc/</url>
+    <url type="bugtracker">https://github.com/flathub/org.videolan.VLC/issues</url>
+    <url type="donation">https://www.videolan.org/contribute.html</url>
+    <categories>
+      <category>AudioVideo</category>
+      <category>Player</category>
+      <category>Recorder</category>
+    </categories>
+    <keywords>
+      <keyword>Player</keyword>
+      <keyword>Capture</keyword>
+      <keyword>DVD</keyword>
+      <keyword>Audio</keyword>
+      <keyword>Video</keyword>
+      <keyword>Server</keyword>
+      <keyword>Broadcast</keyword>
+    </keywords>
+  </component>
+  <component type="runtime">
+    <id>org.freedesktop.Platform</id>
+    <name>Freedesktop Platform</name>
+    <summary>Runtime platform for applications</summary>
+    <project_license>MIT</project_license>
+    <developer_name>Freedesktop SDK</developer_name>
+    <url type="homepage">https://freedesktop-sdk.gitlab.io/</url>
+    <url type="bugtracker">https://gitlab.com/freedesktop-sdk/freedesktop-sdk/-/issues</url>
+    <url type="contact">https://matrix.to/#/#freedesktop-sdk:matrix.org</url>
+  </component>
+  <component type="addon">
+    <id>org.gnome.NautilusPreviewer</id>
+    <name>Sushi</name>
+    <name xml:lang="de">Sushi</name>
+    <summary>Provide a facility for quickly viewing different kinds of files</summary>
+    <summary xml:lang="de">Verschiedene Arten von Dateien schnell ansehen</summary>
+    <project_license>GPL-2.0+</project_license>
+    <extends>org.gnome.Nautilus.desktop</extends>
+    <url type="homepage">https://gitlab.gnome.org/GNOME/sushi</url>
+    <url type="bugtracker">https://github.com/flathub/org.gnome.NautilusPreviewer/issues</url>
+    <url type="translate">https://l10n.gnome.org/module/sushi/</url>
+    <url type="vcs-browser">https://gitlab.gnome.org/GNOME/sushi</url>
+    <keywords>
+      <keyword>nautilus</keyword>
+      <keyword>sushi</keyword>
+      <keyword>view</keyword>
+      <keyword>previewer</keyword>
+      <keyword>preview</keyword>
+    </keywords>
+    <keywords xml:lang="de">
+      <keyword>nautilus</keyword>
+      <keyword>sushi</keyword>
+      <keyword>Ansicht</keyword>
+      <keyword>Vorschau</keyword>
+      <keyword>Vorschau</keyword>
+    </keywords>
+  </component>
+</components>

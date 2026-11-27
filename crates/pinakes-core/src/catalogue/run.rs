@@ -162,11 +162,12 @@ pub trait Importer: Send + Sync + 'static {
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
 /// ([`to_start`]).
 pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
-    super::musicbrainz::importer(config)
-        .into_iter()
-        .chain(super::osm::importer(config))
-        .chain(super::wikidata::importer(config))
-        .collect()
+    let mut importers: Vec<Arc<dyn Importer>> = Vec::new();
+    importers.extend(super::musicbrainz::importer(config));
+    importers.extend(super::osm::importer(config));
+    importers.extend(super::wikidata::importer(config));
+    importers.extend(super::software::importer(config));
+    importers
 }
 
 /// What a run writes through: its catalogue, generation, resume point, position, work directory
@@ -598,8 +599,12 @@ pub enum Next {
 
 /// The catalogues with an importer in this build, in the order they start; each starts only
 /// with `http.contact` set.
-pub const WITH_IMPORTER: [Catalogue; 3] =
-    [Catalogue::Musicbrainz, Catalogue::Osm, Catalogue::Wikidata];
+pub const WITH_IMPORTER: [Catalogue; 4] = [
+    Catalogue::Musicbrainz,
+    Catalogue::Osm,
+    Catalogue::Wikidata,
+    Catalogue::Software,
+];
 /// What `catalogue status` shows as the `waiting` of a file catalogue (OpenAlex, Podcast Index,
 /// software, Tranco) that is on but has no importer task for want of `http.contact`
 /// (MusicBrainz, OpenStreetMap and Wikidata say it in their own words: their `NEEDS_CONTACT`).

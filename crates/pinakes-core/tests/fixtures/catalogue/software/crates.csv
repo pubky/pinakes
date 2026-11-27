@@ -1,0 +1,50 @@
+created_at,description,documentation,homepage,id,max_features,max_upload_size,name,readme,repository,trustpub_only,updated_at
+2019-10-05 19:52:26.646502+00,Flexible concrete Error type built on std::error::Error,https://docs.rs/anyhow,,170198,,,anyhow,"Anyhow&ensp;¯\\\_(°ペ)\_/¯
+==========================
+
+[<img alt=""github"" src=""https://img.shields.io/badge/github-dtolnay/anyhow-8da0cb?style=for-the-badge&labelColor=555555&logo=github"" height=""20"">](https://github.com/dtolnay/anyhow)
+[<img alt=""crates.io"" src=""https://img.shields.io/crates/v/anyho [cut for the fixture]",https://github.com/dtolnay/anyhow,f,2026-11-23 06:21:21.769182+00
+2014-12-05 20:20:39.487502+00,A generic serialization/deserialization framework,https://docs.rs/serde,https://serde.rs,463,,,serde,"<!-- Serde readme rendered on crates.io -->
+
+**Serde is a framework for *ser*ializing and *de*serializing Rust data structures efficiently and generically.**
+
+---
+
+You may be looking for:
+
+- [An overview of Serde](https://serde.rs)
+- [Data formats supported by Serde](https://serde.rs/#data-formats)
+ [cut for the fixture]",https://github.com/serde-rs/serde,f,2026-07-18 23:05:13.266456+00
+2014-11-14 18:37:08.658193+00,"URL library for Rust, based on the WHATWG URL Standard",https://docs.rs/url,,109,,,url,"rust-url
+========
+
+[![Build status](https://github.com/servo/rust-url/workflows/CI/badge.svg)](https://github.com/servo/rust-url/actions?query=workflow%3ACI)
+[![Coverage](https://codecov.io/gh/servo/rust-url/branch/master/graph/badge.svg)](https://codecov.io/gh/servo/rust-url)
+[![Chat](https://img.s [cut for the fixture]",https://github.com/servo/rust-url,f,2026-11-20 23:03:07.148548+00
+2016-07-01 20:39:07.497766+00,"An event-driven, non-blocking I/O platform for writing asynchronous I/O
+backed applications.
+",,https://tokio.rs,5563,,,tokio,"# Tokio
+
+A runtime for writing reliable, asynchronous, and slim applications with
+the Rust programming language. It is:
+
+* **Fast**: Tokio's zero-cost abstractions give you bare-metal
+  performance.
+
+* **Reliable**: Tokio leverages Rust's ownership, type system, and
+  concurrency model to reduce bug [cut for the fixture]",https://github.com/tokio-rs/tokio,f,2026-10-21 21:05:43.950213+00
+2015-02-03 06:17:14.147783+00,"Random number generators and other randomness functionality.
+",https://docs.rs/rand,https://rust-random.github.io/book,1339,,,rand,"# Rand
+
+[![Test Status](https://github.com/rust-random/rand/actions/workflows/test.yml/badge.svg?event=push)](https://github.com/rust-random/rand/actions)
+[![Crate](https://img.shields.io/crates/v/rand.svg)](https://crates.io/crates/rand)
+[![Book](https://img.shields.io/badge/book-master-yellow.svg) [cut for the fixture]",https://github.com/rust-random/rand,t,2026-11-15 13:54:26.803018+00
+2016-09-14 01:16:59.748952+00,"ripgrep is a line-oriented search tool that recursively searches the current
+directory for a regex pattern while respecting gitignore rules. ripgrep has
+first class support on Windows, macOS and Linux.
+",https://github.com/BurntSushi/ripgrep,,6478,,,ripgrep,"ripgrep (rg)
+------------
+ripgrep is a line-oriented search tool that recursively searches the current
+directory for a regex pattern. By default, ripgrep will respect gitignore rules
+and automatically skip hidden files/directories and binary files. (To disable
+all automatic filtering by default, use [cut for the fixture]",https://github.com/BurntSushi/ripgrep,f,2026-11-22 23:02:08.647074+00
