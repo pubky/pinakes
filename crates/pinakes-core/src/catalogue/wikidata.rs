@@ -730,6 +730,14 @@ impl Importer for Wikidata {
         if cursor.end <= position.time {
             return Ok(UpdateEnd::Done);
         }
+        // The changes after a position refused before (they would remove too much) are not read
+        // again: the updates wait there, and the gap rule above imports a newer dump in time.
+        let window = serde_json::to_value(position.time)?;
+        if job.refused_before(&window) {
+            return Err(
+                job.still_refused(format!("the changes after {}", position.time.to_rfc3339()))
+            );
+        }
         let limit = job.limit().or(position.limit);
         let files = LabelFiles::new(job.dir());
         // A line a hard stop cut off ends no label: the file goes back to its last whole line
@@ -858,6 +866,18 @@ impl Importer for Wikidata {
                 keep = self
                     .within_limit(job, keep, limit, gone.len() as u64)
                     .await?;
+            }
+            // A broken answer never empties the catalogue: the update's removals stay within a
+            // tenth of the cards (and past ten, `diff::too_many`); past it the update is refused
+            // before this page is written.
+            let held = job.state().cards.max(0) as u64;
+            let removing = job.report().removed + gone.len() as u64;
+            if super::diff::too_many(removing, held) {
+                let note = format!(
+                    "the changes after {} would remove {removing} of {held} cards",
+                    position.time.to_rfc3339()
+                );
+                return Err(job.refuse(window, "refused", note));
             }
             // The page's cards first, with the cursor of this page; then its removals, with the
             // next page's: a run cut off between the two reads this page again.

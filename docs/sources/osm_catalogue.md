@@ -115,7 +115,12 @@ start at the last change file published before the file's time.
 An update reads the change files after that sequence, at most 30 a run. Each file is read to
 `catalogues.dir/osm` first (at most 4 GB, with room for twice its length), and an object it holds
 several edits of is read at its last one (a delete wins a tie). A file whose changes would hold
-more than 1 GiB in memory is refused (`size`). The update:
+more than 1 GiB in memory is refused (`size`). A change file whose removals would take the
+update's past a tenth of the cards (and more than ten) is refused before anything of it is applied
+(the files before it are)
+(`refused`, [a refused dump or file](../operations.md#a-refused-dump-or-file)): the updates wait
+at it, and a full import follows once the files are 60 behind (`pinakesd catalogue import osm
+--request` asks for one sooner). The update:
 
 - writes the cards of created and modified objects the filter keeps, and removes deleted ones and
   those that no longer pass the filter. A way's geometry comes from the nodes the file holds; when

@@ -158,10 +158,29 @@ impl Tranco {
         }
         Ok(sites.len() as u64)
     }
-    /// The sites off the list for [`OFF_LIST`] days (from `day`) lose their card and their row.
-    async fn drop_off_list(&self, job: &mut Job<'_>, day: chrono::NaiveDate) -> Result<u64> {
+    /// The sites off the list for [`OFF_LIST`] days (from `day`) lose their card and their row;
+    /// when their cards are more than a tenth of the catalogue's (and more than ten,
+    /// `diff::too_many`: a short list after weeks without one), the list `list` is refused instead
+    /// and nothing is removed ([`Job::refuse`]).
+    async fn drop_off_list(
+        &self,
+        job: &mut Job<'_>,
+        day: chrono::NaiveDate,
+        list: &str,
+    ) -> Result<u64> {
         let pool = job.pool().clone();
         let limit = day - chrono::Duration::days(OFF_LIST + LISTED_REFRESH);
+        let gone: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM catalogue_card c JOIN catalogue_site s ON s.host=c.source_id WHERE c.catalogue='tranco' AND s.listed_on < $1",
+        )
+        .bind(limit)
+        .fetch_one(&pool)
+        .await?;
+        let held = job.state().cards.max(0) as u64;
+        if super::diff::too_many(gone.max(0) as u64, held) {
+            let note = format!("list {list}: {gone} of {held} cards' sites off the list");
+            return Err(job.refuse(json!(list), "refused", note));
+        }
         let mut removed = 0;
         loop {
             let hosts: Vec<String> = sqlx::query_scalar(
@@ -184,7 +203,7 @@ impl Tranco {
     /// Read due homepages until none is due, the budget is spent, or a large import starts;
     /// what is next ([`Next`]), and the catalogue reads wait for. [`READS`] reads stay in flight:
     /// sites are claimed [`CLAIM`] at a time as the reads need more, and written as they end.
-    async fn read_due(&self, job: &mut Job<'_>) -> Result<(Next, Option<String>)> {
+    async fn read_due(&self, job: &mut Job<'_>, list: &str) -> Result<(Next, Option<String>)> {
         let started = std::time::Instant::now();
         let pool = job.pool().clone();
         let config = job.config().clone();
@@ -246,13 +265,21 @@ impl Tranco {
         );
         while let Some(chunk) = reads.next().await {
             let chunk: Vec<(String, i32, Homepage)> = chunk.into_iter().collect::<Result<_>>()?;
-            self.record(job, chunk).await?;
+            self.record(job, chunk, list).await?;
         }
         let stopped = stopped.lock().expect("the stop").clone();
         Ok(stopped)
     }
-    /// Keep what a round of reads found: the cards, the sites' outcomes and when each is due.
-    async fn record(&self, job: &mut Job<'_>, reads: Vec<(String, i32, Homepage)>) -> Result<()> {
+    /// Keep what a round of reads found: the cards, the sites' outcomes and when each is due. A
+    /// round whose removals take the run's past a tenth of the catalogue's cards (and past ten,
+    /// `diff::too_many`: the egress or the network broken, every read failing) refuses the list
+    /// `list` instead of removing them ([`Job::refuse`]): the reads wait for the next list.
+    async fn record(
+        &self,
+        job: &mut Job<'_>,
+        reads: Vec<(String, i32, Homepage)>,
+        list: &str,
+    ) -> Result<()> {
         let pool = job.pool().clone();
         let mut cards = Vec::new();
         let mut gone = Vec::new();
@@ -343,6 +370,20 @@ impl Tranco {
         .await?;
         gone.extend(failed.into_iter().flatten());
         if !gone.is_empty() {
+            let carded: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM catalogue_card WHERE catalogue='tranco' AND source_id=ANY($1)",
+            )
+            .bind(&gone)
+            .fetch_one(&pool)
+            .await?;
+            let report = job.report();
+            let held = job.state().cards.max(0) as u64 + report.inserted;
+            let removing = report.removed + carded.max(0) as u64;
+            if super::diff::too_many(removing, held) {
+                let note =
+                    format!("list {list}: homepage reads would remove {removing} of {held} cards");
+                return Err(job.refuse(json!(list), "refused", note));
+            }
             job.remove(&gone, json!({"phase": "reading"})).await?;
         }
         if !deferred.is_empty() {
@@ -368,6 +409,11 @@ impl Tranco {
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&chrono::Utc));
         let fresh = checked.is_some_and(|t| chrono::Utc::now() - t < chrono::Duration::days(1));
+        // A refusal stands until the next list: within the day the list is not looked up again,
+        // so nothing is read.
+        if fresh && job.run() == Run::Update && job.refused().is_some() {
+            return Err(job.still_refused("the list (its removals)"));
+        }
         if job.run() == Run::Update && fresh {
             if let Some(waits) = reads_wait(job.config(), job.pool()).await? {
                 crate::telemetry::homepage_reads_waiting(true);
@@ -395,15 +441,12 @@ impl Tranco {
             Some(Err(error)) => return Err(error),
         };
         if let Some((version, input, at)) = latest {
-            // A list refused before is not loaded again: a full import of the importer's own
-            // ends at once, an update reads the homepages due on the list it has.
-            let refused = job.refused_before(&json!(version));
-            if refused && job.run() == Run::Import {
+            // A list refused before is not loaded again, and no homepage is read on it.
+            if job.refused_before(&json!(version)) {
                 return Err(job.still_refused(format!("list {version}")));
             }
             job.reading(json!(version));
-            let known =
-                refused || position.get("list").and_then(Value::as_str) == Some(version.as_str());
+            let known = position.get("list").and_then(Value::as_str) == Some(version.as_str());
             // A list's day is never ahead of now (a server clock or a file's time could say so,
             // and every site not on it would then count as off the list).
             let now = chrono::Utc::now();
@@ -415,14 +458,19 @@ impl Tranco {
                 if job.run() == Run::Import {
                     stamp(job).await?;
                 }
-                self.drop_off_list(job, day).await?;
+                self.drop_off_list(job, day, &version).await?;
                 // As current as the list's own time (not its day's start: the lag would pass two
                 // days near the end of each day's cycle).
                 job.set_current_as_of(at);
                 position = json!({"list": version, "day": day, "checked": now.to_rfc3339()});
             }
         }
-        let (next, waits) = self.read_due(job).await?;
+        let on_list = position
+            .get("list")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let (next, waits) = self.read_due(job, &on_list).await?;
         crate::telemetry::homepage_reads_waiting(next == Next::Large);
         position["next"] = json!(next.name());
         // When the next site falls due: the plan wakes then ([`plan_after`]).

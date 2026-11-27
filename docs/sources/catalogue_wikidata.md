@@ -104,7 +104,11 @@ again in halves; an item whose answer alone is over it keeps its card until it c
 one still left out fails the run (`api`), as does an answer without its list of changes. A changed item is written again only
 when its card changed. An item that is gone (deleted), merged into another (a redirect), no longer
 has an article, became a Wikimedia page, or now makes a card the table refuses leaves the
-catalogue; a new item with an article joins it. A changed class or genre gives its new label to the
+catalogue; a new item with an article joins it. An update whose removals would pass a tenth of
+the cards (and ten: a broken answer) is refused at the page that would take it past, before that
+page is written (`refused`,
+[a refused dump or file](../operations.md#a-refused-dump-or-file)): the updates wait at that
+position, and once it is five days old a newer dump is imported. A changed class or genre gives its new label to the
 cards read after it (`labels.tsv`); cards already written keep their labels until they change.
 Each run moves the position to the end of the changes it read, and the cards are current as of
 that time (`current_as_of`). While the position is more than an hour behind, the next run starts at

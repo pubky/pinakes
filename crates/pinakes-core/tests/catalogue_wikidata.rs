@@ -2532,3 +2532,50 @@ async fn a_dump_read_slower_than_its_floor_fails(pool: PgPool) {
             .unwrap();
     }
 }
+
+/// An update whose removals would pass a tenth of the catalogue's cards (and ten: every item
+/// deleted, a broken answer) is refused at the page that would take it past: that page and the
+/// rest are not written, the position names the changes it read, and the next update does not
+/// read them again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_update_that_removes_too_much_is_refused(pool: PgPool) {
+    let m = mock();
+    let base = serve(m.clone()).await;
+    let (ctx, _dir) = context(&pool, None);
+    import(&pool, &ctx, &base).await.unwrap();
+    let before = rows(&pool).await;
+    assert!(before.len() > 20, "{}", before.len());
+    let now = chrono::Utc::now();
+    let at = |mins: i64| {
+        (now - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    {
+        let mut e = m.entities.lock().unwrap();
+        for id in before.keys() {
+            e.insert(id.clone(), Value::Null);
+        }
+    }
+    *m.changes.lock().unwrap() = before.keys().map(|id| (id.clone(), at(30))).collect();
+    sqlx::query("UPDATE catalogue_state SET position=jsonb_build_object('time',$1::text) WHERE catalogue='wikidata'")
+        .bind(at(60))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let failed = once(importer(&base), &ctx, Run::Update).await.unwrap_err();
+    assert!(
+        failed.to_string().contains("refused (the changes after"),
+        "{failed}"
+    );
+    // The pages before the one that would pass the cap are applied: at most ten removals.
+    assert!(rows(&pool).await.len() >= before.len() - 10);
+    let state = store::state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
+    assert!(state.position.unwrap()["refused"].is_string());
+    m.asked_sitelinks.lock().unwrap().clear();
+    let again = once(importer(&base), &ctx, Run::Update).await.unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    assert!(m.asked_sitelinks.lock().unwrap().is_empty());
+}

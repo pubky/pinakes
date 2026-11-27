@@ -1613,3 +1613,56 @@ async fn a_swept_shared_place_is_removed_until_a_file_holds_it_again(pool: PgPoo
     assert_eq!(removed, [("node".to_owned(), 777, "Sonne".to_owned())]);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A change file whose removals would pass a tenth of the catalogue's cards (and ten) is refused
+/// before anything of it is applied: no card goes, the position names it, and the same file is
+/// not read again (asked again, the run ends at once).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_change_file_that_removes_too_much_is_refused(pool: PgPool) {
+    let dir = tempfile_dir();
+    let pbf = dir.join("region.osm.pbf");
+    std::fs::write(&pbf, region()).unwrap();
+    step(&pool, &dir, Run::Import, vec![pbf], false).await;
+    let node = |id: u32, action: &str| {
+        match action {
+        "create" => format!("<node id=\"{id}\" version=\"1\" changeset=\"200\" timestamp=\"2026-11-25T10:00:00Z\" lat=\"47.1{id}\" lon=\"9.5{id}\"><tag k=\"amenity\" v=\"restaurant\"/><tag k=\"name\" v=\"Place {id}\"/></node>"),
+        _ => format!("<node id=\"{id}\" version=\"2\" changeset=\"201\" timestamp=\"2026-11-26T10:00:00Z\"/>"),
+    }
+    };
+    let file = |action: &str, ids: std::ops::Range<u32>| {
+        let nodes: String = ids.map(|id| node(id, action)).collect();
+        format!("<?xml version='1.0' encoding='UTF-8'?><osmChange version=\"0.6\"><{action}>{nodes}</{action}></osmChange>")
+    };
+    let created = dir.join("created.osc.gz");
+    std::fs::write(&created, gz(&file("create", 100..120))).unwrap();
+    step(&pool, &dir, Run::Update, vec![created], false).await;
+    let before = hashes(&pool).await;
+    assert_eq!(before.len(), 26);
+    // Twelve of 26 deleted: refused.
+    let deleted = dir.join("deleted.osc.gz");
+    std::fs::write(&deleted, gz(&file("delete", 100..112))).unwrap();
+    let cfg = config(&dir);
+    let mut ctx = Context::new(pool.clone(), cfg.clone());
+    ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
+    let mut importer = files_importer(&cfg, vec![deleted.clone()]);
+    importer.force = Some(Run::Update);
+    let failed = runner::step(&importer, &ctx).await.unwrap_err();
+    assert!(
+        crate::catalogue::failure::shown(&failed).starts_with("refused (change file"),
+        "{failed:#}"
+    );
+    assert_eq!(hashes(&pool).await, before);
+    let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
+    assert_eq!(
+        state.position.unwrap()["refused"],
+        json!(deleted.display().to_string())
+    );
+    let again = runner::step(&importer, &ctx).await.unwrap_err();
+    assert!(again.is::<runner::StillRefused>(), "{again:#}");
+    // Ten deleted (the floor): applied.
+    let ten = dir.join("ten.osc.gz");
+    std::fs::write(&ten, gz(&file("delete", 100..110))).unwrap();
+    step(&pool, &dir, Run::Update, vec![ten], false).await;
+    assert_eq!(hashes(&pool).await.len(), 16);
+    std::fs::remove_dir_all(dir).unwrap();
+}

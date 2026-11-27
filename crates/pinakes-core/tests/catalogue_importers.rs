@@ -2056,3 +2056,76 @@ async fn the_file_catalogues_ask_disk_for_their_own_files_only(pool: PgPool) {
     .unwrap();
     assert_eq!(local.disk_need(Run::Import, &state), 0);
 }
+
+/// Tranco removes at most a tenth of its cards (or ten) in a run: a list that leaves more off it
+/// for a month is refused (nothing removed, the list named in the position, nothing read within
+/// the day), and so is the rest of a run whose homepage reads would remove more (every read
+/// failing).
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_removes_at_most_a_tenth_in_a_run(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=12).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 12);
+    let newer = || {
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&list)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    };
+    // A new list leaves eleven sites off it for over a month: refused, nothing removed.
+    sqlx::query("UPDATE catalogue_site SET listed_on=listed_on-60")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(&list, "1,site1.example\n").unwrap();
+    newer();
+    a_day_passed(&pool).await;
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("off the list"), "{failed}");
+    assert_eq!(count(&pool, "tranco", None).await, 12);
+    let position = state_of(&pool, Catalogue::Tranco).await.position.unwrap();
+    assert!(position["refused"].is_string(), "{position}");
+    // Within the day nothing is read.
+    let again = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    // The sites are listed again, the refusal cleared; every homepage now answers 404 (no card):
+    // the run removes at most ten, then refuses the rest.
+    store::clear_refusal(&pool, Catalogue::Tranco)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_site SET listed_on=current_date,due_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for host in &hosts {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("homepage reads"), "{failed}");
+    assert!(count(&pool, "tranco", None).await >= 2);
+}

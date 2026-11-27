@@ -1248,6 +1248,10 @@ impl Importer for OsmImporter {
         if let Input::Files(files) = &self.input {
             let mut latest = None;
             for file in files.clone() {
+                let name = json!(file.display().to_string());
+                if job.refused_before(&name) {
+                    return Err(job.still_refused(format!("change file {}", file.display())));
+                }
                 let changes = read_changes(
                     std::fs::File::open(&file)?,
                     &file.display().to_string(),
@@ -1255,7 +1259,7 @@ impl Importer for OsmImporter {
                 )
                 .await?;
                 latest = latest.max(changes.latest.clone());
-                apply(job, changes, json!({"files": true})).await?;
+                apply(job, changes, json!({"files": true}), name).await?;
             }
             if let Some(t) = latest.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()) {
                 job.set_current_as_of(t.with_timezone(&chrono::Utc));
@@ -1310,8 +1314,17 @@ impl Importer for OsmImporter {
         }
         let mut last_time = None;
         let end = state.0.min(applied + FILES_PER_UPDATE);
+        let stored_time = position["timestamp"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&chrono::Utc));
         while applied < end {
             let sequence = applied + 1;
+            // A change file refused before is not read again: the updates wait there until a
+            // full import (asked for, or once the files are 60 behind) or `clear-refusal`.
+            if job.refused_before(&json!(sequence)) {
+                return Err(job.still_refused(format!("change file {sequence}")));
+            }
             let path = sequence_path(sequence);
             let url = format!("{base}/{path}.osc.gz");
             let failed = || Failure::new("download").at(host_of(&base));
@@ -1365,7 +1378,7 @@ impl Importer for OsmImporter {
             )
             .await?;
             let _ = tokio::fs::remove_file(&local).await;
-            let counts = apply(job, changes, json!({"applied": applied})).await?;
+            let counts = apply(job, changes, json!({"applied": applied}), json!(sequence)).await?;
             tracing::info!(
                 catalogue = "osm",
                 sequence,
@@ -1377,6 +1390,8 @@ impl Importer for OsmImporter {
             );
             applied = sequence;
             last_time = file_state.map(|s| s.1).or(last_time);
+            // Where a refusal of a later file leaves the next update: after this one.
+            job.set_position(json!({"region": region, "base": base, "sequence": applied, "timestamp": last_time.or(stored_time)}));
             // Saved with an empty write, so a run cut off after this file starts at the next.
             job.write(&[], json!({"applied": applied})).await?;
         }
@@ -1535,7 +1550,15 @@ fn stored_geometry(s: &Stored) -> place::Geometry {
 /// and renames. Applying a file again gives the same cards.
 /// What applying a change file did: cards written, removed, successors and renames found.
 type Applied = (usize, usize, usize, usize);
-async fn apply(job: &mut Job<'_>, changes: Changes, cursor: Value) -> Result<Applied> {
+/// Apply one change file (`refuse_as` names it: its sequence, or a `--from` file's path). One that
+/// would take the update's removals past a tenth of the catalogue's cards (and past ten:
+/// `diff::too_many`) is refused before anything of it is applied ([`Job::refuse`]).
+async fn apply(
+    job: &mut Job<'_>,
+    changes: Changes,
+    cursor: Value,
+    refuse_as: Value,
+) -> Result<Applied> {
     let pool = job.pool();
     let wikidata_on = job.config().catalogues.enabled(Catalogue::Wikidata);
     // What is stored of every object the file names with tags, and of the untagged ones that
@@ -1762,6 +1785,17 @@ async fn apply(job: &mut Job<'_>, changes: Changes, cursor: Value) -> Result<App
         } else if let Some(new) = by_changeset {
             successors.push((id.clone(), new, "changeset"));
         }
+    }
+    // A broken change file never empties the catalogue: the removals an update makes, this
+    // file's with those of the files before it, stay within a tenth of the cards.
+    let held = job.state().cards.max(0) as u64;
+    let gone = job.report().removed + removed_set.len() as u64;
+    if super::diff::too_many(gone, held) {
+        let note = format!(
+            "change file {} would take the update's removals to {gone} of {held} cards",
+            shown(&refuse_as)
+        );
+        return Err(job.refuse(refuse_as, "refused", note));
     }
     // An object that is back (a deletion undone) is no longer followed.
     let back: Vec<String> = cards.iter().map(|c| c.source_id.clone()).collect();

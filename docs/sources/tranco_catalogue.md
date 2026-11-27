@@ -88,7 +88,11 @@ with or without `www.`, path `/` and no query) joins its card
 
 Once a day a run asks for the day's list ID (the runs in between read what fell due from the
 list it has); a new list is loaded, and sites off the list for a month
-(30 days after the last weekly move of their day) lose their card and their row. When the list
+(30 days after the last weekly move of their day) lose their card and their row. A run never
+removes more than a tenth of the cards (and more than ten): a list that would leave more off it,
+or a round of homepage reads that would take the run's removals past it (every read failing), is
+refused (`refused`, nothing of it removed, [a refused dump or file](../operations.md#a-refused-dump-or-file)), and nothing
+is read until the next day's list (or `pinakesd catalogue clear-refusal tranco`). When the list
 can't be looked up (tranco-list.eu down), an update logs it and reads the homepages due on the
 list it has; the list is asked again at the next run. The cards are
 as current as the last list loaded (its `Last-Modified` time); the allowed lag is 2 days. `pinakesd catalogue drop tranco`
