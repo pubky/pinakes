@@ -3363,7 +3363,7 @@ async fn emptied_feed_is_held_then_confirmed_on_the_second_observation(pool: PgP
     {
         // The clock advances an hour between observations.
         sqlx::query(
-            "UPDATE event_fetch SET last_snapshot_at=last_snapshot_at-3600000 WHERE resource_id=$1",
+            "UPDATE event_fetch SET last_snapshot_at=last_snapshot_at-interval '1 hour' WHERE resource_id=$1",
         )
         .bind(&id)
         .execute(&pool)

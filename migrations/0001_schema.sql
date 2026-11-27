@@ -267,6 +267,12 @@ CREATE TABLE source_state (
 
 -- ── Events and places ────────────────────────────────────────────────────────────────────────
 
+-- Whether `versions` is an object of documents each within a document's cap (`osm_place.doc`'s):
+-- as many as the retention keeps, none larger than a document.
+CREATE FUNCTION osm_versions_fit(versions jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT CASE WHEN jsonb_typeof(versions) = 'object' THEN NOT EXISTS (SELECT 1 FROM jsonb_each(versions) v WHERE octet_length(v.value::text) > 8192) ELSE false END $$;
+
 -- An OpenStreetMap object as Pinakes read it, with each version a resource or event refers to
 -- (`versions`). OSM-derived values live only here, in the OSM catalogue's cards
 -- (`catalogue_card` rows of catalogue `osm`), `osm_rename`, `osm_removed` and `osm_successor`:
@@ -275,7 +281,8 @@ CREATE TABLE osm_place (
     osm_type text NOT NULL CONSTRAINT osm_place_osm_type_check CHECK (osm_type IN ('node', 'way', 'relation')),
     osm_id bigint NOT NULL CONSTRAINT osm_place_osm_id_check CHECK (osm_id > 0),
     point geometry(Point,4326),
-    bbox double precision[],
+    -- The place's four bounding edges (`ResourceMeta.bbox`).
+    bbox double precision[] CONSTRAINT osm_place_bbox_check CHECK (array_ndims(bbox) = 1 AND cardinality(bbox) = 4),
     name text,
     category text,
     address jsonb NOT NULL DEFAULT '{}',
@@ -290,7 +297,9 @@ CREATE TABLE osm_place (
     search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(display_name, ''))) STORED,
     fetch_doc jsonb NOT NULL,
     fetch_display_name text,
-    versions jsonb NOT NULL DEFAULT '{}',
+    -- One normalised document per version, by its md5, each within `doc`'s cap; the retention
+    -- (`changes::retain`) drops those nothing refers to.
+    versions jsonb NOT NULL DEFAULT '{}' CONSTRAINT osm_place_versions_check CHECK (osm_versions_fit(versions)),
     PRIMARY KEY (osm_type, osm_id)
 );
 COMMENT ON TABLE osm_place IS 'Derivative database © OpenStreetMap contributors, licensed under ODbL 1.0: https://opendatacommons.org/licenses/odbl/1-0/';
@@ -394,7 +403,9 @@ CREATE INDEX occurrence_venue_version_idx ON occurrence USING btree ((doc #>> '{
 CREATE TABLE event_fetch (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     validators jsonb NOT NULL DEFAULT '{}',
-    last_snapshot_at bigint,
+    -- The `fetched_at` of the document whose snapshot was last stored (`ResourceMeta.fetched_at`,
+    -- to the millisecond).
+    last_snapshot_at timestamp with time zone,
     held_keys text[],
     missing_keys jsonb NOT NULL DEFAULT '{}',
     hold_count integer NOT NULL DEFAULT 0,
@@ -914,14 +925,13 @@ CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS
 CREATE TABLE link_release (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     link_id text NOT NULL,
-    release text,
+    release uuid,
     rank smallint NOT NULL,
     source text NOT NULL,
     seen_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     PRIMARY KEY (resource_id, link_id),
     CONSTRAINT link_release_link_id_check CHECK ((link_id ~ '^[0-9a-f]{32}$'::text)),
-    CONSTRAINT link_release_release_check CHECK ((release IS NULL OR release ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)),
     CONSTRAINT link_release_rank_check CHECK ((rank BETWEEN 0 AND 1000)),
     CONSTRAINT link_release_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
 );

@@ -4746,7 +4746,7 @@ async fn the_member_wait_is_per_calendar_and_bounded(pool: PgPool) {
     // A recent stored snapshot restores the wait.
     sqlx::query("INSERT INTO event_fetch(resource_id,last_snapshot_at) VALUES($1,$2)")
         .bind(&calendar)
-        .bind(Utc::now().timestamp_millis())
+        .bind(Utc::now())
         .execute(&pool)
         .await
         .unwrap();
@@ -4756,7 +4756,7 @@ async fn the_member_wait_is_per_calendar_and_bounded(pool: PgPool) {
     );
     sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2 WHERE resource_id=$1")
         .bind(&calendar)
-        .bind((Utc::now() - Duration::hours(49)).timestamp_millis())
+        .bind(Utc::now() - Duration::hours(49))
         .execute(&pool)
         .await
         .unwrap();

@@ -244,3 +244,60 @@ async fn a_long_import_reason_is_cut_to_what_the_state_holds(pool: PgPool) {
         );
     }
 }
+
+/// A column named for an instant (`…_at`) holds one, as a `timestamptz`: never a number whose
+/// unit only the code knows.
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_instant_column_is_a_timestamp(pool: PgPool) {
+    let found: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name||'.'||column_name||' '||data_type FROM information_schema.columns WHERE table_schema='public' AND column_name LIKE '%\\_at' AND data_type<>'timestamp with time zone' AND table_name IN (SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE') ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(found, Vec::<String>::new());
+}
+
+/// A release is a MusicBrainz ID, stored as a `uuid`; an OSM place's box is four edges, and each
+/// of its versions fits a document's cap (8 KiB), however many the retention keeps.
+#[sqlx::test(migrations = "../../migrations")]
+async fn typed_values_are_stored_as_their_types(pool: PgPool) {
+    let release: String = sqlx::query_scalar(
+        "SELECT data_type FROM information_schema.columns WHERE table_name='link_release' AND column_name='release'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(release, "uuid");
+    let place = |bbox: &'static str, versions: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("INSERT INTO osm_place(osm_type,osm_id,bbox,type,type_path,doc,fetched_at,refresh_at,status,fetch_doc,versions) VALUES('node',1,$1::float8[],'Place','{Place}','{}',now(),now(),'ok','{}',$2::jsonb)")
+                .bind(bbox)
+                .bind(versions)
+                .execute(&pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+    };
+    let big = format!("{{\"a\":\"{}\"}}", "x".repeat(9000));
+    let many = format!(
+        "{{{}}}",
+        (0..200)
+            .map(|n| format!("\"v{n}\":\"{}\"", "x".repeat(8000)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for (bbox, versions, check) in [
+        ("{1,2,3}", "{}".to_owned(), "osm_place_bbox_check"),
+        ("{1,2,3,4,5}", "{}".to_owned(), "osm_place_bbox_check"),
+        ("{{1,2},{3,4}}", "{}".to_owned(), "osm_place_bbox_check"),
+        ("{1,2,3,4}", "[]".to_owned(), "osm_place_versions_check"),
+        ("{1,2,3,4}", big, "osm_place_versions_check"),
+    ] {
+        let refused = place(bbox, versions).await.unwrap_err();
+        assert!(refused.contains(check), "{bbox}: {refused}");
+    }
+    place("{1,2,3,4}", many).await.unwrap();
+}

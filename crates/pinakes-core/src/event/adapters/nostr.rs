@@ -590,7 +590,7 @@ pub async fn resolve(
     let calendar_id = crate::model::identity(uri)?.0;
     let wait = cfg.adapters.calendar_member_wait_hours as f64;
     let calendar_overdue: bool = sqlx::query_scalar(
-        "SELECT coalesce(to_timestamp(e.last_snapshot_at/1000.0),r.created_at)<now()-$2*interval '1 hour' FROM resource r LEFT JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1",
+        "SELECT coalesce(e.last_snapshot_at,r.created_at)<now()-$2*interval '1 hour' FROM resource r LEFT JOIN event_fetch e ON e.resource_id=r.id WHERE r.id=$1",
     )
     .bind(&calendar_id)
     .bind(wait)

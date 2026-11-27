@@ -1113,7 +1113,7 @@ pub async fn record(
     // A link whose place this run could not tell keeps the one recorded before.
     sqlx::query("DELETE FROM link_release WHERE resource_id=$1 AND source=$2 AND NOT link_id=ANY(SELECT v->>'id' FROM jsonb_array_elements($3) v) AND NOT link_id=ANY($4)")
         .bind(resource_id).bind(source).bind(Value::from(edition_rows.clone())).bind(&placed.keep).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO link_release(resource_id,link_id,release,rank,source,expires_at) SELECT $1,v->>'id',v->>'release',(v->>'rank')::smallint,$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET release=excluded.release,rank=excluded.rank,seen_at=now(),expires_at=excluded.expires_at WHERE link_release.source=excluded.source")
+    sqlx::query("INSERT INTO link_release(resource_id,link_id,release,rank,source,expires_at) SELECT $1,v->>'id',(v->>'release')::uuid,(v->>'rank')::smallint,$2,$4 FROM jsonb_array_elements($3) v ON CONFLICT(resource_id,link_id) DO UPDATE SET release=excluded.release,rank=excluded.rank,seen_at=now(),expires_at=excluded.expires_at WHERE link_release.source=excluded.source")
         .bind(resource_id).bind(source).bind(Value::from(edition_rows)).bind(expires).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())

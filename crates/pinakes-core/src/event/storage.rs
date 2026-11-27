@@ -182,7 +182,7 @@ pub async fn prepare(
     } else {
         container
     };
-    let state=sqlx::query("SELECT last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
+    let state=sqlx::query("SELECT (extract(epoch FROM last_snapshot_at)*1000)::bigint AS last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
     let last = state
         .as_ref()
         .and_then(|r| r.get::<Option<i64>, _>("last_snapshot_at"));
@@ -647,7 +647,7 @@ pub async fn apply(
         .execute(&mut **tx)
         .await?;
     let current: Option<i64> = sqlx::query_scalar(
-        "SELECT last_snapshot_at FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
+        "SELECT (extract(epoch FROM last_snapshot_at)*1000)::bigint FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
     )
     .bind(id)
     .fetch_one(&mut **tx)
@@ -660,7 +660,7 @@ pub async fn apply(
             return Ok(None);
         }
     }
-    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,held_keys=$3,missing_keys=$4,hold_count=$5,horizon_start=$6,retention_days=$7,validators=coalesce($8,validators),horizon_end=$9 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
+    sqlx::query("UPDATE event_fetch SET last_snapshot_at=to_timestamp($2::float8/1000),held_keys=$3,missing_keys=$4,hold_count=$5,horizon_start=$6,retention_days=$7,validators=coalesce($8,validators),horizon_end=$9 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
 
     if !plan.applied {
         sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES($1,1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").bind(&plan.source).execute(&mut **tx).await?;
