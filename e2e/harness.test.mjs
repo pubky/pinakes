@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { operatorContact, dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, liveRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
+import { operatorContact, coveringLinks, dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, liveRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
 test('an interrupted run starts no recipe stack, and one interrupted while it runs is stopped', { timeout: 5000 }, async () => {
   // A stand-in for `e2e_stack --live-recipes`: it prints its line and closes when told to, and
   // closes as a signal ends it when killed.
@@ -294,4 +294,34 @@ test('a live run needs the operator\'s contact: there is no default', () => {
     assert.throws(() => operatorContact(env), /PINAKES__HTTP__CONTACT/);
   }
   assert.equal(operatorContact({ PINAKES__HTTP__CONTACT: ' ops@example.org ' }), 'ops@example.org');
+});
+test('the links the cards cover wait, bounded, for an alias that lands after the card was read', async () => {
+  const history = 'https://www.openstreetmap.org/node/501/history';
+  const place = { id: 'a', uri: 'https://www.openstreetmap.org/node/501', aliases: [] };
+  const feed = 'https://cal.example/feed.ics';
+  const uris = [place.uri, history];
+  // The alias lands on the third read: the links cover the tagged one, and the card keeps it.
+  let reads = 0;
+  const docs = new Map([['osm', place]]);
+  const later = async id => (++reads >= 3 ? { id, aliases: [history] } : { id, aliases: [] });
+  const asked = await coveringLinks(docs, uris, [feed], later, 5000);
+  assert.deepEqual(asked.sort(), [feed, place.uri, history].sort());
+  assert.equal(reads, 3);
+  assert.deepEqual(docs.get('osm').aliases, [history]);
+  assert.equal(docs.get('osm').uri, place.uri);
+  // Covered at once: nothing is read again.
+  reads = 0;
+  await coveringLinks(docs, uris, [feed], later, 5000);
+  assert.equal(reads, 0);
+  // Never landing: the wait ends at its bound, without the link (the caller's assertion fails).
+  const started = Date.now();
+  const never = await coveringLinks(new Map([['osm', place]]), uris, [], async id => ({ id, aliases: [] }), 600);
+  assert(!never.includes(history));
+  assert(Date.now() - started < 3000);
+  // A card read under another ID (or not at all) leaves the kept card as it was.
+  const kept = new Map([['osm', place]]);
+  await coveringLinks(kept, uris, [], async () => ({ id: 'b', aliases: [history] }), 300);
+  assert.deepEqual(kept.get('osm'), place);
+  await coveringLinks(kept, uris, [], async () => null, 300);
+  assert.deepEqual(kept.get('osm'), place);
 });
