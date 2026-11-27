@@ -1906,3 +1906,78 @@ async fn a_card_read_without_text_stops_with_the_budget(pool: PgPool) {
         spent + 1
     );
 }
+
+/// A label on many little-known cards, behind many better-known cards without it, is read from a
+/// bounded number of cards: those holding it among the best known, and at most `CARD_SCAN` times
+/// the candidates that the labels index gives, never every card holding it. Its cards are listed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_common_label_without_text_reads_a_bounded_number_of_cards(pool: PgPool) {
+    // 3,000 well known people without the label, 4,000 little-known songs with it.
+    let mut cards: Vec<Card> = (0..3000)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Person {n}"),
+                "Person",
+                &[],
+                None,
+                0.5 + n as f32 / 10_000.0,
+            )
+        })
+        .collect();
+    cards.extend((0..4000).map(|n| {
+        card(
+            10_000 + n,
+            &format!("Song {n}"),
+            "MusicRecording",
+            &["common-tag"],
+            None,
+            0.01 + n as f32 / 1_000_000.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    let read = card_heap_rows_read(&api::card_read_plans());
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("Song")), "{page:?}");
+    // The probe (40), the fame-ordered scan (20 x 20) and the labels index's first 400: never
+    // the 4,000 songs.
+    assert!(read <= 1_200, "{read} card rows read from the table");
+}
+
+/// Excluded types are read from the types each catalogue's cards have, kept until its cards
+/// change: a card of a new type written after a search is listed by the next one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_types_read_follow_a_write_of_the_catalogue(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Ada", "Person", &[], None, 0.9)],
+    )
+    .await;
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    assert!(names(&common::get(&app, "/v1/search?exclude_type=Person").await).is_empty());
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        1,
+        &[card(2, "Mont Blanc", "Mountain", &[], None, 0.8)],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?exclude_type=Person").await),
+        ["Mont Blanc"]
+    );
+}

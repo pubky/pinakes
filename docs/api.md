@@ -1258,8 +1258,10 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
 - without text, the best known first (by its source's fame) after every referenced unit, at most
   `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near`,
   `bbox` or `tags`, those of the twice `limits.search_text_candidates` best known cards that pass
-  every filter; when they are fewer, with `tags` also the best known of the cards holding the
-  labels (read through the labels index, so a rare label is a short read), else the best known
+  every filter; when they are fewer, with `tags` also those holding the labels among each
+  catalogue's best known (a common label), and the best known of the first 20 times
+  `limits.search_text_candidates` cards holding the labels that the labels index gives (every
+  card of a rare label; of a label on more cards, those read first), else the best known
   of the twice `limits.search_text_candidates` cards nearest to the circle's centre (or to each
   box's centre) inside it, and with `type`, `host` or `exclude_type` also the best known of each
   type (or host) let in that are inside it. With `type` or `exclude_type`, a catalogue none of

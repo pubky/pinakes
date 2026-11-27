@@ -2492,8 +2492,10 @@ async fn with_replacers(
         .bind(&joinable)
         .fetch_all(&mut *tx)
         .await
-        .map_err(card_read_error)?;
-    tx.commit().await.map_err(card_read_error)?;
+        .map_err(|e| card_read_error(e, deadline))?;
+    tx.commit()
+        .await
+        .map_err(|e| card_read_error(e, deadline))?;
     for (card, resource) in pairs {
         // The row of the card's own link is the card's own unit (`card_unit`): where it is listed
         // the page lists it once already (`DISTINCT ON (unit_id)`, the resource first), and where
@@ -2701,7 +2703,7 @@ where
     })
     .execute(&mut *tx)
     .await
-    .map_err(card_read_error)?;
+    .map_err(|e| card_read_error(e, deadline))?;
     if CARD_READ_PLANS.with(|p| p.borrow().is_some()) {
         let mut sql = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
         build(&mut sql);
@@ -2709,7 +2711,7 @@ where
             .build_query_scalar()
             .fetch_one(&mut *tx)
             .await
-            .map_err(card_read_error)?;
+            .map_err(|e| card_read_error(e, deadline))?;
         CARD_READ_PLANS.with(|p| {
             if let Some(plans) = p.borrow_mut().as_mut() {
                 plans.push(plan);
@@ -2722,8 +2724,10 @@ where
         .build_query_as()
         .fetch_all(&mut *tx)
         .await
-        .map_err(card_read_error)?;
-    tx.commit().await.map_err(card_read_error)?;
+        .map_err(|e| card_read_error(e, deadline))?;
+    tx.commit()
+        .await
+        .map_err(|e| card_read_error(e, deadline))?;
     Ok(rows)
 }
 /// A transaction for a search's reads whose every statement stops at `deadline` (a
@@ -2746,7 +2750,7 @@ async fn begin_read(
             .bind(format!("{}ms", left.as_millis()))
             .execute(&mut *tx)
             .await
-            .map_err(card_read_error)?;
+            .map_err(|e| card_read_error(e, Some(deadline)))?;
         return Ok(tx);
     }
     Ok(pool.begin().await?)
@@ -2762,11 +2766,12 @@ const CARD_READ_BUSY: &str = "text search is busy, try again shortly";
 fn is_card_read_busy(error: &ApiError) -> bool {
     error.0 == StatusCode::SERVICE_UNAVAILABLE && error.1 == CARD_READ_BUSY
 }
-/// `error` as a search read's error: cancelled by its `statement_timeout` it is
-/// [`card_read_busy`] (counted as `budget`), else an internal error.
-fn card_read_error(error: sqlx::Error) -> ApiError {
+/// `error` as a search read's error: cancelled by the `statement_timeout` of its turn's budget
+/// (`deadline`) it is [`card_read_busy`] (counted as `budget`); else (a read with no turn, or
+/// another error) an internal error.
+fn card_read_error(error: sqlx::Error, deadline: Option<std::time::Instant>) -> ApiError {
     match &error {
-        sqlx::Error::Database(e) if e.code().as_deref() == Some("57014") => {
+        sqlx::Error::Database(e) if deadline.is_some() && e.code().as_deref() == Some("57014") => {
             crate::telemetry::search_index_busy("budget");
             card_read_busy()
         }
@@ -2850,9 +2855,10 @@ fn each_by_fame(
 ///   whose types the filters let in is not read, and the others are read by the types let in.
 /// - With `near`, `bbox` or `tags`: the [`FAMOUS_PROBE`] times `cap` best known cards (the
 ///   `(catalogue, fame, id)` index in order) and those of them through every filter kept, the
-///   whole answer when they are `cap`. When they are fewer: with `tags`, also the best known of
-///   the cards holding the labels, through the labels index (each label's cards, never a
-///   catalogue in fame order: a rare label is a short read); else the [`NEAREST_CARDS`] times
+///   whole answer when they are `cap`. When they are fewer: with `tags`, also those holding the
+///   labels among each catalogue's best known (its fame index, a bounded number of cards: a
+///   common label) and the best known of at most [`CARD_SCAN`] times `cap` cards holding them read
+///   through the labels index (a rare label's every card); else the [`NEAREST_CARDS`] times
 ///   `cap` cards nearest to the circle's or each box's centre in it (the `point` indexes), and
 ///   with a type or host filter also the best known of each type (or host) let in, kept in the
 ///   place; the best known of all. With `sort=distance` and `near`, the `cap` nearest.
@@ -2906,7 +2912,13 @@ async fn best_known_cards(
     // and the others by those types. `None` for a catalogue of more types than are probed: read
     // with the filters as they are.
     let mut let_in: Vec<(String, Option<Vec<String>>)> = vec![];
-    if types.is_some() || excluded.is_some() {
+    // Probed only where it narrows the reads: with excluded types, or with more types than one
+    // read has branches across the catalogues; a few types are read type by type as they are.
+    let probe = excluded.is_some()
+        || types
+            .as_ref()
+            .is_some_and(|t| t.len() * catalogues.len() > CARD_BRANCHES);
+    if probe {
         let wanted: Option<std::collections::HashSet<&String>> =
             types.as_ref().map(|t| t.iter().collect());
         let unwanted: std::collections::HashSet<&String> = excluded.iter().flatten().collect();
@@ -3158,18 +3170,24 @@ async fn best_known_cards(
             .await?;
             if rows.len() < cap && inside.is_none() {
                 if !tags.is_empty() {
-                    // Fewer: the best known of the cards holding the labels, through the labels
-                    // index alone (a rare label's few cards), in the place.
+                    // Fewer: a common label's cards among each catalogue's best known (its fame
+                    // index in order, looking at a bounded number of cards), in the place.
+                    rows.extend(branch_reads(each.clone(), false, false, true).await?);
+                    // And a rare label's cards, through the labels index alone, at most
+                    // [`CARD_SCAN`] times `cap` of them before they are ordered: a label on more
+                    // cards gives the best known of those it reads first, never all of them.
                     rows.extend(
                         read_cards::<FamedCard>(pool, Plan::KeyIndex, deadline, |sql| {
-                            sql.push("SELECT ")
+                            sql.push("SELECT * FROM (SELECT ")
                                 .push(CARD_READ_COLUMNS)
                                 .push(" FROM catalogue_card c WHERE c.catalogue=ANY(")
                                 .push_bind(read_from.clone())
                                 .push(")");
                             filters(sql, false, false);
                             place(sql);
-                            sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
+                            sql.push(" LIMIT ")
+                                .push_bind((CARD_SCAN * cap) as i64)
+                                .push(") b ORDER BY b.fame DESC,b.id LIMIT ")
                                 .push_bind(cap as i64);
                         })
                         .await?,
@@ -3215,10 +3233,75 @@ async fn best_known_cards(
 }
 /// The most types of one catalogue [`catalogue_types`] reads.
 const CATALOGUE_TYPES_MAX: i64 = 256;
-/// The types the cards of each of `catalogues` have, in one read: one probe of the `(catalogue,
-/// type, fame, id)` index per type (each the next type after the last); `None` for a catalogue of
-/// more than [`CATALOGUE_TYPES_MAX`].
+/// The types the cards of each of `catalogues` have: one probe of the `(catalogue, type, fame,
+/// id)` index per type (each the next type after the last), read again only after the
+/// catalogue's cards changed; `None` for a catalogue of more than [`CATALOGUE_TYPES_MAX`].
 async fn catalogue_types(
+    pool: &PgPool,
+    catalogues: &[String],
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<Option<Vec<String>>>, ApiError> {
+    // Each catalogue's state row moves (`updated_at`) with every write of its cards: the types
+    // read for the same row are read again only after it moved.
+    let marks: Vec<(String, String, DateTime<Utc>)> =
+        read_cards(pool, Plan::Ordered, deadline, |sql| {
+            sql.push("SELECT current_database()::text,s.catalogue,s.updated_at FROM catalogue_state s WHERE s.catalogue=ANY(")
+                .push_bind(catalogues.to_vec())
+                .push(")");
+        })
+        .await?;
+    let mark = |catalogue: &str| {
+        marks
+            .iter()
+            .find(|(_, c, _)| c == catalogue)
+            .map(|(db, c, at)| ((db.clone(), c.clone()), *at))
+    };
+    let mut known: Vec<Option<Option<Vec<String>>>> = catalogues
+        .iter()
+        .map(|c| {
+            let (key, at) = mark(c)?;
+            let cache = CATALOGUE_TYPES.lock().ok()?;
+            cache
+                .get(&key)
+                .filter(|(read_at, _)| *read_at == at)
+                .map(|(_, types)| types.clone())
+        })
+        .collect();
+    let unknown: Vec<String> = catalogues
+        .iter()
+        .zip(&known)
+        .filter(|(_, k)| k.is_none())
+        .map(|(c, _)| c.clone())
+        .collect();
+    if !unknown.is_empty() {
+        let read = probe_catalogue_types(pool, &unknown, deadline).await?;
+        let mut read = unknown.iter().zip(read);
+        for (catalogue, slot) in catalogues.iter().zip(known.iter_mut()) {
+            if slot.is_some() {
+                continue;
+            }
+            let Some((_, types)) = read.next() else { break };
+            if let (Some((key, at)), Ok(mut cache)) = (mark(catalogue), CATALOGUE_TYPES.lock()) {
+                if cache.len() >= CATALOGUE_TYPES_KEPT {
+                    cache.clear();
+                }
+                cache.insert(key, (at, types.clone()));
+            }
+            *slot = Some(types);
+        }
+    }
+    Ok(known.into_iter().map(Option::flatten).collect())
+}
+/// How many (database, catalogue) entries [`CATALOGUE_TYPES`] keeps before it starts over.
+const CATALOGUE_TYPES_KEPT: usize = 256;
+/// The types [`catalogue_types`] read, by database and catalogue, with the state row's
+/// `updated_at` they were read at.
+type TypesRead = (DateTime<Utc>, Option<Vec<String>>);
+static CATALOGUE_TYPES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String), TypesRead>>,
+> = std::sync::LazyLock::new(Default::default);
+/// [`catalogue_types`] read from the type index.
+async fn probe_catalogue_types(
     pool: &PgPool,
     catalogues: &[String],
     deadline: Option<std::time::Instant>,
@@ -4038,8 +4121,10 @@ pub async fn search(
             )
             .fetch_one(&mut *tx)
             .await
-            .map_err(card_read_error)?;
-            tx.commit().await.map_err(card_read_error)?;
+            .map_err(|e| card_read_error(e, postgres_deadline))?;
+            tx.commit()
+                .await
+                .map_err(|e| card_read_error(e, postgres_deadline))?;
             Ok::<bool, ApiError>(backed)
         };
         match within_turn(postgres_deadline, read).await {
@@ -6345,7 +6430,7 @@ pub struct OsmDumpPlace {
     display_name: Option<String>,
     /// `ok` or `missing`.
     status: String,
-    fetched_at: chrono::DateTime<chrono::Utc>,
+    fetched_at: DateTime<Utc>,
     /// Every derived document served publicly, keyed by the version hash that change entries
     /// and pinned resource documents name.
     #[schema(value_type = Object)]
@@ -6397,7 +6482,7 @@ pub struct OsmDumpRename {
     category: Option<String>,
     /// The name that replaced it.
     new_name: String,
-    until: chrono::DateTime<chrono::Utc>,
+    until: DateTime<Utc>,
 }
 /// After the renames, while the OSM catalogue is on: a deleted OSM object's successor.
 #[derive(ToSchema)]
@@ -6412,7 +6497,7 @@ pub struct OsmDumpSuccessor {
     new_id: i64,
     /// `wikidata` or `changeset`.
     basis: String,
-    found_at: chrono::DateTime<chrono::Utc>,
+    found_at: DateTime<Utc>,
 }
 /// After the successors, while the OSM catalogue is on: a named OSM object an update removed (it
 /// was deleted), as its card last was.
@@ -6428,7 +6513,7 @@ pub struct OsmDumpRemoved {
     #[schema(required = true)]
     category: Option<String>,
     point: model::Point,
-    removed_at: chrono::DateTime<chrono::Utc>,
+    removed_at: DateTime<Utc>,
 }
 /// The public dump line format (see `OsmDumpPlace`); a new `osm_place` column is not exported
 /// until it is added here, to the schema and to docs/api.md.
