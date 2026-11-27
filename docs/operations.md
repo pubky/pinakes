@@ -1984,15 +1984,34 @@ catalogue without an importer in this version is refused. Without `http.contact`
 
 ### Catalogue sample runs
 
-`scripts/catalogue-sample openalex|podcastindex|software|tranco [--keep]` checks an importer end to
-end against a small real sample read from the real source (at most about 300 MB): it creates a
-throwaway database (`SAMPLE_DB`, which must not exist), imports the sample with
-`pinakesd catalogue import`, checks the cards (counts, keys, labels, canonical links), starts a
-daemon on a private port to check that `/v1/search` finds a card and that its shared links join
-it through `POST /v1/resolve`, runs an update from a second sample and checks that only changed
-rows were written, checks that the catalogue switched off leaves search, then drops the database
-and the downloads. It prints a JSON report (bytes read, cards, time, peak memory, database size).
-`PINAKESD` names the binary (default `target/release/pinakesd`); `PGHOST` and `PGPORT` the server.
+`scripts/catalogue-sample NAME [--keep] [options]` checks a catalogue's importer end to end
+against a small real sample read from the real source:
+
+| NAME | What it reads | Its own options |
+| --- | --- | --- |
+| `musicbrainz` | The first megabytes of each file of the two newest dumps (160 MiB in all) | `--import-only` (the newest dump, no update), `--bytes ENTITY=N` (a file's bytes) |
+| `wikidata` | The first records of the newest dump, then the real recent changes | `--limit N` (cards, default 20,000), `--window MINUTES` (the update's, default 20), `--report FILE` |
+| `osm` | A Geofabrik extract a few days old, then the region's change files since | `--region R` (default `europe/liechtenstein`), `--pbf FILE`, `--days N` (default 3), `--port N` (default 18492), `--max-mb N` (one download's most, default 300) |
+| `openalex`, `podcastindex`, `software`, `tranco` | At most about 300 MB of each source; Tranco at most 50 homepages | |
+
+Each creates a throwaway database, imports the sample with `pinakesd catalogue import`, checks the
+cards (counts, keys, labels, canonical links), starts a daemon on a private port to check that
+`/v1/search` finds a card and that its shared links join it through `POST /v1/resolve`, runs an
+update and checks that only changed rows were written, checks that the catalogue switched off
+leaves search, then drops the database and the downloads (OSM's downloads stay in its directory).
+It prints a JSON report (bytes read, cards, time, peak memory, database size).
+`scripts/catalogue-sample NAME --help` describes a run. Every catalogue takes the same flag and
+environment:
+
+- `--keep` keeps the database and the downloads.
+- `PINAKESD` names the binary (default `target/release/pinakesd`).
+- `PGHOST` and `PGPORT` name the PostgreSQL server the database is created on.
+- `SAMPLE_DB` names the database (default `catalogue_sample_NAME`); a run refuses one that exists,
+  or a name of other than lower case letters, digits and `_`.
+- `SAMPLE_DIR` is where the downloads and the daemon's files go (default a new temporary directory).
+- `PINAKES__HTTP__CONTACT` is the operator's contact, sent in the User-Agent; when unset it is read
+  from `~/.config/pinakes/contact.env`, and it is never printed. Wikidata, OSM and Tranco refuse to
+  run without it.
 
 ### Importer rules
 

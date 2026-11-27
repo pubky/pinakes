@@ -207,12 +207,13 @@ position: it waits for a newer dump, then a full import is asked for (a download
 the catalogue has a limit). Each refuses while a daemon runs the importer, and a failure is recorded
 and resumes as the task's would. `--request` asks the daemon for a full import instead.
 
-`scripts/catalogue-sample-wikidata` checks the importer on a sample of the real dump: it imports
+`scripts/catalogue-sample wikidata` checks the importer on a sample of the real dump: it imports
 the first records into a new database, counts the cards, keys and labels, checks that
 `/v1/search` finds a card and that a shared Wikipedia link gets its card, runs an update from the
 real recent changes, and checks that switching the catalogue off hides it; then it drops the
-database. It needs `PINAKESD`, `DATABASE_URL` (a server where it may create a database) and
-`PINAKES__HTTP__CONTACT`.
+database. `--limit`, `--window` and `--report` change what it reads and writes; the server, the
+binary and the contact come from the environment every sample run takes
+([sample runs](../operations.md#catalogue-sample-runs)).
 
 ## Credit
 

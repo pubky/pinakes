@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
-"""osm-catalogue-sample [options]: import a real OpenStreetMap extract a few days old into a new
-throwaway database through `pinakesd`, check it, run the daemon's own update (it reads the
-region's real change files since the extract), check that only the objects those files name
-changed, check search, reads, the map clusters, the ODbL dump and the off switch, then drop the
-database.
+"""scripts/catalogue-sample osm [--keep] [--region R] [--pbf FILE] [--days N] [--port N] [--max-mb N]
 
-The database server is DATABASE_URL's (its database name is replaced); the daemon serves on
-private loopback ports while checks run. Downloads go to --dir and are kept there (delete them
-after). Defaults: Geofabrik's Liechtenstein extract of three days ago.
+Imports a real OpenStreetMap extract a few days old into a new throwaway database through
+`pinakesd`, checks it, runs the daemon's own update (it reads the region's real change files since
+the extract), checks that only the objects those files name changed, checks search, reads, the map
+clusters, the ODbL dump and the off switch, then drops the database. The daemon serves on private
+loopback ports while checks run. Defaults: Geofabrik's Liechtenstein extract of three days ago.
 
-  --pinakesd PATH     the pinakesd binary (default target/debug/pinakesd)
+  --keep              keep the database
   --region R          a Geofabrik region path (default europe/liechtenstein)
   --pbf FILE          an extract already downloaded (else the dated one of --days ago)
   --days N            how old the extract is (default 3): the update applies N days of changes
-  --dir DIR           where downloads and the run's files go (default: a new temporary directory)
-  --database NAME     the database to create (default cat1125_step6_osm); refused if it exists
-  --keep              keep the database
   --port N            the API port (default 18492; admin is N+1)
   --max-mb N          the most megabytes one download may take (default 300)
 
+Environment:
+  PINAKESD        the pinakesd binary (default: target/release/pinakesd)
+  PGHOST, PGPORT  the PostgreSQL server the database is created on (libpq's own variables)
+  SAMPLE_DB       the database name (default: catalogue_sample_osm); it must not exist
+  SAMPLE_DIR      where the downloads and the run's files go, kept there (default: a new
+                  temporary dir)
+  PINAKES__HTTP__CONTACT  the operator's contact for the User-Agent of downloads (required; also
+                  read from ~/.config/pinakes/contact.env when unset), never printed
+
 Prints one JSON object of measurements and the checks; exits 1 when a check fails.
-The contact for the User-Agent of downloads comes from PINAKES__HTTP__CONTACT, else from
-~/.config/pinakes/contact.env (required).
 """
+import argparse
 import gzip
 import tempfile
 import json
@@ -34,26 +37,35 @@ import time
 import urllib.parse
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def arg(name, default=None, flag=False):
-    if flag:
-        return name in sys.argv
-    if name in sys.argv:
-        i = sys.argv.index(name)
-        if i + 1 >= len(sys.argv):
-            sys.exit(f"{name} needs a value")
-        return sys.argv[i + 1]
-    return default
+def die(message, code=1):
+    print(f"catalogue-sample osm: {message}", file=sys.stderr)
+    sys.exit(code)
 
 
-PINAKESD = os.path.abspath(arg("--pinakesd", os.path.join(REPO, "target/debug/pinakesd")))
-REGION = arg("--region", "europe/liechtenstein")
-DIR = os.path.abspath(arg("--dir", "") or tempfile.mkdtemp(prefix="osm-sample-"))
-DB = arg("--database", "cat1125_step6_osm")
-PORT = int(arg("--port", "18492"))
+parser = argparse.ArgumentParser(prog="scripts/catalogue-sample", usage="%(prog)s osm [--keep] [--region R] [--pbf FILE] [--days N] [--port N] [--max-mb N]",
+                                 description=__doc__.split("\n", 2)[2], formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("catalogue", choices=["osm"])
+parser.add_argument("--keep", action="store_true")
+parser.add_argument("--region", default="europe/liechtenstein")
+parser.add_argument("--pbf")
+parser.add_argument("--days", type=int, default=3)
+parser.add_argument("--port", type=int, default=18492)
+parser.add_argument("--max-mb", type=int, default=300)
+ARGS = parser.parse_args()
+
+REGION = ARGS.region
+DB = os.environ.get("SAMPLE_DB") or "catalogue_sample_osm"
+PORT = ARGS.port
+if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", DB):
+    die("SAMPLE_DB must be a plain database name (a-z, 0-9, _)", 2)
+if not re.fullmatch(r"[a-z0-9-]+(/[a-z0-9-]+){0,3}", REGION):
+    die("--region: a Geofabrik region path", 2)
+PINAKESD = os.path.abspath(os.environ.get("PINAKESD") or os.path.join(REPO, "target/release/pinakesd"))
+if not os.access(PINAKESD, os.X_OK):
+    die(f"no pinakesd at {PINAKESD} (set PINAKESD)")
 CONTACT = os.environ.get("PINAKES__HTTP__CONTACT", "")
 if not CONTACT:
     # The operator's contact file, if any (`export PINAKES__HTTP__CONTACT=...`); never printed.
@@ -63,14 +75,34 @@ if not CONTACT:
             CONTACT = m.group(1).strip() if m else ""
     except OSError:
         pass
-if not re.fullmatch(r"[a-z0-9_]{1,63}", DB):
-    sys.exit("--database: lower case letters, digits and _")
-if not re.fullmatch(r"[a-z0-9-]+(/[a-z0-9-]+){0,3}", REGION):
-    sys.exit("--region: a Geofabrik region path")
-if "DATABASE_URL" not in os.environ:
-    sys.exit("set DATABASE_URL (the server to create the database on)")
+if not CONTACT:
+    die("set PINAKES__HTTP__CONTACT: downloads name the operator's contact")
+# psql, createdb and dropdb reach the server by PGHOST and PGPORT; pinakesd by this URL.
+PGENV = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+_server = {k: v for k, v in (("host", os.environ.get("PGHOST", "")), ("port", os.environ.get("PGPORT", ""))) if v}
+target = f"postgresql:///{DB}" + ("?" + urllib.parse.urlencode(_server) if _server else "")
+
+
+def psql(sql, database=None):
+    out = subprocess.run(
+        ["psql", "-X", "-At", "-v", "ON_ERROR_STOP=1", "-d", database or DB, "-c", sql],
+        env=PGENV, capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip()[:500])
+    return out.stdout.strip()
+
+
+# The database must not exist: this script never touches one it did not create.
+try:
+    exists = psql(f"SELECT count(*) FROM pg_database WHERE datname='{DB}'", "postgres")
+except RuntimeError:
+    die("the PostgreSQL server (PGHOST, PGPORT) did not answer")
+if exists != "0":
+    die(f"database {DB} exists: choose another SAMPLE_DB")
+DIR = os.path.abspath(os.environ.get("SAMPLE_DIR") or tempfile.mkdtemp(prefix="catalogue-sample-osm-"))
 os.makedirs(DIR, exist_ok=True)
-UA = f"pinakes-osm-sample (+https://pubky.app; {CONTACT})"
+UA = f"pinakes-catalogue-sample (+https://pubky.app; {CONTACT})"
 result = {"region": REGION, "checks": {}}
 failed = []
 
@@ -89,7 +121,7 @@ HOSTS = (
     "osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com",
     "osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com",
 )
-MAX_BYTES = int(arg("--max-mb", "300")) * 1_000_000
+MAX_BYTES = ARGS.max_mb * 1_000_000
 
 
 class Hosts(urllib.request.HTTPRedirectHandler):
@@ -107,8 +139,6 @@ OPENER = urllib.request.build_opener(Hosts)
 
 
 def download(url, dest):
-    if not CONTACT:
-        sys.exit("set PINAKES__HTTP__CONTACT: downloads name the operator's contact")
     request = urllib.request.Request(url, headers={"User-Agent": UA})
     read = 0
     with OPENER.open(request, timeout=120) as r, open(dest + ".part", "wb") as out:
@@ -133,10 +163,10 @@ def get_text(url):
 last = REGION.rsplit("/", 1)[-1]
 base = f"https://download.geofabrik.de/{REGION}"
 downloaded = 0
-pbf = arg("--pbf")
+pbf = ARGS.pbf
 if not pbf:
     import datetime
-    day = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=int(arg("--days", "3")))).strftime("%y%m%d")
+    day = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=ARGS.days)).strftime("%y%m%d")
     pbf = os.path.join(DIR, f"{last}-{day}.osm.pbf")
     t = time.time()
     downloaded += download(f"{base}/{last}-{day}.osm.pbf", pbf)
@@ -144,35 +174,7 @@ if not pbf:
     result["pbf_url"] = f"{base}/{last}-{day}.osm.pbf"
 result["pbf_bytes"] = os.path.getsize(pbf)
 
-# The database URL with another database name; psql connects by the PG* variables (pg-env).
-def with_database(name):
-    # The URL as given with its database name replaced (urlunsplit would drop an empty host's
-    # `//`, which libpq needs).
-    raw = os.environ["DATABASE_URL"]
-    scheme, rest = raw.split("://", 1)
-    authority, _, tail = rest.partition("/")
-    query = tail.partition("?")[2]
-    return f"{scheme}://{authority}/{name}" + (f"?{query}" if query else "")
-
-
-server = with_database("postgres")
-target = with_database(DB)
-
-
-def psql(sql, database_url=None):
-    env = dict(os.environ, DATABASE_URL=database_url or target)
-    out = subprocess.run(
-        [os.path.join(HERE, "pg-env"), "psql", "-X", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql],
-        env=env, capture_output=True, text=True,
-    )
-    if out.returncode != 0:
-        raise RuntimeError(out.stderr.strip()[:500])
-    return out.stdout.strip()
-
-
-if psql(f"SELECT count(*) FROM pg_database WHERE datname='{DB}'", server) != "0":
-    sys.exit(f"database {DB} exists: drop it or choose --database")
-psql(f"CREATE DATABASE {DB}", server)
+subprocess.run(["createdb", DB], env=PGENV, check=True)
 
 
 def config(enabled=True):
@@ -361,8 +363,8 @@ try:
     stop()
 finally:
     stop()
-    if not arg("--keep", flag=True):
-        psql(f"DROP DATABASE IF EXISTS {DB} WITH (FORCE)", server)
+    if not ARGS.keep:
+        psql(f"DROP DATABASE IF EXISTS {DB} WITH (FORCE)", "postgres")
         result["database_dropped"] = True
 result["bytes_downloaded"] = downloaded
 result["failed"] = failed

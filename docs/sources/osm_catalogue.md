@@ -174,12 +174,12 @@ configured region; an import cut off is taken up again (on its own file). `pinak
 import osm --update` runs one update from the region's change files, after a finished import.
 Both refuse while another process runs the importer ([operations](../operations.md#importer-rules)).
 
-`scripts/osm-catalogue-sample` imports a real extract a few days old (Liechtenstein by default)
+`scripts/catalogue-sample osm` imports a real extract a few days old (Liechtenstein by default)
 into a new throwaway database, runs the update (the region's real change files since), and checks
 the cards, search, the reads, the map clusters, the ODbL dump and the off switch; it prints its
-measurements as JSON. It needs `DATABASE_URL` (a server it may create a database on),
-`PINAKES__HTTP__CONTACT` (or `~/.config/pinakes/contact.env`) and a built `pinakesd`;
-`--region`, `--days`, `--max-mb` (300 by default) and `--keep` change what it reads and keeps.
+measurements as JSON. `--region`, `--pbf`, `--days`, `--port` and `--max-mb` (300 by default)
+change what it reads; the server, the binary, the contact and `--keep` are those of every sample
+run ([sample runs](../operations.md#catalogue-sample-runs)).
 Measured (debug build, a busy host): Liechtenstein, 2,456 cards in 4.5 s; Switzerland, 400,838
 cards in 596 s, about 1.4 KB per card in PostgreSQL.
 
