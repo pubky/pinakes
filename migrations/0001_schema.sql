@@ -1671,6 +1671,8 @@ CREATE FUNCTION catalogue_key_links(key text) RETURNS text[]
   WHEN 'doi' THEN ARRAY[key]
   WHEN 'arxiv' THEN ARRAY['https://arxiv.org/abs/'||substr(key,7),'https://arxiv.org/pdf/'||substr(key,7)]
   WHEN 'openalex' THEN ARRAY['https://openalex.org/'||substr(key,10)]
+  WHEN 'pmid' THEN ARRAY['https://pubmed.ncbi.nlm.nih.gov/'||substr(key,6)||'/','https://pubmed.ncbi.nlm.nih.gov/'||substr(key,6)]
+  WHEN 'podcast' THEN CASE WHEN split_part(key,':',2)='apple' THEN ARRAY['https://podcasts.apple.com/podcast/id'||split_part(key,':',3),'https://podcasts.apple.com/us/podcast/id'||split_part(key,':',3)] END
   WHEN 'crate' THEN ARRAY(SELECT p.page||n.name FROM unnest(ARRAY['https://crates.io/crates/','https://docs.rs/','https://docs.rs/crate/','https://lib.rs/crates/']) WITH ORDINALITY AS p(page,i)
    CROSS JOIN unnest(ARRAY[substr(key,7)]||CASE WHEN strpos(key,'-')>0 THEN ARRAY[replace(substr(key,7),'-','_')] ELSE '{}'::text[] END) WITH ORDINALITY AS n(name,j) ORDER BY p.i,n.j)
   WHEN 'android' THEN ARRAY['https://f-droid.org/packages/'||substr(key,9)||'/','https://f-droid.org/packages/'||substr(key,9),'https://f-droid.org/en/packages/'||substr(key,9)||'/']

@@ -579,11 +579,20 @@ async fn sweep(
 /// The table's `waiting` cell: a full import an update asked for, with its reason, a dump its
 /// importer refused (`refused` in its position), and why the importer waits.
 fn waiting_cell(state: Option<&State>) -> String {
-    let refused = state
-        .and_then(|s| s.position.as_ref())
+    let position = state.and_then(|s| s.position.as_ref());
+    let refused = position
         .and_then(|p| p.get("refused"))
         .and_then(|v| v.as_str())
-        .map(|v| format!("dump {v} refused"));
+        .map(|v| format!("dump {v} refused"))
+        // A file catalogue's refused file: its version, or each registry's.
+        .or_else(|| match super::diff::refused_in(position)? {
+            serde_json::Value::String(v) => Some(format!("file {v} refused")),
+            serde_json::Value::Object(m) => Some(format!(
+                "{} file refused",
+                m.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+            )),
+            _ => None,
+        });
     let waiting = state.and_then(|s| s.waiting.as_deref());
     let waiting = match (refused, waiting) {
         (Some(r), Some(w)) if !w.trim().is_empty() => Some(format!("{r}; {w}")),

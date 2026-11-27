@@ -89,6 +89,13 @@ pub fn link_keys(uri: &str) -> Vec<(String, Catalogue)> {
     if let Some(work) = openalex_work(uri) {
         keys.push((format!("openalex:{work}"), Catalogue::Openalex));
     }
+    if let Some(pmid) = pubmed_article(uri) {
+        keys.push((format!("pmid:{pmid}"), Catalogue::Openalex));
+    }
+    // A show's Apple Podcasts page (not one of its episodes).
+    if let Some((show, None)) = crate::also_on::podcasts::apple(uri) {
+        keys.push((format!("podcast:apple:{show}"), Catalogue::Podcastindex));
+    }
     if let Some(package) =
         packages::Package::from_uri(uri).filter(|p| p.registry == packages::Registry::Crates)
     {
@@ -128,6 +135,27 @@ fn openalex_work(uri: &str) -> Option<String> {
     let digits = id.strip_prefix(['W', 'w'])?;
     ((1..=12).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit()))
         .then(|| format!("W{digits}"))
+}
+/// The PubMed article a link names: `pubmed.ncbi.nlm.nih.gov/{pmid}` (1-10 digits, no
+/// leading zero), without a query.
+fn pubmed_article(uri: &str) -> Option<String> {
+    let url = url::Url::parse(uri).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str()? != "pubmed.ncbi.nlm.nih.gov"
+        || url.query().is_some()
+    {
+        return None;
+    }
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    match segments.as_slice() {
+        [id] if (1..=10).contains(&id.len())
+            && !id.starts_with('0')
+            && id.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some((*id).to_owned())
+        }
+        _ => None,
+    }
 }
 /// The site a homepage link is: its host, without `www.` and a final dot, for an `http(s)` link
 /// whose path is `/` with no query, user or port, on a host name with a dot (not an address).
@@ -1181,6 +1209,39 @@ pub async fn member(pool: &PgPool, card: &CardRow) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A PubMed article page names its PubMed ID (OpenAlex's), a show's Apple Podcasts page its
+    /// Apple ID (Podcast Index's); other pages of those sites, and an episode, name neither.
+    #[test]
+    fn pubmed_and_apple_podcasts_pages_name_their_keys() {
+        let keys = |uri: &str| -> Vec<(String, Catalogue)> { link_keys(uri) };
+        assert_eq!(
+            keys("https://pubmed.ncbi.nlm.nih.gov/35490842/"),
+            [("pmid:35490842".to_owned(), Catalogue::Openalex)]
+        );
+        assert_eq!(
+            keys("http://pubmed.ncbi.nlm.nih.gov/35490842"),
+            [("pmid:35490842".to_owned(), Catalogue::Openalex)]
+        );
+        for none in [
+            "https://pubmed.ncbi.nlm.nih.gov/?term=x",
+            "https://pubmed.ncbi.nlm.nih.gov/0123/",
+            "https://pubmed.ncbi.nlm.nih.gov/35490842/citedby/",
+            "https://pubmed.ncbi.nlm.nih.gov/12345678901/",
+            "https://example.org/35490842",
+            "https://podcasts.apple.com/us/podcast/x/id1200361736?i=1000600000000",
+            "https://podcasts.apple.com/us/browse",
+        ] {
+            assert!(keys(none).is_empty(), "{none}: {:?}", keys(none));
+        }
+        assert_eq!(
+            keys("https://podcasts.apple.com/us/podcast/the-daily/id1200361736"),
+            [(
+                "podcast:apple:1200361736".to_owned(),
+                Catalogue::Podcastindex
+            )]
+        );
+    }
 
     /// A stored card of Wikidata and a tagged link built from it: the card as the join read it.
     async fn built(pool: &PgPool) -> (String, CardRow) {

@@ -2,6 +2,8 @@
 //! import, a re-import that rewrites only changed cards and removes the ones it no longer reads,
 //! an update, resuming after a failure and after a restart, the catalogue's lock, the wait for
 //! free disk, one large full import at a time, the drop, the switches and the metrics.
+mod common;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use pinakes_core::{
@@ -826,6 +828,25 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     metrics3.refresh(&pool).await.unwrap();
     assert_eq!(get(&metrics3.catalogue_refused, "osm"), 0);
     assert_eq!(get(&metrics3.catalogue_refused, "wikidata"), 1);
+    // A file catalogue's refused file, until a newer file is read.
+    store::ensure_state(&pool, Catalogue::Podcastindex)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"a\",\"refused_file\":\"b\"}' WHERE catalogue='podcastindex'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::ensure_state(&pool, Catalogue::Software)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET position='{\"crates.io\":{\"version\":\"a\"}}' WHERE catalogue='software'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let metrics4 = Metrics::new().unwrap();
+    metrics4.refresh(&pool).await.unwrap();
+    assert_eq!(get(&metrics4.catalogue_refused, "podcastindex"), 1);
+    assert_eq!(get(&metrics4.catalogue_refused, "software"), 0);
     // The lag counts from how current the data is, not from the update that finished an hour
     // ago.
     let lag = get(&metrics2.catalogue_lag, "wikidata");
@@ -1391,46 +1412,66 @@ async fn jsonb_text_len_is_postgresql_s_length(pool: PgPool) {
     }
 }
 
-/// MusicBrainz on without `http.contact` starts no importer, and says so: `waiting` in its state
-/// row (`catalogue status`) and `pinakes_catalogue_needs_contact`; with a contact, or off, neither.
+/// A catalogue on without `http.contact` starts no importer, and says so: `waiting` in its state
+/// row (`catalogue status`, in its own words: `run::contact_needs`) and
+/// `pinakes_catalogue_needs_contact`; with a contact, or off, neither. A catalogue without an
+/// importer gets neither.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let mut config = pinakes_core::config::Config::default();
     assert!(config.egress.contact.is_empty());
     assert!(run::importers(&config).is_empty());
     run::note_unstarted(&pool, &config).await.unwrap();
+    let notes = run::contact_needs(&config);
+    let note = |c: Catalogue| notes.iter().find(|n| n.0 == c).map(|n| n.2);
+    assert_eq!(
+        note(Catalogue::Musicbrainz),
+        Some(pinakes_core::catalogue::musicbrainz::NEEDS_CONTACT)
+    );
+    let waiting = |c: Catalogue| {
+        let pool = pool.clone();
+        async move { store::state(&pool, c).await.unwrap().map(|s| s.waiting) }
+    };
+    for c in run::WITH_IMPORTER {
+        assert_eq!(waiting(c).await, Some(note(c).map(str::to_owned)), "{c}");
+    }
+    for c in Catalogue::ALL
+        .into_iter()
+        .filter(|c| !run::WITH_IMPORTER.contains(c))
+    {
+        assert_eq!(waiting(c).await.flatten(), None, "{c}");
+    }
     let state = store::state(&pool, Catalogue::Musicbrainz)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        state.waiting.as_deref(),
-        Some(pinakes_core::catalogue::musicbrainz::NEEDS_CONTACT)
-    );
     let table = store::status_table(&config.catalogues, std::slice::from_ref(&state));
     assert!(table.contains("needs http.contact"), "{table}");
-    let metrics = Metrics::new().unwrap();
-    metrics.catalogue_contact(&config);
-    let needs = |m: &Metrics| {
+    let needs = |m: &Metrics, c: Catalogue| {
         m.catalogue_needs_contact
-            .with_label_values(&["musicbrainz"])
+            .with_label_values(&[c.name()])
             .get()
     };
-    assert_eq!(needs(&metrics), 1);
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    for c in Catalogue::ALL {
+        assert_eq!(
+            needs(&metrics, c),
+            i64::from(run::WITH_IMPORTER.contains(&c)),
+            "{c}"
+        );
+    }
     config.egress.contact = "ops@example.org".into();
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
-    assert_eq!(needs(&metrics), 0);
+    for c in Catalogue::ALL {
+        assert_eq!(needs(&metrics, c), 0, "{c}");
+    }
     // Started with its contact, the note goes; another `waiting` stays.
     run::note_unstarted(&pool, &config).await.unwrap();
-    let waiting = || async {
-        store::state(&pool, Catalogue::Musicbrainz)
-            .await
-            .unwrap()
-            .unwrap()
-            .waiting
-    };
-    assert_eq!(waiting().await, None);
+    for c in run::WITH_IMPORTER {
+        assert_eq!(waiting(c).await, Some(None), "{c}");
+    }
     sqlx::query(
         "UPDATE catalogue_state SET waiting='free disk 1.0 GB' WHERE catalogue='musicbrainz'",
     )
@@ -1438,12 +1479,33 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     .await
     .unwrap();
     run::note_unstarted(&pool, &config).await.unwrap();
-    assert_eq!(waiting().await.as_deref(), Some("free disk 1.0 GB"));
+    assert_eq!(
+        waiting(Catalogue::Musicbrainz).await.flatten().as_deref(),
+        Some("free disk 1.0 GB")
+    );
+    // Without the contact again, but one catalogue off, then all of them: no note, no gauge.
     config.egress.contact.clear();
     config.catalogues.musicbrainz.enabled = false;
+    run::note_unstarted(&pool, &config).await.unwrap();
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
-    assert_eq!(needs(&metrics), 0);
+    assert_eq!(needs(&metrics, Catalogue::Musicbrainz), 0);
+    for c in run::WITH_IMPORTER
+        .into_iter()
+        .filter(|c| *c != Catalogue::Musicbrainz)
+    {
+        assert_eq!(needs(&metrics, c), 1, "{c}");
+    }
+    config.catalogues.enabled = false;
+    run::note_unstarted(&pool, &config).await.unwrap();
+    for c in run::WITH_IMPORTER {
+        assert_ne!(waiting(c).await.flatten().as_deref(), note(c), "{c}");
+    }
+    let metrics = Metrics::new().unwrap();
+    metrics.catalogue_contact(&config);
+    for c in Catalogue::ALL {
+        assert_eq!(needs(&metrics, c), 0, "{c}");
+    }
 }
 
 /// A failure the importer meets once the catalogue lock's session has ended too (a database

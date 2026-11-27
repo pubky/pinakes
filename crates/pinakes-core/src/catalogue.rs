@@ -23,8 +23,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 
 pub mod bulk;
+pub mod csv;
+pub mod diff;
 pub mod extras;
 pub mod failure;
+pub mod fetch;
 pub mod join;
 pub mod musicbrainz;
 pub mod osm;
@@ -715,6 +718,12 @@ fn clean(text: &str, cap: usize) -> String {
         .join(" ");
     model::truncate(&mut text, cap);
     text
+}
+/// Whether `name` makes a card's name the table takes ([`Card::checked`]: something left once
+/// cleaned, and no credential in it), so an importer makes no card it would refuse.
+pub fn usable_name(name: &str) -> bool {
+    let name = clean(name, NAME_CAP);
+    !name.is_empty() && !crate::capability::contains_credential(&name)
 }
 impl Card {
     /// The row this card is stored as, or why it is not: its link normalized as a referenced

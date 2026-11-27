@@ -2241,8 +2241,9 @@ async fn search_finds_the_cards_until_the_catalogue_is_off(pool: PgPool) {
     assert!(found["items"].as_array().unwrap().is_empty(), "{found}");
 }
 
-/// The daemon runs the MusicBrainz importer while the catalogue is on and the operator's contact
-/// is set, and only then; Wikidata's, on by default, starts with the same contact.
+/// The daemon runs each importer while its catalogue is on and the operator's contact is set,
+/// and only then, in their order (`run::WITH_IMPORTER`); Wikidata's and the file catalogues',
+/// on by default, start with the same contact.
 #[test]
 fn the_daemon_runs_the_importer_while_the_catalogue_is_on() {
     let mut config = Config::default();
@@ -2250,16 +2251,25 @@ fn the_daemon_runs_the_importer_while_the_catalogue_is_on() {
     config.catalogues.osm.enabled = false;
     assert!(run::importers(&config).is_empty());
     config.egress.contact = "ops@example.org".into();
-    let started = run::to_start(run::importers(&config), &config);
-    // Wikidata, also on by default, starts with the same contact.
-    assert_eq!(
-        started.iter().map(|i| i.catalogue()).collect::<Vec<_>>(),
-        [Catalogue::Musicbrainz, Catalogue::Wikidata]
-    );
+    let started = |config: &Config| -> Vec<Catalogue> {
+        run::to_start(run::importers(config), config)
+            .iter()
+            .map(|i| i.catalogue())
+            .collect()
+    };
+    // Every importer but OpenStreetMap's, in their order: MusicBrainz, then Wikidata (also on by
+    // default, started with the same contact), then the file catalogues.
+    let on: Vec<Catalogue> = run::WITH_IMPORTER
+        .into_iter()
+        .filter(|c| *c != Catalogue::Osm)
+        .collect();
+    assert_eq!(on[..2], [Catalogue::Musicbrainz, Catalogue::Wikidata]);
+    assert_eq!(started(&config), on);
     config.catalogues.musicbrainz.enabled = false;
-    let started = run::to_start(run::importers(&config), &config);
-    assert_eq!(
-        started.iter().map(|i| i.catalogue()).collect::<Vec<_>>(),
-        [Catalogue::Wikidata]
-    );
+    // The others, in their order.
+    assert_eq!(started(&config), &on[1..]);
+    // Catalogues off as a whole: none starts.
+    config.catalogues.musicbrainz.enabled = true;
+    config.catalogues.enabled = false;
+    assert!(started(&config).is_empty());
 }

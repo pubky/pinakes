@@ -99,7 +99,9 @@ pub struct Metrics {
     pub catalogue_turn: IntGaugeVec,
     /// Whether the catalogue's importer refused the dump it waits behind: `refused` in its
     /// position, newer than the version applied (or before any), until a dump is applied. A
-    /// refusal of an older dump (a trial by hand) is not what the importer waits for.
+    /// refusal of an older dump (a trial by hand) is not what the importer waits for. For the
+    /// file catalogues (OpenAlex, Podcast Index, software, Tranco): `refused_file` in its
+    /// position, until a newer file is read or a full import finishes.
     pub catalogue_refused: IntGaugeVec,
     /// Whether each catalogue's updates catch up after a full import (its position says so).
     pub catalogue_catching_up: IntGaugeVec,
@@ -539,7 +541,7 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version'))::int,0)::bigint AS refused,(CASE WHEN jsonb_typeof(position->'import')='boolean' AND position->>'import'='true' THEN 1 ELSE 0 END)::bigint AS catching_up FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce(((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version')) OR position ? 'refused_file')::int,0)::bigint AS refused,(CASE WHEN jsonb_typeof(position->'import')='boolean' AND position->>'import'='true' THEN 1 ELSE 0 END)::bigint AS catching_up FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
@@ -1059,6 +1061,7 @@ pub fn background_failures(name: &str) -> u64 {
 pub fn background_success(name: &str) -> i64 {
     BACKGROUND_SUCCESS.with_label_values(&[name]).get()
 }
+
 pub fn after_save_failure(resolver: &str) {
     AFTER_SAVE_FAILURES.with_label_values(&[resolver]).inc();
 }
