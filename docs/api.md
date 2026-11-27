@@ -1190,15 +1190,17 @@ binds `or` looser: `x a` or `b`); a word left out with `-` is left out of every 
 items end inside a list of `or`s (the next item is `or`, also right after a closing quote, or the
 32nd is `or`), the whole list leaves the index's query: the index finds what the rest of the text
 finds, and Postgres checks every candidate against the whole text. A text that is one list of
-`or`s is read whole instead, as before, up to 64 words; a longer one finds the names similar to
-it. A search waits for a free turn; one client address (an IPv6 address by its /64) that
+`or`s (after any `-word`s or `""` before it) is read whole instead, up to 64 words; a longer one
+finds the names similar to it. A `-word` or `""` between the 32nd item and an `or` past it does
+not end the list: the cut still falls inside it. A search waits for a free turn; one client address (an IPv6 address by its /64) that
 already runs half the turns waits while another client's search does, and alone it takes every
 free turn. A search that gets no turn within its budget, or runs past it, answers `503` with
 `Retry-After: 1`: the index stops it at its next check (between the posting steps of a word or
 phrase, and before each word set, which reads its words' lists in one go). A text of one character
-found inside names, which Postgres reads alone, takes a turn too, and that read stops with the
-search's budget (what is left of `limits.search_index_budget_ms`, not the 5 s of every other read):
-past it the search answers `503` with `Retry-After: 1`.
+found inside names, which Postgres reads alone, takes a turn too, and so does a search without text
+while it may list catalogue cards; their reads stop with the search's budget (what is left of
+`limits.search_index_budget_ms`, not the 5 s of every other read, each statement cancelled in
+Postgres past it): past it the search answers `503` with `Retry-After: 1`.
 
 People's tags and catalogue labels add to a card's relevance but never match `q` alone. A post
 whose author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's
@@ -1254,16 +1256,21 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   `in_collection`), `key`, `venue`, `category`, `remote`, `ingredient`, `from` or `to`, nor with
   `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;
 - without text, the best known first (by its source's fame) after every referenced unit, at most
-  `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near` or
-  `bbox`, those of the twice `limits.search_text_candidates` best known cards that are inside it;
-  when they are fewer, also the best known of the twice `limits.search_text_candidates` cards
-  nearest to the circle's centre (or to each box's centre) inside it, so a large area reads a
-  bounded number of cards. A filter (`type`, `tags`, `host`, `exclude_type`) is checked as the
-  nearest are read: when few cards of the area pass it, that read goes through the area's cards
-  of each catalogue until it has its twice `limits.search_text_candidates`, so its bound is then
-  the area, as for every place search on Postgres. With `host`, each catalogue's best known of each host; with `type` (no
-  `tags`), each catalogue's best known of each type and subtype; both merged. A catalogue switched
-  off but not dropped costs these reads nothing;
+  `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near`,
+  `bbox` or `tags`, those of the twice `limits.search_text_candidates` best known cards that pass
+  every filter; when they are fewer, with `tags` also the best known of the cards holding the
+  labels (read through the labels index, so a rare label is a short read), else the best known
+  of the twice `limits.search_text_candidates` cards nearest to the circle's centre (or to each
+  box's centre) inside it, so a large area reads a bounded number of cards. With `type`, `host` or
+  `exclude_type` and a box more than 10 degrees wide or tall, the best known of each type (or
+  host) let in are read instead of the nearest, kept when inside the box. With `type` or
+  `exclude_type`, a catalogue none of whose cards' types the filter lets in is not read at all
+  (`exclude_type=Thing` lists no card), and the others are read by the types let in. With
+  `host`, each catalogue's best known of each host; with `type` or `exclude_type`, each
+  catalogue's best known of each type let in; both merged. A catalogue switched off but not
+  dropped costs these reads nothing. These reads take a turn of the text searches and stop with
+  its budget, as a text search does ([Text search](#text-search)): with no turn in time or past
+  the budget the search answers `503` with `Retry-After: 1`;
 - a catalogue switched off leaves every search at once.
 
 ### Search by key

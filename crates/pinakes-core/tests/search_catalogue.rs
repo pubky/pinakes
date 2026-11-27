@@ -1591,9 +1591,11 @@ async fn a_shared_key_is_checked_through_the_key_index(pool: PgPool) {
 
 /// Every read a one-character search makes while it holds its turn stops with the turn's budget,
 /// the catalogue cards' too: held up past it (here by a lock on `catalogue_card`), the search
-/// answers 503 with `Retry-After: 1`, counted as `budget`.
+/// answers 503 with `Retry-After: 1`, counted once as `budget`, and the statement is cancelled
+/// in Postgres (it no longer waits for the lock).
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_one_character_card_read_stops_with_the_budget(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
     import(
         &pool,
         Catalogue::Wikidata,
@@ -1624,15 +1626,20 @@ async fn a_one_character_card_read_stops_with_the_budget(pool: PgPool) {
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let (status, _) = common::get_from(&app, "127.0.0.2:1234", "/v1/search?q=%E6%9D%B1").await;
+    let answer = status_of(&app, "/v1/search?q=%E6%9D%B1").await;
     let took = started.elapsed();
+    let cancelled = no_statement_waits(&pool).await;
     lock.rollback().await.unwrap();
-    assert_eq!(status, 503);
+    assert_eq!(answer, (503, Some("1".into())));
     assert!(
         took < std::time::Duration::from_secs(4),
         "{took:?}: the budget, not the pool's 5 s"
     );
-    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
+    assert!(cancelled, "the card read still waits for the lock");
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("budget"),
+        spent + 1
+    );
 }
 
 /// Each catalogue has its own two `point` indexes (geometry and geography, partial on it), which
@@ -1655,4 +1662,188 @@ async fn every_catalogue_has_its_own_point_indexes(pool: PgPool) {
             );
         }
     }
+}
+
+/// The tests that count busy searches (`pinakes_search_index_busy_total`, one counter for the
+/// whole binary) run one at a time, so each asserts its own count.
+static BUSY_COUNTED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A search's status and `Retry-After` header, asked by the client `127.0.0.2`.
+async fn status_of(app: &axum::Router, path: &str) -> (u16, Option<String>) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .uri(path)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let retry = response
+        .headers()
+        .get("retry-after")
+        .map(|v| v.to_str().unwrap().to_owned());
+    (response.status().as_u16(), retry)
+}
+/// Whether no backend of this database waits for a lock within two seconds: a statement held up
+/// by a lock was cancelled, not left waiting after its search answered.
+async fn no_statement_waits(pool: &PgPool) -> bool {
+    for _ in 0..200 {
+        if common::lock_waiters(pool).await == 0 {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Excluded types, labels and a wide box with a type are served from index branches, never by a
+/// walk of a catalogue's cards in fame order or of every point in the box: `exclude_type` that
+/// covers every type a catalogue's cards have reads none of its cards, other excluded types read
+/// the types let in each in its index's order, a rare label is read through the labels index
+/// (in a box too), and a type in a box wider than `NEAREST_FILTERED_DEGREES` is read in the
+/// type's index order, kept in the box.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_reads_without_text_stay_bounded_for_excluded_types_labels_and_wide_boxes(
+    pool: PgPool,
+) {
+    // 3,000 well known people near 46,7 and 20 little known labelled mountains a bit further out.
+    let mut cards: Vec<Card> = (0..3000)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Person {n}"),
+                "Person",
+                &[],
+                Some((46.0 + 0.0001 * n as f64, 7.0)),
+                0.5 + n as f32 / 10_000.0,
+            )
+        })
+        .collect();
+    cards.extend((0..20).map(|n| {
+        card(
+            5000 + n,
+            &format!("Peak {n}"),
+            "Mountain",
+            &["rare-peak"],
+            Some((46.4 + 0.001 * n as f64, 7.4)),
+            0.01 + n as f32 / 1000.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    for (path, peaks) in [
+        ("/v1/search?exclude_type=Thing&limit=20", 0),
+        ("/v1/search?exclude_type=Person&limit=20", 20),
+        ("/v1/search?tags=rare-peak&limit=20", 20),
+        (
+            "/v1/search?bbox=6.5,45.5,7.5,46.5&tags=rare-peak&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?bbox=-20.0,30.0,20.0,60.0&type=Mountain&limit=20",
+            20,
+        ),
+    ] {
+        api::record_card_read_plans();
+        let page = names(&common::get(&app, path).await);
+        let read = card_rows_read(&api::card_read_plans());
+        assert_eq!(page.len(), peaks, "{path}: {page:?}");
+        assert!(
+            page.iter().all(|n| n.starts_with("Peak")),
+            "{path}: {page:?}"
+        );
+        assert!(read <= 200, "{path}: {read} card rows read");
+    }
+}
+
+/// A search without text that may list catalogue cards takes a turn of the text searches (their
+/// share per client and their budget): with none free within the budget it answers 503 with
+/// `Retry-After: 1`, counted as `turn`. With every catalogue off it reads no card and waits for
+/// no turn.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_search_without_text_takes_a_turn_of_the_text_searches(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Mont Blanc", "Mountain", &[], None, 0.9)],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let mut off = Config::default();
+    off.catalogues.enabled = false;
+    let mut state = AppState::new(pool.clone(), off).unwrap();
+    state.search_index = index.clone();
+    let off = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search").await),
+        ["Mont Blanc"]
+    );
+    index.set_bounds(1, std::time::Duration::from_millis(300));
+    let turns = pinakes_core::telemetry::search_index_busy_count("turn");
+    let held = index.hold_turn().unwrap();
+    assert_eq!(status_of(&app, "/v1/search").await, (503, Some("1".into())));
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("turn"),
+        turns + 1
+    );
+    assert_eq!(status_of(&off, "/v1/search").await.0, 200);
+    drop(held);
+    index.set_bounds(1, std::time::Duration::from_secs(30));
+    assert_eq!(status_of(&app, "/v1/search").await.0, 200);
+}
+
+/// A search without text reads the cards within its turn's budget, and the read held up past it
+/// (here by a lock on `catalogue_card`) is cancelled in Postgres: the search answers 503 with
+/// `Retry-After: 1`, counted once as `budget`, and no statement keeps waiting for the lock.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_read_without_text_stops_with_the_budget(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Mont Blanc", "Mountain", &[], None, 0.9)],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search").await),
+        ["Mont Blanc"]
+    );
+    index.set_bounds(1, std::time::Duration::from_millis(500));
+    let spent = pinakes_core::telemetry::search_index_busy_count("budget");
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE catalogue_card IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let answer = status_of(&app, "/v1/search").await;
+    let took = started.elapsed();
+    let cancelled = no_statement_waits(&pool).await;
+    lock.rollback().await.unwrap();
+    assert_eq!(answer, (503, Some("1".into())));
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "{took:?}: the budget, not the pool's 5 s"
+    );
+    assert!(cancelled, "the card read still waits for the lock");
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("budget"),
+        spent + 1
+    );
 }

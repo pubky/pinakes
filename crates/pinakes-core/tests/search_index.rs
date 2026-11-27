@@ -697,6 +697,9 @@ async fn a_text_matched_at_word_starts_counts_no_names(pool: PgPool) {
     assert_eq!(index.counted(), 1);
 }
 
+/// The tests that count busy searches (`pinakes_search_index_busy_total`, one counter for the
+/// whole binary) run one at a time, so each asserts its own count.
+static BUSY_COUNTED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// A search's status and `Retry-After` header.
 async fn status_of(app: &axum::Router, path: &str) -> (u16, Option<String>) {
     use tower::ServiceExt;
@@ -717,9 +720,11 @@ async fn status_of(app: &axum::Router, path: &str) -> (u16, Option<String>) {
 
 /// A text search waits for a turn of the index's searches at most its budget, and runs within
 /// what is left of it: with every turn taken, or past the budget, it answers 503 with a
-/// `Retry-After`, counted by reason; with a turn free it answers.
+/// `Retry-After`, counted by reason; with a turn free it answers. A search without text takes a
+/// turn too while it may list catalogue cards; with every catalogue off it waits for none.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_busy_text_index_answers_503(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
     card(&pool, 1, "Aurora", "Northern lights.", "sky", 1).await;
     let index = SearchIndex::in_memory();
     // A generous budget wherever a search must be answered (a loaded host is slow), a short one
@@ -729,6 +734,11 @@ async fn a_busy_text_index_answers_503(pool: PgPool) {
     let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
     state.search_index = index.clone();
     let app = api::router(state);
+    let mut off = Config::default();
+    off.catalogues.enabled = false;
+    let mut state = AppState::new(pool.clone(), off).unwrap();
+    state.search_index = index.clone();
+    let off = api::router(state);
     assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
     let turns = pinakes_core::telemetry::search_index_busy_count("turn");
     index.set_bounds(1, Duration::from_millis(300));
@@ -736,16 +746,23 @@ async fn a_busy_text_index_answers_503(pool: PgPool) {
     let (status, retry) = status_of(&app, "/v1/search?q=aurora").await;
     assert_eq!(status, 503);
     assert!(retry.is_some());
-    assert!(pinakes_core::telemetry::search_index_busy_count("turn") > turns);
-    // A search that needs no text index waits for nothing.
-    assert_eq!(status_of(&app, "/v1/search?tags=sky").await.0, 200);
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("turn"),
+        turns + 1
+    );
+    assert_eq!(status_of(&app, "/v1/search?tags=sky").await.0, 503);
+    // A search that needs no text index and lists no catalogue card waits for nothing.
+    assert_eq!(status_of(&off, "/v1/search?tags=sky").await.0, 200);
     drop(turn);
     index.set_bounds(1, generous);
     assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 200);
     let spent = pinakes_core::telemetry::search_index_busy_count("budget");
     index.set_bounds(1, Duration::ZERO);
     assert_eq!(status_of(&app, "/v1/search?q=aurora").await.0, 503);
-    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("budget"),
+        spent + 1
+    );
 }
 
 /// One character to find inside names (a symbol, a letter of a script without spaces) is read by
@@ -753,6 +770,7 @@ async fn a_busy_text_index_answers_503(pool: PgPool) {
 /// the names' pieces. A symbol outside ASCII (`€`) is found too.
 #[sqlx::test(migrations = "../../migrations")]
 async fn one_character_inside_names_is_read_by_postgres(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
     let euro = card(&pool, 1, "Price € list", "A page.", "money", 1).await;
     let paren = card(&pool, 2, "Foo (bar)", "A page.", "code", 1).await;
     card(&pool, 3, "Plain", "A page.", "none", 1).await;
@@ -783,6 +801,7 @@ async fn one_character_inside_names_is_read_by_postgres(pool: PgPool) {
 /// `resource`), the search answers 503 with `Retry-After: 1`, counted as `budget`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_postgres_read_that_holds_a_turn_stops_with_its_budget(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
     card(&pool, 1, "Price € list", "A page.", "money", 1).await;
     let index = SearchIndex::in_memory();
     let mut config = Config::default();
@@ -807,7 +826,10 @@ async fn a_postgres_read_that_holds_a_turn_stops_with_its_budget(pool: PgPool) {
         took < Duration::from_secs(4),
         "{took:?}: the budget, not the pool's 5 s"
     );
-    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("budget"),
+        spent + 1
+    );
 }
 
 /// The last pass's time starts at the index's open, so when every pass fails from the start the

@@ -1698,6 +1698,26 @@ impl SearchIndex {
             deadline: None,
         })
     }
+    /// A turn of the text searches for a search of `client` (its address) that reads catalogue
+    /// cards from Postgres without text, with the end of its budget: the same turns, share and
+    /// budget as a text search (`limits.search_index_searches`, `limits.search_index_budget_ms`),
+    /// so these reads too run a few at a time and one client never holds them all. No turn
+    /// within the budget is [`Busy`], counted by its reason.
+    pub async fn card_read_turn(
+        &self,
+        client: Option<std::net::IpAddr>,
+    ) -> Result<(Turn, std::time::Instant)> {
+        let (turns, budget) = self.bounds();
+        let deadline = std::time::Instant::now() + budget;
+        let turn = turns
+            .take(client, deadline.into())
+            .await
+            .map_err(|reason| {
+                crate::telemetry::search_index_busy(reason);
+                Busy
+            })?;
+        Ok((turn, deadline))
+    }
     /// Take one turn of the text searches for `client` (its address, counted as [`share_key`]
     /// counts it) now, whatever its share, and keep it until the guard is dropped (tests).
     #[doc(hidden)]

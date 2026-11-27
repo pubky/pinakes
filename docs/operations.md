@@ -1770,8 +1770,11 @@ most names hold of the first 20,000 per segment in dictionary order, while they 
 names in all), a text to 32 items, a phrase to its first 8 words (all of its words when every one
 is common or its rarest is in more than 50,000 names), and 64 three-letter pieces. A text of one
 character found inside names is left to Postgres, so no search reads the index's whole
-dictionary; it takes a turn as an index search does, and its Postgres read stops with what is left
-of the budget (`statement_timeout` for that read; past it `503`, counted as `budget`).
+dictionary; it takes a turn as an index search does, and so does a search without text while a
+catalogue is on (it reads the best known catalogue cards from Postgres). Their Postgres reads stop
+with what is left of the budget: each runs under a `statement_timeout` of it, so Postgres cancels
+the statement too; past it `503`, counted as `budget`. With every catalogue off a search without
+text takes no turn.
 
 ## Catalogues
 
