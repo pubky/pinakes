@@ -37,9 +37,11 @@ length and the gzip stream's own CRC.
 Private feeds are never imported: a feed on a host that serves paid subscribers' feeds
 (`patreon.com`, `supercast.com`, `supercast.tech`, `supportingcast.fm`, `glow.fm`,
 `memberful.com`, `steadyhq.com`, and their subdomains), whose path has a `private` segment (as in
-a subscriber's `/private/<token>.rss`) or an opaque token (a run of letters and digits of at least
-32 characters with both, or of at least 20 mixing lower case, upper case and digits; slugs, numbers
-and UUIDs are not tokens), or whose URL's query carries a credential
+a subscriber's `/private/<token>.rss`), whose path has an opaque token (a run of letters and digits
+of at least 32 characters with both, or of at least 20 mixing lower case, upper case and digits)
+and whose host or path names a subscription (`private`, `premium`, `member(s)`, `subscriber(s)`,
+`supporter(s)`, `patron(s)`, `vip`, `exclusive`, `paid`; a long ID alone is public, as Castbox and
+Fountain name shows by one), or whose URL's query carries a credential
 (`token`, `key`, `auth`, `access`, `secret`, `sig`, `signature`, `password`, a name ending in one
 such as `access_token` or `api_key`, or a `uid` with a `hash`), makes no card; so does a capability
 link. A subscriber's token in a public index still opens their subscription. Every other live feed

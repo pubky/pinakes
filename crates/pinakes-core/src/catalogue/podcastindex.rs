@@ -591,16 +591,47 @@ pub const PRIVATE_FEED_HOSTS: &[&str] = &[
     "steadyhq.com",
 ];
 /// Whether a feed path segment marks a private feed: `private` (in any case, with or without a
-/// file extension, as in a subscriber's `/private/<token>.rss`), or an opaque token
-/// ([`token_segment`]).
+/// file extension, as in a subscriber's `/private/<token>.rss`).
 fn private_segment(segment: &str) -> bool {
     let stem = segment.split('.').next().unwrap_or_default();
-    stem.eq_ignore_ascii_case("private") || token_segment(segment)
+    stem.eq_ignore_ascii_case("private")
+}
+/// Words of a feed URL's host or path that say the feed is someone's subscription: beside an
+/// opaque token ([`token_segment`]) they make the feed private.
+pub const SUBSCRIPTION_WORDS: &[&str] = &[
+    "private",
+    "premium",
+    "member",
+    "members",
+    "subscriber",
+    "subscribers",
+    "supporter",
+    "supporters",
+    "patron",
+    "patrons",
+    "vip",
+    "exclusive",
+    "paid",
+];
+fn subscription_word(word: &str) -> bool {
+    SUBSCRIPTION_WORDS
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+}
+/// The words of a URL's host and path: its runs of ASCII letters and digits.
+fn url_words(url: &url::Url) -> Vec<String> {
+    let host = url.host_str().unwrap_or_default();
+    host.split(|c: char| !c.is_ascii_alphanumeric())
+        .chain(url.path().split(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 /// Whether a path segment holds an opaque token: a run of letters and digits (no `-`, `_` or
 /// `.` between them) of at least 32 characters with both a letter and a digit, or of at least 20
-/// with a lower-case letter, an upper-case letter and a digit. A slug's words, a number, a UUID
-/// (runs of 12 at most) and the short IDs feed hosts use stay public.
+/// with a lower-case letter, an upper-case letter and a digit. Public hosts name shows by such
+/// IDs too (Castbox, Fountain): a token makes a feed private only beside a
+/// [`SUBSCRIPTION_WORDS`] word.
 fn token_segment(segment: &str) -> bool {
     segment
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -615,8 +646,9 @@ fn token_segment(segment: &str) -> bool {
         })
 }
 /// Whether a feed URL is a private feed: on a host of [`PRIVATE_FEED_HOSTS`], with a path
-/// segment `private` or an opaque token ([`private_segment`]), or with a query key that carries
-/// a credential (`token`, `key`, `auth`, `access`, `secret`, `sig`, `signature`, `password`, and
+/// segment `private` ([`private_segment`]) or an opaque token ([`token_segment`]) beside a word
+/// of a subscription in its host or path ([`SUBSCRIPTION_WORDS`]), or with a query key that
+/// carries a credential (`token`, `key`, `auth`, `access`, `secret`, `sig`, `signature`, `password`, and
 /// names ending in one, such as `access_token` or `api_key`; or a `uid` with a `hash`). A
 /// subscriber's token in a public index still opens their subscription.
 pub fn private_feed(link: &str) -> bool {
@@ -634,11 +666,10 @@ pub fn private_feed(link: &str) -> bool {
     {
         return true;
     }
-    if url
-        .path_segments()
-        .into_iter()
-        .flatten()
-        .any(private_segment)
+    let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
+    if segments.iter().any(|s| private_segment(s))
+        || (segments.iter().any(|s| token_segment(s))
+            && url_words(&url).iter().any(|w| subscription_word(w)))
     {
         return true;
     }
@@ -932,9 +963,12 @@ mod tests {
             "https://example.org/feed/private/abc.rss",
             "https://example.org/PRIVATE/feed.xml",
             "https://example.org/feeds/private.rss",
+            // A long opaque token beside a word that says the feed is someone's subscription.
             "https://feeds.example.org/subscriber/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c.rss",
-            "https://example.org/rss/aB3dE5fG7hJ9kL1mN3pQ",
-            "https://example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
+            "https://example.org/premium/rss/aB3dE5fG7hJ9kL1mN3pQ",
+            "https://members.example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
+            "https://example.org/supporters-feed/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c",
+            "https://vip.example.fm/rss/aB3dE5fG7hJ9kL1mN3pQ.xml",
         ] {
             assert!(private_feed(private), "{private}");
             assert!(card(&feed(private), |_| false).is_none(), "{private}");
@@ -953,6 +987,14 @@ mod tests {
             "https://feeds.example.org/the-very-long-history-of-rome-podcast-2024-edition.xml",
             "https://example.org/privateer/feed.xml",
             "https://example.org/shows/private-eye.rss",
+            // Long IDs public hosts give their shows, with no word of a subscription beside them.
+            "https://rss.castbox.fm/everest/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c.xml",
+            "https://feeds.fountain.fm/aB3dE5fG7hJ9kL1mN3pQ",
+            "https://feeds.feedburner.com/TheHistoryOfRome2024",
+            "https://anchor.fm/s/3f9a8b7c/podcast/rss",
+            "https://feeds.buzzsprout.com/1234567.rss",
+            "https://example.org/rss/aB3dE5fG7hJ9kL1mN3pQ",
+            "https://example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
         ] {
             assert!(!private_feed(public), "{public}");
             assert!(card(&feed(public), |_| false).is_some(), "{public}");
@@ -1038,35 +1080,54 @@ mod tests {
                 prop_assert!(row.keys.iter().all(|k| super::super::valid_key(k)));
             }
         }
-        /// Property: a feed URL of public shapes (slugs, numbers, UUIDs, short IDs) on a host
-        /// that is not listed is public; the same URL with a `private` segment or an opaque
-        /// token segment put anywhere in its path is private and makes no card.
+        /// Property: a feed URL of public shapes (slugs, numbers, UUIDs, short IDs, the long IDs
+        /// public hosts use: 32 hex, 20 base62, a CamelCase name with a year) on a host that is not
+        /// listed is public, whatever opaque token it holds, unless a word of a subscription is in
+        /// its host or path; the same URL with a `private` segment anywhere is private, and so is
+        /// one with an opaque token and a subscription word anywhere; neither makes a card.
         #[test]
-        fn a_private_or_token_segment_makes_any_feed_private(
+        fn a_private_segment_or_a_token_with_a_subscription_word_makes_any_feed_private(
             host in "[a-z]{3,10}\\.example\\.(org|com|fm)",
             segments in proptest::collection::vec(prop_oneof![
                 "[a-z]{1,12}(-[a-z0-9]{1,12}){0,8}",
                 "[0-9]{1,19}",
                 "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
                 "[A-Za-z0-9]{1,12}",
+                "[0-9a-f]{32}",
+                "[A-Za-z0-9]{20}",
+                "[A-Z][a-z]{3,8}[A-Z][a-z]{3,8}[0-9]{4}",
             ], 0..6),
             ext in "(\\.rss|\\.xml)?",
-            secret in prop_oneof![
-                "(private|Private|PRIVATE)(\\.rss|\\.xml)?",
+            word in prop::sample::select(SUBSCRIPTION_WORDS.to_vec()),
+            token in prop_oneof![
                 "[a-z][A-Z][0-9][A-Za-z0-9]{17,60}(\\.rss)?",
                 "[0-9][a-f][0-9a-f]{30,62}(\\.rss)?",
             ],
             at in any::<proptest::sample::Index>(),
+            word_at in any::<proptest::sample::Index>(),
         ) {
             let url = |segments: &[String]| format!("https://{host}/{}{ext}", segments.join("/"));
+            let worded = |u: &str| url_words(&url::Url::parse(u).unwrap()).iter().any(|w| subscription_word(w));
             let public = url(&segments);
+            prop_assume!(!worded(&public));
             prop_assert!(!private_feed(&public), "{}", public);
+            // A token alone stays public.
             let mut with = segments.clone();
-            with.insert(at.index(segments.len() + 1), secret);
+            with.insert(at.index(segments.len() + 1), token.clone());
+            let alone = url(&with);
+            prop_assert!(!private_feed(&alone), "{}", alone);
+            // With a subscription word as a segment of its own anywhere, it is private.
+            with.insert(word_at.index(with.len() + 1), word.to_owned());
             let private = url(&with);
             prop_assert!(private_feed(&private), "{}", private);
-            let feed = Feed { id: 7, url: private, title: "A show".into(), ..Feed::default() };
-            prop_assert!(card(&feed, |_| false).is_none());
+            // So is a `private` segment, with or without a token.
+            let mut marked = segments.clone();
+            marked.insert(at.index(segments.len() + 1), "private".into());
+            prop_assert!(private_feed(&url(&marked)), "{}", url(&marked));
+            for private in [private, url(&marked)] {
+                let feed = Feed { id: 7, url: private, title: "A show".into(), ..Feed::default() };
+                prop_assert!(card(&feed, |_| false).is_none());
+            }
         }
         /// Fuzz: any bytes as an archive unpack to nothing or fail, never panic.
         #[test]
