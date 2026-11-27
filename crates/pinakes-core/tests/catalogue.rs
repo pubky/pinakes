@@ -701,6 +701,53 @@ async fn a_drop_deletes_one_catalogue(pool: PgPool) {
     assert_eq!(state(&pool, Catalogue::Software).await.cards, 3);
 }
 
+/// A sweep reads the catalogue a page of `SWEEP_ROWS` at a time: past the first page, a full
+/// import's end removes every card it did not see, wherever its page, and keeps the others; a
+/// drop removes them all, page by page.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_sweep_goes_past_its_first_page(pool: PgPool) {
+    let n = 2 * store::SWEEP_ROWS as usize + 1;
+    let many: Vec<Card> = cards(n)
+        .into_iter()
+        .map(|c| Card { fame: 0.5, ..c })
+        .collect();
+    let report = store::upsert(&pool, Catalogue::Wikidata, 1, &many, None)
+        .await
+        .unwrap();
+    assert_eq!(report.inserted as usize, n);
+    // The next import saw two cards in three (on every page).
+    let seen: i64 = sqlx::query_scalar(
+        "WITH s AS (UPDATE catalogue_card SET seen_generation=2 WHERE catalogue='wikidata' AND substr(source_id,2)::int % 3 <> 0 RETURNING 1) SELECT count(*) FROM s",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(seen as usize, n - n.div_ceil(3));
+    assert!(seen > store::SWEEP_ROWS);
+    let removed = store::finish_import(&pool, Catalogue::Wikidata, 2)
+        .await
+        .unwrap();
+    assert_eq!(removed as usize, n - seen as usize);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, seen);
+    assert_eq!(state(&pool, Catalogue::Wikidata).await.cards, seen);
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM catalogue_card WHERE catalogue='wikidata' AND substr(source_id,2)::int % 3 = 0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+    // A drop: every page, its progress told per page.
+    let mut progress = vec![];
+    let dropped = store::drop_catalogue(&pool, Catalogue::Wikidata, |n| progress.push(n))
+        .await
+        .unwrap();
+    assert_eq!(dropped as i64, seen);
+    // Two pages of cards and the empty one that ends the walk.
+    assert!(progress.len() >= 3, "{progress:?}");
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 0);
+}
+
 /// The batch writer: parts of at most `BATCH_ROWS`, one row per source ID (the last wins),
 /// refused cards counted and left out, and the count in the state row.
 #[sqlx::test(migrations = "../../migrations")]

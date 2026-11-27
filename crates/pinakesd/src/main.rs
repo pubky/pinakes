@@ -2399,6 +2399,75 @@ mod tests {
         assert_eq!(wikidata[..2], ["wikidata", "no"]);
         let _ = std::fs::remove_dir_all(&root);
     }
+    /// A catalogue's directory that is a link (to a directory elsewhere) is removed as the link:
+    /// the drop never follows it, nor a link inside the directory, and what they point to stays.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn the_drop_removes_a_linked_directory_without_following_it(pool: sqlx::PgPool) {
+        // A directory of the test's own (`create_dir` refuses a name that exists).
+        let root = (0u32..)
+            .map(|n| {
+                let at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                std::env::temp_dir().join(format!(
+                    "pinakesd-drop-link-test-{}-{at}-{n}",
+                    std::process::id()
+                ))
+            })
+            .find(|dir| match std::fs::create_dir(dir) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => panic!("{}: {error}", dir.display()),
+            })
+            .unwrap();
+        let catalogues = root.join("catalogues");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&catalogues).unwrap();
+        std::fs::create_dir_all(elsewhere.join("inner")).unwrap();
+        std::fs::write(elsewhere.join("keep.txt"), b"kept").unwrap();
+        std::fs::write(elsewhere.join("inner/keep.txt"), b"kept").unwrap();
+        let mut config = Config::default();
+        config.catalogues.dir = catalogues.to_string_lossy().into_owned();
+        config.catalogues.wikidata.enabled = false;
+        config.catalogues.software.enabled = false;
+        let drop = |catalogue| CatalogueCommand::Drop(catalogue);
+        // Wikidata's directory is a link to `elsewhere`.
+        let linked = config.catalogues.work_dir(Catalogue::Wikidata);
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, drop(Catalogue::Wikidata), &mut out)
+            .await
+            .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("removed "), "{printed}");
+        assert!(
+            std::fs::symlink_metadata(&linked).is_err(),
+            "the link stays"
+        );
+        assert_eq!(std::fs::read(elsewhere.join("keep.txt")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::read(elsewhere.join("inner/keep.txt")).unwrap(),
+            b"kept"
+        );
+        // The software directory holds a link to `elsewhere`: the directory goes, the link with
+        // it, and what it points to stays.
+        let dir = config.catalogues.work_dir(Catalogue::Software);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.part"), b"x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("link")).unwrap();
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, drop(Catalogue::Software), &mut out)
+            .await
+            .unwrap();
+        assert!(!dir.exists());
+        assert_eq!(std::fs::read(elsewhere.join("keep.txt")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::read(elsewhere.join("inner/keep.txt")).unwrap(),
+            b"kept"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
     /// A drop refuses a catalogue its configuration has on, and says how to switch it off.
     #[test]
     fn a_drop_refuses_a_catalogue_that_is_on() {
