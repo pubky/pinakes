@@ -75,7 +75,7 @@ impl Drop for StopOnDrop {
 
 /// The importer.
 pub struct PodcastIndex {
-    client: reqwest::Client,
+    client: fetch::Client,
     input: Input,
     /// The catalogue's directory (`catalogues.dir/podcastindex`): what its unpacked database
     /// already holds counts toward a run's disk need.

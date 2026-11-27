@@ -109,7 +109,7 @@ impl Sources {
 
 /// The importer.
 pub struct Software {
-    client: reqwest::Client,
+    client: fetch::Client,
     sources: Sources,
 }
 impl Software {

@@ -79,7 +79,7 @@ pub enum ListSource {
 
 /// The importer.
 pub struct Tranco {
-    client: reqwest::Client,
+    client: fetch::Client,
     egress: Egress,
     list: ListSource,
     /// At most this many homepages read per run (`--limit`; none: the time budget alone).

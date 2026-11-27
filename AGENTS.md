@@ -108,10 +108,9 @@ service whose artist page it names). Joins never come from a title or name match
 
 **Egress.** Every request a reference can steer goes through `resolver::egress::Egress`: never
 build another HTTP client for them (the others, `resolver/osm.rs`, `nexus.rs` and the catalogue
-importers' (`catalogue/musicbrainz.rs`, `catalogue/osm.rs`, `catalogue/wikidata/net.rs`, and the bulk-file
-client of the file catalogues, `catalogue/fetch.rs`), ask only the Nominatim, Nexus, dump mirror, OpenStreetMap
-bulk-file and catalogue file URLs the operator or the build sets, or a file the operator names with `catalogue
-import --from`; the Tranco catalogue's homepage reads go through the egress). The egress pins DNS, refuses private addresses, caps bodies,
+importers' one client, `catalogue/fetch.rs` with the downloader in `catalogue/bulk.rs`, ask only the Nominatim,
+Nexus, dump mirror, OpenStreetMap bulk-file and catalogue file URLs the operator or the build sets, or a file the
+operator names with `catalogue import --from`; the Tranco catalogue's homepage reads go through the egress). The egress pins DNS, refuses private addresses, caps bodies,
 paces each host and each address (one request at a time, at `limits.host_requests_per_second` or the service's
 published rate; a service's own host named with its pace, `budgets` or `PUBLISHED_RATES`, by host alone) and caches answers. A source with a published limit lowers its host's rate; it
 never raises it.

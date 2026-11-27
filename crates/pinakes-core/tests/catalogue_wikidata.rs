@@ -499,7 +499,6 @@ fn importer(base: &str) -> Arc<Wikidata> {
         api: format!("{base}/w/api.php"),
     };
     w.threads = (3, 2);
-    w.http = true;
     Arc::new(w)
 }
 
@@ -533,7 +532,6 @@ async fn import(_pool: &PgPool, ctx: &Context, base: &str) -> anyhow::Result<Onc
     let base_importer = importer(base);
     w.endpoints = base_importer.endpoints.clone();
     w.threads = base_importer.threads;
-    w.http = true;
     once(Arc::new(w), ctx, Run::Import).await
 }
 
@@ -1118,7 +1116,6 @@ async fn a_download_cut_off_between_runs_resumes(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1156,7 +1153,6 @@ async fn a_resumed_import_keeps_the_limit_it_started_with(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1186,7 +1182,6 @@ async fn a_read_cut_off_between_runs_resumes_at_its_last_batch(pool: PgPool) {
     let (ctx, dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     // More than the dump holds: the only write before the break is the one the failure makes
     // of the cards parsed so far.
     w.write_cards = 10_000;
@@ -1352,7 +1347,6 @@ async fn an_import_that_starts_over_sweeps_what_the_abandoned_attempt_wrote(pool
     // One card a write, so the abandoned attempt has written its cards before it fails.
     let mut w = Wikidata::for_config(&ctx.config);
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.write_cards = 1;
     assert!(once(Arc::new(w), &ctx, Run::Import).await.is_err());
     assert_eq!(last_error(&pool).await.as_deref(), Some("bad_dump"));
@@ -1559,7 +1553,6 @@ async fn a_broken_stream_is_taken_up_where_it_broke(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.from = Some(pinakes_core::catalogue::wikidata::From::Url(format!(
         "{base}/dumps/{DATE}/wikidata-{DATE}-all.json.bz2"
     )));
@@ -1611,7 +1604,6 @@ async fn a_dump_that_keeps_failing_is_rejected(pool: PgPool) {
     let base_importer = importer(&base);
     w.endpoints = base_importer.endpoints.clone();
     w.threads = base_importer.threads;
-    w.http = true;
     let again = run::step(&w, &ctx).await.unwrap_err();
     assert!(again.is::<run::StillRefused>(), "{again}");
     assert_eq!(state().await.error_count, 3);
@@ -1649,7 +1641,6 @@ async fn an_asked_import_keeps_its_limit_through_a_failed_try(pool: PgPool) {
     let mut w = Wikidata::for_config(&ctx.config);
     w.endpoints = importer(&base).endpoints.clone();
     w.threads = (3, 2);
-    w.http = true;
     w.cli_limit = Some(3);
     let Once::Finished(state) = once(Arc::new(w), &ctx, Run::Import).await.unwrap() else {
         panic!()
@@ -1689,7 +1680,6 @@ async fn restarts_are_counted_across_other_failures(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     let count = || async {
@@ -1882,7 +1872,6 @@ async fn an_answer_over_the_cap_is_asked_in_halves(pool: PgPool) {
     m.changes.lock().unwrap().push(("Q42".into(), at));
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.api_cap = 1_500;
     m.asked.lock().unwrap().clear();
     let Once::Finished(_) = once(Arc::new(w), &ctx, Run::Update).await.unwrap() else {
@@ -1911,7 +1900,6 @@ async fn a_dump_replaced_under_a_download_starts_over(pool: PgPool) {
     let (ctx, dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1942,7 +1930,6 @@ async fn a_dump_gone_under_a_download_starts_over(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1995,7 +1982,6 @@ async fn redirects_and_oversized_dumps_are_refused(pool: PgPool) {
     let base_importer = importer(&base);
     w.endpoints = base_importer.endpoints.clone();
     w.threads = base_importer.threads;
-    w.http = true;
     let again = run::step(&w, &ctx).await.unwrap_err();
     assert!(again.is::<run::StillRefused>(), "{again}");
     assert_eq!(
@@ -2151,7 +2137,6 @@ async fn a_cursor_naming_another_host_is_refused(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -2257,7 +2242,6 @@ async fn a_stream_taken_up_again_is_checked(pool: PgPool) {
         let (ctx, _dir) = context(&pool, None);
         let mut w = Wikidata::new();
         w.endpoints = importer(&base).endpoints.clone();
-        w.http = true;
         w.from = Some(pinakes_core::catalogue::wikidata::From::Url(format!(
             "{base}/dumps/{DATE}/wikidata-{DATE}-all.json.bz2"
         )));
@@ -2330,7 +2314,6 @@ async fn a_download_short_of_disk_on_the_way_waits(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -2384,7 +2367,6 @@ async fn a_label_rewrite_cut_off_resumes_where_it_stopped(pool: PgPool) {
         let mut w = Wikidata::new();
         w.endpoints = importer(&base).endpoints.clone();
         w.threads = (3, 2);
-        w.http = true;
         // One card a write: the rewrite is cut after its first.
         w.write_cards = 1;
         Arc::new(w)
@@ -2540,7 +2522,6 @@ async fn a_dump_read_slower_than_its_floor_fails(pool: PgPool) {
         let (ctx, _dir) = context(&pool, limit);
         let mut w = Wikidata::for_config(&ctx.config);
         w.endpoints = importer(&base).endpoints.clone();
-        w.http = true;
         w.slow_window = Duration::from_millis(300);
         assert!(
             once(Arc::new(w), &ctx, Run::Import).await.is_err(),

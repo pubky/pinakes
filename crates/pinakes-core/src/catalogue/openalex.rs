@@ -166,7 +166,7 @@ fn files_digest(works: &[Part], day: &str) -> String {
 
 /// The importer.
 pub struct OpenAlex {
-    client: reqwest::Client,
+    client: fetch::Client,
     /// The bucket's root, or a local directory holding a snapshot's `data/jsonl/` tree.
     base: Input,
 }
@@ -600,7 +600,7 @@ impl Drop for AbortOnDrop {
 /// stream is given back (`read_done`) once it is read whole.
 fn read_part(
     input: &Input,
-    client: &reqwest::Client,
+    client: &fetch::Client,
     handle: &tokio::runtime::Handle,
     min: u64,
     gate: &mut Gate<'_>,

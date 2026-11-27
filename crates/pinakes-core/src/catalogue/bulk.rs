@@ -5,10 +5,11 @@
 //! Nothing here holds more than one line (at most [`Lines::cap`] bytes) or one tar header in
 //! memory, and nothing trusts a size the file states beyond what it reads: a malformed archive is
 //! an error, never a panic.
-use super::failure::Failure;
+use super::{failure::Failure, fetch};
 use anyhow::{bail, Result};
 use sha2::Digest;
 use std::io::{self, BufRead, Read};
+use std::time::Duration;
 
 /// One entry of a tar archive as [`Tar::next_entry`] gives it: its path and its size in bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -523,23 +524,73 @@ pub fn sha256_sums(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Bytes a read must bring in its slow window of waiting for them ([`SLOW_WINDOW`] by default):
+/// a server slower than that (a few bytes every two minutes) would hold the import, and the
+/// large-import turn, without end.
+pub const SLOW_BYTES: u64 = 8 << 20;
+/// The time a download may wait for [`SLOW_BYTES`].
+pub const SLOW_WINDOW: Duration = Duration::from_secs(600);
+/// A read's speed floor, counting only the time spent waiting for the server's bytes (not the
+/// reader's own pauses: a slow batch write is no slow server).
+pub struct Speed {
+    window: Duration,
+    waited: Duration,
+    bytes: u64,
+}
+impl Speed {
+    pub fn new(window: Duration) -> Self {
+        Self {
+            window,
+            waited: Duration::ZERO,
+            bytes: 0,
+        }
+    }
+    /// `n` bytes more came after waiting `waited` for them; false once the window of waiting
+    /// passed without [`SLOW_BYTES`].
+    pub fn read(&mut self, n: u64, waited: Duration) -> bool {
+        self.waited += waited;
+        self.bytes += n;
+        if self.bytes >= SLOW_BYTES {
+            self.waited = Duration::ZERO;
+            self.bytes = 0;
+            return true;
+        }
+        self.waited <= self.window
+    }
+}
+
 /// A download read as a blocking stream on a `spawn_blocking` thread: its body in chunks, and on
 /// a broken connection the rest asked for again from the byte where it broke (`Range`, with
-/// `If-Range` naming the first answer's validator, so a file replaced meanwhile is an error, not
-/// a spliced stream; without a validator it is not asked for again). Each break may be retried
-/// [`Download::RETRIES`] times (a failed request again too), the count renewed after every
-/// [`Download::RENEW_BYTES`] read; every wait for a chunk is bounded, and so is the whole
-/// download ([`Download::DEADLINE`]). The file's length comes from its first answer: one with
-/// none is refused (a body that ends early could not be told from the whole), and a body that
-/// ends before it is a break too.
+/// `If-Range` naming the first answer's validator, so a file replaced meanwhile is an error
+/// (`dump_changed`), not a spliced stream; without a validator it is not asked for again). Each
+/// break may be retried [`Download::RETRIES`] times (a failed request again too), the count
+/// renewed after every [`Download::RENEW_BYTES`] read; every request is tried as
+/// [`fetch::Client::send`] does (a `Retry-After` waited for), every wait for a chunk is bounded,
+/// a server slower than [`SLOW_BYTES`] in its slow window fails it (`download`), and so does the
+/// whole download past [`Download::DEADLINE`] (`timeout`). The file's length comes from its first
+/// answer: one with none is refused (a body that ends early could not be told from the whole),
+/// and a body that ends before it is a break too.
+///
+/// A download of a file already known ([`Download::known`]: its length and validator, from a HEAD
+/// or an earlier run) asks for its bytes from [`Download::from`] (to [`Download::until`]) under
+/// that validator from its first request, which goes out at the first read.
 pub struct Download {
-    client: reqwest::Client,
+    client: fetch::Client,
     url: url::Url,
     handle: tokio::runtime::Handle,
     response: Option<reqwest::Response>,
     validator: Option<String>,
-    /// The file's length, from the first answer.
+    /// The file's length, from the first answer (or known).
     length: u64,
+    /// Whether the file was known before the first request.
+    known: bool,
+    /// Where the bytes asked for end (exclusive); none: the file's end.
+    end: Option<u64>,
+    connected: bool,
+    /// The last answer was one no retry mends (a range from another byte than asked for).
+    hopeless: bool,
+    /// The URL of the last answer (after the redirects it followed).
+    answered_by: Option<url::Url>,
     chunk: bytes::Bytes,
     offset: u64,
     retries: u32,
@@ -549,8 +600,10 @@ pub struct Download {
     /// The most bytes read; a longer body is an error (`size`).
     max_bytes: u64,
     /// The first wait before a retry; it doubles with each one.
-    retry_wait: std::time::Duration,
+    retry_wait: Duration,
     started: std::time::Instant,
+    deadline: Option<Duration>,
+    speed: Speed,
 }
 impl Download {
     /// How many times in a row a broken body is asked for again.
@@ -558,73 +611,137 @@ impl Download {
     /// The bytes read after a break that renew the retries.
     pub const RENEW_BYTES: u64 = 64 << 20;
     /// The longest wait for an answer or the next chunk of a body.
-    pub const CHUNK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+    pub const CHUNK_WAIT: Duration = Duration::from_secs(120);
     /// The longest one download may take.
-    pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(12 * 3600);
+    pub const DEADLINE: Duration = Duration::from_secs(12 * 3600);
     /// Starts `url` (blocking: call it on a `spawn_blocking` thread). A status other than 200 is
     /// a failure at its host: `not_found` for a 404, else `download`.
     pub fn open(
-        client: reqwest::Client,
+        client: fetch::Client,
         handle: tokio::runtime::Handle,
         url: url::Url,
         max_bytes: u64,
-        retry_wait: std::time::Duration,
+        retry_wait: Duration,
     ) -> Result<Self> {
+        let mut download = Self::new(client, handle, url, max_bytes).retry_wait(retry_wait);
+        download.connect()?;
+        Ok(download)
+    }
+    /// A download of `url` of at most `max_bytes`, asked for at its first read (or
+    /// [`Download::open`]).
+    pub fn new(
+        client: fetch::Client,
+        handle: tokio::runtime::Handle,
+        url: url::Url,
+        max_bytes: u64,
+    ) -> Self {
         let host = url.host_str().unwrap_or_default().to_owned();
-        let mut download = Self {
+        Self {
             client,
             url,
             handle,
             response: None,
             validator: None,
             length: 0,
+            known: false,
+            end: None,
+            connected: false,
+            hopeless: false,
+            answered_by: None,
             chunk: bytes::Bytes::new(),
             offset: 0,
             retries: 0,
             broke_at: 0,
             host,
             max_bytes,
-            retry_wait,
+            retry_wait: Duration::from_secs(2),
             started: std::time::Instant::now(),
-        };
-        download.connect()?;
-        Ok(download)
+            deadline: Some(Self::DEADLINE),
+            speed: Speed::new(SLOW_WINDOW),
+        }
+    }
+    /// The first wait before a retry (it doubles with each one).
+    pub fn retry_wait(mut self, wait: Duration) -> Self {
+        self.retry_wait = wait;
+        self
+    }
+    /// The file is known: `length` bytes under `validator` (an empty one is none: such a file
+    /// is not read, as a resume could splice two).
+    pub fn known(mut self, length: u64, validator: &str) -> Self {
+        self.known = true;
+        self.length = length;
+        self.validator = Some(validator.to_owned()).filter(|v| !v.is_empty());
+        self
+    }
+    /// Read from byte `offset` of a known file.
+    pub fn from(mut self, offset: u64) -> Self {
+        self.offset = offset;
+        self.broke_at = offset;
+        self
+    }
+    /// Read up to byte `end` (exclusive) of a known file.
+    pub fn until(mut self, end: u64) -> Self {
+        self.end = Some(end);
+        self
+    }
+    /// The slow-server window: [`SLOW_BYTES`] must come in this much waiting for them.
+    pub fn slow(mut self, window: Duration) -> Self {
+        self.speed = Speed::new(window);
+        self
+    }
+    /// No deadline for the whole download (a stream its reader paces, which has the speed floor
+    /// and a cursor of its own).
+    pub fn no_deadline(mut self) -> Self {
+        self.deadline = None;
+        self
     }
     fn failure(&self, class: &'static str) -> Failure {
         Failure::new(class).at(self.host.clone())
     }
+    fn past_deadline(&self) -> bool {
+        self.deadline.is_some_and(|d| self.started.elapsed() > d)
+    }
+    /// Where the bytes asked for end.
+    fn stop_at(&self) -> u64 {
+        self.end.unwrap_or(self.length).min(self.length)
+    }
     fn connect(&mut self) -> Result<()> {
-        let mut request = self.client.get(self.url.clone());
-        if self.offset > 0 {
+        self.connected = true;
+        let ranged = self.offset > 0 || self.known;
+        let mut headers = vec![];
+        if ranged {
             let Some(validator) = &self.validator else {
                 bail!(self.failure("download"));
             };
-            request = request
-                .header(reqwest::header::RANGE, format!("bytes={}-", self.offset))
-                .header(reqwest::header::IF_RANGE, validator.clone());
+            let range = match self.end {
+                Some(end) => format!("bytes={}-{}", self.offset, end.saturating_sub(1)),
+                None => format!("bytes={}-", self.offset),
+            };
+            headers.push((reqwest::header::RANGE, range));
+            headers.push((reqwest::header::IF_RANGE, validator.clone()));
         }
-        let sent = self
-            .handle
-            .block_on(async { tokio::time::timeout(Self::CHUNK_WAIT, request.send()).await });
+        let sent = self.handle.block_on(self.client.send_with(
+            reqwest::Method::GET,
+            self.url.as_str(),
+            &headers,
+            None,
+            self.retry_wait,
+        ));
         let response = match sent {
-            Ok(Ok(response)) => response,
-            _ => bail!(self.failure("download")),
+            Ok((response, _)) => response,
+            Err(error) => {
+                let class = error
+                    .downcast_ref::<Failure>()
+                    .map_or("download", |f| f.class);
+                bail!(self.failure(class))
+            }
         };
         let status = response.status().as_u16();
-        let resumed = self.offset > 0;
-        match (resumed, status) {
+        match (ranged, status) {
             (false, 200) => {
-                let header = |name| {
-                    response
-                        .headers()
-                        .get(name)
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_owned)
-                };
                 // A strong ETag, else Last-Modified, makes `If-Range` safe.
-                self.validator = header(reqwest::header::ETAG)
-                    .filter(|e| !e.starts_with("W/"))
-                    .or_else(|| header(reqwest::header::LAST_MODIFIED));
+                self.validator =
+                    Some(fetch::validator_of(response.headers())).filter(|v| !v.is_empty());
                 let Some(length) = response.content_length() else {
                     bail!(self.failure("download"));
                 };
@@ -633,6 +750,14 @@ impl Download {
                 }
                 self.length = length;
             }
+            // A server that ignores ranges answers a known file whole: fine from its start.
+            (true, 200) if self.offset == 0 && self.end.is_none() => {
+                if response.content_length() != Some(self.length) {
+                    bail!(self.failure("dump_changed"));
+                }
+            }
+            // `If-Range` did not hold: the file was replaced since its first answer.
+            (true, 200) => bail!(self.failure("dump_changed")),
             (true, 206) => {
                 // `bytes <first>-<last>/<length>`: from the byte asked for, of the same file.
                 let range = response
@@ -646,13 +771,21 @@ impl Download {
                         Some((first, length.parse::<u64>().ok()?))
                     });
                 if range != Some((self.offset, self.length)) {
+                    // Another byte or another length: a server that answers so is not asked
+                    // again.
+                    self.hopeless = true;
                     bail!(self.failure("download"));
                 }
             }
-            // The file changed since the first answer (a 200 to `If-Range`), or anything else.
-            (_, 404) => bail!(self.failure("not_found")),
+            (false, 404) => bail!(self.failure("not_found")),
+            // Gone since its first answer.
+            (true, 404) => bail!(self.failure("dump_gone")),
             _ => bail!(self.failure("download")),
         }
+        if self.length > self.max_bytes {
+            bail!(self.failure("size"));
+        }
+        self.answered_by = Some(response.url().clone());
         self.response = Some(response);
         Ok(())
     }
@@ -660,9 +793,14 @@ impl Download {
     pub fn length(&self) -> u64 {
         self.length
     }
-    /// The bytes read so far.
+    /// The bytes read so far (the offset in the file).
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+    /// The URL the file came from at last (after the redirects followed): none before the first
+    /// answer.
+    pub fn final_url(&self) -> Option<&url::Url> {
+        self.answered_by.as_ref()
     }
     /// After a break: wait, and ask for the rest, as many times as the retries allow.
     fn resume(&mut self) -> io::Result<()> {
@@ -672,18 +810,23 @@ impl Download {
         self.broke_at = self.offset;
         loop {
             // (Without a validator `connect` refuses to resume.)
-            if self.retries >= Self::RETRIES || self.started.elapsed() > Self::DEADLINE {
+            if self.retries >= Self::RETRIES || self.past_deadline() {
                 return Err(io::Error::other(self.failure("download")));
             }
             self.retries += 1;
             std::thread::sleep(self.retry_wait * 2u32.pow(self.retries.min(6) - 1));
             match self.connect() {
                 Ok(()) => return Ok(()),
+                Err(_) if self.hopeless => return Err(io::Error::other(self.failure("download"))),
                 Err(e) => {
-                    // A file gone or replaced is not retried.
+                    // A file gone or replaced, a host that asks to be left alone, a file never
+                    // there: not retried.
                     let class = e.downcast_ref::<Failure>().map(|f| f.class);
-                    if class == Some("not_found") {
-                        return Err(io::Error::other(self.failure("not_found")));
+                    if let Some(
+                        class @ ("not_found" | "dump_gone" | "dump_changed" | "rate_limited"),
+                    ) = class
+                    {
+                        return Err(io::Error::other(self.failure(class)));
                     }
                 }
             }
@@ -692,6 +835,12 @@ impl Download {
 }
 impl Read for Download {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.connected {
+            self.connect().map_err(|e| match e.downcast::<Failure>() {
+                Ok(f) => io::Error::other(f),
+                Err(_) => io::Error::other(self.failure("download")),
+            })?;
+        }
         loop {
             if !self.chunk.is_empty() {
                 let n = buf.len().min(self.chunk.len());
@@ -703,28 +852,34 @@ impl Read for Download {
                 }
                 return Ok(n);
             }
-            if self.started.elapsed() > Self::DEADLINE {
+            if self.past_deadline() {
                 return Err(io::Error::other(self.failure("timeout")));
+            }
+            if self.offset >= self.stop_at() {
+                self.response = None;
+                return Ok(0);
             }
             let Some(response) = self.response.as_mut() else {
                 return Ok(0);
             };
+            let asked = std::time::Instant::now();
             let next = self
                 .handle
                 .block_on(async { tokio::time::timeout(Self::CHUNK_WAIT, response.chunk()).await });
             match next {
-                Ok(Ok(Some(chunk))) => self.chunk = chunk,
-                Ok(Ok(None)) if self.offset >= self.length => {
-                    self.response = None;
-                    return Ok(0);
+                Ok(Ok(Some(chunk))) => {
+                    if !self.speed.read(chunk.len() as u64, asked.elapsed()) {
+                        // Too slow to ever end.
+                        self.response = None;
+                        return Err(io::Error::other(self.failure("download")));
+                    }
+                    // Never past the bytes asked for.
+                    let room = usize::try_from(self.stop_at() - self.offset).unwrap_or(usize::MAX);
+                    self.chunk = chunk.slice(..chunk.len().min(room));
                 }
-                // A body that ended before the file did (an answer of part of the rest, or a
-                // connection closed early): ask for the rest.
-                Ok(Ok(None)) => {
-                    self.response = None;
-                    self.resume()?;
-                }
-                // A broken connection or a stall: ask for the rest.
+                // A body that ended before the bytes asked for did (an answer of part of the
+                // rest, or a connection closed early), a broken connection or a stall: ask for
+                // the rest.
                 _ => {
                     self.response = None;
                     self.resume()?;
@@ -737,6 +892,19 @@ impl Read for Download {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read keeps going while it brings 8 MB in every ten minutes of waiting for the server;
+    /// slower, it ends.
+    #[test]
+    fn a_read_slower_than_its_floor_ends() {
+        let secs = Duration::from_secs;
+        let mut speed = Speed::new(SLOW_WINDOW);
+        assert!(speed.read(SLOW_BYTES - 1, secs(300)));
+        // 8 MB in: the window starts again.
+        assert!(speed.read(1, secs(290)));
+        assert!(speed.read(1 << 20, SLOW_WINDOW));
+        assert!(!speed.read(1, secs(1)));
+    }
 
     /// A tar header for `path` of `size` bytes, of type `kind`, with its checksum.
     pub(crate) fn header(path: &str, size: u64, kind: u8, base256: bool) -> [u8; 512] {

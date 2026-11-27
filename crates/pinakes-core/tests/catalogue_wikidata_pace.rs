@@ -60,7 +60,7 @@ async fn the_egress_turn_is_held_per_exchange_never_through_a_wait() {
     cfg.host_rates.insert("127.0.0.1".into(), 50.0);
     let egress = Egress::with_backends(cfg, Arc::new(Offline), Arc::new(Offline));
     net::share_egress_pace(egress.clone());
-    let client = net::client("ops@example.org", true, true).unwrap();
+    let client = pinakes_core::catalogue::fetch::api_client("ops@example.org", &[]).unwrap();
     let asked = tokio::spawn(async move {
         net::api_capped(&client, &base, &[("action", "query")], 1 << 20).await
     });

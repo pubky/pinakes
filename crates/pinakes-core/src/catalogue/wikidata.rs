@@ -28,6 +28,7 @@
 //! [`LONGEST_GAP`] ago (the daemon was down) is not caught up change by change: the next weekly
 //! dump is imported instead, once one newer than the imported one is out.
 use super::failure::Failure;
+use super::fetch;
 use super::run::{Importer, Job, Plan, Run, UpdateEnd};
 use super::store::State;
 use super::{Card, Catalogue};
@@ -103,20 +104,9 @@ pub enum From {
     Url(String),
 }
 impl From {
-    /// What `--from` names: an `https://` URL without credentials or a query, else a local
-    /// file.
+    /// What `--from` names: a URL ([`fetch::from_url`]'s rule), else a local file.
     pub fn parse(text: &str) -> Result<Self> {
-        if text.starts_with("http://") {
-            anyhow::bail!("--from takes an https:// URL (or a local file)");
-        }
-        if text.starts_with("https://") {
-            let url = url::Url::parse(text).context("--from is not a URL")?;
-            // The URL is stored in the import's cursor until it ends: no credential in it, nor
-            // a query (a signed link's token).
-            anyhow::ensure!(
-                url.username().is_empty() && url.password().is_none() && url.query().is_none(),
-                "--from takes a URL without credentials or a query"
-            );
+        if let Some(url) = fetch::from_url(text)? {
             return Ok(From::Url(url.to_string()));
         }
         let path = std::path::absolute(text).context("--from names no file")?;
@@ -134,8 +124,6 @@ pub struct Wikidata {
     pub limit: Option<u64>,
     /// The read's threads (decoders, parsers): `pipeline::threads` by default.
     pub threads: (usize, usize),
-    /// Plain HTTP allowed (the tests' local server); HTTPS only otherwise.
-    pub http: bool,
     /// Bytes one round of the download reads per connection before the cursor is saved.
     pub download_round: u64,
     /// Cards written per cursor.
@@ -158,7 +146,6 @@ impl Wikidata {
             from: None,
             limit: None,
             threads: pipeline::threads(),
-            http: false,
             download_round: 512 << 20,
             write_cards: super::store::BATCH_ROWS,
             api_cap: net::API_CAP,
@@ -623,12 +610,12 @@ impl Importer for Wikidata {
                     job.new_generation_keeping(serde_json::to_value(marker)?)
                         .await?;
                 }
-                let client = net::client(&contact(job)?, false, self.http)?;
+                let client = fetch::client(&contact(job)?, &[])?;
                 self.start(job, &client, restarted.as_ref()).await?
             }
         };
         job.reading(cursor.source.version());
-        let client = net::client(&contact(job)?, false, self.http)?;
+        let client = fetch::client(&contact(job)?, &[])?;
         match self.run_import(job, &client, &mut cursor).await {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -675,7 +662,7 @@ impl Importer for Wikidata {
     }
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         let contact = contact(job)?;
-        let client = net::client(&contact, true, self.http)?;
+        let client = fetch::api_client(&contact, &[])?;
         let Some(position) = job
             .position()
             .cloned()
@@ -1030,7 +1017,7 @@ fn room(job: &Job<'_>, need: u64) -> Result<()> {
 }
 /// The downloaded dump against its listed SHA-1 (none listed: the blocks' own CRCs check it as
 /// it is read).
-async fn verify(client: &reqwest::Client, dump: &net::Dump, path: &Path) -> Result<()> {
+async fn verify(client: &fetch::Client, dump: &net::Dump, path: &Path) -> Result<()> {
     let Some(want) = net::dump_sha1(client, dump).await? else {
         tracing::info!(
             catalogue = "wikidata",
@@ -1067,7 +1054,7 @@ async fn verify(client: &reqwest::Client, dump: &net::Dump, path: &Path) -> Resu
 /// Ask the API for the labels of `items` (at most [`LABEL_LOOKUPS`]), 50 per request; each is
 /// added to `labels` and its file.
 async fn look_up_labels(
-    client: &reqwest::Client,
+    client: &fetch::Client,
     api: &str,
     items: BTreeSet<u32>,
     labels: &mut Labels,
@@ -1118,7 +1105,7 @@ impl Wikidata {
     async fn start(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         restarted: Option<&Restarted>,
     ) -> Result<ImportCursor> {
         // The command line's limit is kept; an import an update asked for, or one that starts
@@ -1176,7 +1163,7 @@ impl Wikidata {
     async fn run_import(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         if let Some(dump) = cursor.source.dump() {
@@ -1265,7 +1252,7 @@ impl Wikidata {
 
     /// The dump a new import reads, and how: `--from`, else the newest dump, as a stream with a
     /// limit, else downloaded.
-    async fn source(&self, client: &reqwest::Client, limit: Option<u64>) -> Result<Source> {
+    async fn source(&self, client: &fetch::Client, limit: Option<u64>) -> Result<Source> {
         // The changes since a dump whose date is unknown are read from a week before it was
         // written: the dumps are weekly.
         let week = chrono::Duration::days(7);
@@ -1328,7 +1315,7 @@ impl Wikidata {
     async fn download(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         let Source::Download { dump } = cursor.source.clone() else {
@@ -1397,7 +1384,7 @@ impl Wikidata {
     async fn read(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         let files = LabelFiles::new(job.dir());
@@ -1421,13 +1408,12 @@ impl Wikidata {
             }
             Source::File { path, .. } => Box::new(open_at(path, first_byte)?),
             Source::Stream { dump, .. } => Box::new(net::stream(
-                client.clone(),
-                dump.url.clone(),
-                dump.validator.clone(),
+                client,
+                dump,
                 first_byte,
-                dump.size,
+                None,
                 self.slow_window,
-            )),
+            )?),
         };
         let mut pipeline = pipeline::start(source, cursor.at, self.threads);
         // The limit the import started with, also when it resumes after the configuration
@@ -1542,7 +1528,7 @@ impl Wikidata {
     async fn fix_labels(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         let files = LabelFiles::new(job.dir());
@@ -1653,7 +1639,7 @@ impl Wikidata {
     /// run (`api`), as nothing is known of it.
     async fn fetch(
         &self,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         chunk: &[String],
         props: &str,
         mut take: impl FnMut(net::Entities) -> Result<()>,

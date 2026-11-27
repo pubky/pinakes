@@ -850,7 +850,7 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
         "https://osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com/planet/replication/day/state.txt",
         "https://download.geofabrik.de/europe/liechtenstein-latest.osm.pbf",
     ] {
-        assert!(may_follow(&u(ok), HOSTS, true), "{ok}");
+        assert!(crate::catalogue::fetch::may_follow(&u(ok), HOSTS), "{ok}");
     }
     for refused in [
         "http://osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com/planet/x",
@@ -861,7 +861,10 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
         "https://planet.openstreetmap.org:8443/pbf/x",
         "https://user@download.geofabrik.de.evil.example/x",
     ] {
-        assert!(!may_follow(&u(refused), HOSTS, true), "{refused}");
+        assert!(
+            !crate::catalogue::fetch::may_follow(&u(refused), HOSTS),
+            "{refused}"
+        );
     }
     let dir = tempfile_dir();
     let cfg = with_contact(&dir);
@@ -899,7 +902,7 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
         ),
     ])
     .await;
-    let local = http_to(&cfg, &["127.0.0.1"], false).unwrap();
+    let local = crate::catalogue::fetch::client(&cfg.egress.contact, &["127.0.0.1"]).unwrap();
     let dest = dir.join("import.osm.pbf");
     assert!(
         download(&local, &format!("{a}/a.osm.pbf"), &dest, |_| Ok(()))

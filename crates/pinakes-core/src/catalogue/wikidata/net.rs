@@ -3,14 +3,19 @@
 //! items.
 //!
 //! Every request goes to a fixed host (`dumps.wikimedia.org`, `www.wikidata.org`, or the URL an
-//! operator names with `pinakesd catalogue import --from`), with Pinakes' User-Agent and the
-//! operator's contact, one at a time per kind (the dump's two connections are the one exception
-//! Wikimedia allows), no redirects, and bounded answers. A failure is a [`Failure`]: its class and
-//! the host, never what an answer said.
-use crate::catalogue::failure::Failure;
+//! operator names with `pinakesd catalogue import --from`) through the catalogues' client
+//! ([`fetch::client`]: Pinakes' User-Agent with the operator's contact, no redirects, no proxy,
+//! `Retry-After` waited for), one at a time per kind (the dump's two connections are the one
+//! exception Wikimedia allows), and bounded answers; the dump's bytes come through
+//! [`bulk::Download`]. A failure is a [`Failure`]: its class and the host, never what an answer
+//! said.
+use crate::catalogue::{bulk, failure::Failure, fetch};
 use anyhow::{Context as _, Result};
 use serde_json::Value;
 use std::time::Duration;
+
+pub use crate::catalogue::bulk::SLOW_WINDOW;
+pub use crate::catalogue::fetch::host;
 
 /// Where Wikidata's weekly dumps are listed.
 pub const DUMPS: &str = "https://dumps.wikimedia.org/wikidatawiki/entities/";
@@ -22,117 +27,15 @@ const DIRECTORIES: usize = 6;
 pub const API_CAP: usize = 64 << 20;
 /// The largest directory page or checksum file read.
 const PAGE_CAP: usize = 4 << 20;
-/// How often one request is tried before the run fails.
+/// How often a `maxlag` refusal is waited out before the run fails.
 const TRIES: u32 = 6;
-/// The longest wait a `Retry-After` is followed for; one asking longer fails the run
-/// (`rate_limited`), and the runner comes back later.
-const LONGEST_WAIT: Duration = Duration::from_secs(300);
-/// When a host (with its port) asked to be left alone longer than [`LONGEST_WAIT`]: until then
-/// no request goes to it, and a run that would ask fails `rate_limited` at once.
-static NOT_BEFORE: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-fn authority(url: &str) -> Option<String> {
-    let url = url::Url::parse(url).ok()?;
-    Some(format!(
-        "{}:{}",
-        url.host_str()?,
-        url.port_or_known_default()?
-    ))
-}
-/// The longest a host's ask is kept: a day (a `Retry-After` of years would hold the importer off
-/// until the daemon restarts).
-const LONGEST_HOLD: Duration = Duration::from_secs(86_400);
-/// `url`'s host asked not to be asked for `wait` (at most [`LONGEST_HOLD`]).
-fn wait_asked(url: &str, wait: Duration) {
-    let Some(host) = authority(url) else {
-        return;
-    };
-    if let Some(until) = std::time::Instant::now().checked_add(wait.min(LONGEST_HOLD)) {
-        let mut hosts = NOT_BEFORE.lock().unwrap_or_else(|e| e.into_inner());
-        hosts.insert(host, until);
-    }
-}
-/// Forget what `url`'s host asked.
-#[cfg(test)]
-fn forget_wait_asked(url: &str) {
-    if let Some(host) = authority(url) {
-        let mut hosts = NOT_BEFORE.lock().unwrap_or_else(|e| e.into_inner());
-        hosts.remove(&host);
-    }
-}
-/// Whether `url`'s host asked to be left alone for longer than now.
-fn too_early(url: &str) -> bool {
-    let Some(host) = authority(url) else {
-        return false;
-    };
-    let hosts = NOT_BEFORE.lock().unwrap_or_else(|e| e.into_inner());
-    hosts
-        .get(&host)
-        .is_some_and(|t| std::time::Instant::now() < *t)
-}
-/// Bytes a read must bring in [`SLOW_WINDOW`] of waiting for them: a server slower than that (a
-/// few bytes every two minutes) would hold the import, and the large-import turn, without end.
-const SLOW_BYTES: u64 = 8 << 20;
-/// The time a dump read may wait for [`SLOW_BYTES`] (`Wikidata::slow_window`).
-pub const SLOW_WINDOW: Duration = Duration::from_secs(600);
-/// A read's speed floor, counting only the time spent waiting for the server's bytes (not the
-/// reader's own pauses: a slow batch write is no slow server).
-struct Speed {
-    window: Duration,
-    waited: Duration,
-    bytes: u64,
-}
-impl Speed {
-    fn new(window: Duration) -> Self {
-        Self {
-            window,
-            waited: Duration::ZERO,
-            bytes: 0,
-        }
-    }
-    /// `n` bytes more came after waiting `waited` for them; false once the window of waiting
-    /// passed without [`SLOW_BYTES`].
-    fn read(&mut self, n: u64, waited: Duration) -> bool {
-        self.waited += waited;
-        self.bytes += n;
-        if self.bytes >= SLOW_BYTES {
-            self.waited = Duration::ZERO;
-            self.bytes = 0;
-            return true;
-        }
-        self.waited <= self.window
-    }
-}
-/// The longest a page, a checksum file or an API answer may take, all of it.
-const ANSWER_DEADLINE: Duration = Duration::from_secs(600);
 /// The least time between two API requests of the importer (short answers never go back to
 /// back). In the daemon they also take the egress's turn for `www.wikidata.org`
 /// ([`share_egress_pace`]): one request at a time with the resolver's, at its 200 a minute.
 const API_INTERVAL: Duration = Duration::from_millis(300);
-/// Bytes a stream must read after a break before its tries count from zero again.
-const PROGRESS: u64 = 8 << 20;
+/// The first wait before a broken dump read is asked for again (it doubles each time).
+const RETRY_WAIT: Duration = Duration::from_secs(2);
 
-/// The HTTP client of the importer: the User-Agent with the operator's contact, no redirects.
-/// HTTPS only, unless `http` (the tests' local server).
-pub fn client(contact: &str, gzip: bool, http: bool) -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .user_agent(crate::resolver::egress::user_agent(contact))
-        .redirect(reqwest::redirect::Policy::none())
-        .https_only(!http)
-        // Fixed public hosts, asked directly: no proxy from the environment.
-        .no_proxy()
-        .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(120))
-        .gzip(gzip)
-        .build()?)
-}
-/// The host of a URL, for a failure's `at`.
-pub fn host(url: &str) -> String {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "unknown host".into())
-}
 fn failure(class: &'static str, url: &str) -> Failure {
     Failure::new(class).at(host(url))
 }
@@ -165,119 +68,6 @@ impl Dump {
     }
 }
 
-/// A body read whole, at most `cap` bytes.
-async fn body(response: reqwest::Response, cap: usize, url: &str) -> Result<Vec<u8>> {
-    if response.content_length().is_some_and(|n| n > cap as u64) {
-        return Err(failure("size", url).into());
-    }
-    let mut out = Vec::new();
-    let mut response = response;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| failure("download", url))?
-    {
-        if out.len() + chunk.len() > cap {
-            return Err(failure("size", url).into());
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok(out)
-}
-
-/// How long a refusal asks to wait (`Retry-After`, in seconds or as a date).
-fn retry_after(response: &reqwest::Response) -> Option<Duration> {
-    wait_of(
-        response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)?
-            .to_str()
-            .ok()?,
-    )
-}
-/// A `Retry-After` value as a wait from now: seconds, or an HTTP date (none past it).
-fn wait_of(value: &str) -> Option<Duration> {
-    let value = value.trim();
-    if let Ok(secs) = value.parse::<u64>() {
-        return Some(Duration::from_secs(secs));
-    }
-    let at = httpdate::parse_http_date(value).ok()?;
-    Some(
-        at.duration_since(std::time::SystemTime::now())
-            .unwrap_or_default(),
-    )
-}
-/// The wait before try `n` (from 1): 2, 4, 8, … seconds, at most [`LONGEST_WAIT`].
-fn backoff(n: u32) -> Duration {
-    Duration::from_secs(2u64.saturating_pow(n.min(8))).min(LONGEST_WAIT)
-}
-/// Whether an answer is worth trying again: a rate limit or a server error.
-fn transient(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-}
-
-/// A GET that is tried again on a connection error, a rate limit or a server error (waiting as
-/// `Retry-After` says), with `headers`; the answer of the last try otherwise.
-async fn get(
-    client: &reqwest::Client,
-    url: &str,
-    headers: &[(reqwest::header::HeaderName, String)],
-) -> Result<reqwest::Response> {
-    Ok(get_paced(client, url, headers, None).await?.0)
-}
-/// The egress's turn for a host, held for one HTTP exchange ([`get_paced`]).
-type Turn = Option<tokio::sync::OwnedMutexGuard<tokio::time::Instant>>;
-/// [`get`], each try taking `egress`'s turn for the host first: held for that exchange (the
-/// answer comes with it, to be held while its body is read), dropped before any wait, so the
-/// egress's own requests to the host go between the tries.
-async fn get_paced(
-    client: &reqwest::Client,
-    url: &str,
-    headers: &[(reqwest::header::HeaderName, String)],
-    egress: Option<&crate::resolver::egress::Egress>,
-) -> Result<(reqwest::Response, Turn)> {
-    let mut tries = 0;
-    loop {
-        tries += 1;
-        if too_early(url) {
-            return Err(failure("rate_limited", url).into());
-        }
-        let turn = egress_turn(egress, url).await;
-        let mut request = client.get(url);
-        for (name, value) in headers {
-            request = request.header(name, value);
-        }
-        match request.send().await {
-            Ok(response) if transient(response.status()) && tries < TRIES => {
-                drop(turn);
-                // Never at once again, whatever `Retry-After` says.
-                let wait = retry_after(&response)
-                    .unwrap_or_else(|| backoff(tries))
-                    .max(Duration::from_secs(1));
-                if wait > LONGEST_WAIT {
-                    wait_asked(url, wait);
-                    return Err(failure("rate_limited", url).into());
-                }
-                tracing::info!(host = %crate::resolver::log_host(url), status = response.status().as_u16(), wait_secs = wait.as_secs(), "catalogue request refused for now; trying again");
-                tokio::time::sleep(wait).await;
-            }
-            Ok(response) => return Ok((response, turn)),
-            Err(_) if tries < TRIES => {
-                drop(turn);
-                tokio::time::sleep(backoff(tries)).await
-            }
-            Err(error) => {
-                let class = if error.is_timeout() {
-                    "timeout"
-                } else {
-                    "connect"
-                };
-                return Err(failure(class, url).into());
-            }
-        }
-    }
-}
-
 /// What a HEAD of a dump file says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Head {
@@ -286,65 +76,21 @@ pub struct Head {
     pub validator: String,
     pub modified: Option<chrono::DateTime<chrono::Utc>>,
 }
-/// The validator `If-Range` can take: a strong `ETag`, else the `Last-Modified` date; empty
-/// with neither. A weak `ETag` (`W/"…"`) never holds for a range, so every reconnect would read
-/// as a file replaced.
-fn validator_of(headers: &reqwest::header::HeaderMap) -> String {
-    let text = |h: reqwest::header::HeaderName| headers.get(h)?.to_str().ok().map(str::to_owned);
-    text(reqwest::header::ETAG)
-        .filter(|t| !t.starts_with("W/"))
-        .or_else(|| text(reqwest::header::LAST_MODIFIED))
-        .unwrap_or_default()
-}
-/// A HEAD of the dump file, or `None` when there is none (404).
-pub async fn head(client: &reqwest::Client, url: &str) -> Result<Option<Head>> {
-    let mut tries = 0;
-    let response = loop {
-        tries += 1;
-        if too_early(url) {
-            return Err(failure("rate_limited", url).into());
-        }
-        match client.head(url).send().await {
-            Ok(r) if transient(r.status()) && tries < TRIES => {
-                let wait = retry_after(&r).unwrap_or_else(|| backoff(tries));
-                if wait > LONGEST_WAIT {
-                    wait_asked(url, wait);
-                    return Err(failure("rate_limited", url).into());
-                }
-                // At least a second, as `get` waits: a `Retry-After: 0` is no reason to ask at once.
-                tokio::time::sleep(wait.max(Duration::from_secs(1))).await
-            }
-            Ok(r) => break r,
-            Err(_) if tries < TRIES => tokio::time::sleep(backoff(tries)).await,
-            Err(_) => return Err(failure("connect", url).into()),
-        }
+/// A HEAD of the dump file, or `None` when there is none (404). One without a size is no file
+/// (`download`).
+pub async fn head(client: &fetch::Client, url: &str) -> Result<Option<Head>> {
+    let Some(head) = client.head(url).await? else {
+        return Ok(None);
     };
-    match response.status() {
-        reqwest::StatusCode::NOT_FOUND => Ok(None),
-        status if status.is_success() => {
-            // `content_length()` is 0 for every HEAD (no body follows): the header says the size.
-            let size = response
-                .headers()
-                .get(reqwest::header::CONTENT_LENGTH)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .filter(|n| *n > 0)
-                .ok_or_else(|| failure("download", url))?;
-            let validator = validator_of(response.headers());
-            let modified = response
-                .headers()
-                .get(reqwest::header::LAST_MODIFIED)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| httpdate::parse_http_date(v).ok())
-                .map(chrono::DateTime::<chrono::Utc>::from);
-            Ok(Some(Head {
-                size,
-                validator,
-                modified,
-            }))
-        }
-        _ => Err(failure("download", url).into()),
-    }
+    let size = head
+        .size
+        .filter(|n| *n > 0)
+        .ok_or_else(|| failure("download", url))?;
+    Ok(Some(Head {
+        size,
+        validator: head.validator,
+        modified: head.modified,
+    }))
 }
 
 /// The dated directories a dumps index page lists (`20261123/`), newest first.
@@ -365,8 +111,9 @@ pub fn dated_directories(page: &str) -> Vec<String> {
 }
 
 /// The newest dump whose full JSON file is published under `base`.
-pub async fn latest_dump(client: &reqwest::Client, base: &str) -> Result<Dump> {
-    let page = whole(client, base, PAGE_CAP)
+pub async fn latest_dump(client: &fetch::Client, base: &str) -> Result<Dump> {
+    let page = client
+        .small(base, PAGE_CAP)
         .await?
         .ok_or_else(|| failure("download", base))?;
     let page = String::from_utf8_lossy(&page);
@@ -390,23 +137,6 @@ pub async fn latest_dump(client: &reqwest::Client, base: &str) -> Result<Dump> {
     Err(failure("no_dump", base).into())
 }
 
-/// A whole answer of at most `cap` bytes within [`ANSWER_DEADLINE`]; none for a 404.
-async fn whole(client: &reqwest::Client, url: &str, cap: usize) -> Result<Option<Vec<u8>>> {
-    let read = async {
-        let response = get(client, url, &[]).await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !response.status().is_success() {
-            return Err(failure("download", url).into());
-        }
-        body(response, cap, url).await.map(Some)
-    };
-    tokio::time::timeout(ANSWER_DEADLINE, read)
-        .await
-        .unwrap_or_else(|_| Err(failure("timeout", url).into()))
-}
-
 /// The SHA-1 a checksum file lists for `file`, if it lists it.
 pub fn listed_sha1(sums: &str, file: &str) -> Option<String> {
     sums.lines().find_map(|line| {
@@ -418,11 +148,11 @@ pub fn listed_sha1(sums: &str, file: &str) -> Option<String> {
     })
 }
 /// The SHA-1 the dump's checksum file lists for it; none when the file or the line is missing.
-pub async fn dump_sha1(client: &reqwest::Client, dump: &Dump) -> Result<Option<String>> {
+pub async fn dump_sha1(client: &fetch::Client, dump: &Dump) -> Result<Option<String>> {
     let Some(url) = dump.sums_url() else {
         return Ok(None);
     };
-    let Some(sums) = whole(client, &url, PAGE_CAP).await? else {
+    let Some(sums) = client.small(&url, PAGE_CAP).await? else {
         return Ok(None);
     };
     Ok(listed_sha1(
@@ -431,248 +161,99 @@ pub async fn dump_sha1(client: &reqwest::Client, dump: &Dump) -> Result<Option<S
     ))
 }
 
-/// Bytes `from..to` of the dump, written to `file` at their offset as they come; returns the
-/// offset reached (`to` when whole). A broken connection is taken up again where it stopped,
-/// and a file that changed (another validator) fails the run.
+/// The dump's bytes from `from` (to `to`, when given) as a [`bulk::Download`] of the known file
+/// (its size and validator): a broken connection is taken up again where it stopped, a file that
+/// changed fails `dump_changed`, one gone `dump_gone`, a server slower than 8 MB in `slow` of
+/// waiting `download`. Asked for at its first read, on the reading thread.
+pub fn stream(
+    client: &fetch::Client,
+    dump: &Dump,
+    from: u64,
+    to: Option<u64>,
+    slow: Duration,
+) -> Result<bulk::Download> {
+    let url = url::Url::parse(&dump.url).map_err(|_| failure("cursor", &dump.url))?;
+    let download = bulk::Download::new(
+        client.clone(),
+        tokio::runtime::Handle::current(),
+        url,
+        dump.size,
+    )
+    .known(dump.size, &dump.validator)
+    .from(from)
+    .retry_wait(RETRY_WAIT)
+    .slow(slow)
+    .no_deadline();
+    Ok(match to {
+        Some(to) => download.until(to),
+        None => download,
+    })
+}
+
+/// Bytes `from..to` of the dump ([`stream`]), written to `file` at their offset as they come;
+/// returns the offset reached (`to` when whole).
 pub async fn read_range(
-    client: &reqwest::Client,
+    client: &fetch::Client,
     dump: &Dump,
     file: &std::path::Path,
     from: u64,
     to: u64,
     slow: Duration,
 ) -> Result<u64> {
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-    let mut out = tokio::fs::OpenOptions::new()
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let disk = |path: &std::path::Path| Failure::new("disk").at(path.display().to_string());
+    let mut out = std::fs::OpenOptions::new()
         .write(true)
+        // A link put in the file's place is not followed.
         .custom_flags(libc::O_NOFOLLOW)
         .open(file)
-        .await
-        .with_context(|| Failure::new("disk").at(file.display().to_string()))?;
+        .with_context(|| disk(file))?;
     if dump.validator.is_empty() {
         // Without a validator a file replaced between two ranges would be spliced.
         return Err(failure("download", &dump.url).into());
     }
-    let mut at = from;
-    let mut tries = 0;
-    while at < to {
-        tries += 1;
-        let range = format!("bytes={at}-{}", to - 1);
-        let response = get(
-            client,
-            &dump.url,
-            &[
-                (reqwest::header::RANGE, range),
-                (reqwest::header::IF_RANGE, dump.validator.clone()),
-            ],
-        )
-        .await?;
-        match response.status() {
-            reqwest::StatusCode::PARTIAL_CONTENT => {}
-            // `If-Range` did not hold: the file was replaced.
-            reqwest::StatusCode::OK => return Err(failure("dump_changed", &dump.url).into()),
-            reqwest::StatusCode::NOT_FOUND => return Err(failure("dump_gone", &dump.url).into()),
-            _ => return Err(failure("download", &dump.url).into()),
-        }
-        if range_start(&response) != Some(at) {
-            return Err(failure("download", &dump.url).into());
-        }
-        out.seek(std::io::SeekFrom::Start(at))
-            .await
-            .with_context(|| Failure::new("disk").at(file.display().to_string()))?;
-        let mut response = response;
-        let mut speed = Speed::new(slow);
+    let mut body = stream(client, dump, from, Some(to), slow)?;
+    let path = file.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<u64> {
+        out.seek(std::io::SeekFrom::Start(from))
+            .with_context(|| disk(&path))?;
+        let mut buf = vec![0u8; 1 << 20];
         loop {
-            let asked = std::time::Instant::now();
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
-                    let waited = asked.elapsed();
-                    let room = (to - at) as usize;
-                    let chunk = &chunk[..chunk.len().min(room)];
-                    out.write_all(chunk)
-                        .await
-                        .with_context(|| Failure::new("disk").at(file.display().to_string()))?;
-                    at += chunk.len() as u64;
-                    if !speed.read(chunk.len() as u64, waited) {
-                        // Too slow: the run fails, and the next try reads this round again from
-                        // its start (the cursor keeps the rounds before it).
-                        return Err(failure("download", &dump.url).into());
-                    }
-                    if at >= to {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-        if at < to {
-            if tries >= TRIES {
-                return Err(failure("download", &dump.url).into());
-            }
-            tokio::time::sleep(backoff(tries)).await;
-        } else {
-            tries = 0;
-        }
-    }
-    out.flush()
-        .await
-        .with_context(|| Failure::new("disk").at(file.display().to_string()))?;
-    out.sync_data()
-        .await
-        .with_context(|| Failure::new("disk").at(file.display().to_string()))?;
-    Ok(at)
-}
-
-/// The first byte a partial answer holds (its `Content-Range`).
-fn range_start(response: &reqwest::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)?
-        .to_str()
-        .ok()?
-        .strip_prefix("bytes ")?
-        .split('-')
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// The dump from byte `from` to its `size`, as a stream of chunks for a reading thread
-/// ([`ChannelReader`]): read until the reader is dropped or the file's end. A broken connection
-/// is taken up again where it stopped (`If-Range` on the validator); a failure is sent as an
-/// error holding its [`Failure`].
-pub fn stream(
-    client: reqwest::Client,
-    url: String,
-    validator: String,
-    from: u64,
-    size: u64,
-    slow: Duration,
-) -> ChannelReader {
-    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(64);
-    tokio::spawn(async move {
-        let fail = |class: &'static str| std::io::Error::other(failure(class, &url));
-        if validator.is_empty() {
-            // Without a validator a broken connection taken up again could splice two files.
-            let _ = tx.send(Err(fail("download"))).await;
-            return;
-        }
-        let mut at = from;
-        let mut tries = 0;
-        // Where the tries were counted from zero last.
-        let mut counted = from;
-        while at < size {
-            tries += 1;
-            let headers = [
-                (reqwest::header::RANGE, format!("bytes={at}-")),
-                (reqwest::header::IF_RANGE, validator.clone()),
-            ];
-            let response = match get(&client, &url, &headers).await {
-                Ok(r) => r,
-                Err(error) => {
-                    let error = error
-                        .downcast::<Failure>()
-                        .unwrap_or_else(|_| failure("download", &url));
-                    let _ = tx.send(Err(std::io::Error::other(error))).await;
-                    return;
+            let n = match body.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    return Err(failure_in(&e)
+                        .unwrap_or_else(|| Failure::new("download"))
+                        .into())
                 }
             };
-            match response.status() {
-                // Only the bytes asked for: another offset would splice the file.
-                reqwest::StatusCode::PARTIAL_CONTENT if range_start(&response) == Some(at) => {}
-                // A server that ignores ranges answers the whole file: fine from the start.
-                reqwest::StatusCode::OK if at == 0 => {}
-                reqwest::StatusCode::OK => {
-                    let _ = tx.send(Err(fail("dump_changed"))).await;
-                    return;
-                }
-                reqwest::StatusCode::NOT_FOUND => {
-                    let _ = tx.send(Err(fail("dump_gone"))).await;
-                    return;
-                }
-                _ => {
-                    let _ = tx.send(Err(fail("download"))).await;
-                    return;
-                }
+            if n == 0 {
+                break;
             }
-            let mut response = response;
-            let mut speed = Speed::new(slow);
-            // A chunk read; the end of the answer or a break ends the loop. Only the time
-            // waiting for the server counts toward the speed floor, not the reader's pauses.
-            let mut asked = std::time::Instant::now();
-            while let Ok(Some(chunk)) = response.chunk().await {
-                let waited = asked.elapsed();
-                let room = (size - at) as usize;
-                let chunk = chunk.slice(..chunk.len().min(room));
-                at += chunk.len() as u64;
-                if !speed.read(chunk.len() as u64, waited) {
-                    // Too slow to ever end: the run fails, and resumes from its cursor later.
-                    let _ = tx.send(Err(fail("download"))).await;
-                    return;
-                }
-                if at - counted >= PROGRESS {
-                    tries = 0;
-                    counted = at;
-                }
-                if tx.send(Ok(chunk)).await.is_err() {
-                    return;
-                }
-                if at >= size {
-                    return;
-                }
-                asked = std::time::Instant::now();
-            }
-            if at >= size {
-                return;
-            }
-            if tries >= TRIES {
-                let _ = tx.send(Err(fail("download"))).await;
-                return;
-            }
-            tokio::time::sleep(backoff(tries)).await;
+            out.write_all(&buf[..n]).with_context(|| disk(&path))?;
         }
-    });
-    ChannelReader {
-        rx,
-        chunk: bytes::Bytes::new(),
-    }
+        out.flush().with_context(|| disk(&path))?;
+        out.sync_data().with_context(|| disk(&path))?;
+        Ok(body.offset())
+    })
+    .await
+    .map_err(|_| Failure::new("panic"))?
 }
 
-/// The run's failure a read error holds (a stream's), if any.
+/// The run's failure a read error holds (a download's), if any.
 pub fn failure_in(error: &std::io::Error) -> Option<Failure> {
     error.get_ref()?.downcast_ref::<Failure>().cloned()
 }
 
-/// A `Read` over chunks a task sends; for a reading thread, never inside the runtime.
-pub struct ChannelReader {
-    rx: tokio::sync::mpsc::Receiver<std::io::Result<bytes::Bytes>>,
-    chunk: bytes::Bytes,
-}
-impl std::io::Read for ChannelReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        while self.chunk.is_empty() {
-            match self.rx.blocking_recv() {
-                Some(Ok(chunk)) => self.chunk = chunk,
-                Some(Err(error)) => return Err(error),
-                None => return Ok(0),
-            }
-        }
-        let n = buf.len().min(self.chunk.len());
-        buf[..n].copy_from_slice(&self.chunk[..n]);
-        let _ = self.chunk.split_to(n);
-        Ok(n)
-    }
-}
-
 /// An API answer as JSON: a rate limit, a server error and Wikimedia's `maxlag` refusal are
 /// waited out and tried again; another error fails the run (`api`).
-pub async fn api(client: &reqwest::Client, base: &str, query: &[(&str, &str)]) -> Result<Value> {
+pub async fn api(client: &fetch::Client, base: &str, query: &[(&str, &str)]) -> Result<Value> {
     api_capped(client, base, query, API_CAP).await
 }
 /// [`api`], with answers of at most `cap` bytes (larger: `size`).
 pub async fn api_capped(
-    client: &reqwest::Client,
+    client: &fetch::Client,
     base: &str,
     query: &[(&str, &str)],
     cap: usize,
@@ -690,13 +271,14 @@ pub async fn api_capped(
         pace().await;
         let read = async {
             // The egress's turn is held for the exchange and its body, never for a wait.
-            let (response, turn) = get_paced(client, &url, &[], EGRESS.get()).await?;
-            let status = response.status();
-            let wait = retry_after(&response);
-            if !status.is_success() {
+            let (response, turn) = client.send(&url, &[], EGRESS.get()).await?;
+            let wait = fetch::retry_after(&response);
+            if !response.status().is_success() {
                 return Err(anyhow::Error::new(failure("api", &url)));
             }
-            let raw = body(response, cap, &url).await?;
+            let raw = fetch::small_body(response, cap, &url)
+                .await?
+                .unwrap_or_default();
             drop(turn);
             Ok((wait, raw))
         };
@@ -707,9 +289,9 @@ pub async fn api_capped(
         if value["error"]["code"] == "maxlag" {
             let wait = wait.unwrap_or(Duration::from_secs(5));
             // Wikidata still lagging after the tries: a wait it asks for, not a fault.
-            if wait > LONGEST_WAIT || tries >= TRIES {
-                if wait > LONGEST_WAIT {
-                    wait_asked(&url, wait);
+            if wait > fetch::LONGEST_WAIT || tries >= TRIES {
+                if wait > fetch::LONGEST_WAIT {
+                    fetch::hold(&url, wait);
                 }
                 return Err(failure("rate_limited", &url).into());
             }
@@ -723,6 +305,8 @@ pub async fn api_capped(
         return Ok(value);
     }
 }
+/// The longest an API answer may take, all of it.
+const ANSWER_DEADLINE: Duration = Duration::from_secs(600);
 
 /// The daemon's egress ([`share_egress_pace`]): the API requests take its turn for their host.
 static EGRESS: std::sync::OnceLock<crate::resolver::egress::Egress> = std::sync::OnceLock::new();
@@ -731,21 +315,6 @@ static EGRESS: std::sync::OnceLock<crate::resolver::egress::Egress> = std::sync:
 /// a by-hand run paces only by [`API_INTERVAL`].
 pub fn share_egress_pace(egress: crate::resolver::egress::Egress) {
     let _ = EGRESS.set(egress);
-}
-/// The egress's turn for `url`'s host, waiting for it as long as it takes (a queue too long for
-/// the egress's own wait is waited out); none without an egress.
-async fn egress_turn(
-    egress: Option<&crate::resolver::egress::Egress>,
-    url: &str,
-) -> Option<tokio::sync::OwnedMutexGuard<tokio::time::Instant>> {
-    let egress = egress?;
-    let host = url::Url::parse(url).ok()?.host_str()?.to_owned();
-    loop {
-        match egress.host_turn(&host).await {
-            Ok(turn) => return Some(turn),
-            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
-        }
-    }
 }
 
 /// Waits until [`API_INTERVAL`] has passed since the last API request of this process.
@@ -775,7 +344,7 @@ pub struct Changes {
 /// The recent changes of items (namespace 0) from `start` to `end`, oldest first: edits, new
 /// items and log entries (deletions, restores, merges), 500 a page.
 pub async fn recent_changes(
-    client: &reqwest::Client,
+    client: &fetch::Client,
     base: &str,
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
@@ -844,7 +413,7 @@ pub const FULL: &str = "info|labels|descriptions|aliases|claims|sitelinks";
 pub const SITELINKS: &str = "info|sitelinks";
 /// The items `qids` (at most 50) with `props` ([`FULL`], [`SITELINKS`]).
 pub async fn entities(
-    client: &reqwest::Client,
+    client: &fetch::Client,
     base: &str,
     qids: &[String],
     cap: usize,
@@ -924,7 +493,7 @@ pub fn parse_entities(mut value: Value, asked: &[String]) -> Entities {
 }
 /// The English (else `mul`) labels of the items `qids` (at most 50), as tag labels.
 pub async fn labels(
-    client: &reqwest::Client,
+    client: &fetch::Client,
     base: &str,
     qids: &[String],
 ) -> Result<Vec<(String, Option<String>)>> {
@@ -985,7 +554,8 @@ mod tests {
             size: 10,
             validator: "\"v\"".into(),
         };
-        let error = read_range(&reqwest::Client::new(), &dump, &link, 0, 10, SLOW_WINDOW)
+        let client = fetch::client("ops@example.org", &[]).unwrap();
+        let error = read_range(&client, &dump, &link, 0, 10, SLOW_WINDOW)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1036,25 +606,6 @@ mod tests {
             "2026-11-23T00:00:00+00:00"
         );
     }
-    /// With the daemon's egress, an API request waits for the egress's turn for the host: not
-    /// while one of the egress's own requests to it is under way.
-    #[tokio::test]
-    async fn the_api_takes_the_egress_turn_for_its_host() {
-        // Never the network: recorded answers (no request is made).
-        let (egress, _) = crate::sources::fixture::egress(vec![]);
-        let url = "https://www.wikidata.org/w/api.php?action=wbgetentities";
-        let held = egress.host_turn("www.wikidata.org").await.unwrap();
-        let waiting =
-            tokio::time::timeout(Duration::from_millis(300), egress_turn(Some(&egress), url));
-        assert!(
-            waiting.await.is_err(),
-            "it waits while the egress's request runs"
-        );
-        drop(held);
-        let turn = tokio::time::timeout(Duration::from_secs(30), egress_turn(Some(&egress), url));
-        assert!(turn.await.unwrap().is_some());
-        assert!(egress_turn(None, url).await.is_none());
-    }
     /// The API's real answer for an item without any sitelink (`fixtures/wikidata`): the item
     /// is found, with no Wikipedia article; an empty list is read the same way.
     #[test]
@@ -1071,59 +622,6 @@ mod tests {
         let mut listed = answer;
         listed["entities"]["Q26778405"]["sitelinks"] = serde_json::json!([]);
         assert!(parse_entities(listed, &asked).unaccounted.is_empty());
-    }
-    /// A read keeps going while it brings 8 MB in every ten minutes of waiting for the server;
-    /// slower, it ends.
-    #[test]
-    fn a_read_slower_than_its_floor_ends() {
-        let secs = Duration::from_secs;
-        let mut speed = Speed::new(SLOW_WINDOW);
-        assert!(speed.read(SLOW_BYTES - 1, secs(300)));
-        // 8 MB in: the window starts again.
-        assert!(speed.read(1, secs(290)));
-        assert!(speed.read(1 << 20, SLOW_WINDOW));
-        assert!(!speed.read(1, secs(1)));
-    }
-    /// A host that asked to be left alone longer than five minutes is not asked again before.
-    #[test]
-    fn a_long_wait_asked_holds_every_request_to_the_host() {
-        let url = "https://example.org:4443/w/api.php";
-        assert!(!too_early(url));
-        wait_asked(url, Duration::from_secs(3600));
-        assert!(too_early(url) && too_early("https://example.org:4443/other"));
-        assert!(!too_early("https://example.org/w/api.php"));
-        forget_wait_asked(url);
-        assert!(!too_early(url));
-        // Years are held a day at most, and never overflow.
-        wait_asked(url, Duration::from_secs(u64::MAX));
-        assert!(too_early(url));
-        let until = NOT_BEFORE.lock().unwrap()["example.org:4443"];
-        assert!(until <= std::time::Instant::now() + LONGEST_HOLD);
-        forget_wait_asked(url);
-    }
-    #[test]
-    fn a_weak_etag_is_no_validator() {
-        let mut h = reqwest::header::HeaderMap::new();
-        h.insert(reqwest::header::ETAG, "\"strong\"".parse().unwrap());
-        assert_eq!(validator_of(&h), "\"strong\"");
-        h.insert(reqwest::header::ETAG, "W/\"weak\"".parse().unwrap());
-        assert_eq!(validator_of(&h), "");
-        let date = "Wed, 25 Nov 2026 08:00:25 GMT";
-        h.insert(reqwest::header::LAST_MODIFIED, date.parse().unwrap());
-        assert_eq!(validator_of(&h), date);
-    }
-    #[test]
-    fn a_retry_after_is_read_in_seconds_or_as_a_date() {
-        assert_eq!(wait_of(" 120 "), Some(Duration::from_secs(120)));
-        let soon = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(90));
-        let wait = wait_of(&soon).unwrap();
-        assert!(
-            wait > Duration::from_secs(80) && wait <= Duration::from_secs(90),
-            "{wait:?}"
-        );
-        let past = httpdate::fmt_http_date(std::time::SystemTime::now() - Duration::from_secs(90));
-        assert_eq!(wait_of(&past), Some(Duration::ZERO));
-        assert_eq!(wait_of("soon"), None);
     }
     #[test]
     fn recent_changes_and_entities_are_read_from_their_answers() {

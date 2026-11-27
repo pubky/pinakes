@@ -1610,14 +1610,14 @@ enum Breaks {
     NoValidator,
     /// It breaks once, and the rest comes from another byte than asked for.
     WrongRange,
-    /// The artist file answers 503 once.
+    /// The artist file answers 503 for one run (as often as the client tries a request).
     ArtistBusyOnce,
     /// It breaks once, and the first answer for the rest gives only part of it (as its
     /// `Content-Range` says), its body ending cleanly.
     ShortRange,
     /// The release file comes with no length, its body ending cleanly.
     NoLength,
-    /// `LATEST` answers 503 once.
+    /// `LATEST` answers 503 for one run (as often as the client tries a request).
     LatestBusyOnce,
     /// It breaks once, and the rest comes with another total length than the first answer's.
     WrongTotal,
@@ -1630,6 +1630,8 @@ struct Served {
     broke: Arc<Mutex<bool>>,
     /// The short answer of [`Breaks::ShortRange`] was given.
     shortened: Arc<Mutex<bool>>,
+    /// The 503s a busy mirror still answers.
+    busy: Arc<Mutex<u32>>,
     latest: String,
     breaks: Breaks,
 }
@@ -1661,9 +1663,9 @@ async fn serve(
     }
     if path == "LATEST" {
         if s.breaks == Breaks::LatestBusyOnce {
-            let mut broke = s.broke.lock().unwrap();
-            if !*broke {
-                *broke = true;
+            let mut busy = s.busy.lock().unwrap();
+            if *busy > 0 {
+                *busy -= 1;
                 return Response::builder()
                     .status(StatusCode::SERVICE_UNAVAILABLE)
                     .body(Body::empty())
@@ -1679,9 +1681,9 @@ async fn serve(
             .unwrap();
     };
     if s.breaks == Breaks::ArtistBusyOnce && path.ends_with("/artist.tar.xz") {
-        let mut broke = s.broke.lock().unwrap();
-        if !*broke {
-            *broke = true;
+        let mut busy = s.busy.lock().unwrap();
+        if *busy > 0 {
+            *busy -= 1;
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(Body::empty())
@@ -1786,6 +1788,8 @@ async fn mirror(files: BTreeMap<String, Vec<u8>>, latest: &str, breaks: Breaks) 
         requests: requests.clone(),
         broke: Arc::new(Mutex::new(false)),
         shortened: Arc::new(Mutex::new(false)),
+        // The client tries a request six times before the run fails.
+        busy: Arc::new(Mutex::new(6)),
         latest: latest.to_owned(),
         breaks,
     };
@@ -1860,7 +1864,7 @@ async fn a_replaced_file_or_one_the_list_leaves_out_writes_nothing(pool: PgPool)
     )
     .await
     .unwrap_err();
-    assert!(failed.to_string().contains("download"), "{failed}");
+    assert!(failed.to_string().contains("dump_changed"), "{failed}");
     assert!(rows(&pool).await.is_empty());
 
     let mut files = served(&dir, B);

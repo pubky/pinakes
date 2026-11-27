@@ -112,18 +112,10 @@ impl Source {
     pub fn official() -> Self {
         Self::Mirror(url::Url::parse(MIRROR).expect("a URL"))
     }
-    /// A mirror URL (`https://`, or `http://` on the loopback address) or a local directory
-    /// named after its dump.
+    /// A mirror URL ([`super::fetch::from_url`]'s rule) or a local directory named after its
+    /// dump.
     pub fn parse(from: &str) -> Result<Self> {
-        if from.starts_with("http://") || from.starts_with("https://") {
-            let mut url = url::Url::parse(from).context("not a URL")?;
-            let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-            if url.scheme() == "http" && !loopback {
-                bail!("a dump mirror is read over https");
-            }
-            if url.query().is_some() || !url.username().is_empty() || url.password().is_some() {
-                bail!("a dump mirror URL takes no query or credentials");
-            }
+        if let Some(mut url) = super::fetch::from_url(from)? {
             if !url.path().ends_with('/') {
                 url.set_path(&format!("{}/", url.path()));
             }
@@ -172,7 +164,7 @@ fn in_future(version: &str) -> bool {
 /// The MusicBrainz importer.
 pub struct MusicBrainz {
     source: Source,
-    client: reqwest::Client,
+    client: super::fetch::Client,
     /// Readers that parse lines in parallel.
     threads: usize,
     /// `[catalogues.musicbrainz] limit`, for the disk a run needs.
@@ -188,19 +180,9 @@ pub struct MusicBrainz {
 impl MusicBrainz {
     /// The importer of `source`, asking with the operator's contact in its User-Agent.
     pub fn new(source: Source, contact: &str) -> Result<Self> {
-        // A client of its own, outside `Egress`: it reads only the dump mirror the operator or
+        // The catalogues' client, outside `Egress`: it reads only the dump mirror the operator or
         // the build names, which no reference steers. It follows no redirect.
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            // The files are xz already; an answer the client unpacked would count other bytes than
-            // the ranges a resume asks for.
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .user_agent(crate::resolver::egress::user_agent(contact))
-            .connect_timeout(Duration::from_secs(30))
-            .build()?;
+        let client = super::fetch::client(contact, &[])?.first_wait(RETRY_WAIT);
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get() / 2)
             .clamp(1, 4);
@@ -249,33 +231,17 @@ impl MusicBrainz {
     /// The first wait before a broken download is asked for again.
     pub fn retry_wait(mut self, wait: Duration) -> Self {
         self.retry_wait = wait;
+        self.client = self.client.first_wait(wait);
         self
     }
 
     async fn get_text(&self, url: url::Url, cap: usize) -> Result<Option<String>> {
-        let failure = || Failure::new("download").at(self.source.at());
-        let response = tokio::time::timeout(Duration::from_secs(60), self.client.get(url).send())
-            .await
-            .map_err(|_| failure())?
-            .map_err(|_| failure())?;
-        match response.status().as_u16() {
-            200 => {}
-            404 => return Ok(None),
-            _ => bail!(failure()),
-        }
-        let mut body = vec![];
-        let mut response = response;
-        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(60), response.chunk())
-            .await
-            .map_err(|_| failure())?
-            .map_err(|_| failure())?
-        {
-            body.extend_from_slice(&chunk);
-            if body.len() > cap {
-                bail!(Failure::new("size").at(self.source.at()));
-            }
-        }
-        Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+        let body = self.client.small(url.as_str(), cap).await.map_err(|e| {
+            // The source's place, whatever failed (never the answer's text).
+            let class = e.downcast_ref::<Failure>().map_or("download", |f| f.class);
+            Failure::new(class).at(self.source.at())
+        })?;
+        Ok(body.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
     /// The newest dump's name.
     async fn latest(&self) -> Result<String> {
@@ -1397,7 +1363,7 @@ fn failure_note(error: &anyhow::Error) -> String {
 /// What a read needs.
 struct ReadPlan {
     source: Source,
-    client: reqwest::Client,
+    client: super::fetch::Client,
     handle: tokio::runtime::Handle,
     version: String,
     sums: BTreeMap<String, String>,

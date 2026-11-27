@@ -50,7 +50,7 @@ past either, the read stops (`disk`).
   100 bad lines, and more than one in a thousand of the lines read, stop the run (`parse`). A file
   whose xz stream or archive is broken stops it as `archive`.
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range`
-  with `If-Range`, so a file replaced meanwhile is refused, never spliced), up to five times in a
+  with `If-Range`, so a file replaced meanwhile is refused as `dump_changed`, never spliced), up to five times in a
   row (renewed after every 64 MiB read), and not at all when the mirror names no ETag or
   Last-Modified. A body that ends cleanly before the file's length (its first answer's
   `Content-Length`) is a break too; an answer that names no length is refused (`download`), as its

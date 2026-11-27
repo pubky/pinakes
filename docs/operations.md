@@ -1977,6 +1977,18 @@ registry for `software`):
 | `software` | `REGISTRY=FILE\|URL`, once per registry replaced: `crates.io=` the dump, `f-droid=` its `entry.json` (the index next to it), `flathub=` the AppStream `.xml.gz` |
 | `tranco` | A list file (`rank,site` lines) |
 
+A `--from` URL is read over `https` (`http` only on a loopback address); one with a user name, a
+password or a query is refused, and the error does not repeat it. `osm` takes a local file only.
+
+Every importer asks its upstreams the same way: directly (proxy variables in the environment are
+not used), with the operator's contact in the User-Agent, and following a redirect (at most 3) only
+to a host its catalogue names. A rate limit or a server error (429, 5xx) is asked again up to six
+times, waiting as its `Retry-After` says; one that asks for more than five minutes fails the run
+(`rate_limited`), and that host is not asked again until then (a day at most). A broken download
+resumes at the byte it reached, under `If-Range`: a file replaced meanwhile fails `dump_changed`,
+one gone `dump_gone`, and a server that brings less than 8 MB in ten minutes of waiting fails
+`download`.
+
 `--limit N` is Tranco's: at most N homepages are read (MusicBrainz's is its card limit).
 `--force` is MusicBrainz's alone; the other catalogues refuse it. `catalogue import tranco` reads homepages through an egress of its own, apart from a running daemon's per-host pace: stop the daemon (or switch Tranco off there) first. A
 catalogue without an importer in this version is refused. Without `http.contact` (or

@@ -65,7 +65,7 @@ IDs, a sparse file); a region's 16 bytes per node, about twice its file.
 The planet's file and change files come from `planet.openstreetmap.org`, which redirects them to
 OpenStreetMap's buckets (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com`,
 `osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com`); a region's from
-`download.geofabrik.de`. The importer follows at most 5 redirects, only to these names, over https.
+`download.geofabrik.de`. The importer follows at most 3 redirects, only to these names, over https.
 
 - Before the download, the importer checks the free disk for the file and its index (the file's
   length is known from the server), and waits while it is short (`waiting`), as before any run.

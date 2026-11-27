@@ -758,6 +758,11 @@ async fn import(
             }
             std::sync::Arc::new(osm::OsmImporter {
                 input: match from {
+                    // A URL is refused by the one `--from` rule's checks, and a valid one too:
+                    // OpenStreetMap's `--from` names a local file.
+                    Some(from) if pinakes_core::catalogue::fetch::from_url(from)?.is_some() => {
+                        bail!("--from: the osm importer reads a local file (its downloads are the region's)")
+                    }
                     Some(file) => osm::Input::Files(vec![PathBuf::from(file)]),
                     None => osm::Input::Region,
                 },

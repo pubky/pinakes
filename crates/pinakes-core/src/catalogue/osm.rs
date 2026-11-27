@@ -214,36 +214,10 @@ async fn read_header(file: &Path) -> Result<pbf::Header> {
     .map_err(|_| Failure::new("panic"))?
     .with_context(|| Failure::new("parse").at(file.display().to_string()))
 }
-fn http(config: &crate::config::Config) -> Result<reqwest::Client> {
-    http_to(config, HOSTS, true)
-}
-/// Whether a redirect may go to `url`: one of `hosts` by its exact name, over https unless
-/// `https_only` is false (a test's local servers).
-fn may_follow(url: &url::Url, hosts: &[&str], https_only: bool) -> bool {
-    (url.scheme() == "https" || !https_only)
-        && url.port().is_none_or(|_| !https_only)
-        && url.host_str().is_some_and(|h| hosts.contains(&h))
-}
-/// A client of its own, outside `Egress`: it reads only the fixed bulk-file hosts (`HOSTS`),
-/// following at most 5 redirects, only to them.
-fn http_to(
-    config: &crate::config::Config,
-    hosts: &'static [&'static str],
-    https_only: bool,
-) -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() < 5 && may_follow(attempt.url(), hosts, https_only) {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .user_agent(crate::resolver::egress::user_agent(&config.egress.contact))
-        .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(120))
-        .build()?)
+/// The catalogues' client, outside `Egress`: it reads only the fixed bulk-file hosts
+/// ([`HOSTS`]), following redirects only to them.
+fn http(config: &crate::config::Config) -> Result<super::fetch::Client> {
+    super::fetch::client(&config.egress.contact, HOSTS)
 }
 fn host_of(url: &str) -> String {
     url::Url::parse(url)
@@ -251,35 +225,10 @@ fn host_of(url: &str) -> String {
         .and_then(|u| u.host_str().map(str::to_owned))
         .unwrap_or_default()
 }
-/// Read a response's body into `out`, at most `cap` bytes.
-async fn body_to(
-    mut response: reqwest::Response,
-    cap: u64,
-    failed: impl Fn() -> Failure,
-    out: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<u64> {
-    use tokio::io::AsyncWriteExt;
-    let mut read = 0u64;
-    while let Some(chunk) = response.chunk().await.with_context(&failed)? {
-        read += chunk.len() as u64;
-        anyhow::ensure!(read <= cap, failed());
-        out.write_all(&chunk).await?;
-    }
-    Ok(read)
-}
 /// A small text file (a replication state): at most 64 KiB, or none when it is not there.
-async fn get_text(client: &reqwest::Client, url: &str) -> Result<Option<String>> {
-    let failed = || Failure::new("download").at(host_of(url));
-    let response = client.get(url).send().await.with_context(failed)?;
-    if response.status().as_u16() == 404 {
-        return Ok(None);
-    }
-    if !response.status().is_success() {
-        return Err(failed().into());
-    }
-    let mut body = vec![];
-    body_to(response, 64 * 1024, failed, &mut body).await?;
-    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+async fn get_text(client: &super::fetch::Client, url: &str) -> Result<Option<String>> {
+    let body = client.small(url, 64 * 1024).await?;
+    Ok(body.map(|b| String::from_utf8_lossy(&b).into_owned()))
 }
 /// The largest bulk file read (the planet is about 96 GB).
 const MAX_FILE: u64 = 250_000_000_000;
@@ -294,7 +243,7 @@ const KEEP_DOWNLOAD: Duration = Duration::from_secs(7 * 86400);
 /// (the free-disk check). True when the file was downloaded now, false when an earlier
 /// attempt's file was used.
 async fn download(
-    client: &reqwest::Client,
+    client: &super::fetch::Client,
     url: &str,
     dest: &Path,
     room: impl Fn(u64) -> Result<()>,
@@ -372,7 +321,7 @@ fn local_version(file: &Path) -> Option<Value> {
 }
 /// A bulk file's version as its `HEAD` answer names it (a strong ETag, else Last-Modified), or
 /// none when the answer names none (or does not come): the file is then read as any.
-async fn remote_version(client: &reqwest::Client, url: &str) -> Option<Value> {
+async fn remote_version(client: &super::fetch::Client, url: &str) -> Option<Value> {
     let input = super::fetch::Input::Url(url::Url::parse(url).ok()?);
     let (version, _) = input.version(client).await.ok()?;
     Some(json!(version))
