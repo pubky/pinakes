@@ -1477,10 +1477,8 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     run::note_unstarted(&pool, &config).await.unwrap();
     let notes = run::contact_needs(&config);
     let note = |c: Catalogue| notes.iter().find(|n| n.0 == c).map(|n| n.2);
-    assert_eq!(
-        note(Catalogue::Musicbrainz),
-        Some(pinakes_core::catalogue::musicbrainz::NEEDS_CONTACT)
-    );
+    // One text for every catalogue.
+    assert!(notes.iter().all(|n| n.2 == run::NEEDS_CONTACT));
     let waiting = |c: Catalogue| {
         let pool = pool.clone();
         async move { store::state(&pool, c).await.unwrap().map(|s| s.waiting) }

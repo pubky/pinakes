@@ -132,13 +132,6 @@ pub fn parse_state(text: &str) -> Option<(u64, chrono::DateTime<chrono::Utc>)> {
     Some((sequence?, timestamp?))
 }
 
-/// Whether the catalogue is on without the operator's contact, which its downloads name.
-pub fn needs_contact(config: &crate::config::Config) -> bool {
-    config.catalogues.enabled(Catalogue::Osm) && config.egress.contact.trim().is_empty()
-}
-/// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
-pub const NEEDS_CONTACT: &str =
-    "needs http.contact: the importer asks OpenStreetMap's file servers with the operator's contact";
 /// The importer `pinakesd` runs: the configured region's files; none without the operator's
 /// contact (`http.contact`), which every request to the bulk-file hosts names.
 pub fn importer(config: &crate::config::Config) -> Option<std::sync::Arc<dyn Importer>> {
@@ -1042,10 +1035,7 @@ impl Importer for OsmImporter {
             Some(file) => (file, false, None),
             None => {
                 if job.config().egress.contact.trim().is_empty() {
-                    return Err(super::run::Waits(
-                        "http.contact is not set: bulk files are read only with the operator's contact in the User-Agent".into(),
-                    )
-                    .into());
+                    return Err(super::run::Waits(super::run::NEEDS_CONTACT.into()).into());
                 }
                 let file = dir.join("import.osm.pbf");
                 let client = http(job.config())?;
@@ -1249,10 +1239,7 @@ impl Importer for OsmImporter {
         }
         let region = job.config().catalogues.osm.region.clone();
         if job.config().egress.contact.trim().is_empty() {
-            return Err(super::run::Waits(
-                "http.contact is not set: change files are read only with the operator's contact in the User-Agent".into(),
-            )
-            .into());
+            return Err(super::run::Waits(super::run::NEEDS_CONTACT.into()).into());
         }
         let position = job.position().cloned().unwrap_or(Value::Null);
         if position["region"].as_str() != Some(region.as_str()) {

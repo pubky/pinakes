@@ -298,15 +298,8 @@ fn seconds(at: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(at.timestamp(), 0).unwrap_or(at)
 }
 
-/// Whether the catalogue is on but its importer does not start for want of `http.contact`.
-pub fn needs_contact(config: &Config) -> bool {
-    config.catalogues.enabled(Catalogue::Wikidata) && config.egress.contact.is_empty()
-}
-/// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
-pub const NEEDS_CONTACT: &str =
-    "needs http.contact: the importer asks Wikimedia with the operator's contact";
 /// The importer `pinakesd` runs; none without the operator's contact (`http.contact`), which
-/// every request to Wikimedia names: the state row says why ([`NEEDS_CONTACT`]).
+/// every request to Wikimedia names: the state row says why (`run::NEEDS_CONTACT`).
 pub fn importer(config: &Config) -> Option<std::sync::Arc<dyn Importer>> {
     if config.egress.contact.is_empty() {
         if config.catalogues.enabled(Catalogue::Wikidata) {
@@ -321,10 +314,11 @@ pub fn importer(config: &Config) -> Option<std::sync::Arc<dyn Importer>> {
 }
 
 fn contact(job: &Job<'_>) -> Result<String> {
-    let contact = job.config().http.contact.trim().to_owned();
+    let contact = job.config().egress.contact.trim().to_owned();
     if contact.is_empty() {
-        // Wikimedia asks every client for a contact; without one nothing is asked.
-        return Err(Failure::new("no_contact").into());
+        // Wikimedia asks every client for a contact; without one nothing is asked, and the run
+        // waits for one as every importer does.
+        return Err(super::run::Waits(super::run::NEEDS_CONTACT.into()).into());
     }
     Ok(contact)
 }
@@ -2031,7 +2025,6 @@ mod tests {
             "timeout",
             "api",
             "disk",
-            "no_contact",
             "rate_limited",
             "empty",
         ] {

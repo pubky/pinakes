@@ -680,7 +680,7 @@ async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
     assert!(runner::to_start(runner::importers(&config, &egress), &config).is_empty());
     runner::note_unstarted(&pool, &config).await.unwrap();
     let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
-    assert_eq!(state.waiting.as_deref(), Some(NEEDS_CONTACT));
+    assert_eq!(state.waiting.as_deref(), Some(runner::NEEDS_CONTACT));
     config.egress.contact = "ops@example.org".into();
     let started = runner::to_start(runner::importers(&config, &egress), &config);
     assert_eq!(

@@ -482,6 +482,7 @@ fn context(pool: &PgPool, limit: Option<u64>) -> (Context, Dir) {
     config.catalogues.dir = dir.to_string_lossy().into_owned();
     config.catalogues.wikidata.limit = limit;
     config.http.contact = "ops@example.org".into();
+    config.egress.contact = "ops@example.org".into();
     let mut ctx = Context::new(pool.clone(), Arc::new(config));
     ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
     ctx.pace = Pace {
@@ -1065,7 +1066,8 @@ async fn an_update_stuck_past_the_gap_is_dropped(pool: PgPool) {
     assert_eq!((state.run, state.cursor), (None, None));
 }
 
-/// Without the operator's contact nothing is asked of Wikimedia: the run fails at once.
+/// Without the operator's contact nothing is asked of Wikimedia: the run waits for one, as every
+/// importer's does, and `catalogue status` says why.
 #[sqlx::test(migrations = "../../migrations")]
 async fn no_contact_no_request(pool: PgPool) {
     let m = mock();
@@ -1073,16 +1075,19 @@ async fn no_contact_no_request(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut config = (*ctx.config).clone();
     config.http.contact = String::new();
+    config.egress.contact = String::new();
     let ctx = Context {
         config: Arc::new(config),
         ..ctx
     };
-    assert!(import(&pool, &ctx, &base).await.is_err());
+    let next = run::step(importer(&base).as_ref(), &ctx).await.unwrap();
+    assert!(matches!(next, run::Next::Wait(_)), "{next:?}");
     let state = store::state(&pool, Catalogue::Wikidata)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(state.last_error.as_deref(), Some("no_contact"));
+    assert_eq!(state.waiting.as_deref(), Some(run::NEEDS_CONTACT));
+    assert_eq!((state.last_error, state.error_count), (None, 0));
     assert!(m.ranges.lock().unwrap().is_empty() && m.api.lock().unwrap().is_empty());
 }
 
@@ -2069,10 +2074,7 @@ async fn without_a_contact_the_importer_waits_for_one(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        state.waiting.as_deref(),
-        Some(pinakes_core::catalogue::wikidata::NEEDS_CONTACT)
-    );
+    assert_eq!(state.waiting.as_deref(), Some(run::NEEDS_CONTACT));
     assert_eq!(state.error_count, 0);
     let m = pinakes_core::telemetry::Metrics::new().unwrap();
     m.catalogue_contact(&config);

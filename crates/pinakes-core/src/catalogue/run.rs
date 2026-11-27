@@ -808,32 +808,19 @@ pub const WITH_IMPORTER: [Catalogue; 7] = [
     Catalogue::Tranco,
     Catalogue::Software,
 ];
-/// What `catalogue status` shows as the `waiting` of a file catalogue (OpenAlex, Podcast Index,
-/// software, Tranco) that is on but has no importer task for want of `http.contact`
-/// (MusicBrainz, OpenStreetMap and Wikidata say it in their own words: their `NEEDS_CONTACT`).
+/// What `catalogue status` shows as the `waiting` of a catalogue that is on but has no importer
+/// task for want of `http.contact`, and of a run that finds none: it waits for one (every
+/// importer names the operator's contact in the requests it makes).
 pub const NEEDS_CONTACT: &str =
-    "needs http.contact: the importer asks for its files with the operator's contact";
+    "needs http.contact: the importer asks its upstream with the operator's contact";
+/// Whether `catalogue` is on without the operator's contact (`http.contact`).
+pub fn needs_contact(config: &Config, catalogue: Catalogue) -> bool {
+    config.catalogues.enabled(catalogue) && config.egress.contact.trim().is_empty()
+}
 /// The catalogues whose importer needs `http.contact` (every one of [`WITH_IMPORTER`]), with
 /// whether `config` leaves one that is on without it and what `waiting` says then.
 pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); WITH_IMPORTER.len()] {
-    WITH_IMPORTER.map(|catalogue| {
-        let (needs, note) = match catalogue {
-            Catalogue::Musicbrainz => (
-                super::musicbrainz::needs_contact(config),
-                super::musicbrainz::NEEDS_CONTACT,
-            ),
-            Catalogue::Osm => (super::osm::needs_contact(config), super::osm::NEEDS_CONTACT),
-            Catalogue::Wikidata => (
-                super::wikidata::needs_contact(config),
-                super::wikidata::NEEDS_CONTACT,
-            ),
-            _ => (
-                config.catalogues.enabled(catalogue) && config.egress.contact.is_empty(),
-                NEEDS_CONTACT,
-            ),
-        };
-        (catalogue, needs, note)
-    })
+    WITH_IMPORTER.map(|catalogue| (catalogue, needs_contact(config, catalogue), NEEDS_CONTACT))
 }
 /// Say in the state rows why a catalogue that is on has no importer task: one without
 /// `http.contact` (its note from [`contact_needs`] in `waiting`). Started with its contact, or

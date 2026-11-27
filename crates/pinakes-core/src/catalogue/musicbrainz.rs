@@ -2179,13 +2179,6 @@ impl Importer for MusicBrainz {
 /// The reason a full import asked for by hand is recorded under (`import_requested`).
 pub const REQUESTED: &str = "asked for by pinakesd catalogue import --request";
 
-/// Whether the catalogue is on but its importer does not start: it needs `http.contact`.
-pub fn needs_contact(config: &crate::config::Config) -> bool {
-    config.catalogues.enabled(Catalogue::Musicbrainz) && config.egress.contact.is_empty()
-}
-/// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
-pub const NEEDS_CONTACT: &str =
-    "needs http.contact: the importer asks the mirror with the operator's contact";
 /// The importer `pinakesd` runs: the official mirror; none without the operator's contact
 /// (`http.contact`), which every request to the mirror names.
 pub fn importer(config: &crate::config::Config) -> Option<Arc<dyn Importer>> {
