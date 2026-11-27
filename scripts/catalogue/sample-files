@@ -293,7 +293,7 @@ tranco)
   [[ $id =~ ^[A-Za-z0-9]{1,16}$ ]] || fail "no list ID"
   fetch "https://tranco-list.eu/download/$id/1000000" "$s/list.csv"
   touch -d "$(curl -sSfI -A "$ua" "https://tranco-list.eu/download/$id/1000000" | sed -n 's/^last-modified: //Ip' | tr -d '\r')" "$s/list.csv" 2>/dev/null || true
-  from=("--from" "$s/list.csv" "--limit" "44") from2=("--from" "$s2/list.csv" "--limit" "1")
+  from=("--from" "$s/list.csv" "--reads" "44") from2=("--from" "$s2/list.csv" "--reads" "1")
   ;;
 esac
 note downloaded_bytes "$downloaded"
@@ -540,7 +540,7 @@ tranco)
   # The day's list ID, then the list, from tranco-list.eu; five homepage reads. A day passed
   # since the update's lookup (an update looks the list up once a day).
   psql -c "UPDATE catalogue_state SET position=position-'checked' WHERE catalogue='tranco'"
-  import "$run/official.log" --update --limit 5
+  import "$run/official.log" --update --reads 5
   list=$(psql -c "SELECT position->>'list' FROM catalogue_state WHERE catalogue='tranco'")
   [[ $list =~ ^[A-Za-z0-9]{1,16}$ ]] || fail "the official list was not read (position: $(position))"
   sites=$(psql -c "SELECT count(*) FROM catalogue_site")

@@ -47,7 +47,7 @@ without a fetch.
   failure.
 - **When.** Reads run after the bulk imports: they wait while a large catalogue's full import
   (Wikidata, MusicBrainz, OpenStreetMap, OpenAlex) runs, and while a large catalogue that is on
-  and has an importer in this build (all four) has not finished its first full
+  (its importer started with `http.contact`) has not finished its first full
   import. Meanwhile the day's list ID is asked at most once a day, the run waits ten minutes,
   `catalogue status` says which catalogue the reads wait for, and
   `pinakes_catalogue_homepage_reads_waiting` is 1. A run reads for at most an hour; while
@@ -110,8 +110,8 @@ also deletes `catalogue_site`.
 
 ## Run it by hand
 
-`pinakesd catalogue import tranco [--from FILE] [--limit N] [--update]` runs one import or
-update now. It reads homepages through an egress of its own, which does not share the running
+`pinakesd catalogue import tranco [--from FILE] [--reads N] [--update]` runs one import or
+update now; `--reads N` reads at most N homepages. It reads homepages through an egress of its own, which does not share the running
 daemon's per-host pace: stop the daemon (or switch Tranco off in it) first, so no host is asked
 twice as fast from one address.
 

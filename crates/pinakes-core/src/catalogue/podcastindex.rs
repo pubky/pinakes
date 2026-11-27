@@ -283,7 +283,7 @@ impl Importer for PodcastIndex {
     /// ([`Job::still_refused`]).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         let (version, at) = self.input.version(&self.client).await?;
         if job

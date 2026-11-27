@@ -2154,7 +2154,7 @@ impl Importer for MusicBrainz {
     /// different subset is a new import, not a change of the old one).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         if job.cursor().is_none() {
             let latest = self.latest().await?;
@@ -2175,9 +2175,6 @@ impl Importer for MusicBrainz {
         Ok(UpdateEnd::Done)
     }
 }
-/// The reason a full import asked for by hand is recorded under (`import_requested`).
-pub const REQUESTED: &str = "asked for by pinakesd catalogue import --request";
-
 /// The importer `pinakesd` runs: the official mirror; none without the operator's contact
 /// (`http.contact`), which every request to the mirror names.
 pub fn importer(config: &crate::config::Config) -> Option<Arc<dyn Importer>> {

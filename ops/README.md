@@ -157,11 +157,8 @@ refused first import, which no lag alert covers, keeps alerting. A catalogue tha
 but whose importer can't start (one with an importer but no `http.contact`) raises
 neither: its `waiting` in `catalogue status` and `pinakes_catalogue_needs_contact` say so, and
 `CatalogueNeedsContact` (warning) fires after an hour of it. `CatalogueFirstImportStalled`
-(warning) fires when a catalogue with an importer (`musicbrainz`, `osm`, `wikidata`, `openalex`, `podcastindex`,
-`software`, `tranco`) has been on for two days
-without a finished import: a wait for free disk or the large-import turn counts no error. Its
-list names the catalogues that have an importer (a catalogue without one never finishes an
-import); a step that adds an importer adds its name. On a new host with every large catalogue on,
+(warning) fires when a catalogue has been on for two days
+without a finished import: a wait for free disk or the large-import turn counts no error. On a new host with every large catalogue on,
 the large-import turn can hold the planet's first import back for more than two days while
 another catalogue's runs: then the alert is expected, and its `waiting` in `catalogue status`
 ends with "one large import runs at a time". `CatalogueTurnBlocked` (warning) covers the one

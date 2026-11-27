@@ -155,7 +155,7 @@ fn rows(catalogue: Catalogue, cards: &[Card]) -> (Vec<Row>, u64) {
                 // Its ID as far as a valid one goes: an over-long ID is one reason to refuse.
                 let mut shown: String = card.source_id.chars().take(128).collect();
                 shown.retain(|c| !c.is_control());
-                tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card refused");
+                tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card rejected");
             }
         }
     }
@@ -317,7 +317,7 @@ async fn write_part_counted(
     .fetch_one(&mut **tx)
     .await?;
     for id in &refused {
-        tracing::debug!(catalogue = catalogue.name(), source_id = %id, "catalogue card refused by the table's checks");
+        tracing::debug!(catalogue = catalogue.name(), source_id = %id, "catalogue card rejected by the table's checks");
     }
     let ids: Vec<&str> = part
         .iter()
@@ -673,19 +673,21 @@ fn one_line(text: Option<&str>) -> String {
         _ => "-".into(),
     }
 }
-/// `pinakesd catalogue status`: one line per catalogue with its switch, phase, cards, the last
-/// full import and update, why it waits and its last error.
+/// `pinakesd catalogue status`: one line per catalogue with its switch, phase, cards, the upstream
+/// version it read (a dump's date, a list's ID), the last full import and update, how current its
+/// cards are, why it waits and its last error.
 pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
     let at = |t: Option<DateTime<Utc>>| {
         t.map_or("-".to_owned(), |t| {
             t.format("%Y-%m-%d %H:%M:%SZ").to_string()
         })
     };
-    let mut lines: Vec<[String; 9]> = vec![[
+    let mut lines: Vec<[String; 10]> = vec![[
         "catalogue".to_owned(),
         "enabled".into(),
         "phase".into(),
         "cards".into(),
+        "upstream version".into(),
         "last import".into(),
         "last update".into(),
         "current as of".into(),
@@ -704,6 +706,7 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             .into(),
             state.map_or("idle", |s| s.phase.as_str()).to_owned(),
             state.map_or(0, |s| s.cards).to_string(),
+            one_line(state.and_then(|s| s.upstream_version.as_deref())),
             at(state.and_then(|s| s.last_import_at)),
             at(state.and_then(|s| s.last_update_at)),
             at(state.and_then(|s| s.current_as_of)),
@@ -711,7 +714,7 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             one_line(state.and_then(|s| s.last_error.as_deref())),
         ]);
     }
-    let widths: Vec<usize> = (0..9)
+    let widths: Vec<usize> = (0..10)
         .map(|i| {
             lines
                 .iter()
@@ -776,6 +779,7 @@ mod tests {
                 "disabled",
                 "1234",
                 "2026-11-24",
+                "2026-11-24",
                 "10:00:00Z",
                 "-",
                 "2026-11-23",
@@ -788,7 +792,7 @@ mod tests {
         let wikidata: Vec<_> = lines[1].split_whitespace().collect();
         assert_eq!(
             wikidata,
-            ["wikidata", "yes", "idle", "0", "-", "-", "-", "-", "-"]
+            ["wikidata", "yes", "idle", "0", "-", "-", "-", "-", "-", "-"]
         );
         // A full import an update asked for shows with its reason, and why it waits.
         let mut requested = State {

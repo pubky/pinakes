@@ -886,7 +886,7 @@ async fn an_update_that_would_remove_too_much_is_refused_and_waits(pool: PgPool)
     run::request_import(
         &pool,
         Catalogue::Musicbrainz,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -991,7 +991,7 @@ async fn an_import_asked_for_stays_asked_for_when_cut_off(pool: PgPool) {
     run::request_import(
         &pool,
         Catalogue::Musicbrainz,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -1024,7 +1024,7 @@ async fn an_empty_dump_never_empties_the_catalogue(pool: PgPool) {
     run::request_import(
         &pool,
         Catalogue::Musicbrainz,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -1165,7 +1165,7 @@ async fn a_request_stands_until_its_import_ends(pool: PgPool) {
     run::request_import(
         &pool,
         Catalogue::Musicbrainz,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -1179,7 +1179,7 @@ async fn a_request_stands_until_its_import_ends(pool: PgPool) {
     assert_eq!(state.run.as_deref(), Some("import"));
     assert_eq!(
         state.import_requested.as_deref(),
-        Some(pinakes_core::catalogue::musicbrainz::REQUESTED)
+        Some(pinakes_core::catalogue::run::REQUESTED)
     );
     run::step(&importer(&s, source), &s.ctx).await.unwrap();
     let state = store::state(&pool, Catalogue::Musicbrainz)
@@ -1312,7 +1312,7 @@ async fn finished_foreign_and_handed_over_cursors(pool: PgPool) {
     run::request_import(
         &pool,
         Catalogue::Musicbrainz,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -2268,7 +2268,7 @@ async fn search_finds_the_cards_until_the_catalogue_is_off(pool: PgPool) {
 }
 
 /// The daemon runs each importer while its catalogue is on and the operator's contact is set,
-/// and only then, in their order (`run::WITH_IMPORTER`); Wikidata's and the file catalogues',
+/// and only then, in their order (`run::importers`); Wikidata's and the file catalogues',
 /// on by default, start with the same contact.
 #[test]
 fn the_daemon_runs_the_importer_while_the_catalogue_is_on() {
@@ -2286,11 +2286,14 @@ fn the_daemon_runs_the_importer_while_the_catalogue_is_on() {
     };
     // Every importer but OpenStreetMap's, in their order: MusicBrainz, then Wikidata (also on by
     // default, started with the same contact), then the file catalogues.
-    let on: Vec<Catalogue> = run::WITH_IMPORTER
-        .into_iter()
-        .filter(|c| *c != Catalogue::Osm)
-        .collect();
-    assert_eq!(on[..2], [Catalogue::Musicbrainz, Catalogue::Wikidata]);
+    let on = [
+        Catalogue::Musicbrainz,
+        Catalogue::Wikidata,
+        Catalogue::Openalex,
+        Catalogue::Podcastindex,
+        Catalogue::Tranco,
+        Catalogue::Software,
+    ];
     assert_eq!(started(&config), on);
     config.catalogues.musicbrainz.enabled = false;
     // The others, in their order.

@@ -646,7 +646,7 @@ pub async fn reads_wait(config: &Config, pool: &sqlx::PgPool) -> Result<Option<S
         .filter(|c| c.large())
         .map(Catalogue::name)
         .collect();
-    let first: Vec<&str> = super::run::WITH_IMPORTER
+    let first: Vec<&str> = Catalogue::ALL
         .into_iter()
         .filter(|c| c.large() && config.catalogues.enabled(*c) && !config.egress.contact.is_empty())
         .map(Catalogue::name)
@@ -793,7 +793,7 @@ impl Importer for Tranco {
     /// An update; a full import instead when one was asked for (`--request`).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         self.run(job).await?;
         Ok(UpdateEnd::Done)

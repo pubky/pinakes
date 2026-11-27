@@ -457,7 +457,7 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     run::request_import(
         &pool,
         Catalogue::Software,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -686,7 +686,7 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     run::request_import(
         &pool,
         Catalogue::Podcastindex,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -960,7 +960,7 @@ async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) 
     run::request_import(
         &pool,
         Catalogue::Openalex,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -2145,13 +2145,9 @@ async fn a_requested_import_takes_over_an_update_under_way(pool: PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        run::request_import(
-            &pool,
-            catalogue,
-            pinakes_core::catalogue::musicbrainz::REQUESTED,
-        )
-        .await
-        .unwrap();
+        run::request_import(&pool, catalogue, pinakes_core::catalogue::run::REQUESTED)
+            .await
+            .unwrap();
         let gets = (
             files.gets("/db-dump.tar.gz"),
             podcasts.gets("/podcastindex_feeds.db.tgz"),
@@ -2528,7 +2524,7 @@ async fn a_tranco_refusal_gives_way_to_a_full_import_asked_for(pool: PgPool) {
     run::request_import(
         &pool,
         Catalogue::Tranco,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();

@@ -673,7 +673,7 @@ async fn catalogue_command(
             pinakes_core::catalogue::run::request_import(
                 pool,
                 catalogue,
-                pinakes_core::catalogue::musicbrainz::REQUESTED,
+                pinakes_core::catalogue::run::REQUESTED,
             )
             .await?;
             writeln!(out, "a full import of catalogue {catalogue} is asked for: the process running its importer starts it after an update under way, or at its next step (a full import under way is the one asked for)")?;
@@ -684,129 +684,68 @@ async fn catalogue_command(
             }
         }
         CatalogueCommand::Import {
-            catalogue: catalogue @ (Catalogue::Musicbrainz | Catalogue::Osm | Catalogue::Wikidata),
+            catalogue,
             from,
             limit,
+            reads,
             update,
             force,
             since,
             ..
         } => {
-            anyhow::ensure!(from.len() <= 1, "--from is given once");
-            import(
-                pool,
-                config,
+            let options = ImportOptions {
                 catalogue,
-                ImportOptions {
-                    from: from.first().map(String::as_str),
-                    limit,
-                    update,
-                    force,
-                    since,
-                },
-                out,
-            )
-            .await?;
-        }
-        CatalogueCommand::Import {
-            catalogue,
-            from,
-            limit,
-            update,
-            ..
-        } => {
-            let args = ImportArgs {
-                catalogue,
-                from,
+                from: &from,
                 limit,
+                reads,
                 update,
+                force,
+                since,
             };
-            import_files(pool, config, &args, out).await?;
+            import(pool, config, options, out).await?;
         }
     }
     Ok(())
 }
 
-/// `catalogue import NAME`: one run of the catalogue's importer now, through the daemon's code
-/// (`catalogue::run::run_once`): a full import, or with `--update` an update, from the official
-/// mirror or `--from` (a local directory holding one dump's files, or a mirror URL), with
-/// `--limit` in place of the configured limit (below the cards stored only with `--force`). It
-/// prints why it waits, then the cards before and after and the catalogue's state.
 /// What `catalogue import` was given.
 struct ImportOptions<'a> {
-    from: Option<&'a str>,
+    catalogue: Catalogue,
+    /// `--from`: once (software: once per registry, `REGISTRY=FILE|URL`).
+    from: &'a [String],
+    /// MusicBrainz and Wikidata: the card limit in place of the configured one (`--limit`).
     limit: Option<u64>,
+    /// Tranco: at most this many homepages read (`--reads`).
+    reads: Option<u64>,
     update: bool,
+    /// A `--limit` below the cards stored (`--force`).
     force: bool,
     /// Wikidata: where the update reads the changes from (`--since`, with `--update`).
     since: Option<chrono::DateTime<chrono::Utc>>,
 }
+/// `catalogue import NAME`: one run of the catalogue's importer now, through the daemon's code
+/// (`catalogue::run::run_once_with`): a full import, or with `--update` an update, from the
+/// official files or `--from` ([`importer_for`]), with `--limit` in place of the configured limit
+/// (below the cards stored only with `--force`). It prints why it waits, then the run that ran (an
+/// update can hand over to a full import), the cards before and after, what the run wrote and the
+/// catalogues' state.
 async fn import(
     pool: &sqlx::PgPool,
     config: &Config,
-    catalogue: Catalogue,
     options: ImportOptions<'_>,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    use pinakes_core::catalogue::{musicbrainz, osm, run, store, wikidata};
-    let ImportOptions {
-        from,
-        limit,
-        update,
-        force,
-        since,
-    } = options;
+    use pinakes_core::catalogue::{run, store};
+    let catalogue = options.catalogue;
     let mut config = config.clone();
-    if limit.is_some() {
+    if let Some(limit) = options.limit {
         match catalogue {
-            Catalogue::Musicbrainz => config.catalogues.musicbrainz.limit = limit,
-            Catalogue::Wikidata => config.catalogues.wikidata.limit = limit,
+            Catalogue::Musicbrainz => config.catalogues.musicbrainz.limit = Some(limit),
+            Catalogue::Wikidata => config.catalogues.wikidata.limit = Some(limit),
             _ => {}
         }
     }
-    let importer: std::sync::Arc<dyn run::Importer> = match catalogue {
-        Catalogue::Osm => {
-            if from.is_none() && config.egress.contact.is_empty() {
-                bail!("set http.contact (or PINAKES__HTTP__CONTACT): OpenStreetMap's bulk files are read with the operator's contact");
-            }
-            std::sync::Arc::new(osm::OsmImporter {
-                input: match from {
-                    // A URL is refused by the one `--from` rule's checks, and a valid one too:
-                    // OpenStreetMap's `--from` names a local file.
-                    Some(from) if pinakes_core::catalogue::fetch::from_url(from)?.is_some() => {
-                        bail!("--from: the osm importer reads a local file (its downloads are the region's)")
-                    }
-                    Some(file) => osm::Input::Files(vec![PathBuf::from(file)]),
-                    None => osm::Input::Region,
-                },
-                region: config.catalogues.osm.region.clone(),
-                ..Default::default()
-            })
-        }
-        Catalogue::Musicbrainz => {
-            let source = match from {
-                Some(from) => musicbrainz::Source::parse(from)?,
-                None => musicbrainz::Source::official(),
-            };
-            if matches!(source, musicbrainz::Source::Mirror(_)) && config.egress.contact.is_empty()
-            {
-                bail!("set http.contact (or PINAKES__HTTP__CONTACT): the dump mirror is asked with the operator's contact");
-            }
-            std::sync::Arc::new(
-                musicbrainz::MusicBrainz::new(source, &config.egress.contact)?.configured(&config),
-            )
-        }
-        Catalogue::Wikidata => {
-            if config.egress.contact.is_empty() {
-                bail!("set http.contact (or PINAKES__HTTP__CONTACT): Wikimedia is asked with the operator's contact");
-            }
-            let mut importer = wikidata::Wikidata::for_config(&config);
-            importer.from = from.map(wikidata::From::parse).transpose()?;
-            importer.cli_limit = limit;
-            std::sync::Arc::new(importer)
-        }
-        other => bail!("catalogue {other} has no importer in this build"),
-    };
+    let importer = importer_for(&config, &options)?;
     let before = store::state(pool, catalogue).await?;
     let cards = before.as_ref().map_or(0, |s| s.cards);
     let stored_limit = before
@@ -814,6 +753,7 @@ async fn import(
         .and_then(|s| s.position.as_ref())
         .and_then(|p| p.get("limit"))
         .and_then(|l| l.as_u64());
+    let force = options.force;
     if let Some(limit) = config.catalogues.limit(catalogue) {
         // A limit other than the one the cards were read with makes a full import of the new
         // subset (an update hands over to one: Wikidata's past the five-day gap, or one already
@@ -830,7 +770,7 @@ async fn import(
     }
     let ctx = run::Context::new(pool.clone(), std::sync::Arc::new(config.clone()));
     let started = std::time::Instant::now();
-    let kind = if update {
+    let kind = if options.update {
         run::Run::Update
     } else {
         run::Run::Import
@@ -840,11 +780,12 @@ async fn import(
     // remove the rest. A full import with `--force` keeps the floor (`catalogue allow-shrink` lets
     // a real shrink through).
     let expect_shrink = force
-        && limit.is_some_and(|l| {
+        && options.limit.is_some_and(|l| {
             i64::try_from(l).is_ok_and(|l| l < cards) && stored_limit.is_none_or(|s| l < s)
         });
     // `--since` moves the position under the run's own lock, after the command's own refusals
     // (a refused command changes nothing), so no daemon can start an update in between.
+    let since = options.since;
     let first = async {
         match since {
             Some(since) => move_position(pool, catalogue, since).await,
@@ -863,7 +804,7 @@ async fn import(
     };
     writeln!(
         out,
-        "catalogue {catalogue}: {} finished in {:.0} s; {cards} cards before, {} after; written: {} new, {} changed, {} unchanged, {} refused, {} removed",
+        "catalogue {catalogue}: {} finished in {:.0} s; {cards} cards before, {} after; written: {} new, {} changed, {} unchanged, {} rejected, {} removed",
         ran.name(),
         started.elapsed().as_secs_f64(),
         state.cards,
@@ -878,118 +819,117 @@ async fn import(
     Ok(())
 }
 
-/// `catalogue import NAME` for the catalogues that read files (all but MusicBrainz): one run of
-/// the catalogue's importer now, through the daemon's own code (`catalogue::run::run_once`): a full import, or with `--update` an update, from the
-/// official files or `--from` (OpenAlex: a directory holding a snapshot's `data/jsonl/` tree, or
-/// another bucket URL; Podcast Index: the archive or its `.db`; software: `REGISTRY=FILE|URL`
-/// once per registry replaced, REGISTRY one of `crates.io`, `f-droid` (its `entry.json`),
-/// `flathub`; Tranco: a list file). Tranco's `--limit` reads at most that many homepages. It prints why it waits, then the
-/// cards before and after and the catalogue's state.
-async fn import_files(
-    pool: &sqlx::PgPool,
+/// The importer `catalogue import` runs: of the official files, or of `--from`: MusicBrainz, a
+/// local directory holding one dump's files or a mirror URL; OpenStreetMap, a `.osm.pbf` file;
+/// Wikidata, a dump file or URL; OpenAlex, a directory holding a snapshot's `data/jsonl/` tree or
+/// another bucket URL; Podcast Index, the archive or its `.db`; software, `REGISTRY=FILE|URL` once
+/// per registry replaced (`crates.io`, `f-droid`, its `entry.json`, `flathub`); Tranco, a list
+/// file. Without `http.contact` only local files are read, and Tranco not at all.
+fn importer_for(
     config: &Config,
-    args: &ImportArgs,
-    out: &mut dyn std::io::Write,
-) -> Result<()> {
+    options: &ImportOptions<'_>,
+) -> Result<std::sync::Arc<dyn pinakes_core::catalogue::run::Importer>> {
     use pinakes_core::catalogue::{
-        fetch::Input, openalex, podcastindex, run, software, store, tranco,
+        fetch::Input, musicbrainz, openalex, osm, podcastindex, software, tranco, wikidata,
     };
-    let catalogue = args.catalogue;
+    use std::sync::Arc;
+    let catalogue = options.catalogue;
     let contact = &config.egress.contact;
-    let from = |n: usize| args.from.get(n).map(String::as_str);
     anyhow::ensure!(
-        args.from.len() <= 1 || catalogue == Catalogue::Software,
+        options.from.len() <= 1 || catalogue == Catalogue::Software,
         "--from is given once (software: once per registry)"
     );
-    // Tranco reads homepages over the network whatever its list.
-    if contact.is_empty()
-        && (catalogue == Catalogue::Tranco
-            || args.from.is_empty()
-            || args.from.iter().any(|f| f.contains("://"))
-            || catalogue == Catalogue::Software && args.from.len() < 3)
-    {
-        bail!("set http.contact (or PINAKES__HTTP__CONTACT): catalogue files are asked for with the operator's contact");
-    }
-    anyhow::ensure!(
-        args.limit.is_none() || catalogue == Catalogue::Tranco,
-        "--limit is Tranco's (homepages read); the other catalogues read their whole file"
-    );
-    let importer: std::sync::Arc<dyn run::Importer> = match catalogue {
-        Catalogue::Openalex => {
-            let base = match from(0) {
-                Some(from) => Input::parse(from)?,
-                None => Input::parse(openalex::BUCKET)?,
-            };
-            std::sync::Arc::new(openalex::OpenAlex::new(base, contact)?)
-        }
-        Catalogue::Podcastindex => {
-            let input = Input::parse(from(0).unwrap_or(podcastindex::DATABASE))?;
-            std::sync::Arc::new(podcastindex::PodcastIndex::new(input, contact)?.configured(config))
-        }
-        Catalogue::Software => {
-            let mut sources = software::Sources::official();
-            for given in &args.from {
-                let (name, file) = given.split_once('=').context(
-                    "software's --from is REGISTRY=FILE|URL (crates.io, f-droid or flathub)",
-                )?;
-                let registry = software::Registry::parse(name)
-                    .context("software's registries are crates.io, f-droid and flathub")?;
-                let input = Input::parse(file)?;
-                match registry {
-                    software::Registry::Crates => sources.crates = input,
-                    software::Registry::FDroid => sources.fdroid = input,
-                    software::Registry::Flathub => sources.flathub = input,
-                }
+    let from = options.from.first().map(String::as_str);
+    Ok(match catalogue {
+        Catalogue::Osm => {
+            if from.is_none() && contact.is_empty() {
+                bail!("set http.contact (or PINAKES__HTTP__CONTACT): OpenStreetMap's bulk files are read with the operator's contact");
             }
-            std::sync::Arc::new(software::Software::new(sources, contact)?)
-        }
-        Catalogue::Tranco => {
-            let list = match from(0) {
-                Some(from) => tranco::ListSource::Given(Input::parse(from)?),
-                None => tranco::ListSource::Official,
-            };
-            let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
-            let importer = tranco::Tranco::new(list, egress, contact)?;
-            std::sync::Arc::new(match args.limit {
-                Some(n) => importer.reads(n),
-                None => importer,
+            Arc::new(osm::OsmImporter {
+                input: match from {
+                    // A URL is refused by the one `--from` rule's checks, and a valid one too:
+                    // OpenStreetMap's `--from` names a local file.
+                    Some(from) if pinakes_core::catalogue::fetch::from_url(from)?.is_some() => {
+                        bail!("--from: the osm importer reads a local file (its downloads are the region's)")
+                    }
+                    Some(file) => osm::Input::Files(vec![PathBuf::from(file)]),
+                    None => osm::Input::Region,
+                },
+                region: config.catalogues.osm.region.clone(),
+                ..Default::default()
             })
         }
-        other => bail!("catalogue {other} has no importer in this build"),
-    };
-    if !config.catalogues.enabled(catalogue) {
-        writeln!(
-            out,
-            "catalogue {catalogue} is off in this configuration: its cards stay out of search and lookups until it is on"
-        )?;
-    }
-    let before = store::state(pool, catalogue).await?.map_or(0, |s| s.cards);
-    let ctx = run::Context::new(pool.clone(), std::sync::Arc::new(config.clone()));
-    let started = std::time::Instant::now();
-    let kind = if args.update {
-        run::Run::Update
-    } else {
-        run::Run::Import
-    };
-    let (state, written) = run::run_once(importer, &ctx, kind, |why| {
-        let _ = writeln!(out, "waiting: {why}");
+        Catalogue::Musicbrainz => {
+            let source = match from {
+                Some(from) => musicbrainz::Source::parse(from)?,
+                None => musicbrainz::Source::official(),
+            };
+            if matches!(source, musicbrainz::Source::Mirror(_)) && contact.is_empty() {
+                bail!("set http.contact (or PINAKES__HTTP__CONTACT): the dump mirror is asked with the operator's contact");
+            }
+            Arc::new(musicbrainz::MusicBrainz::new(source, contact)?.configured(config))
+        }
+        Catalogue::Wikidata => {
+            if contact.is_empty() {
+                bail!("set http.contact (or PINAKES__HTTP__CONTACT): Wikimedia is asked with the operator's contact");
+            }
+            let mut importer = wikidata::Wikidata::for_config(config);
+            importer.from = from.map(wikidata::From::parse).transpose()?;
+            importer.cli_limit = options.limit;
+            Arc::new(importer)
+        }
+        Catalogue::Openalex | Catalogue::Podcastindex | Catalogue::Software | Catalogue::Tranco => {
+            // Tranco reads homepages over the network whatever its list.
+            let given = options.from;
+            if contact.is_empty()
+                && (catalogue == Catalogue::Tranco
+                    || given.is_empty()
+                    || given.iter().any(|f| f.contains("://"))
+                    || catalogue == Catalogue::Software && given.len() < 3)
+            {
+                bail!("set http.contact (or PINAKES__HTTP__CONTACT): catalogue files are asked for with the operator's contact");
+            }
+            match catalogue {
+                Catalogue::Openalex => {
+                    let base = Input::parse(from.unwrap_or(openalex::BUCKET))?;
+                    Arc::new(openalex::OpenAlex::new(base, contact)?)
+                }
+                Catalogue::Podcastindex => {
+                    let input = Input::parse(from.unwrap_or(podcastindex::DATABASE))?;
+                    Arc::new(podcastindex::PodcastIndex::new(input, contact)?.configured(config))
+                }
+                Catalogue::Software => {
+                    let mut sources = software::Sources::official();
+                    for given in given {
+                        let (name, file) = given.split_once('=').context(
+                            "software's --from is REGISTRY=FILE|URL (crates.io, f-droid or flathub)",
+                        )?;
+                        let registry = software::Registry::parse(name)
+                            .context("software's registries are crates.io, f-droid and flathub")?;
+                        let input = Input::parse(file)?;
+                        match registry {
+                            software::Registry::Crates => sources.crates = input,
+                            software::Registry::FDroid => sources.fdroid = input,
+                            software::Registry::Flathub => sources.flathub = input,
+                        }
+                    }
+                    Arc::new(software::Software::new(sources, contact)?)
+                }
+                _ => {
+                    let list = match from {
+                        Some(from) => tranco::ListSource::Given(Input::parse(from)?),
+                        None => tranco::ListSource::Official,
+                    };
+                    let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
+                    let importer = tranco::Tranco::new(list, egress, contact)?;
+                    Arc::new(match options.reads {
+                        Some(n) => importer.reads(n),
+                        None => importer,
+                    })
+                }
+            }
+        }
     })
-    .await?;
-    writeln!(
-        out,
-        "catalogue {catalogue}: {} finished in {:.0} s; {before} cards before, {} after; written: {} new, {} changed, {} unchanged, {} refused, {} removed",
-        kind.name(),
-        started.elapsed().as_secs_f64(),
-        state.cards,
-        written.inserted,
-        written.changed,
-        written.unchanged,
-        written.rejected,
-        written.removed
-    )?;
-    let states = store::states(pool).await?;
-    writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
-    Ok(())
 }
 
 /// `catalogue import NAME --update --since T`: the position moves to `T`, as the first step of the
@@ -1010,13 +950,13 @@ async fn move_position(
         bail!("catalogue {catalogue} has no finished full import: run catalogue import {catalogue} first");
     }
     // The asked-for import runs first (the runner's next step), and its end sets the position.
-    if state.import_requested.as_deref() == Some(pinakes_core::catalogue::musicbrainz::REQUESTED) {
+    if state.import_requested.as_deref() == Some(pinakes_core::catalogue::run::REQUESTED) {
         bail!("catalogue {catalogue}: a full import is asked for (catalogue import {catalogue} --request); --since waits until it has run");
     }
     let moved = sqlx::query("UPDATE catalogue_state SET position=coalesce(position,'{}'::jsonb)||jsonb_build_object('time',$2::text,'import',false),import_requested=CASE WHEN import_requested=$3 THEN import_requested END,run=CASE WHEN run='update' THEN NULL ELSE run END,cursor=CASE WHEN run='update' THEN NULL ELSE cursor END,updated_at=now() WHERE catalogue=$1 AND (run IS NULL OR run='update')")
         .bind(catalogue.name())
         .bind(since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .bind(pinakes_core::catalogue::musicbrainz::REQUESTED)
+        .bind(pinakes_core::catalogue::run::REQUESTED)
         .execute(pool)
         .await?
         .rows_affected();
@@ -1160,13 +1100,16 @@ enum Command {
 enum CatalogueCommand {
     Status,
     Drop(Catalogue),
-    /// `catalogue import NAME [--from DIR|FILE|URL] [--limit N] [--update [--since TIME]] [--force] | --request`.
+    /// `catalogue import NAME [--from DIR|FILE|URL] [--limit N] [--reads N] [--update [--since TIME]] [--force] | --request`.
     Import {
         catalogue: Catalogue,
         /// Local files or directories, or URLs, in place of the official files (software: one
         /// per registry, `REGISTRY=FILE|URL`).
         from: Vec<String>,
+        /// MusicBrainz and Wikidata: the card limit.
         limit: Option<u64>,
+        /// Tranco: at most this many homepages read.
+        reads: Option<u64>,
         update: bool,
         /// Only ask the daemon for a full import (`--request`).
         request: bool,
@@ -1193,16 +1136,6 @@ fn join_pause(drained: i64, nothing_joined: bool) -> Option<Duration> {
     } else {
         Duration::from_secs(1)
     })
-}
-/// What `catalogue import` was given, for the catalogues that read files (`import_files`).
-#[derive(Clone, Debug, PartialEq)]
-struct ImportArgs {
-    catalogue: Catalogue,
-    from: Vec<String>,
-    /// Tranco: at most this many homepages read.
-    limit: Option<u64>,
-    /// An update instead of a full import.
-    update: bool,
 }
 /// How long `pinakesd healthcheck` waits for the admin listener's answer, all of it.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1286,21 +1219,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                                 Catalogue::ALL.map(Catalogue::name).join(", ")
                             )
                         })?;
-                        anyhow::ensure!(
-                            matches!(
-                                catalogue,
-                                Catalogue::Musicbrainz
-                                    | Catalogue::Osm
-                                    | Catalogue::Wikidata
-                                    | Catalogue::Openalex
-                                    | Catalogue::Podcastindex
-                                    | Catalogue::Software
-                                    | Catalogue::Tranco
-                            ),
-                            "catalogue {catalogue} has no importer in this build"
-                        );
-                        let (mut from, mut limit, mut update, mut request, mut force) =
-                            (Vec::new(), None, false, false, false);
+                        let (mut from, mut limit, mut reads, mut update, mut request, mut force) =
+                            (Vec::new(), None, None, false, false, false);
                         let mut since = None;
                         while let Some(option) = args.next() {
                             match option.as_str() {
@@ -1312,6 +1232,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                                         .filter(|n| *n >= 1)
                                         .context("--limit requires a whole number of at least 1")?;
                                     limit = Some(n);
+                                }
+                                "--reads" => {
+                                    let n: u64 = args
+                                        .next()
+                                        .and_then(|n| n.parse().ok())
+                                        .filter(|n| *n >= 1)
+                                        .context("--reads requires a whole number of at least 1")?;
+                                    reads = Some(n);
                                 }
                                 "--update" => update = true,
                                 "--request" => request = true,
@@ -1338,7 +1266,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             }
                         }
                         anyhow::ensure!(
-                            !request || (from.is_empty() && limit.is_none() && !update && !force),
+                            !request || (from.is_empty() && limit.is_none() && reads.is_none() && !update && !force),
                             "catalogue import --request takes no other option"
                         );
                         // Only MusicBrainz's and Wikidata's --limit remove stored cards (below
@@ -1347,10 +1275,21 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             !force || matches!(catalogue, Catalogue::Musicbrainz | Catalogue::Wikidata),
                             "--force applies to catalogue import musicbrainz and wikidata only (a --limit below the cards stored); catalogue {catalogue} takes no --force"
                         );
+                        anyhow::ensure!(
+                            reads.is_none() || catalogue == Catalogue::Tranco,
+                            "--reads is Tranco's (at most N homepages read); catalogue {catalogue} takes no --reads"
+                        );
                         // OpenStreetMap: `--from` a PBF file to import; updates read upstream.
                         anyhow::ensure!(
                             catalogue != Catalogue::Osm || (limit.is_none() && !(update && !from.is_empty())),
                             "catalogue import osm takes --from FILE (a .osm.pbf) for a full import; --update reads the region's change files and takes no --from; there is no --limit (use catalogues.osm.region)"
+                        );
+                        // A card limit is MusicBrainz's and Wikidata's: the other catalogues read
+                        // their whole files.
+                        anyhow::ensure!(
+                            limit.is_none() || matches!(catalogue, Catalogue::Musicbrainz | Catalogue::Wikidata),
+                            "--limit (cards) is MusicBrainz's and Wikidata's; catalogue {catalogue} reads its whole file{}",
+                            if catalogue == Catalogue::Tranco { " (--reads N reads at most N homepages)" } else { "" }
                         );
                         anyhow::ensure!(
                             since.is_none() || (update && catalogue == Catalogue::Wikidata),
@@ -1370,6 +1309,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             catalogue,
                             from,
                             limit,
+                            reads,
                             update,
                             request,
                             force,
@@ -1402,7 +1342,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue clear-refusal NAME | catalogue import NAME [--from FILE|DIR|URL]… [--limit N] [--update [--since TIME]] [--force] | catalogue import NAME --request | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue clear-refusal NAME | catalogue import NAME [--from FILE|DIR|URL]… [--limit N] [--reads N] [--update [--since TIME]] [--force] | catalogue import NAME --request | parse-worker SECS] (catalogue import: --limit and --force are musicbrainz's and wikidata's, --reads tranco's, --since wikidata's with --update; osm takes none of them)"
                             .into(),
                     ),
                 ))
@@ -1501,6 +1441,7 @@ mod tests {
                 catalogue: Catalogue::Musicbrainz,
                 from: vec!["/tmp/dump".into()],
                 limit: Some(500),
+                reads: None,
                 update: true,
                 request: false,
                 force: false,
@@ -1551,7 +1492,7 @@ mod tests {
             &["catalogue", "import", "openalex", "--force"],
             &["catalogue", "import", "podcastindex", "--force"],
             &["catalogue", "import", "software", "--update", "--force"],
-            &["catalogue", "import", "tranco", "--limit", "5", "--force"],
+            &["catalogue", "import", "tranco", "--reads", "5", "--force"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
@@ -1602,25 +1543,33 @@ mod tests {
                     "flathub=https://x.example/a.xml.gz".into()
                 ],
                 limit: None,
+                reads: None,
                 update: true,
                 request: false,
                 force: false,
                 since: None,
             }
         );
-        let (_, command) = parse(&["catalogue", "import", "tranco", "--limit", "50"]).unwrap();
+        // Tranco's homepage reads are `--reads`; a card `--limit` is MusicBrainz's and Wikidata's.
+        let (_, command) = parse(&["catalogue", "import", "tranco", "--reads", "50"]).unwrap();
         assert!(matches!(
             command,
             Command::Catalogue(CatalogueCommand::Import {
-                limit: Some(50),
+                limit: None,
+                reads: Some(50),
                 ..
             })
         ));
         for bad in [
             &["catalogue", "import"][..],
             &["catalogue", "import", "nope"],
-            &["catalogue", "import", "tranco", "--limit", "0"],
-            &["catalogue", "import", "tranco", "--limit"],
+            &["catalogue", "import", "tranco", "--reads", "0"],
+            &["catalogue", "import", "tranco", "--reads"],
+            &["catalogue", "import", "tranco", "--limit", "5"],
+            &["catalogue", "import", "openalex", "--limit", "5"],
+            &["catalogue", "import", "musicbrainz", "--reads", "5"],
+            &["catalogue", "import", "osm", "--force"],
+            &["catalogue", "import", "tranco", "--reads", "5", "--request"],
             &["catalogue", "import", "openalex", "--from"],
             &["catalogue", "status", "--update"],
             &["--from", "x", "catalogue", "import", "openalex"],
@@ -2004,6 +1953,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 limit,
+                reads: None,
                 update,
                 request: false,
                 force,
@@ -2048,6 +1998,7 @@ mod tests {
                 catalogue: Catalogue::Musicbrainz,
                 from: Vec::new(),
                 limit: None,
+                reads: None,
                 update: false,
                 request: true,
                 force: false,
@@ -2159,6 +2110,7 @@ mod tests {
             catalogue: Catalogue::Musicbrainz,
             from: vec![dump.to_string_lossy().into_owned()],
             limit,
+            reads: None,
             update: false,
             request: false,
             force,
@@ -2194,6 +2146,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(olds().await, 0, "{}", String::from_utf8_lossy(&out));
+        // The closing line names the run and what it wrote (cards the checks refuse as
+        // `rejected`, as the metric counts them); the status table shows the dump read.
+        let printed = String::from_utf8(out).unwrap();
+        let closing = printed
+            .lines()
+            .find(|l| l.starts_with("catalogue musicbrainz: import finished"))
+            .unwrap_or_else(|| panic!("{printed}"));
+        assert!(
+            closing.contains(" rejected, ") && closing.contains(" removed"),
+            "{closing}"
+        );
+        assert!(
+            printed.lines().any(|l| l.contains("upstream version")),
+            "{printed}"
+        );
     }
 
     /// A Wikidata update with a configured limit below the cards stored is refused without
@@ -2224,6 +2191,7 @@ mod tests {
                 catalogue: Catalogue::Wikidata,
                 from: Vec::new(),
                 limit: None,
+                reads: None,
                 update: true,
                 request: false,
                 force: false,
@@ -2277,6 +2245,7 @@ mod tests {
                 catalogue: Catalogue::Wikidata,
                 from: Vec::new(),
                 limit: None,
+                reads: None,
                 update: true,
                 request: false,
                 force: false,
@@ -2308,7 +2277,7 @@ mod tests {
         );
         // While an import the operator asked for (`--request`) waits, --since is refused (that
         // import runs first) and the request stays.
-        let requested = pinakes_core::catalogue::musicbrainz::REQUESTED;
+        let requested = pinakes_core::catalogue::run::REQUESTED;
         sqlx::query("UPDATE catalogue_state SET import_requested=$1 WHERE catalogue='wikidata'")
             .bind(requested)
             .execute(&pool)

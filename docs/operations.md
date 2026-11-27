@@ -21,7 +21,7 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] reindex` | Builds the text index from the database into a new generation and switches to it. Run it with the daemon stopped ([text index](#text-index)). |
 | `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
-| `pinakesd [--config PATH] catalogue import NAME [--from FILE\|DIR\|URL]… [--limit N] [--update [--since TIME]] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz`, `osm`, `wikidata`, `openalex`, `podcastindex`, `software` and `tranco` in this version ([run an import](#run-an-import)). |
+| `pinakesd [--config PATH] catalogue import NAME [--from FILE\|DIR\|URL]… [--limit N] [--reads N] [--update [--since TIME]] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop), [run an import](#run-an-import)). |
 | `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue allow-shrink NAME` | After a run that failed as `shrunk` (refused otherwise), lets the catalogue's next full import remove the cards it did not read, however many: it goes through at its next try, unless a run fails for another reason first. Runs beside the daemon ([catalogues](#a-full-import-that-shrinks-the-catalogue)). |
 | `pinakesd [--config PATH] catalogue clear-refusal NAME` | Clears what the catalogue's importer refused (a dump, a file, a change file, an update's window), so its next run reads it again; refused once more if it still can't be applied. Runs beside the daemon ([catalogues](#a-refused-dump-or-file)). |
@@ -1783,12 +1783,12 @@ takes no turn.
 A catalogue card is one item of an open catalogue, stored in `catalogue_card`. The catalogues are
 `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` and `software` (crates.io,
 F-Droid and Flathub). An importer is the only writer of a catalogue's cards; they don't go
-through the fetch queue, the refresh tiers or the change journal. This version has importers for
+through the fetch queue, the refresh tiers or the change journal. Each catalogue has its page:
 [`musicbrainz`](sources/musicbrainz_catalogue.md), [`osm`](sources/osm_catalogue.md),
 [`wikidata`](sources/catalogue_wikidata.md), [`openalex`](sources/openalex_catalogue.md),
 [`podcastindex`](sources/podcastindex_catalogue.md), [`software`](sources/software_catalogue.md)
-and [`tranco`](sources/tranco_catalogue.md); a catalogue without one stays empty. Catalogues are
-on by default, so a daemon whose configuration has no `[catalogues]` section runs these importers:
+and [`tranco`](sources/tranco_catalogue.md). Catalogues are
+on by default, so a daemon whose configuration has no `[catalogues]` section runs their importers:
 with `http.contact` set and the disk they need, the Wikidata importer downloads its 104 GB dump;
 without a contact they ask nothing, and `catalogue status` says they wait for one. Set
 `[catalogues] enabled = false` for an instance that imports nothing.
@@ -1929,11 +1929,12 @@ max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, wh
 ```sh
 pinakesd --config <path> catalogue status
 pinakesd --config <path> catalogue drop <name>
-pinakesd --config <path> catalogue import <name> [--from FILE|DIR|URL]… [--limit N] [--update [--since TIME]] [--force]
+pinakesd --config <path> catalogue import <name> [--from FILE|DIR|URL]… [--limit N] [--reads N] [--update [--since TIME]] [--force]
 pinakesd --config <path> catalogue import <name> --request
 ```
 
-`catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, when its
+`catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, the
+upstream version it read (a dump's date, a file's version, Tranco's list and sites read), when its
 last full import and update finished, how current its cards are, a full import an update asked
 for (with its reason) and why it waits, and its last error.
 The last error stays after a later success; the metrics count every failure.
@@ -1956,8 +1957,9 @@ the lock by then. Run it again to finish.
 update, through the same code and state rows as the daemon's task: it takes the catalogue's lock
 (refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
 disk as the task does (printing why), watches its lock, and prints the cards before and after and
-the status table when it has finished. A full import takes up one that was cut off, else begins a
-new one, and clears an update refused for removing too much. `--from`, `--limit`, `--since` and
+the status table when it has finished (the cards each run wrote: new, changed, unchanged,
+rejected as invalid, removed). A full import takes up one that was cut off, else begins a
+new one, and clears an update refused for removing too much. `--from`, `--limit`, `--reads`, `--since` and
 `--force` are the importer's own ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand),
 [Wikidata](sources/catalogue_wikidata.md#commands); the others [below](#run-an-import)). A failure is recorded as the
 task records it, unless the lock's database session has ended by then: the command then says the
@@ -1998,9 +2000,9 @@ http.contact` for every catalogue alike; a daemon's run that finds none waits fo
 of disk does. `catalogue import` refuses without it unless it reads only local `--from` files
 (Wikidata and Tranco always ask upstream, so they are refused).
 
-`--limit N` is Tranco's: at most N homepages are read (MusicBrainz's is its card limit).
-`--force` is MusicBrainz's alone; the other catalogues refuse it. `catalogue import tranco` reads homepages through an egress of its own, apart from a running daemon's per-host pace: stop the daemon (or switch Tranco off there) first. A
-catalogue without an importer in this version is refused. Without `http.contact` (or
+`--reads N` is Tranco's: at most N homepages are read. `--limit N` (a card limit) and `--force` (a
+`--limit` below the cards stored) are MusicBrainz's and Wikidata's; every other catalogue refuses
+them, `osm` included (its scope is `catalogues.osm.region`). `catalogue import tranco` reads homepages through an egress of its own, apart from a running daemon's per-host pace: stop the daemon (or switch Tranco off there) first. Without `http.contact` (or
 `PINAKES__HTTP__CONTACT`) only local files are read, and Tranco not at all.
 
 ### Catalogue sample runs
@@ -2036,12 +2038,9 @@ environment:
 
 ### Importer rules
 
-Each catalogue with an importer (`musicbrainz`, `osm`, `wikidata`, `openalex`, `podcastindex`,
-`software` and `tranco` in this version) runs it as a background task of `pinakesd`, started only for a
+Each catalogue's importer runs as a background task of `pinakesd`, started only for a
 catalogue that is on and only with `http.contact` set (every request names the operator's contact; without it the daemon
-logs that the importer does not start). Catalogues are on by default: a daemon with
-`http.contact` set starts importing them at its first start with this version. To upgrade without
-importing, set `[catalogues] enabled = false` (or each one's `enabled`) before. It follows these
+logs that the importer does not start). It follows these
 rules:
 
 | Rule | What the task does |

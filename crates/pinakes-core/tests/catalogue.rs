@@ -1540,14 +1540,9 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
         let pool = pool.clone();
         async move { store::state(&pool, c).await.unwrap().map(|s| s.waiting) }
     };
-    for c in run::WITH_IMPORTER {
+    // Every catalogue has an importer, and each needs the contact.
+    for c in Catalogue::ALL {
         assert_eq!(waiting(c).await, Some(note(c).map(str::to_owned)), "{c}");
-    }
-    for c in Catalogue::ALL
-        .into_iter()
-        .filter(|c| !run::WITH_IMPORTER.contains(c))
-    {
-        assert_eq!(waiting(c).await.flatten(), None, "{c}");
     }
     let state = store::state(&pool, Catalogue::Musicbrainz)
         .await
@@ -1563,11 +1558,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
     for c in Catalogue::ALL {
-        assert_eq!(
-            needs(&metrics, c),
-            i64::from(run::WITH_IMPORTER.contains(&c)),
-            "{c}"
-        );
+        assert_eq!(needs(&metrics, c), 1, "{c}");
     }
     config.egress.contact = "ops@example.org".into();
     let metrics = Metrics::new().unwrap();
@@ -1577,7 +1568,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     }
     // Started with its contact, the note goes; another `waiting` stays.
     run::note_unstarted(&pool, &config).await.unwrap();
-    for c in run::WITH_IMPORTER {
+    for c in Catalogue::ALL {
         assert_eq!(waiting(c).await, Some(None), "{c}");
     }
     sqlx::query(
@@ -1598,7 +1589,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
     assert_eq!(needs(&metrics, Catalogue::Musicbrainz), 0);
-    for c in run::WITH_IMPORTER
+    for c in Catalogue::ALL
         .into_iter()
         .filter(|c| *c != Catalogue::Musicbrainz)
     {
@@ -1606,7 +1597,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     }
     config.catalogues.enabled = false;
     run::note_unstarted(&pool, &config).await.unwrap();
-    for c in run::WITH_IMPORTER {
+    for c in Catalogue::ALL {
         assert_ne!(waiting(c).await.flatten().as_deref(), note(c), "{c}");
     }
     let metrics = Metrics::new().unwrap();

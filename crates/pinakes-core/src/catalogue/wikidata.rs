@@ -927,7 +927,7 @@ fn inherited_limit(state: &State) -> Option<u64> {
     let asked = state
         .import_requested
         .as_ref()
-        .filter(|r| r.as_str() != super::musicbrainz::REQUESTED)
+        .filter(|r| r.as_str() != super::run::REQUESTED)
         .and_then(|_| state.position.clone())
         .and_then(|p| serde_json::from_value::<UpdatePosition>(p).ok())
         .and_then(|p| p.limit);
@@ -1972,7 +1972,7 @@ mod tests {
         asked.import_requested = None;
         assert_eq!(disk_need(Run::Import, &asked, false), DUMP_SIZE + SPARE);
         // One the operator asked for reads the whole dump.
-        asked.import_requested = Some(super::super::musicbrainz::REQUESTED.into());
+        asked.import_requested = Some(super::super::run::REQUESTED.into());
         assert_eq!(disk_need(Run::Import, &asked, false), DUMP_SIZE + SPARE);
     }
 

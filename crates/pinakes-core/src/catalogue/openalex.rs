@@ -1141,7 +1141,7 @@ impl Importer for OpenAlex {
     /// import. A snapshot read last, or one refused, is not read again.
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         let min = job.config().catalogues.openalex.min_citations;
         let last = job.position().cloned().unwrap_or_default();

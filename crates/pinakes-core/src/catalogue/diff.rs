@@ -87,7 +87,7 @@ impl Sink {
                     // Its ID as far as a valid one goes, as `store::upsert` logs it.
                     let mut shown: String = card.source_id.chars().take(128).collect();
                     shown.retain(|c| !c.is_control());
-                    tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card refused");
+                    tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card rejected");
                 }
             }
         }

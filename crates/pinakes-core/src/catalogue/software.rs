@@ -434,7 +434,7 @@ impl Importer for Software {
     /// An update; a full import instead when one was asked for (`--request`).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         self.run(job).await?;
         Ok(UpdateEnd::Done)

@@ -823,17 +823,6 @@ pub enum Next {
     Wait(Duration),
 }
 
-/// The catalogues with an importer in this build, in the order they start; each starts only
-/// with `http.contact` set.
-pub const WITH_IMPORTER: [Catalogue; 7] = [
-    Catalogue::Musicbrainz,
-    Catalogue::Osm,
-    Catalogue::Wikidata,
-    Catalogue::Openalex,
-    Catalogue::Podcastindex,
-    Catalogue::Tranco,
-    Catalogue::Software,
-];
 /// What `catalogue status` shows as the `waiting` of a catalogue that is on but has no importer
 /// task for want of `http.contact`, and of a run that finds none: it waits for one (every
 /// importer names the operator's contact in the requests it makes).
@@ -843,10 +832,10 @@ pub const NEEDS_CONTACT: &str =
 pub fn needs_contact(config: &Config, catalogue: Catalogue) -> bool {
     config.catalogues.enabled(catalogue) && config.egress.contact.trim().is_empty()
 }
-/// The catalogues whose importer needs `http.contact` (every one of [`WITH_IMPORTER`]), with
-/// whether `config` leaves one that is on without it and what `waiting` says then.
-pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); WITH_IMPORTER.len()] {
-    WITH_IMPORTER.map(|catalogue| (catalogue, needs_contact(config, catalogue), NEEDS_CONTACT))
+/// Every catalogue (each importer needs `http.contact`), with whether `config` leaves one that
+/// is on without it and what `waiting` says then.
+pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); Catalogue::ALL.len()] {
+    Catalogue::ALL.map(|catalogue| (catalogue, needs_contact(config, catalogue), NEEDS_CONTACT))
 }
 /// Say in the state rows why a catalogue that is on has no importer task: one without
 /// `http.contact` (its note from [`contact_needs`] in `waiting`). Started with its contact, or
@@ -1522,6 +1511,10 @@ pub async fn run_once_with(
     ended
 }
 
+/// The reason a full import asked for by hand (`pinakesd catalogue import --request`) is recorded
+/// under (`import_requested`); an importer whose update finds one asked for hands over to it
+/// ([`UpdateEnd::NeedsImport`]).
+pub const REQUESTED: &str = "asked for by pinakesd catalogue import --request";
 /// Ask for a full import of `catalogue` (`pinakesd catalogue import --request`): the importer
 /// that holds the catalogue (a daemon's task) starts it as any full import asked for, after the
 /// run under way, or at its next step. Needs no lock.

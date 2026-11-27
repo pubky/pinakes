@@ -182,6 +182,8 @@ runs it (the large-import turn, the disk check, the cursor), from a PBF file or 
 configured region; an import cut off is taken up again (on its own file). `pinakesd catalogue
 import osm --update` runs one update from the region's change files, after a finished import.
 Both refuse while another process runs the importer ([operations](../operations.md#importer-rules)).
+There is no `--limit` or `--force` (`catalogues.osm.region` sets the scope): the command refuses
+them.
 
 `scripts/catalogue-sample osm` imports a real extract a few days old (Liechtenstein by default)
 into a new throwaway database, runs the update (the region's real change files since), and checks
