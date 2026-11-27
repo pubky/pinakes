@@ -1647,7 +1647,8 @@ fn read_file(
             BufReader::with_capacity(1 << 20, &mut hashed),
             XZ_THREADS,
             XZ_MEMORY,
-        )?;
+        )?
+        .stop(plan.stop.clone());
         let mut tar = Tar::new(decoded);
         let wanted = format!("mbdump/{file}");
         loop {

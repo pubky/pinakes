@@ -340,7 +340,10 @@ impl<R: BufRead> Lines<R> {
 /// An `.xz` file decoded on `threads` threads (liblzma's multi-threaded decoder, which decodes a
 /// stream of several blocks in parallel and one of a single block on one thread), within
 /// `memory` bytes of decoder memory: every stream of it, as `xz` reads concatenated ones (the
-/// multi-threaded decoder stops at a stream's end), with the stream padding between them.
+/// multi-threaded decoder stops at a stream's end), with the stream padding between them. A file
+/// of more than [`XZ_EMPTY_STREAMS`] streams that decode to nothing, or more than
+/// [`XZ_PADDING_CAP`] bytes of padding in all, is broken (`InvalidData`: the caller's `archive`);
+/// a stop ([`Xz::stop`]) is heard between streams and in their padding.
 pub fn xz<R: BufRead>(inner: R, threads: u32, memory: u64) -> Result<Xz<R>> {
     let decoder = liblzma::bufread::XzDecoder::new_stream(inner, xz_stream(threads, memory)?);
     Ok(Xz {
@@ -348,8 +351,17 @@ pub fn xz<R: BufRead>(inner: R, threads: u32, memory: u64) -> Result<Xz<R>> {
         rest: None,
         threads,
         memory,
+        gave: false,
+        empty: 0,
+        padding: 0,
+        stop: None,
     })
 }
+/// The streams that decode to no byte one `.xz` file may hold.
+pub const XZ_EMPTY_STREAMS: u32 = 64;
+/// The stream padding (NUL bytes between streams) one `.xz` file may hold, in all (as much as
+/// the decoded bytes MusicBrainz lets an archive hold after the entry it reads).
+pub const XZ_PADDING_CAP: u64 = 16 << 20;
 fn xz_stream(threads: u32, memory: u64) -> Result<liblzma::stream::Stream> {
     liblzma::stream::MtStreamBuilder::new()
         .threads(threads.max(1))
@@ -365,6 +377,13 @@ pub struct Xz<R: BufRead> {
     rest: Option<R>,
     threads: u32,
     memory: u64,
+    /// Whether the stream being read gave a byte yet; the streams that decoded to nothing so
+    /// far, and the padding read between streams.
+    gave: bool,
+    empty: u32,
+    padding: u64,
+    /// Set when the run stops: checked between streams (a `stopped` failure).
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 impl<R: BufRead> Xz<R> {
     /// The input, past what was decoded.
@@ -374,6 +393,19 @@ impl<R: BufRead> Xz<R> {
             None => self.rest.expect("the input"),
         }
     }
+    /// Stop between two streams once `flag` is set (`stopped`).
+    pub fn stop(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.stop = Some(flag);
+        self
+    }
+    fn stopped(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+fn broken_xz(what: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, what)
 }
 impl<R: BufRead> Read for Xz<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -383,10 +415,14 @@ impl<R: BufRead> Read for Xz<R> {
             };
             let n = decoder.read(buf)?;
             if n > 0 || buf.is_empty() {
+                self.gave |= n > 0;
                 return Ok(n);
             }
             // A stream ended: after its padding (NUL bytes), the input ends or another begins.
             let mut inner = self.decoder.take().expect("the decoder").into_inner();
+            if !std::mem::take(&mut self.gave) {
+                self.empty += 1;
+            }
             loop {
                 let ahead = match inner.fill_buf() {
                     Ok(ahead) => ahead,
@@ -403,11 +439,35 @@ impl<R: BufRead> Read for Xz<R> {
                 let padding = ahead.iter().take_while(|b| **b == 0).count();
                 let more = padding < ahead.len();
                 inner.consume(padding);
+                self.padding += padding as u64;
+                if self.padding > XZ_PADDING_CAP {
+                    self.rest = Some(inner);
+                    return Err(broken_xz("xz: stream padding over its cap"));
+                }
+                if self.stopped() {
+                    self.rest = Some(inner);
+                    return Err(io::Error::other(Failure::new("stopped")));
+                }
                 if more {
                     break;
                 }
             }
-            let stream = xz_stream(self.threads, self.memory).map_err(io::Error::other)?;
+            // The first stream of a file may be empty; many are a file built to spin the reader.
+            if self.empty > XZ_EMPTY_STREAMS {
+                self.rest = Some(inner);
+                return Err(broken_xz("xz: too many empty streams"));
+            }
+            if self.stopped() {
+                self.rest = Some(inner);
+                return Err(io::Error::other(Failure::new("stopped")));
+            }
+            let stream = match xz_stream(self.threads, self.memory) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    self.rest = Some(inner);
+                    return Err(io::Error::other(e));
+                }
+            };
             self.decoder = Some(liblzma::bufread::XzDecoder::new_stream(inner, stream));
         }
     }
@@ -735,6 +795,62 @@ mod tests {
             .unwrap()
             .read_to_end(&mut out)
             .is_err());
+    }
+
+    /// A file built to spin the reader (streams that decode to nothing, endless padding) is
+    /// broken (`InvalidData`, the caller's `archive`), its input kept; a run that stops stops
+    /// between streams.
+    #[test]
+    fn empty_xz_streams_and_padding_are_capped_and_a_stop_is_heard() {
+        let packed = |data: &[u8]| {
+            let mut out = vec![];
+            liblzma::read::XzEncoder::new(data, 1)
+                .read_to_end(&mut out)
+                .unwrap();
+            out
+        };
+        let read = |file: &[u8]| {
+            let mut decoded = xz(file, 1, 64 << 20).unwrap();
+            let mut out = vec![];
+            let got = decoded.read_to_end(&mut out);
+            // The input is there after a failure too.
+            let _ = decoded.into_inner();
+            got.map(|_| out)
+        };
+        let empty = packed(b"");
+        // A few empty streams among others read.
+        let mut file = [empty.clone(), empty.clone(), packed(b"abc"), empty.clone()].concat();
+        assert_eq!(read(&file).unwrap(), b"abc");
+        // Streams that gave bytes over several reads are no empty ones.
+        let many: Vec<u8> = (0..XZ_EMPTY_STREAMS * 2)
+            .flat_map(|_| packed(&[b'x'; 100]))
+            .collect();
+        assert_eq!(read(&many).unwrap().len(), XZ_EMPTY_STREAMS as usize * 200);
+        for _ in 0..XZ_EMPTY_STREAMS {
+            file.extend_from_slice(&empty);
+        }
+        let failed = read(&file).unwrap_err();
+        assert_eq!(failed.kind(), io::ErrorKind::InvalidData, "{failed}");
+        // Padding: a little is read, more than the cap is broken.
+        let mut padded = [packed(b"a"), vec![0; 4096], packed(b"b")].concat();
+        assert_eq!(read(&padded).unwrap(), b"ab");
+        padded = [
+            packed(b"a"),
+            vec![0; XZ_PADDING_CAP as usize + 4],
+            packed(b"b"),
+        ]
+        .concat();
+        let failed = read(&padded).unwrap_err();
+        assert_eq!(failed.kind(), io::ErrorKind::InvalidData, "{failed}");
+        // A stop between two streams.
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let two = [packed(b"a"), packed(b"b")].concat();
+        let mut decoded = xz(&two[..], 1, 64 << 20).unwrap().stop(flag);
+        let mut out = vec![];
+        let failed = decoded.read_to_end(&mut out).unwrap_err();
+        let failure = failed.get_ref().and_then(|e| e.downcast_ref::<Failure>());
+        assert_eq!(failure.map(|f| f.class), Some("stopped"));
+        assert_eq!(out, b"a");
     }
 
     #[test]
