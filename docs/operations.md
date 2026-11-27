@@ -2073,15 +2073,16 @@ for the others. The position names what was refused (`refused`), with where it w
 `limit` stands (alert `CatalogueDumpRefused` after an hour).
 
 The importer then reads nothing while that version is the newest: each try (an hour apart) asks
-only for the version (a `HEAD`, the dump list, `LATEST`) and ends without a failure (Tranco's
-homepage reads go on from the list it has; software reads the other registries). The refusal goes
+only for the version (a `HEAD`, the dump list, `LATEST`) and ends without a failure (Tranco reads
+no homepage either until its next list; software reads the other registries). The refusal goes
 when:
 
 - upstream publishes a newer version: the next run reads it, and its position replaces the
   refusal;
 - a full import is asked for (`pinakesd catalogue import <name> --request` beside the daemon, or
   `catalogue import <name>` with it stopped): it reads the refused version again, and removes
-  the cards it does not read as any full import;
+  the cards it does not read as any full import (Tranco's caps on a run's removals don't apply
+  to it);
 - you clear it: `pinakesd --config <path> catalogue clear-refusal <name>`, beside the daemon. The
   next run reads the refused version again, as an update when one is due (a checksum failure
   while the mirror was still copying a file, say). If it still can't be applied, it is refused

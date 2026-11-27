@@ -2207,3 +2207,140 @@ async fn openalex_counts_the_lines_it_passes_over(pool: PgPool) {
     assert_eq!(count(&pool, "openalex", None).await, 5);
     assert!(skipped("openalex", "bad_line") >= before + 1.0);
 }
+
+/// A Tranco refusal never wedges the catalogue: a full import asked for (`--request`) has no cap
+/// on a run's removals, so a list that leaves most sites off it for good goes through.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tranco_refusal_gives_way_to_a_full_import_asked_for(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=12).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_site SET listed_on=listed_on-60")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(&list, "1,site1.example\n").unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&list)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    a_day_passed(&pool).await;
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("off the list"), "{failed}");
+    assert_eq!(count(&pool, "tranco", None).await, 12);
+    // A day on, the list can't be looked up: with the refusal standing nothing is read, and the
+    // refusal stays (no position without it is written).
+    a_day_passed(&pool).await;
+    std::fs::rename(&list, dir.path().join("aside.csv")).unwrap();
+    let again = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    assert!(state_of(&pool, Catalogue::Tranco)
+        .await
+        .position
+        .unwrap()
+        .get("refused")
+        .is_some());
+    std::fs::rename(dir.path().join("aside.csv"), &list).unwrap();
+    // Asked for, the task's next step is a full import that removes the sites off the list.
+    run::request_import(
+        &pool,
+        Catalogue::Tranco,
+        pinakes_core::catalogue::musicbrainz::REQUESTED,
+    )
+    .await
+    .unwrap();
+    run::step(&*importer, &ctx).await.unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 1);
+    let state = state_of(&pool, Catalogue::Tranco).await;
+    assert!(state.import_requested.is_none());
+    assert!(state.position.unwrap().get("refused").is_none());
+}
+
+/// A round of homepage reads that would take the run's removals past the cap writes nothing of
+/// itself: every site is either as its round left it (the rounds before, applied whole) or as it
+/// was before the run (its card, its last outcome and read), never half. (A site whose read was
+/// still in flight keeps its claim's hour, as in any run cut off.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_round_of_homepage_reads_writes_nothing_of_it(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=30).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 30);
+    let rows = || async {
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >("SELECT host,outcome,read_at FROM catalogue_site ORDER BY host")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    sqlx::query("UPDATE catalogue_site SET due_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = rows().await;
+    for host in &hosts {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("homepage reads"), "{failed}");
+    let carded: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT source_id FROM catalogue_card WHERE catalogue='tranco'")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+    assert!(carded.len() >= 20, "{}", carded.len());
+    for (row, was) in rows().await.into_iter().zip(before) {
+        if carded.contains(&row.0) {
+            assert_eq!(row, was, "a site of the refused round is as it was");
+        } else {
+            assert_eq!(row.1.as_deref(), Some("status"), "{row:?}");
+        }
+    }
+}

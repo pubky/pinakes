@@ -161,7 +161,7 @@ impl Tranco {
     /// The sites off the list for [`OFF_LIST`] days (from `day`) lose their card and their row;
     /// when their cards are more than a tenth of the catalogue's (and more than ten,
     /// `diff::too_many`: a short list after weeks without one), the list `list` is refused instead
-    /// and nothing is removed ([`Job::refuse`]).
+    /// and nothing is removed ([`Job::refuse`]), unless a full import was asked for ([`forced`]).
     async fn drop_off_list(
         &self,
         job: &mut Job<'_>,
@@ -177,7 +177,7 @@ impl Tranco {
         .fetch_one(&pool)
         .await?;
         let held = job.state().cards.max(0) as u64;
-        if super::diff::too_many(gone.max(0) as u64, held) {
+        if !forced(job) && super::diff::too_many(gone.max(0) as u64, held) {
             let note = format!("list {list}: {gone} of {held} cards' sites off the list");
             return Err(job.refuse(json!(list), "refused", note));
         }
@@ -273,7 +273,9 @@ impl Tranco {
     /// Keep what a round of reads found: the cards, the sites' outcomes and when each is due. A
     /// round whose removals take the run's past a tenth of the catalogue's cards (and past ten,
     /// `diff::too_many`: the egress or the network broken, every read failing) refuses the list
-    /// `list` instead of removing them ([`Job::refuse`]): the reads wait for the next list.
+    /// `list` instead of removing them ([`Job::refuse`]): nothing of the round is written, its
+    /// sites are due again, and the reads wait for the next list. A full import asked for
+    /// ([`forced`]) has no cap.
     async fn record(
         &self,
         job: &mut Job<'_>,
@@ -348,6 +350,55 @@ impl Tranco {
                 gone.push(host.clone());
             }
         }
+        // The cards the round removes, decided before anything of it is written: the sites that
+        // make none, and those whose transient failure is their last allowed in a row.
+        if !forced(job) {
+            let failing: Vec<&str> = reads
+                .iter()
+                .filter(|(h, _, o)| transient(h, o))
+                .map(|(h, _, _)| h.as_str())
+                .collect();
+            let mut leaving = gone.clone();
+            if !failing.is_empty() {
+                leaving.extend(
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT host FROM catalogue_site WHERE host=ANY($1) AND failures+1>=$2",
+                    )
+                    .bind(&failing)
+                    .bind(FAILURES)
+                    .fetch_all(&pool)
+                    .await?,
+                );
+            }
+            let carded: i64 = if leaving.is_empty() {
+                0
+            } else {
+                sqlx::query_scalar(
+                    "SELECT count(*) FROM catalogue_card WHERE catalogue='tranco' AND source_id=ANY($1)",
+                )
+                .bind(&leaving)
+                .fetch_one(&pool)
+                .await?
+            };
+            let report = job.report();
+            let held = job.state().cards.max(0) as u64 + report.inserted;
+            let removing = report.removed + carded.max(0) as u64;
+            if carded > 0 && super::diff::too_many(removing, held) {
+                // The round's sites were claimed for an hour: they are due again as they were.
+                let claimed: Vec<&str> = reads
+                    .iter()
+                    .map(|(h, _, _)| h.as_str())
+                    .chain(deferred.iter().map(String::as_str))
+                    .collect();
+                sqlx::query("UPDATE catalogue_site SET due_at=now() WHERE host=ANY($1)")
+                    .bind(&claimed)
+                    .execute(&pool)
+                    .await?;
+                let note =
+                    format!("list {list}: homepage reads would remove {removing} of {held} cards");
+                return Err(job.refuse(json!(list), "refused", note));
+            }
+        }
         job.write(&cards, json!({"phase": "reading"})).await?;
         // A transient failure keeps its card until it failed three times in a row; it is tried
         // again the next day, or after the site's `Retry-After`.
@@ -370,20 +421,6 @@ impl Tranco {
         .await?;
         gone.extend(failed.into_iter().flatten());
         if !gone.is_empty() {
-            let carded: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM catalogue_card WHERE catalogue='tranco' AND source_id=ANY($1)",
-            )
-            .bind(&gone)
-            .fetch_one(&pool)
-            .await?;
-            let report = job.report();
-            let held = job.state().cards.max(0) as u64 + report.inserted;
-            let removing = report.removed + carded.max(0) as u64;
-            if super::diff::too_many(removing, held) {
-                let note =
-                    format!("list {list}: homepage reads would remove {removing} of {held} cards");
-                return Err(job.refuse(json!(list), "refused", note));
-            }
             job.remove(&gone, json!({"phase": "reading"})).await?;
         }
         if !deferred.is_empty() {
@@ -403,6 +440,13 @@ impl Tranco {
     /// can't be looked up (tranco-list.eu down) reads the homepages due on the list it has.
     async fn run(&self, job: &mut Job<'_>) -> Result<()> {
         let mut position = job.position().cloned().unwrap_or_else(|| json!({}));
+        // A refusal is the run's to carry on (`Job::refuse`): a position this run writes holds none,
+        // since a run that goes on is not refused (a refusal that stands ends it below).
+        if let Some(p) = position.as_object_mut() {
+            for key in super::run::REFUSAL_KEYS {
+                p.remove(key);
+            }
+        }
         let checked = position
             .get("checked")
             .and_then(Value::as_str)
@@ -433,6 +477,10 @@ impl Tranco {
         let latest = match looked_up {
             None => None,
             Some(Ok(latest)) => Some(latest),
+            // While a refusal stands, a list that can't be looked up may be the refused one.
+            Some(Err(_)) if job.run() == Run::Update && job.refused().is_some() => {
+                return Err(job.still_refused("the list (its removals)"));
+            }
             Some(Err(error)) if job.run() == Run::Update && position.get("list").is_some() => {
                 let shown = super::failure::shown(&error);
                 tracing::warn!(catalogue = "tranco", error = %shown, "Tranco's list could not be looked up; the homepages due are read from the list loaded");
@@ -512,6 +560,12 @@ impl Tranco {
         job.set_position(position);
         Ok(())
     }
+}
+/// Whether the caps on a run's removals are off: a full import asked for (`--request`, or by
+/// hand) removes what its list and reads say, however many, so a refusal never wedges the
+/// catalogue.
+fn forced(job: &Job<'_>) -> bool {
+    job.run() == Run::Import && job.asked()
 }
 /// What the next run of reads waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

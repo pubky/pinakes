@@ -91,10 +91,14 @@ list it has); a new list is loaded, and sites off the list for a month
 (30 days after the last weekly move of their day) lose their card and their row. A run never
 removes more than a tenth of the cards (and more than ten): a list that would leave more off it,
 or a round of homepage reads that would take the run's removals past it (every read failing), is
-refused (`refused`, nothing of it removed, [a refused dump or file](../operations.md#a-refused-dump-or-file)), and nothing
-is read until the next day's list (or `pinakesd catalogue clear-refusal tranco`). When the list
-can't be looked up (tranco-list.eu down), an update logs it and reads the homepages due on the
-list it has; the list is asked again at the next run. The cards are
+refused (`refused`, nothing of the list's removals or of that round written, its sites due again,
+[a refused dump or file](../operations.md#a-refused-dump-or-file)), and nothing is read until the
+next day's list, or `pinakesd catalogue clear-refusal tranco` (which checks again). A full import
+asked for (`pinakesd catalogue import tranco --request`) has no such cap: it removes what its list
+and reads say, however many, so a list that stays short (the sites off it for good) goes through
+that way. When the list can't be looked up (tranco-list.eu down), an update logs it and reads the
+homepages due on the list it has (nothing while a refusal stands); the list is asked again at the
+next run. The cards are
 as current as the last list loaded (its `Last-Modified` time); the allowed lag is 2 days. `pinakesd catalogue drop tranco`
 also deletes `catalogue_site`.
 
