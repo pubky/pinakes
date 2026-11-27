@@ -935,6 +935,26 @@ mod tests {
     }
 
     #[test]
+    fn a_feed_whose_link_the_table_refuses_is_a_refused_card() {
+        // Found by `any_row_gives_a_valid_card_or_none`: links that read as a profile (`…/@a`),
+        // which no card may hold. The card is counted `rejected` and a stored copy stays
+        // (`an_update_counts_its_refused_and_unchanged_cards`), never removed for it.
+        let at = |url: &str| Feed {
+            url: url.into(),
+            ..feed()
+        };
+        for link in ["https://a.aa/a/a@a", "https://a.aa/a/$@a"] {
+            let refused = card(&at(link), |_| false).expect("a card");
+            assert_eq!(
+                refused.checked(Catalogue::Podcastindex).err(),
+                Some(crate::catalogue::Reject::Uri),
+                "{link}"
+            );
+        }
+        let plain = card(&at("https://a.aa/a/a"), |_| false).expect("a card");
+        assert!(plain.checked(Catalogue::Podcastindex).is_ok());
+    }
+    #[test]
     fn private_feeds_are_never_imported() {
         let feed = |url: &str| Feed {
             id: 7,
@@ -1065,14 +1085,23 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
-        /// Property: any row gives no card or a card the table takes, whose link is the feed's.
+        /// Property: any row gives no card, or a card the table takes, whose link is the feed's; or
+        /// one it refuses for that link alone (a link that reads as a post or a profile: counted
+        /// `rejected`, a stored copy kept), every other field of it valid.
         #[test]
         fn any_row_gives_a_valid_card_or_none(url in "(https?://[a-z]{1,8}\\.[a-z]{2,3}/[ -~]{0,30})|[ -~]{0,20}",
             title in "\\PC{0,80}", guid in "[0-9a-fA-F-]{0,40}", link in "[ -~]{0,40}", cats in proptest::collection::vec("\\PC{0,25}", 0..10),
             popularity in -5i64..40, id in -2i64..1_000_000_000) {
             let feed = Feed { id, url: url.clone(), title, guid, link, categories: cats, popularity, ..Feed::default() };
             if let Some(card) = card(&feed, |_| false) {
-                let checked = card.checked(Catalogue::Podcastindex);
+                let checked = match card.checked(Catalogue::Podcastindex) {
+                    Err(crate::catalogue::Reject::Uri) => {
+                        let mut plain = card.clone();
+                        plain.uri = "https://a.aa/feed".into();
+                        plain.checked(Catalogue::Podcastindex)
+                    }
+                    checked => checked,
+                };
                 prop_assert!(checked.is_ok(), "{:?}: {:?}", card, checked.as_ref().err());
                 let row = checked.unwrap();
                 prop_assert!((0.0..=1.0).contains(&row.fame));

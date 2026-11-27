@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 36da5ffb8e59df2e9839b196c578fd54feb7fc85e91bd0d94f23284ad3b3b83d # shrinks to url = "http://a.aa/", title = "", guid = "", link = "", cats = [], popularity = 0, id = 1
 cc 252e12ed4dd91b76a3407dc7831aa5db7246da738b0adaf58349ff84d480d6ff # shrinks to url = "http://a.aa/", title = "//:a@&A", guid = "", link = "", cats = [], popularity = 0, id = 1
+cc 997fb7dd576028f61e4c7b21f54dc88ffe7bfa031f7a0af3ff2d6b39ca4c2b65 # shrinks to url = "https://a.aa/a/a@a", title = "ஞ", guid = "", link = "", cats = [], popularity = 0, id = 1
