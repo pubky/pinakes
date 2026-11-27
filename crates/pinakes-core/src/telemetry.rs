@@ -245,6 +245,10 @@ impl Metrics {
         for reason in ["turns", "share", "timeout"] {
             MAP_CLUSTERS_BUSY.with_label_values(&[reason]);
         }
+        registry.register(Box::new(SEARCH_HEAVY_BUSY.clone()))?;
+        for reason in ["turn", "share"] {
+            SEARCH_HEAVY_BUSY.with_label_values(&[reason]);
+        }
         for queue in ["resources", "catalogue"] {
             SEARCH_INDEX_QUEUE.with_label_values(&[queue]);
         }
@@ -858,6 +862,26 @@ static SEARCH_INDEX_BUSY: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLo
     )
     .expect("static metric")
 });
+/// Facet, trending and related searches answered 503, by why: no turn of
+/// `limits.search_heavy_searches` within `limits.search_heavy_wait_ms` (`turn`), or a turn was
+/// free but its client ran its share while others waited (`share`).
+static SEARCH_HEAVY_BUSY: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_search_heavy_busy_total",
+            "Facet, trending and related searches answered 503 because their turns were taken: no turn within the wait (turn), or the client's share of turns taken (share)",
+        ),
+        &["reason"],
+    )
+    .expect("static metric")
+});
+pub fn search_heavy_busy(reason: &'static str) {
+    SEARCH_HEAVY_BUSY.with_label_values(&[reason]).inc();
+}
+/// The heavy searches answered 503 for `reason` so far.
+pub fn search_heavy_busy_count(reason: &'static str) -> u64 {
+    SEARCH_HEAVY_BUSY.with_label_values(&[reason]).get()
+}
 /// Map cluster counts answered 503, by why: every turn taken (`turns`), the client's share taken
 /// (`share`), or the view too wide for its filter (`timeout`).
 static MAP_CLUSTERS_BUSY: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {

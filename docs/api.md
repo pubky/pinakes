@@ -1137,7 +1137,7 @@ letters and digits; anything else, such as a URL, gets a general message. Other 
 | 400 | `collapse=group` while groups are off (`groups.enabled = false`) |
 | 501 | `reach=wot_2` or `boost=wot_2` on an instance whose Nexus serves no reach set |
 | 502 | Nexus failed, or did not answer in time, while reading a `reach` or `boost` set |
-| 503 | A text search found no free turn of the text index, ran past its time, or its client runs its share of turns already ([Text search](#text-search)); `Retry-After: 1` |
+| 503 | A text search found no free turn of the text index, ran past its time, or its client runs its share of turns already ([Text search](#text-search)); or a facet, trending or related search found none of its turns ([Rate budget](#rate-budget)); `Retry-After: 1` |
 
 ### Text search
 
@@ -1574,9 +1574,14 @@ credential when it has:
 
 - a calendar provider's secret share link (the patterns `scripts/verify-no-capability-urls`
   keeps out of the repository);
-- a password in the user info;
-- a key such as `token`, `access_token`, `key`, `sig` or `signature`
-  (`capability::CREDENTIAL_KEYS`), or one that ends like `client_secret`, `X-Api-Key`,
+- a password in the user info; in a web or calendar link any user info, a name alone included
+  (`https://TOKEN@host/`);
+- `sid` or `session` with an opaque value, a session's ID: 12 characters or more with a letter
+  and a digit, or 16 or more with an upper case letter right after a lower case one
+  (`sid=3243128`, `session=keynote`, `session=keynote2025` or `session=Plenary-Session-Day` names
+  a record);
+- a key such as `token`, `access_token`, `key`, `sig`, `signature`, `jwt`, `authorization` or
+  `connect.sid` (`capability::CREDENTIAL_KEYS`), or one that ends like `client_secret`, `X-Api-Key`,
   `access_key`, `auth_token` or `session_id` once its case and everything but its ASCII letters
   and digits are set aside (`api key`, `user[password]` and `k-e-y` count too). A public list's
   page cursor such as `pageToken` does not count (`capability::credential_key`).
@@ -3357,11 +3362,20 @@ entry that is not one of them ([operations](operations.md#clients-and-budgets)).
 | A search with `reach` | `limits.reach_cost` (6) |
 | A search with `boost` | `limits.reach_cost` (6) |
 | A search with `related` | `limits.related_cost` (6) |
+| A search with `facet` | `limits.facet_cost` (2) for each facet asked |
+| A search with `sort=trending` | `limits.trending_cost` (1) for each started week of its window (90 days: 13) |
 | A search with several of these | All of them together |
 | Any other request | 1 |
 
 The reach and boost costs are charged before any Nexus call, because each reads a set from Nexus.
+A search that costs more than the whole budget (an operator's high costs over a low
+`api.requests_per_minute`) always answers 429.
 Over budget, the answer is 429 with `Retry-After: 60`.
+
+Facet, trending and related searches also share `limits.search_heavy_searches` (4) turns for the
+whole instance: each waits for one at most `limits.search_heavy_wait_ms` (1 s), and a client
+address past half of them yields to others waiting. With no turn, the search answers 503 with
+`Retry-After: 1`; card reads and other searches go on.
 
 ### Errors
 
@@ -3489,8 +3503,8 @@ text. Every other method is MCP's.
 #### MCP budget and deadlines
 
 - An MCP message spends one unit of the per-IP budget, and a tool call what its requests cost on
-  top: a `reach` search 6, `types` two requests, `social` its lookup plus one per 100 URIs it
-  asks Nexus.
+  top: a `reach` search 6, `types` 3 (a search with one facet, 2, and `/v1/info`, 1), `social`
+  its lookup plus one per 100 URIs it asks Nexus.
 - Bodies are capped at 2 MiB, as for every route. The routes keep their statement timeout, and
   `social` the Nexus client's 10-second timeout.
 - A tool call has one deadline for all its requests together: two seconds inside

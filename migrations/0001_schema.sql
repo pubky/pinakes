@@ -85,7 +85,7 @@ CREATE INDEX resource_category_idx ON resource USING btree (category);
 CREATE INDEX resource_catalogue_card_idx ON resource USING btree (catalogue_card) WHERE catalogue_card IS NOT NULL;
 -- The labels of the cards built from catalogue cards, which a search's `tags=` matches.
 CREATE INDEX resource_backed_labels_idx ON resource USING gin ((doc -> 'labels')) WHERE catalogue_card IS NOT NULL;
-CREATE INDEX resource_claim_priority_idx ON resource USING btree (resolver, priority_at DESC NULLS LAST, next_attempt_at) WHERE NOT dead_letter AND NOT final;
+CREATE INDEX resource_claim_order_idx ON resource USING btree (resolver, priority_at DESC NULLS LAST, (resolved_at IS NULL) DESC, next_attempt_at, id) WHERE NOT dead_letter AND NOT final;
 CREATE INDEX resource_geography_idx ON resource USING gist ((point::geography));
 CREATE INDEX resource_host_idx ON resource USING btree (host);
 CREATE INDEX resource_name_trgm_idx ON resource USING gin (name gin_trgm_ops);
@@ -775,10 +775,19 @@ CREATE FUNCTION mark_group_dirty() RETURNS trigger
  END IF;
  RETURN NULL;
 END $$;
+-- A resource's revision moves when a column grouping reads changes value (its document as
+-- `mark_group_dirty` compares it): a write that only names one (a refresh's new `fetched_at`, a
+-- failure that keeps the status) leaves a grouping run's fence alone.
 CREATE FUNCTION bump_group_resource_revision() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
- NEW.group_revision=OLD.group_revision+1;
+ IF NEW.status IS DISTINCT FROM OLD.status OR NEW.uri IS DISTINCT FROM OLD.uri OR NEW.host IS DISTINCT FROM OLD.host
+    OR NEW.point::bytea IS DISTINCT FROM OLD.point::bytea OR NEW.start_at IS DISTINCT FROM OLD.start_at
+    OR NEW.end_at IS DISTINCT FROM OLD.end_at OR NEW.type IS DISTINCT FROM OLD.type OR NEW.name IS DISTINCT FROM OLD.name
+    OR NEW.osm_version IS DISTINCT FROM OLD.osm_version
+    OR (NEW.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') IS DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') THEN
+  NEW.group_revision=OLD.group_revision+1;
+ END IF;
  RETURN NEW;
 END $$;
 CREATE FUNCTION bump_group_child_revision() RETURNS trigger
@@ -811,8 +820,6 @@ CREATE FUNCTION group_hint(unit text) RETURNS jsonb
 $$;
 
 CREATE TRIGGER group_resource_dirty AFTER INSERT OR UPDATE OF doc ON resource FOR EACH ROW EXECUTE FUNCTION mark_group_dirty();
--- alias::assign's UPDATE of the alias names `doc` and `osm_version` so that this fires: keep those
--- columns in both places.
 CREATE TRIGGER group_resource_revision BEFORE UPDATE OF doc, status, uri, host, point, start_at, end_at, type, name, osm_version ON resource FOR EACH ROW EXECUTE FUNCTION bump_group_resource_revision();
 CREATE TRIGGER group_occurrence_dirty AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION mark_group_dirty();
 CREATE TRIGGER group_occurrence_revision AFTER INSERT OR DELETE OR UPDATE ON occurrence FOR EACH ROW EXECUTE FUNCTION bump_group_child_revision();
@@ -846,6 +853,7 @@ CREATE TABLE resource_key (
     CONSTRAINT resource_key_via_check CHECK ((via ~ '^[a-z0-9_]{1,32}$'))
 );
 CREATE INDEX resource_key_source_idx ON resource_key USING btree (resource_id, source);
+CREATE INDEX resource_key_expires_idx ON resource_key USING btree (expires_at);
 CREATE INDEX resource_key_key_idx ON resource_key USING btree (key);
 -- In byte order, where the keys of one catalogue (`catalogue:<name>:…`) are one range, then by
 -- resource: the start's sweep reads only those of the catalogues it removes, a page at a time from
@@ -866,6 +874,7 @@ CREATE TABLE resource_fact (
     CONSTRAINT resource_fact_value_check CHECK ((octet_length(value) BETWEEN 1 AND 512)),
     CONSTRAINT resource_fact_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
 );
+CREATE INDEX resource_fact_expires_idx ON resource_fact USING btree (expires_at);
 CREATE INDEX resource_fact_source_idx ON resource_fact USING btree (resource_id, source);
 CREATE INDEX resource_fact_value_idx ON resource_fact USING btree (name, value);
 
@@ -896,6 +905,7 @@ CREATE TABLE derived_link (
     CONSTRAINT derived_link_kind_check CHECK ((kind IS NULL OR kind ~ '^[a-z_]{1,32}$')),
     CONSTRAINT derived_link_key_check CHECK ((key IS NULL OR octet_length(key) BETWEEN 3 AND 512))
 );
+CREATE INDEX derived_link_expires_idx ON derived_link USING btree (expires_at);
 CREATE INDEX derived_link_named_idx ON derived_link USING btree (link_id) WHERE key IS NOT NULL;
 CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS NOT NULL;
 

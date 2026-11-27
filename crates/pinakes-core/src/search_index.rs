@@ -838,7 +838,7 @@ pub(crate) fn share_key(client: std::net::IpAddr) -> std::net::IpAddr {
 /// waits for a free turn; a client past its share (half the turns, at least one) takes one only
 /// while no other client under its share waits, so alone it takes every free turn. A waiting
 /// search holds nothing.
-struct Turns {
+pub(crate) struct Turns {
     /// The number of turns.
     limit: usize,
     state: std::sync::Mutex<TurnState>,
@@ -898,7 +898,7 @@ impl Drop for Waiting<'_> {
     }
 }
 impl Turns {
-    fn new(limit: usize) -> Arc<Self> {
+    pub(crate) fn new(limit: usize) -> Arc<Self> {
         Arc::new(Self {
             limit,
             state: std::sync::Mutex::new(TurnState {
@@ -906,6 +906,20 @@ impl Turns {
                 ..Default::default()
             }),
             changed: tokio::sync::Notify::new(),
+        })
+    }
+    /// One turn for `client` now, whatever its share, kept until the guard is dropped (tests).
+    pub(crate) fn hold(self: &Arc<Self>, client: Option<std::net::IpAddr>) -> Option<Turn> {
+        let mut state = self.state.lock().expect("turns");
+        if state.free == 0 {
+            return None;
+        }
+        state.free -= 1;
+        *state.running.entry(client).or_default() += 1;
+        drop(state);
+        Some(Turn {
+            turns: self.clone(),
+            client,
         })
     }
     /// A client's share: half the turns, at least one.
@@ -936,7 +950,7 @@ impl Turns {
     /// A turn for a search of `client` (its address), waited for until `deadline`; past it, why
     /// none came: `turn` (every turn taken) or `share` (one free, the client past its share while
     /// others waited).
-    async fn take(
+    pub(crate) async fn take(
         self: &Arc<Self>,
         client: Option<std::net::IpAddr>,
         deadline: tokio::time::Instant,
@@ -1711,15 +1725,7 @@ impl SearchIndex {
         self.hold(None)
     }
     fn hold(&self, client: Option<std::net::IpAddr>) -> Option<Turn> {
-        let turns = self.bounds().0;
-        let mut state = turns.state.lock().expect("turns");
-        if state.free == 0 {
-            return None;
-        }
-        state.free -= 1;
-        *state.running.entry(client).or_default() += 1;
-        drop(state);
-        Some(Turn { turns, client })
+        self.bounds().0.hold(client)
     }
     /// Run at most `searches` text searches at once (0: one per CPU core), each within `budget`
     /// (`limits.search_index_searches`, `limits.search_index_budget_ms`).

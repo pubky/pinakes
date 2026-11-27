@@ -66,12 +66,18 @@ pub(crate) const CLAIMABLE: &str = concat!(
     ")"
 );
 /// The claim: expedited rows first (`priority_at`), then links never read before overdue
-/// refreshes, then by due time.
+/// refreshes, then by due time. Each route's rows are read on their own, in the order of
+/// `resource_claim_order_idx`, up to the batch, and the batch is the first of those: read for
+/// all routes at once, every due row of them would be sorted on each claim. Each route locks up to
+/// a batch of rows; those not taken are free again when the statement ends, and a claim running
+/// beside it meanwhile skips them.
 static CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "UPDATE resource SET lease_until=now()+$2*interval '1 second', generation=generation+1 \
-        WHERE id IN (SELECT id FROM resource WHERE resolver=ANY($1) AND {CLAIMABLE} \
-          ORDER BY priority_at DESC NULLS LAST,(resolved_at IS NULL) DESC,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3) \
+        WHERE id IN (SELECT due.id FROM unnest($1::text[]) route(resolver) CROSS JOIN LATERAL \
+          (SELECT id,priority_at,resolved_at,next_attempt_at FROM resource WHERE resolver=route.resolver AND {CLAIMABLE} \
+            ORDER BY priority_at DESC NULLS LAST,(resolved_at IS NULL) DESC,next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT $3) due \
+          ORDER BY due.priority_at DESC NULLS LAST,(due.resolved_at IS NULL) DESC,due.next_attempt_at,due.id LIMIT $3) \
         RETURNING id,uri,attempts,generation"
     )
 });
@@ -2397,6 +2403,97 @@ mod tests {
         }
     }
 
+    /// With few rows due among many waiting, the claim still reads about the rows it takes: a
+    /// read in claim order would walk every waiting row's index entry of the route
+    /// (`resource_claim_order_idx` cannot bound `next_attempt_at`), so it reads by due time
+    /// (`resource_queue_idx`). 20,000 `web` rows due tomorrow, 3 due now; the pages its scans of
+    /// `resource` read themselves (their subplans' set aside) are counted: about 300 in claim
+    /// order, a few by due time.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_claim_with_few_rows_due_reads_few_rows(pool: PgPool) {
+        fn blocks(plan: &serde_json::Value) -> f64 {
+            plan["Shared Hit Blocks"].as_f64().unwrap_or_default()
+                + plan["Shared Read Blocks"].as_f64().unwrap_or_default()
+        }
+        fn resource_blocks(plan: &serde_json::Value) -> f64 {
+            let children = plan["Plans"].as_array().cloned().unwrap_or_default();
+            // Scans alone: the update's own pages are its writes of the rows taken.
+            let scan = plan["Node Type"]
+                .as_str()
+                .is_some_and(|node| node.ends_with("Scan"));
+            let own = if scan && plan["Relation Name"] == "resource" {
+                blocks(plan) - children.iter().map(blocks).sum::<f64>()
+            } else {
+                0.0
+            };
+            own + children.iter().map(resource_blocks).sum::<f64>()
+        }
+        for statement in [
+            "INSERT INTO resource(id,uri,resolver,next_attempt_at) SELECT md5('w'||n),'https://example.org/w'||n,'web',now()+interval '1 day' FROM generate_series(1,20000) n",
+            "INSERT INTO resource(id,uri,resolver,next_attempt_at) SELECT md5('d'||n),'https://example.org/d'||n,'web',now()-interval '1 minute' FROM generate_series(1,3) n",
+            "INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) SELECT id,'tag',repeat('a',52),'t','/pub/app/t/'||id,now() FROM resource",
+            "VACUUM ANALYZE",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let mut tx = pool.begin().await.unwrap();
+        let plan: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+            *CLAIM
+        ))
+        .bind(vec!["web"])
+        .bind(60.0)
+        .bind(8_i64)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        drop(tx);
+        let read = resource_blocks(&plan[0]["Plan"]);
+        assert!(read <= 60.0, "{read} resource pages read: {plan}");
+    }
+
+    /// A claim over several routes takes its batch in one order across them: expedited rows
+    /// first, then links never read, then by due time, whichever route a row is on; the routes'
+    /// own reads in claim order give the same batch as one read of them all.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_claim_over_several_routes_keeps_one_order(pool: PgPool) {
+        for statement in [
+            // A referenced row of each kind on each route; `id` breaks ties as the claim does.
+            "INSERT INTO resource(id,uri,resolver,next_attempt_at,resolved_at,priority_at) VALUES \
+              (md5('w-due'),'https://example.org/w-due','web',now()-interval '3 hours',now()-interval '1 day',NULL), \
+              (md5('w-new'),'https://example.org/w-new','web',now()-interval '1 hour',NULL,NULL), \
+              (md5('e-due'),'https://example.org/e-due','event',now()-interval '4 hours',now()-interval '1 day',NULL), \
+              (md5('e-fast'),'https://example.org/e-fast','event',now()-interval '1 minute',now()-interval '1 day',now()), \
+              (md5('m-later'),'https://example.org/m-later','media',now()+interval '1 hour',NULL,NULL)",
+            "INSERT INTO reference(resource_id,kind,author,label,object_path,created_at) SELECT id,'tag',repeat('a',52),'t','/pub/app/t/'||id,now() FROM resource",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let cfg = QueueConfig::default();
+        let jobs = claim_sources(&pool, &["web", "event", "media"], &cfg, 3)
+            .await
+            .unwrap();
+        // The batch is a set (the claim's rows come back in no order): the three first in claim
+        // order. Not yet due: never taken. The fourth goes to the next claim.
+        let mut uris: Vec<&str> = jobs.iter().map(|j| j.uri.as_str()).collect();
+        uris.sort_unstable();
+        assert_eq!(
+            uris,
+            [
+                "https://example.org/e-due",
+                "https://example.org/e-fast",
+                "https://example.org/w-new"
+            ]
+        );
+        let next = claim_sources(&pool, &["web", "event", "media"], &cfg, 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.iter().map(|j| j.uri.as_str()).collect::<Vec<_>>(),
+            ["https://example.org/w-due"]
+        );
+    }
+
     /// The claim and the `pending` gauge find a row's references through the reference index,
     /// one probe by resource for the row and one for each alias of it: neither reads every
     /// reference for a row. 56,000 references of 25,000 links, 2,000 of them derived links
@@ -2443,6 +2540,27 @@ mod tests {
                 .fetch_one(&mut *tx)
                 .await
                 .unwrap();
+        // The claim reads each route's due rows in claim order from its index: no sort of every
+        // due row of the routes.
+        fn index_scans(plan: &serde_json::Value, found: &mut Vec<String>) {
+            if let Some(index) = plan["Index Name"].as_str() {
+                found.push(format!(
+                    "{} {index}",
+                    plan["Node Type"].as_str().unwrap_or_default()
+                ));
+            }
+            for child in plan["Plans"].as_array().into_iter().flatten() {
+                index_scans(child, found);
+            }
+        }
+        let mut indexes = vec![];
+        index_scans(&claim[0]["Plan"], &mut indexes);
+        assert!(
+            indexes
+                .iter()
+                .any(|i| i == "Index Scan resource_claim_order_idx"),
+            "{indexes:?}: {claim}"
+        );
         for (name, plan) in [("gauge", gauge), ("claim", claim)] {
             let mut scans = vec![];
             reference_scans(&plan[0]["Plan"], &mut scans);

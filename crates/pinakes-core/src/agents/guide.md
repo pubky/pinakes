@@ -252,7 +252,9 @@ Add it to a client as a remote (HTTP) MCP server at `{{BASE}}/mcp`.
 
 - **Per-IP budget**: 120 requests a minute over every public route by default
   (`limits.requests_per_minute` in `GET {{BASE}}/v1/info`). A `reach` or `boost` search costs 6, a
-  `related` search 6. Over budget is a 429 with `Retry-After: 60`. An MCP message costs one, and a tool
+  `related` search 6, each facet asked 2, and a `sort=trending` page 1 per started week of its
+  window (`window=90d`: 13); a search with several pays them all. Over budget is a 429 with
+  `Retry-After: 60`. An MCP message costs one, and a tool
   call costs what its REST call costs on top; the `social` tool costs one per 100 URIs it asks.
 - **Pages**: `limit` 1–500, default 50. Follow `cursor`; a full page does not mean there is no
   more.
@@ -277,7 +279,7 @@ Errors are `{"error": "…"}` with the status:
 | 413 | Body over 2 MB | Send less |
 | 429 | Over the per-IP budget | Wait the `Retry-After` seconds. Ask fewer, larger questions: one search with `facet`, or `POST /v1/resources/lookup` for up to 500 links at once |
 | 502 | Nexus did not answer a `reach` search in time | Retry once, or drop `reach` |
-| 503 | The instance has read all the new links it takes this hour (`POST /v1/resolve`) | Wait the `Retry-After` seconds; links it knows still read |
+| 503 | The instance has read all the new links it takes this hour (`POST /v1/resolve`); or its searches of one kind are all running (a text search, or one with `facet`, `sort=trending` or `related`) | Wait the `Retry-After` seconds (1 for a search) and ask again; links it knows still read, and a search without facets still answers |
 | 504 | The request took longer than the instance's timeout (30 s by default) | Retry once with a narrower question |
 | 500 | Internal | Retry once |
 

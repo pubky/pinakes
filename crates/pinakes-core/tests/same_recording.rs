@@ -1846,7 +1846,7 @@ async fn a_save_and_a_dirty_mark_beside_it_never_deadlock(pool: PgPool) {
                 if mark == "sweep" {
                     same_recording::sweep(&pool).await
                 } else {
-                    also_on::prune(&pool).await
+                    also_on::prune(&pool, 1000).await
                 }
             })
         };

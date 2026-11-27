@@ -251,6 +251,8 @@ resolver limits apply to pubky and to each card route.
 | `reach_timeout_secs` | `5` | 1–60 | Nexus reach deadline per search, and for all of an MCP `social` call's Nexus reads (seconds). Must be more than two seconds below `request_timeout_secs`. |
 | `reach_cost` | `6` | 2–100 | Budget units a search costs for each of `reach` and `boost`. |
 | `related_cost` | `6` | 2–100 | Budget units a related search costs. |
+| `facet_cost` | `2` | 1–100 | Budget units a search costs for each facet it asks (`facet=type,tags` is two). |
+| `trending_cost` | `1` | 1–100 | Budget units a trending search costs for each started week of its window (`window=90d` is 13 weeks). |
 | `related_taggers` | `200` | 1–10000 | Taggers a related page samples: the authors of a resource's most recent tags, at most this many. |
 | `related_window_days` | `365` | 1–3650 | Days a related page looks back, for those taggers and their tags. |
 | `related_refs_per_tagger` | `1000` | 1–100000 | References a related page reads per sampled tagger (their most recent). |
@@ -265,6 +267,8 @@ resolver limits apply to pubky and to each card route.
 | `search_index_commit_secs` | `2` | 1–60 | Seconds between two passes that commit queued changes to the text index. |
 | `search_index_searches` | `0` | 0–256 | Text searches the text index runs at once; `0` is one per CPU core. One more waits for a turn; one client address runs at most half of them while others wait ([Text index](#text-index)). Behind a proxy, set `api.trusted_proxies`, or every client counts as the proxy's one address. |
 | `search_index_budget_ms` | `2000` | 100–30000 | The most a text search's index stage takes, its wait for a turn included; past it the search answers 503. |
+| `search_heavy_searches` | `4` | 1–8 | Facet, trending and related searches Postgres runs at once. At 8 or fewer, at least two of the API pool's 10 connections stay free of them; plain searches take no turn. One more waits for a turn; one client address runs at most half of them while others wait. |
+| `search_heavy_wait_ms` | `1000` | 0–30000 | How long a facet, trending or related search waits for a turn; past it the search answers 503 with `Retry-After: 1`. Must be under `request_timeout_secs` less two seconds (an MCP tool call's time), so a waiting search answers 503, not 504. |
 | `api_cache_capacity` | `10000` | 100–100000 | Entries the rate limiter's table holds when an API request adds a client address. Past it the oldest entry is forgotten with its used budget, so keep it above the clients, preview clients and previewed links seen in a minute. Also the client addresses the dump download limiter remembers per hour. |
 | `preview_cache_capacity` | `10000` | 100–100000 | The same table's size when a preview adds its client address and link. Keep it equal to `api_cache_capacity`. |
 | `preview_requests_per_minute` | `30` | 1 or more | Preview requests per minute per client. |
@@ -292,6 +296,7 @@ resolver limits apply to pubky and to each card route.
 | `also_on_retry_secs` | `300` | 1–86400 | First retry of a failed source run (seconds). Doubles up to an hour. |
 | `also_on_refusal_hold_secs` | `300` | 120–86400 | How long a service's refusal of the operator's credentials (TIDAL, Spotify, Podcast Index) is held before it is asked again (seconds). |
 | `also_on_watch_page_bytes` | `3145728` | 1–16 MiB | Largest YouTube watch page `youtube_match` reads (bytes). A larger one is refused. |
+| `also_on_prune_batch` | `1000` | 10–100000 | Expired join keys, derived links or facts the hourly cleanup deletes in one transaction, oldest expiry first. Each transaction of keys or links holds the writers while it runs. |
 
 #### Calendar and event limits
 
@@ -2040,6 +2045,7 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |
 | `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10 (counted from its open, so passes that fail from the start fire it too); the log says why. Text searches read Postgres alone, or miss newer changes. |
 | `TextSearchBusy` | warning | [Text index](#text-index): over ten text searches an instance answered 503 in ten minutes, for ten minutes. Raise `limits.search_index_searches` on a host with more cores, or find what makes searches slow. |
+| `HeavySearchBusy` | warning | Over ten facet, trending or related searches an instance answered 503 in ten minutes, for ten minutes (`pinakes_search_heavy_busy_total`): every turn of `limits.search_heavy_searches` was taken for `limits.search_heavy_wait_ms`. Raise `limits.search_heavy_searches` (at most 8) or the wait, or find the client address that sends them (`reason="share"`: one address held half the turns). |
 | `CatalogueCardsRejected`, `CatalogueCardsRemoved` | warning | [Importer rules](#importer-rules): a catalogue's runs refused over a tenth of the cards they read in an hour (a dump format change, an importer bug: the debug log names the refused cards), or removed over a tenth of the catalogue in a day (check upstream; a full import under half its cards fails instead). |
 
 A new key needs a restart.
@@ -2091,7 +2097,6 @@ the provider keeps its listing. Any other reads its fixed sample, which its `can
 `scripts/verify-no-capability-urls` (run by the tests) scans every tracked and new source file for capability
 URLs. Synthetic fixture URLs are allowed only in named test files, and failures print paths without the URLs.
 
-At runtime the daemon applies the same provider patterns, plus credential query keys and a password in the
-user info (`crates/pinakes-core/src/capability.rs`): `POST /v1/resolve` refuses such a link, and no also-on,
+At runtime the daemon applies the same provider patterns, plus credential query keys and user info (`crates/pinakes-core/src/capability.rs`): `POST /v1/resolve` refuses such a link, and no also-on,
 archive or oEmbed lookup is sent one. `crates/pinakes-core/tests/fixtures/capability_urls.json` holds the
 probes both must agree on; add a pattern to both.

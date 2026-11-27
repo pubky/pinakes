@@ -434,7 +434,7 @@ async fn runs_replace_their_rows_failures_keep_them_and_rows_expire(pool: PgPool
         json!([]),
         "an expired link is not shown even before pruning"
     );
-    assert_eq!(also_on::prune(&pool).await.unwrap(), 2);
+    assert_eq!(also_on::prune(&pool, 1000).await.unwrap(), 2);
     assert_eq!(rows(pool.clone()).await, (vec![], vec![]));
 }
 
@@ -2919,7 +2919,7 @@ async fn pruned_keys_and_facts_change_the_search_revision(pool: PgPool) {
         .await
         .unwrap();
     let before = revision().await;
-    assert_eq!(also_on::prune(&pool).await.unwrap(), 1);
+    assert_eq!(also_on::prune(&pool, 1000).await.unwrap(), 1);
     assert!(revision().await > before);
 }
 
@@ -4497,6 +4497,7 @@ async fn a_switched_off_source_s_name_leaves_a_card_no_read_reaches(pool: PgPool
                 7,
                 24,
                 30,
+                1000,
                 Duration::from_secs(3600),
                 shutdown,
             ));
@@ -4998,4 +4999,37 @@ async fn reextract_starts_a_failed_lookup_over(pool: PgPool) {
         .unwrap();
         assert_eq!(row, (true, 0, None), "{routes:?}");
     }
+}
+
+/// Pruning deletes expired keys, links and facts `batch` rows at a time, oldest expiry first,
+/// each batch in a transaction of its own (a search write each): a mass expiry holds the writers
+/// one batch at a time. Every expired row goes, a live one stays.
+#[sqlx::test(migrations = "../../migrations")]
+async fn pruning_deletes_expired_rows_in_batches(pool: PgPool) {
+    for statement in [
+        "INSERT INTO resource(id,uri) SELECT md5('p'||i),'https://prune.example/'||i FROM generate_series(1,26) i",
+        "INSERT INTO resource_key(resource_id,key,source,via,expires_at) SELECT md5('p'||i),'wikidata:Q'||i,'wikidata','wikidata',now()-i*interval '1 minute' FROM generate_series(1,25) i",
+        "INSERT INTO resource_key(resource_id,key,source,via,expires_at) VALUES (md5('p26'),'wikidata:Q26','wikidata','wikidata',now()+interval '1 day')",
+        "INSERT INTO derived_link(resource_id,link_id,uri,site,source,via,key,expires_at) SELECT md5('p'||i),md5('p'||(i+1)),'https://open.example/'||i,'Example','wikidata','wikidata','wikidata:Q'||i,now()-interval '1 minute' FROM generate_series(1,3) i",
+        "INSERT INTO resource_fact(resource_id,name,value,source,expires_at) SELECT md5('p'||i),'isrc','V'||i,'musicbrainz',now()-interval '1 minute' FROM generate_series(1,12) i",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let writes = || async {
+        sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(writes),0)::bigint FROM search_write")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = writes().await;
+    assert_eq!(also_on::prune(&pool, 10).await.unwrap(), 40);
+    // Keys in three batches (10, 10, 5), the links in one, facts in two, then placements once.
+    assert_eq!(writes().await - before, 7);
+    let left: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM resource_key UNION ALL SELECT link_id FROM derived_link UNION ALL SELECT value FROM resource_fact ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, vec!["wikidata:Q26".to_owned()]);
 }

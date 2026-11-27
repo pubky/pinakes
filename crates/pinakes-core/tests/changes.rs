@@ -1347,6 +1347,7 @@ async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
         7,
         7 * 24,
         90,
+        1000,
         Duration::from_millis(20),
         rx,
     ));
@@ -1961,6 +1962,7 @@ fn an_occurrence_key_names_no_credential_and_others_stay_as_written() {
         null_key.clone(),
         serde_json::to_string(&("ht\ttps://cal.example/e?%74oken=SECRET", "r")).unwrap(),
         serde_json::to_string(&("web\ncal:cal.example/feed.ics?token=SECRET", "")).unwrap(),
+        serde_json::to_string(&("https://SECRET@cal.example/e", "")).unwrap(),
     ] {
         let stored = changes::stored_key(&key);
         assert_ne!(stored, key);
@@ -1971,7 +1973,7 @@ fn an_occurrence_key_names_no_credential_and_others_stay_as_written() {
     // A non-string recurrence id is kept as written.
     assert!(changes::stored_key(&null_key).ends_with(",null]"));
     for key in [
-        serde_json::to_string(&("https://u@cal.example/e", "")).unwrap(),
+        serde_json::to_string(&("https://cal.example/e", "")).unwrap(),
         serde_json::to_string(&("plain", "")).unwrap(),
         format!("[\"uid:{}\",\"\"]", "0".repeat(64)),
     ] {

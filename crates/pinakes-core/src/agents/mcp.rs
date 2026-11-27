@@ -31,6 +31,7 @@ use rmcp::{
 };
 use serde_json::{json, Map, Value};
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -101,6 +102,7 @@ impl Failure {
             400 => "fix the argument the error names",
             404 => "unknown here: nobody referenced it on Pubky, or it has not been read; try `card` with resolve: true, or `search` by q or key",
             429 => "over a per-IP limit: wait `retry_after_s` seconds (a minute when absent), then ask fewer, larger questions",
+            503 if self.error.contains("search is busy") => "the instance's searches of this kind are all taken (a text search, or one with facets, trending or related): wait `retry_after_s` seconds and ask again, or ask without facets",
             503 => "not available for now (the instance's new previews for this hour are taken): wait `retry_after_s` seconds; a link the index knows still reads",
             501 => "this instance does not serve that: for `wot_2`, use `following` or `friends`",
             502 | 504 => "not answered in time (an upstream, or the request's own deadline): retry once",
@@ -932,16 +934,36 @@ fn best_member(group_type: Option<&str>, members: &[Value]) -> Value {
         .map_or(Value::Null, |(_, m)| m.clone())
 }
 
-/// Whether a Nexus view is the one for `uri`, in any spelling the two normalize alike.
-fn view_of<'a>(views: &'a [Value], uri: &str) -> Option<&'a Value> {
-    let normalized = crate::model::identity(uri).map(|(_, u, _)| u).ok();
-    views.iter().find(|v| {
-        v["details"]["uri"].as_str().is_some_and(|u| {
-            u == uri
-                || normalized.as_deref() == Some(u)
-                || crate::model::identity(u).is_ok_and(|(_, n, _)| Some(n) == normalized)
-        })
-    })
+/// The Nexus views by their URI as written and as normalized, each naming the first view that
+/// has it: [`ViewIndex::of`] finds a URI's view without reading every view.
+struct ViewIndex<'a> {
+    views: &'a [Value],
+    by_uri: HashMap<String, usize>,
+}
+impl<'a> ViewIndex<'a> {
+    fn new(views: &'a [Value]) -> Self {
+        let mut by_uri = HashMap::new();
+        for (at, view) in views.iter().enumerate() {
+            let Some(uri) = view["details"]["uri"].as_str() else {
+                continue;
+            };
+            by_uri.entry(uri.to_owned()).or_insert(at);
+            if let Ok((_, normalized, _)) = crate::model::identity(uri) {
+                by_uri.entry(normalized).or_insert(at);
+            }
+        }
+        Self { views, by_uri }
+    }
+    /// The first view for `uri`, in any spelling the two normalize alike.
+    fn of(&self, uri: &str) -> Option<&'a Value> {
+        let normalized = crate::model::identity(uri).map(|(_, u, _)| u).ok();
+        [Some(uri), normalized.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|key| self.by_uri.get(key).copied())
+            .min()
+            .map(|at| &self.views[at])
+    }
 }
 
 /// A count of taggers over several views: the taggers they list, once each, or the most one
@@ -983,13 +1005,16 @@ fn taggers(tag: &Value) -> impl Iterator<Item = &Value> {
 /// own tag file (`nexus::tag_file_author`).
 fn social_answer(asks: &[Ask], views: &[Value], viewer: Option<&str>) -> Value {
     let mut items = vec![];
+    let index = ViewIndex::new(views);
     for ask in asks {
         let found: Vec<(&String, &Value)> = ask
             .asked
             .iter()
-            .filter_map(|u| view_of(views, u).map(|v| (u, v)))
+            .filter_map(|u| index.of(u).map(|v| (u, v)))
             .collect();
+        // Each label's taggers, found by the label: the views of a card may carry many labels.
         let mut labels: Vec<(String, Taggers, bool)> = vec![];
+        let mut label_at: HashMap<String, usize> = HashMap::new();
         let mut everyone = Taggers::default();
         for (_, view) in &found {
             // A view counts its taggers over all labels (`taggers_count`), each once.
@@ -999,10 +1024,11 @@ fn social_answer(asks: &[Ask], views: &[Value], viewer: Option<&str>) -> Value {
                 let Some(label) = tag["label"].as_str() else {
                     continue;
                 };
-                let at = match labels.iter().position(|(l, _, _)| l == label) {
-                    Some(at) => at,
+                let at = match label_at.get(label) {
+                    Some(at) => *at,
                     None => {
                         labels.push((label.to_owned(), Taggers::default(), false));
+                        label_at.insert(label.to_owned(), labels.len() - 1);
                         labels.len() - 1
                     }
                 };
@@ -1249,6 +1275,57 @@ mod tests {
                 {"uri": "https://example.org/unknown", "asked": ["https://example.org/unknown"],
                  "found": [], "taggers_count": 0, "tags": []}
             ]})
+        );
+    }
+
+    /// Many distinct labels over a card's views (Nexus labels anyone can create) merge in time
+    /// that follows their number, in the same order: by taggers, then by label. Four times the
+    /// labels take about four times as long; a merge that searched the labels so far would take
+    /// sixteen. The two sizes run in turn, five rounds, and the fastest run of each is compared,
+    /// so a loaded machine slows both alike.
+    #[test]
+    fn social_merges_many_labels_in_linear_time() {
+        let views = |labels: usize| {
+            let asked: Vec<String> = (0..6).map(|v| format!("https://example.org/{v}")).collect();
+            let ask = Ask {
+                id: None,
+                root: None,
+                uri: asked[0].clone(),
+                asked: asked.clone(),
+            };
+            let views: Vec<Value> = asked
+                .iter()
+                .enumerate()
+                .map(|(v, uri)| {
+                    let tags: Vec<Value> = (v..labels)
+                        .step_by(6)
+                        .map(|l| json!({"label": format!("l{l:05}"), "taggers_count": 1 + l % 3, "taggers": []}))
+                        .collect();
+                    json!({"details": {"uri": uri}, "taggers_count": 3, "tags": tags})
+                })
+                .collect();
+            (ask, views)
+        };
+        let (small_ask, small_views) = views(10_000);
+        let (large_ask, large_views) = views(40_000);
+        let (mut small, mut large) = (Duration::MAX, Duration::MAX);
+        let mut answer = Value::Null;
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            social_answer(std::slice::from_ref(&small_ask), &small_views, None);
+            small = small.min(started.elapsed());
+            let started = std::time::Instant::now();
+            answer = social_answer(std::slice::from_ref(&large_ask), &large_views, None);
+            large = large.min(started.elapsed());
+        }
+        let tags = answer["items"][0]["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 40_000);
+        assert_eq!(tags[0]["label"], "l00002");
+        assert_eq!(tags[0]["taggers_count"], 3);
+        assert_eq!(tags[39_999]["label"], "l39999");
+        assert!(
+            large < small * 8,
+            "40,000 labels {large:?}, 10,000 labels {small:?}"
         );
     }
 
@@ -1545,5 +1622,28 @@ mod tests {
             hint.contains("retry_after_s") && !hint.contains("retry once"),
             "{hint}"
         );
+        assert!(hint.contains("previews"), "{hint}");
+        // A busy search is told it is a busy search, not a preview's.
+        for error in [
+            "search is busy, try again shortly",
+            "text search is busy, try again shortly",
+        ] {
+            let result = Failure {
+                status: 503,
+                error: error.into(),
+                url: Some("https://pinakes.example/v1/search?facet=type".into()),
+                retry_after: Some(1),
+            }
+            .result();
+            let ContentBlock::Text(text) = &result.content[0] else {
+                panic!("text content")
+            };
+            let body: Value = serde_json::from_str(&text.text).unwrap();
+            let hint = body["hint"].as_str().unwrap();
+            assert!(
+                hint.contains("searches") && !hint.contains("previews"),
+                "{error}: {hint}"
+            );
+        }
     }
 }

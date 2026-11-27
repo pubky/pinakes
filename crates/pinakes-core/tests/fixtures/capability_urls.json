@@ -73,7 +73,16 @@
     "https://api.example.org/v1/items?credential=SECRET",
     "https://api.example.org/v1/items?secretKey=SECRET",
     "https://api.example.org/v1/items?client_secret",
-    "https://app.example.org/cb#api+key=SECRET"
+    "https://app.example.org/cb#api+key=SECRET",
+    "https://events.example.org/feed.ics?jwt=SECRET",
+    "https://events.example.org/feed.ics?authorization=SECRET",
+    "https://events.example.org/feed.ics?Authorization=Bearer%20SECRET",
+    "https://events.example.org/feed.ics?session=SECRET123abc",
+    "https://events.example.org/feed.ics?sid=SECRETabcdef1",
+    "https://events.example.org/feed.ics?connect.sid=SECRET",
+    "https://events.example.org/feed.ics?access_jwt=SECRET",
+    "https://events.example.org/feed.ics#jwt=SECRET",
+    "https://SECRET@events.example.org/feed.ics"
   ],
   "public": [
     "https://calendar.google.com/calendar/ical/en.ch%23holiday%40group.v.calendar.google.com/public/basic.ics",
@@ -100,6 +109,17 @@
     "https://www.example.org/zoo?monkey=1",
     "https://www.example.org/keys?hotkey=1",
     "https://www.example.org/login?oauth=1",
-    "https://www.example.org/x?key1=1"
+    "https://www.example.org/x?key1=1",
+    "https://www.example.org/inside?side=1",
+    "https://www.example.org/x?possession=1",
+    "https://www.example.org/x?sessions=3",
+    "https://pubchem.ncbi.nlm.nih.gov/summary/summary.cgi?sid=3243128",
+    "https://conference.example.org/programme?session=12",
+    "https://conference.example.org/programme?session=keynote",
+    "https://conference.example.org/programme?session=plenary-day-two",
+    "https://records.example.org/item?sid=12345678",
+    "https://conference.example.org/programme?session=keynote2025",
+    "https://conference.example.org/programme?session=Plenary-Session-Day",
+    "https://radio.example.org:8000/;?sid=1"
   ]
 }

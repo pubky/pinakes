@@ -523,7 +523,7 @@ async fn a_failure_keeps_a_recent_poster_and_old_or_switched_off_ones_go(pool: P
         .execute(&pool)
         .await
         .unwrap();
-    also_on::prune(&pool).await.unwrap();
+    also_on::prune(&pool, 1000).await.unwrap();
     look_up(&pool, &busy).await;
     read_again(&pool, &reader).await;
     assert_eq!(
@@ -665,7 +665,7 @@ async fn maintenance_drops_expired_tmdb_values_and_nothing_else(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    also_on::prune(&pool).await.unwrap();
+    also_on::prune(&pool, 1000).await.unwrap();
     let revision = || async {
         sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(writes),0)::bigint FROM search_write")
             .fetch_one(&pool)

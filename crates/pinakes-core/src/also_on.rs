@@ -85,6 +85,9 @@ pub struct AlsoOnConfig {
     /// The largest YouTube watch page `youtube_match` reads.
     #[serde(skip)]
     pub watch_page_bytes: usize,
+    /// The expired keys, links or facts [`prune`] deletes in one transaction, oldest expiry first.
+    #[serde(skip)]
+    pub prune_batch: i64,
 }
 impl Default for AlsoOnConfig {
     fn default() -> Self {
@@ -101,6 +104,7 @@ impl Default for AlsoOnConfig {
             retry_secs: 300,
             refusal_hold_secs: 300,
             watch_page_bytes: 3 * 1024 * 1024,
+            prune_batch: 1000,
         }
     }
 }
@@ -1233,38 +1237,71 @@ pub async fn refill(pool: &PgPool, stop: impl Fn() -> bool) -> Result<u64> {
 /// The cards [`refill`] reads at once.
 pub const REFILL_BATCH: i64 = 100;
 
-/// Delete keys and links nobody refreshed in time (their deletion regroups as a change would).
-pub async fn prune(pool: &PgPool) -> Result<u64> {
-    // Each deletion takes the write order, then locks what its triggers update, as `record` does.
-    let mut tx = pool.begin().await?;
-    lock_writers(&mut tx).await?;
-    sqlx::query("SELECT 1 FROM resource WHERE id IN (SELECT resource_id FROM resource_key WHERE expires_at<=now()) ORDER BY id FOR NO KEY UPDATE")
-        .execute(&mut *tx)
-        .await?;
-    let keys = sqlx::query("DELETE FROM resource_key WHERE expires_at<=now()")
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    tx.commit().await?;
-    let mut tx = pool.begin().await?;
-    lock_writers(&mut tx).await?;
-    sqlx::query("SELECT 1 FROM resource WHERE id IN (SELECT link_id FROM derived_link WHERE expires_at<=now() AND key IS NOT NULL) ORDER BY id FOR NO KEY UPDATE")
-        .execute(&mut *tx)
-        .await?;
-    let links = sqlx::query("DELETE FROM derived_link WHERE expires_at<=now()")
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    tx.commit().await?;
-    let facts = sqlx::query("DELETE FROM resource_fact WHERE expires_at<=now()")
-        .execute(pool)
-        .await?
-        .rows_affected();
+/// Delete keys, links and facts nobody refreshed in time (their deletion regroups as a change
+/// would), `batch` rows at a time, oldest expiry first, each batch in a transaction of its own: a
+/// mass expiry (a removed source's keys) holds the writers one batch at a time. A batch is the
+/// rows picked by their primary key; keys and links first take the write order and the rows of
+/// the resources their triggers update, as `record` does.
+pub async fn prune(pool: &PgPool, batch: i64) -> Result<u64> {
+    let batch = batch.max(1);
+    let mut deleted = 0;
+    // Each: the oldest expired rows by primary key (three columns, the third empty where the key
+    // has two), the resources their triggers update locked in ID order, and their deletion.
+    for (pick, lock, delete) in [
+        (
+            "SELECT resource_id,key,'' FROM resource_key WHERE expires_at<=now() ORDER BY expires_at LIMIT $1",
+            Some("SELECT 1 FROM resource WHERE id IN (SELECT unnest($1::text[])) ORDER BY id FOR NO KEY UPDATE"),
+            "DELETE FROM resource_key k USING unnest($1::text[],$2::text[]) p(resource_id,key) WHERE k.resource_id=p.resource_id AND k.key=p.key AND k.expires_at<=now()",
+        ),
+        (
+            "SELECT resource_id,link_id,'' FROM derived_link WHERE expires_at<=now() ORDER BY expires_at LIMIT $1",
+            Some("SELECT 1 FROM resource WHERE id IN (SELECT l.link_id FROM derived_link l JOIN unnest($1::text[],$2::text[]) p(resource_id,link_id) ON l.resource_id=p.resource_id AND l.link_id=p.link_id WHERE l.key IS NOT NULL) ORDER BY id FOR NO KEY UPDATE"),
+            "DELETE FROM derived_link l USING unnest($1::text[],$2::text[]) p(resource_id,link_id) WHERE l.resource_id=p.resource_id AND l.link_id=p.link_id AND l.expires_at<=now()",
+        ),
+        (
+            "SELECT resource_id,name,value FROM resource_fact WHERE expires_at<=now() ORDER BY expires_at LIMIT $1",
+            None,
+            "DELETE FROM resource_fact f USING unnest($1::text[],$2::text[],$3::text[]) p(resource_id,name,value) WHERE f.resource_id=p.resource_id AND f.name=p.name AND f.value=p.value AND f.expires_at<=now()",
+        ),
+    ] {
+        loop {
+            let mut tx = pool.begin().await?;
+            if lock.is_some() {
+                lock_writers(&mut tx).await?;
+            }
+            let rows: Vec<(String, String, String)> = sqlx::query_as(pick)
+                .bind(batch)
+                .fetch_all(&mut *tx)
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let mut columns: [Vec<String>; 3] = Default::default();
+            for (a, b, c) in rows {
+                columns[0].push(a);
+                columns[1].push(b);
+                columns[2].push(c);
+            }
+            if let Some(lock) = lock {
+                sqlx::query(lock)
+                    .bind(&columns[0])
+                    .bind(&columns[1])
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let mut query = sqlx::query(delete).bind(&columns[0]).bind(&columns[1]);
+            if delete.contains("$3") {
+                query = query.bind(&columns[2]);
+            }
+            deleted += query.execute(&mut *tx).await?.rows_affected();
+            tx.commit().await?;
+        }
+    }
     let placed = sqlx::query("DELETE FROM link_release WHERE expires_at<=now()")
         .execute(pool)
         .await?
         .rows_affected();
-    Ok(keys + links + facts + placed)
+    Ok(deleted + placed)
 }
 
 async fn subject(pool: &PgPool, id: &str) -> Result<Option<Subject>> {
