@@ -10,7 +10,7 @@ catalogue without a fetch.
 | Catalogue | `software`, sources `crates.io`, `f-droid`, `flathub` |
 | Reads | `https://static.crates.io/db-dump.tar.gz` (up to its `crates_keywords.csv`), `https://f-droid.org/repo/entry.json` and the `index-v2.json` it names, `https://dl.flathub.org/repo/appstream/x86_64/appstream.xml.gz` |
 | Credentials | None |
-| Rate | Each file's version once a day; a file when it is new; all streamed, nothing written to disk |
+| Rate | Each file's version once a day; a file when it is new; streamed, but for F-Droid's index, which is written to the catalogue's directory while it is checked |
 | Refresh | Daily, each registry on its own |
 | Needs | `http.contact` |
 | Card types | `SoftwareSourceCode` (crates), `MobileApplication` (F-Droid), `SoftwareApplication` (Flathub) |
@@ -26,8 +26,10 @@ catalogue without a fetch.
   read. Each crate's README is skipped as it is read. A dump without `crates.csv`, `keywords.csv`,
   `crates_categories.csv` or `crates_keywords.csv`, or one that ends inside a file, is refused
   (`archive`).
-- **F-Droid.** `entry.json` names the index file with its SHA-256 and size; the index is read
-  whole and checked against both before any card is written (`checksum`). crates.io and Flathub
+- **F-Droid.** `entry.json` names the index file with its SHA-256 and size; the index is written
+  to a file in `catalogues.dir/software` while it is hashed and checked against both before it is
+  parsed (`checksum`), so an index that is not the entry's is never parsed. The file's name is
+  removed as soon as it is opened: its bytes go when the read ends, however it ends. crates.io and Flathub
   publish no checksum of their files: their integrity rests on TLS, the file's length and the gzip
   stream's own CRC.
 - **Flathub.** The AppStream catalogue as a stream of XML elements: components of type
@@ -37,7 +39,8 @@ catalogue without a fetch.
   a 1,024-byte description and links of at most 512 bytes (a longer one is left out), keywords
   and category names 64 bytes, and what the dump's reading holds (the crates and their
   downloads, categories and keywords) at most 1 GiB as counted (`size`); an XML text 4,096
-  bytes, nesting 64 levels and 200,000 components; F-Droid's index at most 512 MiB, Flathub's
+  bytes, one XML event (a tag, a text, a comment) 1 MiB (`parse`), nesting 64 levels and 200,000
+  components; F-Droid's index at most 512 MiB, Flathub's
   catalogue 256 MiB (512 MiB unpacked), the part of the crates.io dump read 16 GiB unpacked; each
   registry at most 2 million packages. A crate name, Android package or Flathub ID that is not
   one is left out, and so is a link that carries a credential. A dump file without the columns

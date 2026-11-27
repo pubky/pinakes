@@ -23,7 +23,8 @@
 //! [`FULL_EVERY`] after the last one.
 //!
 //! Memory: up to [`BUFFERED`] files wait with their cards held ([`HELD_CARDS`] each at most,
-//! a few hundred bytes a card: about 1-2 GB at worst, a few hundred MB as a rule), and the IDs of
+//! a few hundred bytes a card, the IDs of works that don't qualify counting toward it: about 1-2
+//! GB at worst, a few hundred MB as a rule), and the IDs of
 //! the works with a card are held as 64-bit numbers (about 15M today: 250-500 MB).
 use super::{
     bulk,
@@ -297,6 +298,7 @@ impl OpenAlex {
                             &client,
                             &handle,
                             min,
+                            HELD_CARDS * HELD_IDS_PER_CARD,
                             &mut gate,
                             &mut || drop(stream.take()),
                             &mut |m| tx.blocking_send(m).is_ok(),
@@ -557,8 +559,12 @@ enum Message {
 }
 /// Files read and waiting to hand over their cards, at most (beside the [`STREAMS`] being read).
 pub const BUFFERED: usize = 2 * STREAMS;
-/// Cards a file holds back while an earlier date is written before it waits instead.
+/// Cards a file holds back while an earlier date is written before it waits instead. The IDs
+/// of works that don't qualify it holds count toward it, [`HELD_IDS_PER_CARD`] to a card.
 pub const HELD_CARDS: usize = 50_000;
+/// Held IDs of works that don't qualify that count as one held card: an ID is held as an 8-byte
+/// number, a card takes a few hundred bytes.
+pub const HELD_IDS_PER_CARD: usize = 32;
 /// A work ID's number (`W123` is 123).
 fn work_number(id: &str) -> Option<u64> {
     work_id(id)?.strip_prefix('W')?.parse().ok()
@@ -596,13 +602,15 @@ impl Drop for AbortOnDrop {
 
 /// Read one works file: its lines (each within [`LINE_CAP`]), the works that qualify as cards,
 /// and the numbers of those that don't. While `gate` is open the parts go out as they are read;
-/// before, they are held (up to [`HELD_CARDS`] cards, then the reader waits), and the file's
-/// stream is given back (`read_done`) once it is read whole.
+/// before, they are held (up to `hold` IDs, a card counting [`HELD_IDS_PER_CARD`]; then the
+/// reader waits), and the file's stream is given back (`read_done`) once it is read whole.
+#[allow(clippy::too_many_arguments)]
 fn read_part(
     input: &Input,
     client: &fetch::Client,
     handle: &tokio::runtime::Handle,
     min: u64,
+    hold: usize,
     gate: &mut Gate<'_>,
     read_done: &mut dyn FnMut(),
     send: &mut dyn FnMut(Message) -> bool,
@@ -617,39 +625,38 @@ fn read_part(
     let mut lines = bulk::Lines::new(BufReader::with_capacity(1 << 20, gz), LINE_CAP);
     let mut line = Vec::new();
     let mut held: Vec<Message> = Vec::new();
-    let mut held_cards = 0usize;
+    // What is held, in IDs: a card counts `HELD_IDS_PER_CARD`.
+    let mut held_ids = 0usize;
     let mut cards = Vec::new();
     let mut gone = Vec::new();
     let (mut lines_read, mut broken) = (0u64, 0u64);
     // Hand over what is held and the current parts, or hold them.
     let mut out =
-        |held: &mut Vec<Message>, held_cards: &mut usize, part: Vec<Message>, last: bool| -> bool {
+        |held: &mut Vec<Message>, held_ids: &mut usize, part: Vec<Message>, last: bool| -> bool {
             let n: usize = part
                 .iter()
-                .map(|m| {
-                    if let Message::Cards(c) = m {
-                        c.len()
-                    } else {
-                        0
-                    }
+                .map(|m| match m {
+                    Message::Cards(c) => c.len().saturating_mul(HELD_IDS_PER_CARD),
+                    Message::Gone(g) => g.len(),
+                    _ => 0,
                 })
-                .sum();
+                .fold(0, usize::saturating_add);
             held.extend(part.into_iter().filter(|m| match m {
                 Message::Cards(c) => !c.is_empty(),
                 Message::Gone(g) => !g.is_empty(),
                 _ => true,
             }));
-            *held_cards += n;
+            *held_ids = held_ids.saturating_add(n);
             if gate.closed() {
                 return false;
             }
-            if !gate.is_open() && !last && *held_cards < HELD_CARDS {
+            if !gate.is_open() && !last && *held_ids < hold {
                 return true;
             }
             if !gate.is_open() && !gate.wait() {
                 return false;
             }
-            *held_cards = 0;
+            *held_ids = 0;
             held.drain(..).all(&mut *send)
         };
     loop {
@@ -683,7 +690,7 @@ fn read_part(
                 Message::Cards(std::mem::take(&mut cards)),
                 Message::Gone(std::mem::take(&mut gone)),
             ];
-            if !out(&mut held, &mut held_cards, part, false) {
+            if !out(&mut held, &mut held_ids, part, false) {
                 return Ok(());
             }
         }
@@ -693,7 +700,7 @@ fn read_part(
         Message::Cards(std::mem::take(&mut cards)),
         Message::Gone(std::mem::take(&mut gone)),
     ];
-    out(&mut held, &mut held_cards, part, true);
+    out(&mut held, &mut held_ids, part, true);
     crate::telemetry::catalogue_items_skipped("openalex", "bad_line", broken);
     crate::telemetry::catalogue_items_skipped("openalex", "oversized_line", lines.too_long());
     if broken > 0 {
@@ -1215,6 +1222,78 @@ mod tests {
         ] {
             assert!(manifest(bad.as_bytes()).is_none(), "{bad}");
         }
+    }
+
+    /// A file waiting for an earlier date holds the IDs of its works that don't qualify toward
+    /// its hold: past it the reader waits (its stream not given back) instead of reading on,
+    /// and hands everything over once the gate opens.
+    #[test]
+    fn held_ids_that_dont_qualify_count_toward_the_hold() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("part_0000.gz");
+        let works = 3 * 10 * fetch::PART;
+        let mut gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        for n in 1..=works {
+            writeln!(
+                gz,
+                r#"{{"id":"https://openalex.org/W{n}","cited_by_count":1}}"#
+            )
+            .unwrap();
+        }
+        gz.finish().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let handle = runtime.handle().clone();
+        let (open_tx, open_rx) = tokio::sync::watch::channel(0usize);
+        let read_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let reader = {
+            let (read_done, sent) = (read_done.clone(), sent.clone());
+            let input = Input::File(path);
+            std::thread::spawn(move || {
+                let mut gate = Gate {
+                    open: open_rx,
+                    rank: 1,
+                    handle: &handle,
+                };
+                read_part(
+                    &input,
+                    &super::fetch::client("test", &[]).unwrap(),
+                    &handle,
+                    50,
+                    // Two cards' worth: less than one part of IDs.
+                    2 * HELD_IDS_PER_CARD,
+                    &mut gate,
+                    &mut || read_done.store(true, std::sync::atomic::Ordering::SeqCst),
+                    &mut |m| {
+                        match m {
+                            Message::Gone(ids) => sent.lock().unwrap().extend(ids),
+                            Message::Cards(cards) => assert!(cards.is_empty()),
+                            _ => {}
+                        }
+                        true
+                    },
+                )
+            })
+        };
+        // The reader stops at its first part: it neither reads the file whole nor sends.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline
+            && !read_done.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!read_done.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(sent.lock().unwrap().is_empty());
+        open_tx.send(1).unwrap();
+        reader.join().unwrap().unwrap();
+        assert!(read_done.load(std::sync::atomic::Ordering::SeqCst));
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), works);
+        assert!(sent.iter().copied().eq(1..=works as u64));
     }
 
     /// Works cited more than the threshold become cards with their links' keys; the others are

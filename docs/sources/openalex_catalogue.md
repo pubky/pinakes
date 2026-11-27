@@ -31,8 +31,9 @@ names every file; a file outside the bucket's works tree is refused (`manifest`)
   passed over without being parsed. A work that does not qualify removes its card if there is
   one, so a card written from an older copy goes when the newest copy no longer qualifies.
 - **Bounds.** A line longer than 8 MiB is skipped and counted in the log; a card takes at most
-  512 bytes of each text (title, venue, author). A file may hold at
-  most 16 GiB, the manifest 64 MiB and at most 100,000 files.
+  512 bytes of each text (title, venue, author). A file waiting for an earlier date holds at most
+  50,000 cards back, the IDs of its works that don't qualify counting 32 to a card; past that its
+  reader waits. A file may hold at most 16 GiB, the manifest 64 MiB and at most 100,000 files.
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range` with
   `If-Range`), up to five times in a row. A file may take 12 hours. The manifest lists no checksum
   of a works file; each is read as it arrives, and its gzip members' own CRC and length check it.

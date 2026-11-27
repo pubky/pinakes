@@ -173,19 +173,20 @@ impl Software {
                         anyhow::bail!(Failure::new("manifest").at(input.at()));
                     }
                 }
+                let spool = job.dir().join(FDROID_SPOOL);
                 fetch::batches(move |sink| {
                     let body = index.open(
                         &client,
                         &handle,
                         FDROID_INDEX_MAX.min(entry.index.size.saturating_add(1)),
                     )?;
-                    fdroid(body, &entry, &index.at(), sink)
+                    fdroid(body, &entry, &index.at(), &spool, sink)
                 })
             }
             Registry::Flathub => fetch::batches(move |sink| {
                 let body = input.open(&client, &handle, FLATHUB_MAX)?;
                 let xml = flate2::read::GzDecoder::new(body).take(FLATHUB_XML_MAX);
-                flathub(BufReader::new(xml), &input.at(), sink)
+                flathub(xml, &input.at(), sink)
             }),
         };
         let mut cards = 0u64;
@@ -924,23 +925,57 @@ impl Localized {
         .filter(|t| !t.is_empty())
     }
 }
-/// The cards of F-Droid's index: read whole (within its size), its SHA-256 and size checked
-/// against the entry, then its packages as cards.
+/// The file F-Droid's index is written to in the catalogue's directory while it is hashed: the
+/// name is unlinked as soon as it is opened, so the bytes go with the reader.
+const FDROID_SPOOL: &str = "fdroid-index.json.part";
+#[cfg(test)]
+thread_local! {
+    /// The F-Droid indexes this thread parsed (for the tests).
+    static FDROID_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// The cards of F-Droid's index: written whole (within its size) to `spool` while it is hashed,
+/// its SHA-256 and size checked against the entry, and only then parsed, its packages as cards.
+/// An index that is not the entry's is never parsed.
 fn fdroid<R: Read>(
     body: R,
     entry: &FdroidEntry,
     at: &str,
+    spool: &std::path::Path,
     sink: &mut dyn FnMut(Vec<Card>) -> bool,
 ) -> Result<()> {
+    use std::io::{Seek, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    let disk = || Failure::new("disk").at(spool.display().to_string());
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(spool)
+        .map_err(|_| disk())?;
+    let _ = std::fs::remove_file(spool);
     let mut hashed = bulk::Hashed::new(body);
-    let index: Result<FdroidIndex, _> = serde_json::from_reader(BufReader::new(&mut hashed));
-    // The rest, if any, counts for the digest.
-    std::io::copy(&mut hashed, &mut std::io::sink())?;
+    {
+        let mut out = std::io::BufWriter::new(&mut file);
+        std::io::copy(&mut hashed, &mut out).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::StorageFull {
+                anyhow::Error::from(disk())
+            } else {
+                anyhow::Error::from(e)
+            }
+        })?;
+        out.flush().map_err(|_| disk())?;
+    }
     if hashed.count() != entry.index.size || !hashed.hex().eq_ignore_ascii_case(&entry.index.sha256)
     {
         anyhow::bail!(Failure::new("checksum").at(at.to_owned()));
     }
-    let index = index.map_err(|_| Failure::new("parse").at(at.to_owned()))?;
+    file.rewind().map_err(|_| disk())?;
+    #[cfg(test)]
+    FDROID_PARSED.with(|n| n.set(n.get() + 1));
+    let index: FdroidIndex = serde_json::from_reader(BufReader::new(file))
+        .map_err(|_| Failure::new("parse").at(at.to_owned()))?;
     if index.packages.len() > PACKAGES_CAP {
         anyhow::bail!(Failure::new("size").at(at.to_owned()));
     }
@@ -1041,9 +1076,12 @@ struct Component {
 }
 /// The cards of Flathub's AppStream catalogue, read as a stream of XML events: each
 /// application component's ID, name, summary, categories, keywords, homepage and source links,
-/// in the catalogue's own language (elements with an `xml:lang` are passed over).
-fn flathub<R: BufRead>(xml: R, at: &str, sink: &mut dyn FnMut(Vec<Card>) -> bool) -> Result<()> {
+/// in the catalogue's own language (elements with an `xml:lang` are passed over). One event (a
+/// tag, a text, a comment) of more than a megabyte fails the read (`parse`), as an OpenStreetMap
+/// change file's does ([`osc::MAX_TAG_BYTES`](super::osm::osc::MAX_TAG_BYTES)).
+fn flathub<R: Read>(xml: R, at: &str, sink: &mut dyn FnMut(Vec<Card>) -> bool) -> Result<()> {
     use quick_xml::events::Event;
+    let (xml, pulled) = super::osm::osc::bounded(xml);
     let mut reader = quick_xml::Reader::from_reader(xml);
     let config = reader.config_mut();
     config.trim_text(true);
@@ -1059,7 +1097,9 @@ fn flathub<R: BufRead>(xml: R, at: &str, sink: &mut dyn FnMut(Vec<Card>) -> bool
     let failure = || Failure::new("parse").at(at.to_owned());
     loop {
         buf.clear();
-        match reader.read_event_into(&mut buf) {
+        let event = reader.read_event_into(&mut buf);
+        pulled.set(0);
+        match event {
             Err(_) => anyhow::bail!(failure()),
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
@@ -1423,12 +1463,31 @@ pub(crate) mod tests {
             },
         }
     }
-    /// F-Droid's index becomes cards once its digest and size are the entry's.
+    /// F-Droid's index read to a spool file in `dir` (gone again once it is read).
+    fn fdroid_in(
+        dir: &std::path::Path,
+        body: &[u8],
+        entry: &FdroidEntry,
+        sink: &mut dyn FnMut(Vec<Card>) -> bool,
+    ) -> Result<()> {
+        let spool = dir.join(FDROID_SPOOL);
+        let read = fdroid(body, entry, "test", &spool, sink);
+        assert!(std::fs::symlink_metadata(&spool).is_err(), "{spool:?} left");
+        read
+    }
+    fn parsed() -> usize {
+        FDROID_PARSED.with(|n| n.get())
+    }
+    /// F-Droid's index becomes cards once its digest and size are the entry's; one that is not
+    /// the entry's is never parsed, and the spool file never outlives the read.
     #[test]
     fn an_fdroid_index_becomes_cards_once_its_digest_holds() {
+        let dir = tempfile::tempdir().unwrap();
         let index = fixture("fdroid-index-v2.json");
         let entry = entry_for(&index);
-        let cards = cards_of(|sink| fdroid(&index[..], &entry, "test", sink)).unwrap();
+        let before = parsed();
+        let cards = cards_of(|sink| fdroid_in(dir.path(), &index[..], &entry, sink)).unwrap();
+        assert_eq!(parsed(), before + 1);
         assert!(cards.len() >= 2);
         let app = &cards[0];
         assert!(app.uri.starts_with("https://f-droid.org/packages/"));
@@ -1443,8 +1502,38 @@ pub(crate) mod tests {
         }
         let mut wrong = entry.clone();
         wrong.index.sha256 = "0".repeat(64);
-        let failed = cards_of(|sink| fdroid(&index[..], &wrong, "test", sink)).unwrap_err();
+        let failed = cards_of(|sink| fdroid_in(dir.path(), &index[..], &wrong, sink)).unwrap_err();
         assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "checksum");
+        // Bytes past the entry's size, or short of it, are not the entry's either.
+        let mut longer = index.clone();
+        longer.extend_from_slice(b"\n");
+        let failed = cards_of(|sink| fdroid_in(dir.path(), &longer, &entry, sink)).unwrap_err();
+        assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "checksum");
+        let failed =
+            cards_of(|sink| fdroid_in(dir.path(), &index[..10], &entry, sink)).unwrap_err();
+        assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "checksum");
+        assert_eq!(
+            parsed(),
+            before + 1,
+            "an index that is not the entry's was parsed"
+        );
+        // A link where the spool goes is not followed: the read fails and the link's target
+        // stays as it was.
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, b"kept").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(FDROID_SPOOL)).unwrap();
+        let failed = cards_of(|sink| {
+            fdroid(
+                &index[..],
+                &entry,
+                "test",
+                &dir.path().join(FDROID_SPOOL),
+                sink,
+            )
+        })
+        .unwrap_err();
+        assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "disk");
+        assert_eq!(std::fs::read(&target).unwrap(), b"kept");
         // An entry naming a file elsewhere is refused.
         let mut far = serde_json::json!({"timestamp": 1, "index": {"name": "/../x.json", "sha256": "0".repeat(64), "size": 1}});
         assert!(fdroid_entry(far.to_string().as_bytes()).is_none());
@@ -1482,6 +1571,42 @@ pub(crate) mod tests {
         assert!(cards.iter().all(|c| !c.source_id.contains("Platform")));
         // A broken file is a failure.
         assert!(cards_of(|sink| flathub(&b"<components><component>"[..], "t", sink)).is_err());
+    }
+
+    /// One XML event (a text, a comment, a tag) over a megabyte fails the read; a catalogue of
+    /// many smaller events, far over a megabyte in all, reads.
+    #[test]
+    fn a_flathub_event_over_a_megabyte_fails_the_read() {
+        use crate::catalogue::osm::osc::{MAX_TAG_BYTES, READ_BUFFER};
+        let over = MAX_TAG_BYTES + READ_BUFFER + 10;
+        let app = |id: &str, text: &str| {
+            format!("<component type=\"desktop-application\"><id>{id}</id><name>App</name>{text}</component>")
+        };
+        for big in [
+            app(
+                "org.example.App",
+                &format!("<summary>{}</summary>", "x".repeat(over)),
+            ),
+            app("org.example.App", &format!("<!--{}-->", "x".repeat(over))),
+            app(
+                "org.example.App",
+                &format!(
+                    "<url type=\"homepage\" a=\"{}\">https://example.org/</url>",
+                    "x".repeat(over)
+                ),
+            ),
+        ] {
+            let xml = format!("<components>{big}</components>");
+            let failed = cards_of(|sink| flathub(xml.as_bytes(), "t", sink)).unwrap_err();
+            assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "parse");
+        }
+        let many: String = (0..30_000)
+            .map(|n| app(&format!("org.example.App{n}"), "<summary>An app</summary>"))
+            .collect();
+        let xml = format!("<components>{many}</components>");
+        assert!(xml.len() > 2 * over);
+        let cards = cards_of(|sink| flathub(xml.as_bytes(), "t", sink)).unwrap();
+        assert_eq!(cards.len(), 30_000);
     }
 
     #[test]
@@ -1548,7 +1673,8 @@ pub(crate) mod tests {
         fn any_bytes_end_without_a_panic(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
             let _ = cards_of(|sink| crates(&bytes[..], "t", sink));
             let entry = entry_for(&bytes);
-            let _ = cards_of(|sink| fdroid(&bytes[..], &entry, "t", sink));
+            let dir = tempfile::tempdir().unwrap();
+            let _ = cards_of(|sink| fdroid_in(dir.path(), &bytes[..], &entry, sink));
             let _ = cards_of(|sink| flathub(&bytes[..], "t", sink));
         }
         /// Fuzz: a dump whose files hold arbitrary CSV reads without a panic.
