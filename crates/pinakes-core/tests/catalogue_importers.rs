@@ -1177,6 +1177,63 @@ async fn one_openalex_card_holds_a_shared_doi(pool: PgPool) {
     assert!(reindexed >= 1);
 }
 
+/// An update cut off between its removals and the DOI pass (the holder of a shared DOI removed,
+/// the twin not yet given the DOI back) ends, when it is taken up, with a pass over every card's
+/// DOIs: the twin takes the DOI back though the files read again name neither work.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_openalex_update_cut_off_after_its_removals_shares_dois_again(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let original = with(&w[0], |v| v["cited_by_count"] = 900.into());
+    let twin = with(&w[0], |v| {
+        v["id"] = "https://openalex.org/W2".into();
+        v["cited_by_count"] = 60.into();
+    });
+    let first = ("2026-10-14", vec![original, twin]);
+    snapshot(snap.path(), "2026-10-14", std::slice::from_ref(&first));
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let doi_key = "doi:10.1016/j.kint.2022.02.042";
+    let (held_uri, _, _, _, _, _) = row(&pool, "openalex", "W4225145323").await;
+    let (_, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert!(!keys.contains(&doi_key.to_owned()), "{keys:?}");
+    // The update as it stood when it was cut off: the holder, fallen below the threshold in a
+    // newer file, removed with the update's cursor; the DOI pass not run.
+    let fallen = with(&w[0], |v| v["cited_by_count"] = 10.into());
+    snapshot(
+        snap.path(),
+        "2026-11-14",
+        &[first, ("2026-11-01", vec![fallen])],
+    );
+    sqlx::query(
+        "UPDATE catalogue_state SET run='update',phase='update' WHERE catalogue='openalex'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store::remove(
+        &pool,
+        Catalogue::Openalex,
+        &["W4225145323".to_owned()],
+        Some(&serde_json::json!({"snapshot": "2026-11-14", "phase": "removing"})),
+    )
+    .await
+    .unwrap();
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.run, None);
+    let (uri, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert_eq!(uri, held_uri);
+    assert!(keys.contains(&doi_key.to_owned()), "{keys:?}");
+}
+
 // --- Tranco --------------------------------------------------------------------------------------
 
 /// What one URL answers.

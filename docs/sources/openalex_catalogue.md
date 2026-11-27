@@ -70,7 +70,8 @@ holding one DOI would tie, and a shared DOI link would join neither, so one card
 cited (then the lowest ID). Each other one links its openalex.org page and drops the DOI's keys,
 remembering them in `details.shared_doi`; it takes them back when it is the best holder left (the
 holder removed, or cited less). This is decided at the end of each run, for the DOIs the run
-wrote or removed a holder of (a full import: for all its cards). A card that moves counts as
+wrote or removed a holder of (a full import, and an update taken up after it was cut off during
+or after its removals: for all its cards). A card that moves counts as
 changed, so the links already stored on its DOI are checked again and search reads it again.
 
 ## Updates

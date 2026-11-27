@@ -398,8 +398,12 @@ impl OpenAlex {
                     .await?;
                     list.extend(held);
                 }
-                job.remove(&ids, json!({"snapshot": snapshot, "phase": "removing"}))
-                    .await?;
+                // The cursor that says the removals began goes with the first one, so an update
+                // cut off anywhere after it ends with a pass over every DOI ([`REMOVING`]).
+                let removing = json!({"snapshot": snapshot, "phase": REMOVING});
+                let (first, rest) = ids.split_at(1);
+                job.remove(first, removing.clone()).await?;
+                job.remove(rest, removing).await?;
             }
             Ok(dois)
         }
@@ -412,6 +416,10 @@ impl OpenAlex {
         result
     }
 }
+/// The cursor's `phase` once an update's removals began: an update taken up from it may have
+/// removed holders of DOIs whose other holders `share_dois` has not looked at yet, so it ends
+/// with a pass over every card's DOIs.
+const REMOVING: &str = "removing";
 /// Which DOIs [`share_dois`] looks at.
 pub enum DoiScope<'a> {
     /// The cards a full import wrote (its generation): the others go with its end.
@@ -1126,6 +1134,11 @@ impl Importer for OpenAlex {
         if last.get("min_citations").and_then(Value::as_u64) != Some(u64::from(min)) {
             return Ok(UpdateEnd::NeedsImport("openalex.min_citations changed"));
         }
+        // Taken up after its removals began: the DOIs of the works removed are not known any
+        // more, so the pass looks at every DOI.
+        let removed_before = job
+            .cursor()
+            .is_some_and(|c| c.get("phase").and_then(Value::as_str) == Some(REMOVING));
         let manifest = self.manifest().await?;
         if last.get("snapshot").and_then(Value::as_str) == Some(manifest.date.as_str()) {
             return Ok(UpdateEnd::Done);
@@ -1150,10 +1163,13 @@ impl Importer for OpenAlex {
             })
             .collect();
         // An update cut off reads its files again: its removals are decided over all of them.
-        let dois = self.read(job, &manifest, &parts, BTreeSet::new()).await?;
+        let dois = self
+            .read(job, &manifest, &parts, BTreeSet::new())
+            .await?
+            .filter(|_| !removed_before);
         match &dois {
             Some(dois) => share_dois(job.pool(), DoiScope::Dois(dois)).await?,
-            // Past a million DOIs written: a whole pass over the cards.
+            // Past a million DOIs written, or taken up after its removals: a whole pass.
             None => share_dois(job.pool(), DoiScope::Generation(job.generation())).await?,
         };
         job.set_position(position(&manifest, min));
