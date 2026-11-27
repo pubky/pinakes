@@ -92,31 +92,46 @@ impl State {
     }
 }
 
+/// The key of `catalogue_state.position` under which an importer's task keeps when it began
+/// waiting and why (`{"reason": "disk", "at": <time>}`), so `pinakes_catalogue_waiting_seconds`
+/// counts a wait across daemon restarts (`run::run`). Only the task writes it, and it goes when
+/// the wait ends, when a run ends (its position is written then), and when the catalogue is off
+/// at a start. A [`State`] never holds it: importers never see it.
+pub const WAITING_SINCE: &str = "waiting_since";
+/// `position` without [`WAITING_SINCE`]: none when the key was all it held.
+pub(crate) const POSITION_WITHOUT_WAIT: &str = "CASE WHEN position ? 'waiting_since' THEN nullif(position-'waiting_since','{}'::jsonb) ELSE position END";
+/// A state row's columns as a [`State`] reads them.
+fn state_columns() -> String {
+    format!("catalogue,phase,run,generation,cursor,{POSITION_WITHOUT_WAIT} AS position,cards,upstream_version,last_import_at,last_update_at,current_as_of,import_requested,waiting,last_error,error_count,updated_at,scope,generation_cards,shrink_allowed")
+}
 /// The state row of `catalogue`, made when it has none: one statement, so a drop that deletes
 /// the row at the same time can't leave it missing between a write and a read.
 pub async fn ensure_state(pool: &PgPool, catalogue: Catalogue) -> Result<State> {
-    Ok(sqlx::query_as(
-        "INSERT INTO catalogue_state(catalogue) VALUES($1) ON CONFLICT (catalogue) DO UPDATE SET catalogue=excluded.catalogue RETURNING *",
-    )
+    Ok(sqlx::query_as(&format!(
+        "INSERT INTO catalogue_state(catalogue) VALUES($1) ON CONFLICT (catalogue) DO UPDATE SET catalogue=excluded.catalogue RETURNING {}",
+        state_columns()
+    ))
     .bind(catalogue.name())
     .fetch_one(pool)
     .await?)
 }
 pub async fn state(pool: &PgPool, catalogue: Catalogue) -> Result<Option<State>> {
-    Ok(
-        sqlx::query_as("SELECT * FROM catalogue_state WHERE catalogue=$1")
-            .bind(catalogue.name())
-            .fetch_optional(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(&format!(
+        "SELECT {} FROM catalogue_state WHERE catalogue=$1",
+        state_columns()
+    ))
+    .bind(catalogue.name())
+    .fetch_optional(pool)
+    .await?)
 }
 /// Every state row, by catalogue name.
 pub async fn states(pool: &PgPool) -> Result<Vec<State>> {
-    Ok(
-        sqlx::query_as("SELECT * FROM catalogue_state ORDER BY catalogue")
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(&format!(
+        "SELECT {} FROM catalogue_state ORDER BY catalogue",
+        state_columns()
+    ))
+    .fetch_all(pool)
+    .await?)
 }
 /// The `phase` of each catalogue's state row as the configuration the daemon starts with says:
 /// `disabled` for a catalogue that is off, and `idle` again for one turned back on. The run under
@@ -125,6 +140,11 @@ pub async fn states(pool: &PgPool) -> Result<Vec<State>> {
 pub async fn sync_switches(pool: &PgPool, config: &CataloguesConfig) -> Result<()> {
     let on = config.enabled_names();
     sqlx::query("UPDATE catalogue_state SET phase='disabled',waiting=NULL,updated_at=now() WHERE NOT catalogue=ANY($1) AND phase<>'disabled'")
+        .bind(&on)
+        .execute(pool)
+        .await?;
+    // A catalogue that is off waits for nothing: a wait it was counting ends.
+    sqlx::query(&format!("UPDATE catalogue_state SET position={POSITION_WITHOUT_WAIT} WHERE NOT catalogue=ANY($1) AND position ? 'waiting_since'"))
         .bind(&on)
         .execute(pool)
         .await?;

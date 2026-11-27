@@ -875,10 +875,7 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
     let mut lock: Option<SessionLock> = None;
     // Whether the last try found the lock held elsewhere: logged once, when that starts.
     let mut busy = false;
-    let mut waited = Waited {
-        catalogue,
-        since: None,
-    };
+    let waited = Waited { catalogue };
     loop {
         if *shutdown.borrow() {
             return;
@@ -915,15 +912,22 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             _ = shutdown.changed() => return,
             next = stepped => next,
         };
-        // Why the step waits, from the state row it wrote (none while another process holds the
-        // lock and the row): `pinakes_catalogue_waiting_seconds`. A failed step keeps the wait's
-        // start, so a wait broken by failures in between still counts from its beginning.
+        // Why the step waits, from the state row it wrote: `pinakes_catalogue_waiting_seconds`,
+        // from the wait's start kept with the row. A failed step keeps the start, so a wait broken
+        // by failures in between still counts from its beginning; while another process holds
+        // the lock and the row, this task neither writes nor shows a wait.
         match &next {
             Ok(Next::Wait(_)) if lock.is_some() => {
-                waited.note(waiting_reason(&ctx.pool, catalogue).await)
+                let reason = waiting_reason(&ctx.pool, catalogue).await;
+                waited.note(&ctx.pool, reason).await;
             }
-            Ok(_) => waited.note(None),
-            Err(_) => waited.failed(),
+            Ok(_) if lock.is_some() => {
+                waited.note(&ctx.pool, None).await;
+            }
+            Ok(_) => waited.away(),
+            Err(_) => {
+                waited.failed(&ctx.pool).await;
+            }
         }
         let wait = match next {
             Ok(Next::Again) => continue,
@@ -999,36 +1003,77 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
     }
 }
 
-/// How long a task has waited for one reason (`pinakes_catalogue_waiting_seconds`).
+/// How long a task has waited for one reason (`pinakes_catalogue_waiting_seconds`), counted from
+/// the start kept in its state row ([`store::WAITING_SINCE`]), so a daemon restart counts on from
+/// it. Written only while the task holds the catalogue's lock; best effort (a failed read or
+/// write leaves the gauge as it was).
 struct Waited {
     catalogue: Catalogue,
-    /// The reason and when the task began waiting for it.
-    since: Option<(&'static str, std::time::Instant)>,
 }
 impl Waited {
-    /// After a step: it waits for `reason`, or does not wait.
-    fn note(&mut self, reason: Option<&'static str>) {
+    /// After a step that held the lock: it waits for `reason` (the start kept, or now when the
+    /// reason is new), or does not wait (the start goes). The wait shown: its reason and seconds.
+    async fn note(
+        &self,
+        pool: &PgPool,
+        reason: Option<&'static str>,
+    ) -> Option<(&'static str, u64)> {
         let name = self.catalogue.name();
-        if self.since.map(|(was, _)| was) != reason {
-            if let Some((was, _)) = self.since.take() {
-                crate::telemetry::catalogue_waiting(name, was, 0);
-            }
-            self.since = reason.map(|reason| (reason, std::time::Instant::now()));
-        }
-        self.show();
-    }
-    /// After a step that failed: the wait goes on from its start (a run that fails is tried
-    /// again, and waits again for the same reason).
-    fn failed(&mut self) {
-        self.show();
-    }
-    fn show(&self) {
-        if let Some((reason, at)) = self.since {
-            crate::telemetry::catalogue_waiting(
-                self.catalogue.name(),
-                reason,
-                at.elapsed().as_secs(),
+        let written = match reason {
+            Some(reason) => sqlx::query("UPDATE catalogue_state SET position=coalesce(position,'{}'::jsonb)||jsonb_build_object('waiting_since',jsonb_build_object('reason',$2::text,'at',now())) WHERE catalogue=$1 AND (position->'waiting_since'->>'reason') IS DISTINCT FROM $2")
+                .bind(name)
+                .bind(reason)
+                .execute(pool)
+                .await,
+            None => sqlx::query(&format!("UPDATE catalogue_state SET position={} WHERE catalogue=$1 AND position ? 'waiting_since'", store::POSITION_WITHOUT_WAIT))
+                .bind(name)
+                .execute(pool)
+                .await,
+        };
+        if let Err(error) = written {
+            tracing::debug!(
+                catalogue = name,
+                kind = crate::resolver::error_class(&anyhow::Error::from(error)),
+                "catalogue wait not kept"
             );
+        }
+        let shown = match reason {
+            Some(_) => self.stored(pool).await,
+            None => None,
+        };
+        self.show(shown);
+        shown
+    }
+    /// After a step that failed: the kept wait goes on from its start (a run that fails is tried
+    /// again, and waits again for the same reason); nothing is written.
+    async fn failed(&self, pool: &PgPool) -> Option<(&'static str, u64)> {
+        let shown = self.stored(pool).await;
+        self.show(shown);
+        shown
+    }
+    /// Another process holds the lock and the row: this task waits for nothing of its own.
+    fn away(&self) {
+        self.show(None);
+    }
+    /// The wait the state row keeps: its reason and how long ago it began.
+    async fn stored(&self, pool: &PgPool) -> Option<(&'static str, u64)> {
+        let (reason, seconds): (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT position->'waiting_since'->>'reason',greatest(floor(extract(epoch FROM now()-(position->'waiting_since'->>'at')::timestamptz)),0)::bigint FROM catalogue_state WHERE catalogue=$1",
+        )
+        .bind(self.catalogue.name())
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+        let reason = crate::telemetry::CATALOGUE_WAIT_REASONS
+            .into_iter()
+            .find(|r| Some(*r) == reason.as_deref())?;
+        Some((reason, u64::try_from(seconds?).unwrap_or(0)))
+    }
+    fn show(&self, wait: Option<(&'static str, u64)>) {
+        for reason in crate::telemetry::CATALOGUE_WAIT_REASONS {
+            let seconds = wait.filter(|w| w.0 == reason).map_or(0, |w| w.1);
+            crate::telemetry::catalogue_waiting(self.catalogue.name(), reason, seconds);
         }
     }
 }
@@ -1669,26 +1714,66 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A wait keeps its start through failed steps between its waits (a disk wait broken by
-    /// failures still reaches the alert's hours); a step that runs, or another reason, starts
-    /// it again.
-    #[test]
-    fn a_wait_keeps_its_start_through_failed_steps() {
-        let mut waited = Waited {
+    /// A wait keeps its start in the state row: through failed steps between its waits (a disk
+    /// wait broken by failures still reaches the alert's hours) and for a task started again (a
+    /// daemon restart); another reason starts it again, and a step that runs removes it. The
+    /// state the importers read never holds it, and the rest of the position stays.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_wait_keeps_its_start_with_the_state_row(pool: PgPool) {
+        let waited = Waited {
             catalogue: Catalogue::Osm,
-            since: None,
         };
-        waited.note(Some("disk"));
-        let started = waited.since.expect("waiting").1;
-        waited.failed();
-        waited.note(Some("disk"));
-        assert_eq!(waited.since.map(|s| s.1), Some(started));
-        waited.note(Some("turn"));
-        assert!(waited
-            .since
-            .is_some_and(|s| s.0 == "turn" && s.1 >= started));
-        waited.note(None);
-        assert_eq!(waited.since, None);
+        store::ensure_state(&pool, Catalogue::Osm).await.unwrap();
+        let started = waited.note(&pool, Some("disk")).await;
+        assert!(
+            started.is_some_and(|(r, s)| r == "disk" && s < 60),
+            "{started:?}"
+        );
+        // Seven hours on, the task fails a step, and a new task (a restart) waits again.
+        sqlx::query("UPDATE catalogue_state SET position=jsonb_set(position,'{waiting_since,at}',to_jsonb(now()-interval '7 hours'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let seven = |w: Option<(&str, u64)>| w.is_some_and(|(r, s)| r == "disk" && s >= 25200);
+        assert!(seven(waited.failed(&pool).await));
+        let restarted = Waited {
+            catalogue: Catalogue::Osm,
+        };
+        assert!(seven(restarted.note(&pool, Some("disk")).await));
+        let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
+        assert_eq!(state.position, None);
+        // Another reason starts over; the rest of the position is kept, and stays when the wait
+        // ends.
+        sqlx::query("UPDATE catalogue_state SET position=position||'{\"sequence\": 7}'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let turn = restarted.note(&pool, Some("turn")).await.unwrap();
+        assert!(turn.0 == "turn" && turn.1 < 60, "{turn:?}");
+        let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
+        assert_eq!(state.position, Some(json!({"sequence": 7})));
+        assert_eq!(restarted.note(&pool, None).await, None);
+        let raw: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT position FROM catalogue_state WHERE catalogue='osm'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(raw, Some(json!({"sequence": 7})));
+    }
+
+    /// A catalogue off at a daemon's start waits for nothing: the wait its row kept goes, so it
+    /// doesn't count the time off when it is on again.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_catalogue_off_at_a_start_ends_its_wait(pool: PgPool) {
+        let waited = Waited {
+            catalogue: Catalogue::Osm,
+        };
+        store::ensure_state(&pool, Catalogue::Osm).await.unwrap();
+        waited.note(&pool, Some("disk")).await.unwrap();
+        let mut off = crate::catalogue::CataloguesConfig::default();
+        off.osm.enabled = false;
+        store::sync_switches(&pool, &off).await.unwrap();
+        assert_eq!(waited.failed(&pool).await, None);
     }
 
     /// The waits the runner and the importers write are told apart by their words.

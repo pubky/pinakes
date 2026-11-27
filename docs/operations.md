@@ -1957,10 +1957,10 @@ and removes the directory only while it still holds it. Run it again to finish.
 `catalogue import <name>` runs one full import of the catalogue now, or with `--update` one
 update, through the same code and state rows as the daemon's task: it takes the catalogue's lock
 (refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
-disk as the task does (printing why), watches its lock, and prints the cards before and after and
-the status table when it has finished; it checks its lock before each step and watches it while
-it waits, and stops (the lock lost) once its session has ended (the cards each run wrote: new, changed, unchanged,
-rejected as invalid, removed). A full import takes up one that was cut off, else begins a
+disk as the task does (printing why), and prints the cards before and after (the cards the run
+wrote: new, changed, unchanged, rejected as invalid, removed) and the status table when it has
+finished. It checks its lock before each step and watches it while a step runs and while it
+waits, and stops (the lock lost) once its session has ended. A full import takes up one that was cut off, else begins a
 new one, and clears an update refused for removing too much. `--from`, `--limit`, `--reads`, `--since` and
 `--force` are the importer's own ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand),
 [Wikidata](sources/wikidata_catalogue.md#run-it-by-hand); the others [below](#run-an-import)). A failure is recorded as the
