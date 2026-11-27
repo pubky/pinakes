@@ -92,7 +92,8 @@ a backup. [How Pinakes works](docs/design.md) explains every step and its rules.
 You need:
 
 - Rust 1.98.1 (`rust-toolchain.toml` selects it);
-- PostgreSQL 16 to 18 with PostGIS 3.4 or newer and `pg_trgm`. On Ubuntu, install
+- PostgreSQL 16 (tested in CI; 17 tested once manually; 18 expected to work, untested) with
+  PostGIS 3.4 or newer and `pg_trgm`. On Ubuntu, install
   `postgresql-16 postgresql-16-postgis-3 postgresql-contrib-16`, from the
   [PGDG repository](https://www.postgresql.org/download/linux/ubuntu/) if your distribution lacks
   version 16;
@@ -165,8 +166,8 @@ stop startup, except retired keys, which are ignored with a warning.
 
 Secrets come from the environment. [`.env.example`](.env.example) lists them with placeholder
 values: the database URL, the admin token, the Nexus authorization, a keyed Nominatim URL and the
-optional provider credentials (Spotify, TIDAL, Discogs, GitHub, CourtListener, Podcast Index, TMDB,
-Ticketmaster). Copy it to `.env`, fill in what
+optional provider credentials (Spotify, TIDAL, Discogs, GitHub, CourtListener, Podcast Index, Stack
+Exchange, TMDB, Ticketmaster). Copy it to `.env`, fill in what
 you use, and load it (`set -a; . ./.env; set +a`, systemd `EnvironmentFile=`, or
 `docker run --env-file`). Keep `.env` out of version control and readable by the service user only.
 A source's token or app-key variable (`PINAKES_GITHUB_TOKEN`, `PINAKES_COURTLISTENER_TOKEN`, the

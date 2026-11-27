@@ -15,7 +15,8 @@ if [[ "$base" == "$head" ]]; then
   base=$(git rev-parse "$head^1")
 fi
 # Recorded upstream responses and licence texts stay byte-exact, whitespace included.
-recorded=(':(exclude,glob)crates/*/tests/fixtures/**' ':(exclude,glob)data/LICENSE*')
+recorded=(':(exclude,glob)crates/*/tests/fixtures/**' ':(exclude,glob)data/LICENSE*'
+  ':(exclude,glob)scripts/spdx/*.txt')
 printf 'Whitespace check: %s..%s and uncommitted changes\n' "$base" "$head"
 git diff --check "$base" "$head" -- . "${recorded[@]}"
 git diff --check HEAD -- . "${recorded[@]}"

@@ -5,7 +5,10 @@ reused without repeat HTTP calls.
 `responses.json` preserves available capture time/status/headers and
 body SHA-256; bodies are gzip-compressed with deterministic metadata. The captured
 pages are test input, never executed or served. Source content rights remain with
-the respective publishers. API credentials and authenticated content are excluded.
+the respective publishers. API credentials and authenticated content are excluded; the keys
+a page's publisher sends every visitor (map API keys, presigned-link credentials) are replaced
+by `REDACTED` (`scripts/scrub-publisher-keys`), and a scrubbed body's name, `sha256` and `bytes`
+are its scrubbed form's; its row has no `blake3`, which named the body as recorded.
 Outlook, iCloud and Nextcloud calendar URLs are synthetic parser fixtures; their
 canaries are disabled. `scripts/verify-no-capability-urls` checks these files and
 compressed bodies without printing matched capabilities.

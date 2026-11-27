@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -20,8 +21,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 [dev-dependencies]
 # A MusicBrainz dump packed as its mirror serves it (the `catalogue import` tests), with the
 # versions pinakes-core already uses.
-liblzma = "=0.4.9"
+liblzma = "0.4.9"
 reqwest.workspace = true
-sha2 = "=0.10.9"
+sha2 = "0.10.9"
 tempfile = "3"
 url.workspace = true

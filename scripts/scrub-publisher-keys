@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""scrub-publisher-keys: keys a publisher's page sends every visitor, replaced in recorded fixtures.
+
+Recorded public pages carry the publisher's own keys: Google API keys (Maps, YouTube's
+INNERTUBE_API_KEY, Firebase), AWS key ids, signatures and session tokens in presigned links,
+CloudFront key-pair ids and signatures, Instagram's ajaxResponseToken, an Eppo flag-config
+`apiKey=` and Fatsoma's `fk_ui_cust_` key. None is Pinakes' or a
+test's; each value becomes REDACTED, the text around it is kept.
+
+  --check [PATH...]   report each file under PATH (default: the fixture folder) that still holds
+                      one, by pattern and count, never the value, and each README whose SHA-256
+                      names no body below it (a stale digest); exit 1 when any does
+  --write PATH...     replace them in place in each file (gzip bodies too, written back with
+                      deterministic headers); adapter bodies are renamed to their new SHA-256
+                      and their responses.json rows updated, and a provenance.json row naming
+                      a file gets the SHA-256 and size of its body as it now is, as does a
+                      README line above it that names the body's SHA-256 (and size)
+  --stdin             read one body on standard input and write it scrubbed (adapter_probe)
+"""
+import gzip
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / 'crates/pinakes-core/tests/fixtures'
+PLACEHOLDER = b'REDACTED'
+# A URL parameter's value ends at a separator, a quote, an escape or white space.
+VALUE = rb'[^&"\'\s<>\\]+'
+# (name, pattern): the group `v` is the value replaced; everything else is kept.
+PATTERNS = [
+    ('google_api_key', rb'(?P<v>AIza[0-9A-Za-z_-]{35})'),
+    ('aws_key_id', rb'(?P<v>(?:AKIA|ASIA)[0-9A-Z]{16})'),
+    ('aws_presigned', rb'X-Amz-(?:Signature|Security-Token)=(?P<v>' + VALUE + rb')'),
+    ('aws_query_key', rb'AWSAccessKeyId=(?P<v>' + VALUE + rb')'),
+    ('cloudfront_key_pair', rb'Key-Pair-Id=(?P<v>' + VALUE + rb')'),
+    ('cloudfront_signature', rb'[?&;]Signature=(?P<v>' + VALUE + rb')'),
+    ('client_api_key_param', rb'[?&;]apiKey(?:=|&#x3D;|%3D)(?P<v>[A-Za-z0-9._-]{20,})'),
+    ('fatsoma_key', rb'(?P<v>fk_ui_cust_[A-Za-z0-9_-]{8,})'),
+    ('instagram_ajax_token', rb'"ajaxResponseToken":\{"secret":"(?P<v>[^"]*)"'),
+    ('instagram_ajax_token', rb'"ajaxResponseToken":\{"secret":"[^"]*","encrypted":"(?P<v>[^"]*)"'),
+]
+COMPILED = [(name, re.compile(rx)) for name, rx in PATTERNS]
+README = re.compile(r'(?i)^readme[^/]*\.md$')
+DIGEST = re.compile(r'\b[0-9a-f]{64}\b')
+# Synthetic probes of the capability-URL check (`tests/capability_urls.rs`), not recorded pages.
+EXEMPT = {FIXTURES / 'capability_urls.json'}
+
+
+def hits(body):
+    found = {}
+    for name, rx in COMPILED:
+        n = sum(1 for m in rx.finditer(body) if m.group('v') != PLACEHOLDER)
+        if n:
+            found[name] = found.get(name, 0) + n
+    return found
+
+
+def scrub(body):
+    for _, rx in COMPILED:
+        body = rx.sub(lambda m: m.group(0)[:m.start('v') - m.start()] + PLACEHOLDER
+                      + m.group(0)[m.end('v') - m.start():], body)
+    return body
+
+
+def read(path):
+    raw = path.read_bytes()
+    return gzip.decompress(raw) if path.suffix == '.gz' else raw
+
+
+def files(paths):
+    for p in paths:
+        if p.is_dir():
+            yield from sorted(f for f in p.rglob('*') if f.is_file())
+        elif p.is_file():
+            yield p
+
+
+def shown(f):
+    return f.relative_to(ROOT) if f.is_relative_to(ROOT) else f
+
+
+def check(paths):
+    bad, readmes, digests = 0, [], {}
+    for f in files(paths):
+        if README.match(f.name):
+            readmes.append(f)
+        if f.resolve() in EXEMPT:
+            continue
+        body = read(f)
+        digests[f] = {hashlib.sha256(body).hexdigest(), hashlib.sha256(f.read_bytes()).hexdigest()}
+        found = hits(body)
+        if found:
+            bad += 1
+            counts = ' '.join(f'{k}x{v}' for k, v in sorted(found.items()))
+            print(f'{shown(f)}: {counts}')
+    for readme in readmes:
+        below = set().union(*(d for f, d in digests.items() if f.is_relative_to(readme.parent)))
+        stale = [d for d in DIGEST.findall(readme.read_text()) if d not in below]
+        if stale:
+            bad += 1
+            print(f'{shown(readme)}: stale_digestx{len(stale)}')
+    if bad:
+        print(f'{bad} files hold publisher keys or a stale digest: run scripts/scrub-publisher-keys '
+              '--write on the bodies (it updates their README lines)', file=sys.stderr)
+    return 1 if bad else 0
+
+
+def rename_adapter_body(path, body):
+    """An adapter body is named by its SHA-256; its responses.json rows follow the new name."""
+    index = path.parent / 'responses.json'
+    digest = hashlib.sha256(body).hexdigest()
+    rows = json.loads(index.read_text())
+    target = path.with_name(f'{digest}.gz')
+    for row in rows:
+        if row.get('path') == path.name:
+            row['path'], row['sha256'] = target.name, digest
+            if 'bytes' in row:
+                row['bytes'] = len(body)
+            # The recorded BLAKE3 named the unscrubbed body.
+            row.pop('blake3', None)
+    index.write_text(json.dumps(rows, indent=2, ensure_ascii=False) + '\n')
+    path.rename(target)
+
+
+def update_provenance(path, body):
+    """A provenance.json row naming this file records the digest and size of its body."""
+    index = path.parent / 'provenance.json'
+    if not index.is_file():
+        return
+    rows = json.loads(index.read_text())
+    digest, changed = hashlib.sha256(body).hexdigest(), False
+    for row in rows.values() if isinstance(rows, dict) else []:
+        if isinstance(row, dict) and row.get('file') == path.name and 'sha256' in row \
+                and row['sha256'] != digest:
+            row['sha256'], changed = digest, True
+            if 'bytes' in row:
+                row['bytes'] = len(body)
+    if changed:
+        index.write_text(json.dumps(rows, indent=2, ensure_ascii=False) + '\n')
+
+
+def update_readmes(path, top, body, clean):
+    """A README line from the body's folder up to `top` that names its SHA-256 as recorded (and
+    its size) names the scrubbed form's."""
+    old, new = hashlib.sha256(body).hexdigest(), hashlib.sha256(clean).hexdigest()
+    for folder in [path.parent, *path.parent.parents]:
+        for readme in sorted(folder.glob('*.md')):
+            text = readme.read_text()
+            if README.match(readme.name) and old in text:
+                readme.write_text(''.join(
+                    re.sub(rf'\b{len(body)}\b', str(len(clean)), line).replace(old, new) if old in line
+                    else line for line in text.splitlines(keepends=True)))
+        if folder in (top, ROOT) or not folder.is_relative_to(top):
+            break
+
+
+def write(paths):
+    for top, f in ((top, f) for top in paths for f in files([top])):
+        if f.resolve() in EXEMPT or f.name in ('provenance.json', 'responses.json'):
+            continue
+        body = read(f)
+        clean = scrub(body)
+        if clean == body:
+            continue
+        f.write_bytes(gzip.compress(clean, compresslevel=9, mtime=0) if f.suffix == '.gz' else clean)
+        update_readmes(f, top if top.is_dir() else f.parent, body, clean)
+        if f.suffix == '.gz' and (f.parent / 'responses.json').is_file() \
+                and re.fullmatch(r'[0-9a-f]{64}\.gz', f.name):
+            rename_adapter_body(f, clean)
+        else:
+            update_provenance(f, clean)
+        print(f'scrubbed {shown(f)}')
+    return 0
+
+
+def main(argv):
+    if argv[:1] == ['--stdin'] and len(argv) == 1:
+        sys.stdout.buffer.write(scrub(sys.stdin.buffer.read()))
+        return 0
+    if argv[:1] == ['--check']:
+        return check([Path(a) for a in argv[1:]] or [FIXTURES])
+    if argv[:1] == ['--write'] and len(argv) > 1:
+        return write([Path(a) for a in argv[1:]])
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

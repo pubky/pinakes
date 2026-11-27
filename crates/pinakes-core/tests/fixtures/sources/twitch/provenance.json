@@ -1,46 +1,46 @@
 {
   "channel-missing": {
-    "bytes": 216864,
+    "bytes": 216728,
     "content_type": "text/html",
     "file": "channel-missing.html.gz",
     "recorded_at": "2026-10-26T00:13:24+00:00",
-    "sha256": "eabd5335faa36f9b08219daf476ee6bfb151b9f0471f349e8c1db58f9d1e43b0",
+    "sha256": "f99a736bc587dd2e56928bcb330cdcf46d27a6502d5809a695d06c44df7d22b4",
     "status": 200,
     "url": "https://www.twitch.tv/thisuserdoesnotexist12345"
   },
   "channel-twitch": {
-    "bytes": 232660,
+    "bytes": 232524,
     "content_type": "text/html",
     "file": "channel-twitch.html.gz",
     "recorded_at": "2026-10-26T00:13:23+00:00",
-    "sha256": "bf51ba19a5430b4d9c614274ec2b219a70f3a8ea67e6f49b7baa6a27418e4c11",
+    "sha256": "2d61f73d0f9804e16770088ed058aee9924954df5b493637a5807e4b360842d3",
     "status": 200,
     "url": "https://www.twitch.tv/twitch"
   },
   "clip-BoldRelievedElephantTwitchRPG": {
-    "bytes": 216864,
+    "bytes": 216728,
     "content_type": "text/html",
     "file": "clip-BoldRelievedElephantTwitchRPG.html.gz",
     "recorded_at": "2026-10-26T00:13:24+00:00",
-    "sha256": "eabd5335faa36f9b08219daf476ee6bfb151b9f0471f349e8c1db58f9d1e43b0",
+    "sha256": "f99a736bc587dd2e56928bcb330cdcf46d27a6502d5809a695d06c44df7d22b4",
     "status": 200,
     "url": "https://www.twitch.tv/twitch/clip/BoldRelievedElephantTwitchRPG-LcSvPfVEjpg_OTrK"
   },
   "own-page-channel-twitch": {
-    "bytes": 236928,
+    "bytes": 236792,
     "content_type": "text/html",
     "file": "own-page-channel-twitch.html.gz",
     "recorded_at": "2026-11-21T18:47:55+00:00",
-    "sha256": "8f64684e69ed38fea322fe436b43cd93a6f193eac667e1d2c8131905b1a05b37",
+    "sha256": "dd630d743f890e13d0c11778ce9e6ac620fe03ddf5ba17f759ed8e7db81b3980",
     "status": 200,
     "url": "https://www.twitch.tv/twitch"
   },
   "video-2896433713": {
-    "bytes": 222479,
+    "bytes": 222343,
     "content_type": "text/html",
     "file": "video-2896433713.html.gz",
     "recorded_at": "2026-10-26T00:13:23+00:00",
-    "sha256": "8759443928caa1de9a3748f5145b46edfc6ba96bcc5450976382b2ce5704cc3a",
+    "sha256": "30df33df452f1a8b5240c7e70fbacfbf18e56a4ee4429f4b0bf0b8ca30b506aa",
     "status": 200,
     "url": "https://www.twitch.tv/videos/2896433713"
   }

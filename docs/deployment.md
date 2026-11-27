@@ -127,8 +127,12 @@ match `v*.*.*`. Rust is 1.98.1 in CI, in the image build and in `rust-toolchain.
 
 `scripts/ci/container-smoke` starts the release daemon and checks that `/v1/info` and
 `/v1/search?limit=1` answer, the ODbL dump downloads, the process runs as UID 10001, the health
-check passes, the image exposes only port 8090, and port 9090 is bound to loopback only. It needs
-no public provider and no test identity.
+check passes, the image exposes only port 8090, port 9090 is bound to loopback only, and the
+licence notices are in `/usr/share/doc/pinakes/`. It needs no public provider and no test identity.
+
+The image ships `/usr/share/doc/pinakes/`: Pinakes' `LICENSE`, the licences of the data sets built
+into the binary, and `THIRD-PARTY-NOTICES`, written at build time from the locked crates linked
+into `pinakesd` (`scripts/third-party-notices`).
 
 Pull request and `main` runs of this workflow don't log in to a registry, and their token can't
 write packages: only the two publishing jobs ask for `packages: write`. The workflow creates no
@@ -235,7 +239,7 @@ docker buildx imagetools inspect "ghcr.io/pubky/pinakes:$VERSION"
 | Service | What Pinakes uses it for | Requirements |
 | --- | --- | --- |
 | `pinakesd` | The public API and a separate private admin listener | One daemon per database; the instance lock enforces it. Request budgets are per process: several instances behind one address share the services' limits. Load-test your own mix of links for sizing. |
-| PostgreSQL 16 to 18 | Documents, references, queues, groups and the change journal | PostGIS 3.4 or newer and `pg_trgm`. Size it from the [storage model](#storage-model). |
+| PostgreSQL 16 (tested in CI; 17 tested once manually; 18 expected to work, untested) | Documents, references, queues, groups and the change journal | PostGIS 3.4 or newer and `pg_trgm`. Size it from the [storage model](#storage-model). |
 | Nominatim | Venue geocoding and OpenStreetMap place details (`osm.nominatim_url`) | Self-hosted or hosted ([Nominatim](#nominatim)). For hardware, see [Nominatim's installation guide](https://nominatim.org/release-docs/5.2/admin/Installation/). |
 | Nexus | The reference feed and social and reach reads (`nexus_url`) | A Nexus that serves the `/v1` routes Pinakes reads ([README](../README.md)). It is a fixed, trusted upstream; optional authorization comes from the environment. |
 | Dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | Persistent and writable, with room for two copies of the file ([ODbL dump](operations.md#odbl-dump)). A CDN can cache the file by its `ETag`. |
@@ -305,7 +309,7 @@ The table below is an estimate in decimal units. It assumes:
 | --- | --- | --- | --- | --- | --- |
 | Baseline | 225 | 1,198 | ~27 MB | ~3 GB | ~3–8 MB |
 | 100× | 22,500 | 119,800 | ~695 MB | ~4 GB | ~70–210 MB |
-| 100,000× | 22.5 million | 119.8 million | ~675 GB | ~1.02 TB | ~70–210 GB |
+| 100,000× | 22.5 million | 119.8 million | ~675 GB | ~1.02 TB | ~68–203 GB |
 
 Longer change journals, larger documents, resources with many references, table bloat,
 replication slots and WAL retention can dominate. At large scale, measure them instead of

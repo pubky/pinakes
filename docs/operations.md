@@ -334,7 +334,8 @@ resolver limits apply to pubky and to each card route.
 
 ## Database
 
-Supported: PostgreSQL 16–18 with PostGIS 3.4+ and `pg_trgm`. The daemon opens at most 20
+Supported: PostgreSQL 16 (tested in CI; 17 tested once manually; 18 expected to work, untested)
+with PostGIS 3.4+ and `pg_trgm`. The daemon opens at most 20
 connections for its workers and background passes and at most 10 for the API, whose statements
 time out after five seconds.
 
@@ -2017,9 +2018,10 @@ A new key needs a restart.
 ### Info and stored errors
 
 Admin `GET /v1/info` has the manifests, resolver status (aliases left out), counts (`aliases` among them),
-ingestion, source and canary state. Public `/v1/info` shows only the version, what the instance resolves, the
-limits a client must respect and the OSM licence. Admin info and the database metrics are cached for 15
-seconds.
+ingestion, source and canary state. Public `/v1/info` has what a client needs: the version, the card shape,
+the User-Agent this instance sends, what it resolves, the spelling rules' version, the limits a client must
+respect, the OSM licence and the notices a client must show ([Info](api.md#info)). Admin info and the
+database metrics are cached for 15 seconds.
 
 Stored errors are classes, never texts: the [queue's](#failures-and-retries) `last_error`, and a source's
 health (`source_state`), one of `dns`, `connect`, `timeout`, `http_4xx`, `http_5xx`, `parse`, `policy`,

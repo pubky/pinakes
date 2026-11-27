@@ -26,6 +26,7 @@ export DATABASE_URL='postgresql:///postgres?host=/var/run/postgresql'
 | `scripts/openapi` | Regenerates `docs/openapi.json`. A test fails while the snapshot differs from the code. |
 | `scripts/verify-osm-boundary [out.sql]` | OSM-derived facts are only in `osm_place` (run by the tests; needs `psql`, `pg_dump`, `rg`, `python3`). |
 | `scripts/verify-no-capability-urls` | No private calendar share URL in any tracked file (run by the tests). |
+| `scripts/scrub-publisher-keys --write PATH…` | Replaces the keys a recorded page's publisher sends every visitor (Google API keys, AWS and CloudFront presigned-link credentials, Instagram's `ajaxResponseToken`) with `REDACTED`; run it on every fixture you record (`adapter_probe` runs it on each capture). `--check` lists fixtures that still hold one (run by the tests). |
 | `scripts/check-removals [--tests] [NAME…]` | Removes each source (every registered one, or the named ones) on a scratch worktree by the checklist below, checks nothing of the source's is left (its id, display name and page links, searched independently of the deletion), and builds every test target with warnings as errors; with `--tests`, also runs the workspace's tests; `--self-test` checks the leftover check; `--spellings-layout FILE` checks FILE is in the layout it rewrites `data/spellings.json` in. A source whose removal needs any other edit fails. Half a minute per source to build, minutes more with the tests; run it for the sources a change touches. |
 | `scripts/lock-waits COMMAND…` | Samples the database every 50 ms while COMMAND runs (COMMAND starts once the sampler has its first sample, or has stopped) and prints which locks backends waited on; fails, without repeating any part of `DATABASE_URL`, when it could not sample. Needs `psql` and `python3`. |
 
@@ -117,7 +118,8 @@ never raises it.
 **Secrets.** Keys, tokens and passwords come only from the config file or the environment
 (`PINAKES__…`, or a variable a source names for itself, `PINAKES_NAME`: an own section's
 `OwnSection::VARIABLES`, an official source's `token_variable`). They never appear in logs, errors, `Debug` output or `/v1/info`. Fixtures
-and samples hold no real keys and no private calendar URLs.
+and samples hold no real keys and no private calendar URLs; a recorded page's publisher keys are
+replaced (`scripts/scrub-publisher-keys`).
 
 **Limits.** A new cap, timeout or rate is a limit in `config.rs` with a default, and gets a row in
 the table in `docs/operations.md` (a test checks every limit is listed).

@@ -9,11 +9,11 @@
     "url": "https://play.google.com/store/apps/details?id=org.example.unlisted&hl=en"
   },
   "page-signal": {
-    "bytes": 1279163,
+    "bytes": 1279101,
     "content_type": "text/html; charset=utf-8",
     "file": "page-signal.html.gz",
     "recorded_at": "2026-10-26T18:29:29+00:00",
-    "sha256": "c6d12d218e120383472f1bb717f2c497e812ed16b07f3074b400070b966fb6a9",
+    "sha256": "d0647d7b1dc76aa08ddb9f60a720eece72bba6c560fbf0f41c524a1f666a50ba",
     "status": 200,
     "url": "https://play.google.com/store/apps/details?id=org.thoughtcrime.securesms&hl=en"
   }
