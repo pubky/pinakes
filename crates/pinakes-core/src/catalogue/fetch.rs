@@ -333,9 +333,9 @@ pub fn hold(url: &str, wait: Duration) {
         hosts.insert(host, until);
     }
 }
-/// Forget what `url`'s host asked.
-#[cfg(test)]
-pub(crate) fn forget_hold(url: &str) {
+/// Forget what `url`'s host asked (for tests: their loopback ports are handed out again, and no
+/// test may leave a hold behind for the next one).
+pub fn forget_hold(url: &str) {
     if let Some(host) = authority(url) {
         let mut hosts = NOT_BEFORE.lock().unwrap_or_else(|e| e.into_inner());
         hosts.remove(&host);

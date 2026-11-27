@@ -629,11 +629,22 @@ thread_local! {
 }
 /// Runs `f` with `flag` as the stop of every [`Download`] made on this thread meanwhile that
 /// names none of its own ([`Download::stop`]): a reader of a run's file hears the run end.
+/// The thread's stop goes back to what it was when `f` ends, also when it panics (a blocking
+/// thread is pooled: the next run's downloads on it must not hear this run's stop).
 pub fn stopping_with<T>(flag: Arc<AtomicBool>, f: impl FnOnce() -> T) -> T {
-    let before = THREAD_STOP.with(|s| s.replace(Some(flag)));
-    let out = f();
-    THREAD_STOP.with(|s| *s.borrow_mut() = before);
-    out
+    struct Restore(Option<Arc<AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let before = self.0.take();
+            THREAD_STOP.with(|s| *s.borrow_mut() = before);
+        }
+    }
+    let _restore = Restore(THREAD_STOP.with(|s| s.replace(Some(flag))));
+    f()
+}
+/// The stop a [`Download`] made on this thread now would take ([`stopping_with`]).
+pub fn thread_stop() -> Option<Arc<AtomicBool>> {
+    THREAD_STOP.with(|s| s.borrow().clone())
 }
 /// Sets its flag when dropped: a run's future cut off stops the downloads it runs on blocking
 /// threads.
@@ -756,38 +767,7 @@ impl Download {
             .stop
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(depth.max(1));
-        let spawned = std::thread::Builder::new()
-            .name("catalogue-read-ahead".into())
-            .spawn(move || {
-                let mut body = self;
-                loop {
-                    let mut buf = vec![0u8; 64 << 10];
-                    match body.read(&mut buf) {
-                        Ok(0) => return,
-                        Ok(n) => {
-                            buf.truncate(n);
-                            if tx.send(Ok(buf)).is_err() {
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(e));
-                            return;
-                        }
-                    }
-                }
-            });
-        let failed = spawned
-            .err()
-            .map(|_| io::Error::other(Failure::new("read")));
-        ReadAhead {
-            rx,
-            chunk: Vec::new(),
-            at: 0,
-            failed,
-            _stop: StopOnDrop(flag),
-        }
+        read_ahead(self, depth, flag)
     }
     /// The first wait before a retry (it doubles with each one).
     pub fn retry_wait(mut self, wait: Duration) -> Self {
@@ -1048,14 +1028,80 @@ impl Read for Download {
     }
 }
 
-/// [`Download::read_ahead`]'s reader: the reads the download's thread made, in order.
+/// What a read-ahead thread sends: bytes, its reader's failure, or the end of the stream. A
+/// channel that closes without the end (the thread died) is a failure, never the stream's end.
+enum Ahead {
+    Bytes(Vec<u8>),
+    Failed(io::Error),
+    End,
+}
+/// `reader` read on a thread of its own, at most `depth` reads of 64 KiB ahead of the returned
+/// reader ([`Download::read_ahead`]); `stop` is set when the returned reader is dropped.
+pub fn read_ahead<R: Read + Send + 'static>(
+    reader: R,
+    depth: usize,
+    stop: Arc<AtomicBool>,
+) -> ReadAhead {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Ahead>(depth.max(1));
+    let finished = Arc::new(AtomicBool::new(false));
+    let done = StopOnDrop(finished.clone());
+    let spawned = std::thread::Builder::new()
+        .name("catalogue-read-ahead".into())
+        .spawn(move || {
+            // Set however the thread ends, a panic included.
+            let _done = done;
+            let mut body = reader;
+            loop {
+                let mut buf = vec![0u8; 64 << 10];
+                match body.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = tx.send(Ahead::End);
+                        return;
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        if tx.send(Ahead::Bytes(buf)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Ahead::Failed(e));
+                        return;
+                    }
+                }
+            }
+        });
+    let failed = spawned
+        .err()
+        .map(|_| io::Error::other(Failure::new("read")));
+    ReadAhead {
+        rx,
+        chunk: Vec::new(),
+        at: 0,
+        ended: false,
+        failed,
+        finished,
+        _stop: StopOnDrop(stop),
+    }
+}
+/// [`read_ahead`]'s reader: the reads its thread made, in order.
 pub struct ReadAhead {
-    rx: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    rx: std::sync::mpsc::Receiver<Ahead>,
     chunk: Vec<u8>,
     at: usize,
+    /// The thread sent the stream's end.
+    ended: bool,
     /// The thread could not start.
     failed: Option<io::Error>,
+    /// Set once the thread has ended.
+    finished: Arc<AtomicBool>,
     _stop: StopOnDrop,
+}
+impl ReadAhead {
+    /// Set once the reading thread has ended (also after this reader is dropped).
+    pub fn finished(&self) -> Arc<AtomicBool> {
+        self.finished.clone()
+    }
 }
 impl Read for ReadAhead {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -1063,13 +1109,18 @@ impl Read for ReadAhead {
             return Err(e);
         }
         while self.at >= self.chunk.len() {
+            if self.ended {
+                return Ok(0);
+            }
             match self.rx.recv() {
-                Ok(Ok(chunk)) => {
+                Ok(Ahead::Bytes(chunk)) => {
                     self.chunk = chunk;
                     self.at = 0;
                 }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Ok(0),
+                Ok(Ahead::Failed(e)) => return Err(e),
+                Ok(Ahead::End) => self.ended = true,
+                // The thread ended without the stream's end: it died.
+                Err(_) => return Err(io::Error::other(Failure::new("read"))),
             }
         }
         let n = buf.len().min(self.chunk.len() - self.at);

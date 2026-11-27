@@ -1868,6 +1868,8 @@ async fn a_long_retry_after_fails_the_run(pool: PgPool) {
         Some("rate_limited (127.0.0.1)")
     );
     assert_eq!(m.api.lock().unwrap().len(), asked);
+    // No hold is left behind for another test.
+    pinakes_core::catalogue::fetch::forget_hold(&base);
 }
 
 /// An answer that leaves out an item asked for is no answer: the run fails (`api`), and the item's

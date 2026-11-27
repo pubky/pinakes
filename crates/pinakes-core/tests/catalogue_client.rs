@@ -2,7 +2,7 @@
 //! they share (`catalogue::bulk::Download`): redirects only to the hosts a catalogue names,
 //! proxies named in the environment ignored, `https` only (plain `http` on a loopback address),
 //! `Retry-After` waited for, a slow server cut off, and one `--from` rule for every importer.
-//! Its own test binary: one test sets proxy variables for the whole process.
+//! (Proxy variables, which are the whole process's, are tested in `catalogue_client_env.rs`.)
 use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
@@ -10,7 +10,7 @@ use axum::{
     Router,
 };
 use pinakes_core::catalogue::{
-    bulk::Download,
+    bulk::{self, Download},
     failure::Failure,
     fetch::{self, Input},
     musicbrainz, wikidata,
@@ -100,58 +100,6 @@ async fn a_redirect_to_a_host_off_the_list_is_not_followed() {
     let refused = none.small(&format!("{base}/near"), 1000).await.unwrap_err();
     assert_eq!(class(&refused), "download");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-}
-
-/// Proxies named in the environment are never asked: a proxy listener sees no connection, for an
-/// `https` host (which only a proxy could reach here) nor for a loopback one.
-#[tokio::test]
-async fn proxies_named_in_the_environment_are_ignored() {
-    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
-    proxy.set_nonblocking(true).unwrap();
-    let connections = Arc::new(AtomicUsize::new(0));
-    let counted = connections.clone();
-    std::thread::spawn(move || loop {
-        match proxy.accept() {
-            Ok(_) => {
-                counted.fetch_add(1, Ordering::SeqCst);
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(5)),
-        }
-    });
-    for name in [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
-        std::env::set_var(name, &proxy_url);
-    }
-    std::env::remove_var("NO_PROXY");
-    std::env::remove_var("no_proxy");
-    let origin = serve(Router::new().route("/x", get(|| async { "direct" }))).await;
-    let client = fetch::client("ops@example.org", &[])
-        .unwrap()
-        .first_wait(Duration::from_millis(1));
-    let direct = client.small(&format!("{origin}/x"), 100).await.unwrap();
-    assert_eq!(direct.as_deref(), Some(&b"direct"[..]));
-    // A name that resolves nowhere: only a proxy would take the request.
-    let far = client
-        .small("https://pinakes-proxy-test.invalid/x", 100)
-        .await
-        .unwrap_err();
-    assert_eq!(class(&far), "connect");
-    let api = fetch::api_client("ops@example.org", &[])
-        .unwrap()
-        .first_wait(Duration::from_millis(1));
-    assert!(api
-        .small("https://pinakes-proxy-test.invalid/w/api.php", 100)
-        .await
-        .is_err());
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
 
 /// A rate limit or a server error is asked again after the time its `Retry-After` names; one
@@ -256,6 +204,9 @@ async fn a_retry_after_is_honoured() {
     let again = client.head(&format!("{base}/other")).await.unwrap_err();
     assert_eq!(class(&again), "rate_limited");
     assert_eq!(long.load(Ordering::SeqCst), 1);
+    // The hold is the process's: no test leaves one behind for a port handed out again.
+    fetch::forget_hold(&format!("{base}/later"));
+    assert!(client.head(&format!("{base}/other")).await.is_ok());
 }
 
 /// A server slower than the floor (8 MB in the slow window of waiting) fails the download; the
@@ -429,28 +380,28 @@ async fn a_range_read_whole_asks_nothing() {
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 }
 
-/// A stop is heard within about a second wherever a download waits: a `Retry-After`, the pause
-/// before a resume, a reader that read ahead and was dropped, a file catalogue's reader whose run
-/// is gone.
+/// A download that waits is stopped within about a second once `flag` is set (`stopped`).
+async fn stopped_soon(
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    read: tokio::task::JoinHandle<std::io::Result<usize>>,
+) {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = Instant::now();
+    flag.store(true, Ordering::SeqCst);
+    let failed = read.await.unwrap().unwrap_err();
+    assert_eq!(io_class(&failed), "stopped");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// A stop is heard within about a second in a `Retry-After` of half a minute.
 #[tokio::test]
-async fn a_stop_is_heard_in_every_wait() {
+async fn a_stop_is_heard_in_a_retry_after() {
     let handle = tokio::runtime::Handle::current();
     let client = fetch::client("ops@example.org", &[]).unwrap();
-    let stopped_soon =
-        |flag: Arc<std::sync::atomic::AtomicBool>,
-         read: tokio::task::JoinHandle<std::io::Result<usize>>| async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let started = Instant::now();
-            flag.store(true, Ordering::SeqCst);
-            let failed = read.await.unwrap().unwrap_err();
-            assert_eq!(io_class(&failed), "stopped");
-            assert!(
-                started.elapsed() < Duration::from_secs(3),
-                "{:?}",
-                started.elapsed()
-            );
-        };
-    // A `Retry-After` of half a minute.
     let (busy_url, _) = busy().await;
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (c, h, u, f) = (
@@ -463,8 +414,14 @@ async fn a_stop_is_heard_in_every_wait() {
         Download::new(c, h, u, 100).stop(f).read_to_end(&mut vec![])
     });
     stopped_soon(flag, read).await;
+}
 
-    // The pause before a resume: a body that breaks off, retried after half a minute.
+/// A stop is heard within about a second in the pause before a resume: a body that breaks off,
+/// asked for again after half a minute.
+#[tokio::test]
+async fn a_stop_is_heard_in_the_pause_before_a_resume() {
+    let handle = tokio::runtime::Handle::current();
+    let client = fetch::client("ops@example.org", &[]).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let broken = format!("http://{}/file", listener.local_addr().unwrap());
     tokio::spawn(async move {
@@ -494,8 +451,15 @@ async fn a_stop_is_heard_in_every_wait() {
             .read_to_end(&mut vec![])
     });
     stopped_soon(flag, read).await;
+}
 
-    // A reader that read ahead, dropped: its download is stopped.
+/// A reader that read ahead, dropped while its download waits (a `Retry-After` of half a
+/// minute): the download is stopped and its thread ends within about a second.
+#[tokio::test]
+async fn a_dropped_read_ahead_stops_its_thread() {
+    let handle = tokio::runtime::Handle::current();
+    let client = fetch::client("ops@example.org", &[]).unwrap();
+    let (busy_url, hits) = busy().await;
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (c, h, u, f) = (
         client.clone(),
@@ -507,10 +471,34 @@ async fn a_stop_is_heard_in_every_wait() {
         tokio::task::spawn_blocking(move || Download::new(c, h, u, 100).stop(f).read_ahead(4))
             .await
             .unwrap();
+    let finished = ahead.finished();
+    // Dropped once the download waits in its `Retry-After`, not before it asked.
+    let started = Instant::now();
+    while hits.load(Ordering::SeqCst) == 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "never asked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!finished.load(Ordering::SeqCst));
     drop(ahead);
     assert!(flag.load(Ordering::SeqCst));
+    // The reading thread itself ends, within about a second.
+    let started = Instant::now();
+    while !finished.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the read-ahead thread still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
 
-    // A file catalogue's reader whose run is gone (the receiver dropped) in a wait.
+/// A file catalogue's reader whose run is gone (its receiver dropped) while its download waits
+/// (a `Retry-After` of half a minute) ends within about a second.
+#[tokio::test]
+async fn a_file_reader_whose_run_is_gone_ends() {
+    let client = fetch::client("ops@example.org", &[]).unwrap();
+    let (busy_url, _) = busy().await;
     let (ended_tx, ended_rx) = std::sync::mpsc::channel();
     let (c, u) = (client.clone(), busy_url.clone());
     let parts = fetch::batches(move |_sink| {
@@ -521,6 +509,11 @@ async fn a_stop_is_heard_in_every_wait() {
         opened
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // Still waiting when the run goes: it is the drop that ends it.
+    assert!(
+        ended_rx.try_recv().is_err(),
+        "the reader ended before the drop"
+    );
     let dropped = Instant::now();
     drop(parts);
     let ended = tokio::task::spawn_blocking(move || ended_rx.recv_timeout(Duration::from_secs(10)))
@@ -557,4 +550,58 @@ async fn a_download_read_ahead_gives_its_bytes_in_order() {
     .unwrap()
     .unwrap();
     assert_eq!(read, body);
+}
+
+/// A reader that panics leaves no stop on its (pooled) thread: a later download there, made
+/// without a stop of its own, reads.
+#[tokio::test]
+async fn a_panicking_reader_leaves_no_stop_on_its_thread() {
+    let base = serve(Router::new().route("/x", get(|| async { "fine" }))).await;
+    let client = fetch::client("ops@example.org", &[]).unwrap();
+    let handle = tokio::runtime::Handle::current();
+    let url = url::Url::parse(&format!("{base}/x")).unwrap();
+    // On a pooled blocking thread, as a file catalogue's reader runs.
+    let read = tokio::task::spawn_blocking(move || {
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let panicked = std::panic::catch_unwind(|| {
+            bulk::stopping_with::<()>(stopped, || panic!("a reader's bug"))
+        });
+        assert!(panicked.is_err());
+        assert!(bulk::thread_stop().is_none());
+        let mut out = String::new();
+        Download::new(client, handle, url, 100)
+            .read_to_string(&mut out)
+            .map(|_| out)
+    })
+    .await
+    .unwrap();
+    assert_eq!(read.unwrap(), "fine");
+}
+
+/// A read-ahead thread that dies is a failure (`read`), never the stream's end; one whose reader
+/// ends gives every byte and then the end.
+#[test]
+fn a_read_ahead_thread_that_dies_is_a_failure() {
+    struct Dies(u8);
+    impl Read for Dies {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                panic!("a reader's bug");
+            }
+            self.0 -= 1;
+            buf[..3].copy_from_slice(b"abc");
+            Ok(3)
+        }
+    }
+    let flag = || Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut out = vec![];
+    let failed = bulk::read_ahead(Dies(2), 4, flag())
+        .read_to_end(&mut out)
+        .unwrap_err();
+    assert_eq!(io_class(&failed), "read");
+    let mut out = vec![];
+    bulk::read_ahead(&b"abcdef"[..], 4, flag())
+        .read_to_end(&mut out)
+        .unwrap();
+    assert_eq!(out, b"abcdef");
 }
