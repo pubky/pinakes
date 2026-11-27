@@ -273,6 +273,10 @@ struct Restarted {
     /// The command line's limit the import that starts over kept.
     #[serde(default)]
     limit: Option<u64>,
+    /// The import that starts over has its generation already: a try that failed before it
+    /// read anything keeps the marker, and the next one takes no other.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    generation_taken: bool,
 }
 /// Where an update resumes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -592,15 +596,26 @@ impl Importer for Wikidata {
                             count: 0,
                             after: String::new(),
                             limit: Some(limit),
+                            generation_taken: false,
                         },
                     };
                     job.write(&[], serde_json::to_value(keep)?).await?;
                 }
                 // An import that starts over after one that failed has a generation of its own:
                 // the cards the abandoned attempt wrote and this one doesn't read leave at its end,
-                // and the shrink floor counts only this one's. The marker goes back with it.
-                if let Some(r) = restarted.as_ref().filter(|r| r.count > 0) {
-                    let marker = Restart { restart: r.clone() };
+                // and the shrink floor counts only this one's. The marker goes back with it, saying
+                // so: the tries after one that fails before it reads anything (the dumps host
+                // down) go on in that generation.
+                if let Some(r) = restarted
+                    .as_ref()
+                    .filter(|r| r.count > 0 && !r.generation_taken)
+                {
+                    let marker = Restart {
+                        restart: Restarted {
+                            generation_taken: true,
+                            ..r.clone()
+                        },
+                    };
                     job.new_generation_keeping(serde_json::to_value(marker)?)
                         .await?;
                 }
@@ -647,6 +662,7 @@ impl Importer for Wikidata {
                         count,
                         after: class.to_owned(),
                         limit: cursor.sticky,
+                        generation_taken: false,
                     },
                 };
                 job.write(&[], serde_json::to_value(restart)?).await?;

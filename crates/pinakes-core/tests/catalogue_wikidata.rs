@@ -988,13 +988,22 @@ async fn a_limited_catalogue_under_its_limit_fills_up_to_it(pool: PgPool) {
 }
 
 /// A position more than five days old is not caught up change by change: the update waits for
-/// a dump newer than the imported one, then asks for a full import.
+/// a dump newer than the imported one, then asks for a full import. The imported dump is dated
+/// the day before the run, so it is always newer than the position: only its being the imported
+/// one holds the update back.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_long_gap_waits_for_the_next_dump(pool: PgPool) {
     let m = mock();
+    let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%Y%m%d")
+        .to_string();
+    *m.dates.lock().unwrap() = vec![yesterday.clone()];
     let base = serve(m.clone()).await;
     let (ctx, _dir) = context(&pool, Some(3));
-    import(&pool, &ctx, &base).await.unwrap();
+    let Once::Finished(state) = import(&pool, &ctx, &base).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(state.upstream_version.as_deref(), Some(yesterday.as_str()));
     let old = (chrono::Utc::now() - chrono::Duration::days(6))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     sqlx::query("UPDATE catalogue_state SET position=jsonb_build_object('time',$1::text) WHERE catalogue='wikidata'")
@@ -1674,6 +1683,39 @@ async fn an_asked_import_keeps_its_limit_through_a_failed_try(pool: PgPool) {
         panic!()
     };
     assert_eq!(state.cards as usize, kept_ids().len());
+}
+
+/// While a restart's marker stands and the tries after it fail before they read anything (the
+/// dumps directory down), the import that starts over takes one generation, not one per try.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_takes_one_generation_however_many_tries_fail(pool: PgPool) {
+    let m = mock();
+    *m.sha1.lock().unwrap() = Some("0".repeat(40));
+    let base = serve(m.clone()).await;
+    let (ctx, _dir) = context(&pool, None);
+    let state = || async {
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    // The checksum fails: the files go, and the next try starts over from the newest dump.
+    assert!(import(&pool, &ctx, &base).await.is_err());
+    let failed = state().await;
+    assert_eq!(failed.cursor.as_ref().unwrap()["restart"]["count"], 1);
+    m.index_fails.store(true, Ordering::SeqCst);
+    for _ in 0..3 {
+        assert!(import(&pool, &ctx, &base).await.is_err());
+        assert_eq!(state().await.generation, failed.generation + 1);
+    }
+    // The tries after it go on in that generation, to its end.
+    m.index_fails.store(false, Ordering::SeqCst);
+    *m.sha1.lock().unwrap() = Some(sha1_hex(&m.dump.lock().unwrap()));
+    let Once::Finished(done) = import(&pool, &ctx, &base).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(done.generation, failed.generation + 1);
+    assert_eq!(done.cards as usize, kept_ids().len());
 }
 
 /// The restarts of a dump are counted across a try that failed for another reason in between.
