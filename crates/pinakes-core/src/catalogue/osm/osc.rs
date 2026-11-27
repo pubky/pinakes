@@ -55,7 +55,7 @@ impl<R: Read> Read for Bounded<R> {
         if pulled > MAX_TAG_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "an XML event over 1 MiB",
+                "osc: an XML event over 1 MiB",
             ));
         }
         Ok(n)
