@@ -200,6 +200,20 @@ tests:
           - exp_labels: {severity: warning, instance: a, job: pinakes}
             exp_annotations:
               summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches), searches ran past limits.search_index_budget_ms, or one client held its share of turns"
+  # Facet, trending and related searches answered 503: about 30 per ten minutes on a, 5 on b.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_search_heavy_busy_total{instance="a",job="pinakes",reason="turn"}'
+        values: '0+3x40'
+      - series: 'pinakes_search_heavy_busy_total{instance="b",job="pinakes",reason="share"}'
+        values: '0+0.5x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HeavySearchBusy
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes}
+            exp_annotations:
+              summary: "Pinakes answered over ten facet, trending or related searches 503 in ten minutes for ten minutes: every turn of limits.search_heavy_searches was taken for limits.search_heavy_wait_ms, or one client held its share"
   # Refused cards: on a, 300 of 1,000 read an hour (fires); on b, 150 of 10,000 (a few, fires not).
   - interval: 1m
     input_series:

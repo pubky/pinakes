@@ -1137,7 +1137,7 @@ letters and digits; anything else, such as a URL, gets a general message. Other 
 | 400 | `collapse=group` while groups are off (`groups.enabled = false`) |
 | 501 | `reach=wot_2` or `boost=wot_2` on an instance whose Nexus serves no reach set |
 | 502 | Nexus failed, or did not answer in time, while reading a `reach` or `boost` set |
-| 503 | A text search found no free turn of the text index, ran past its time, or its client runs its share of turns already ([Text search](#text-search)); `Retry-After: 1` |
+| 503 | A text search found no free turn of the text index, ran past its time, or its client runs its share of turns already ([Text search](#text-search)); or a facet, trending or related search found none of its turns ([Rate budget](#rate-budget)); `Retry-After: 1` |
 
 ### Text search
 
@@ -3371,6 +3371,11 @@ The reach and boost costs are charged before any Nexus call, because each reads 
 A search that costs more than the whole budget (an operator's high costs over a low
 `api.requests_per_minute`) always answers 429.
 Over budget, the answer is 429 with `Retry-After: 60`.
+
+Facet, trending and related searches also share `limits.search_heavy_searches` (4) turns for the
+whole instance: each waits for one at most `limits.search_heavy_wait_ms` (1 s), and a client
+address past half of them yields to others waiting. With no turn, the search answers 503 with
+`Retry-After: 1`; card reads and other searches go on.
 
 ### Errors
 

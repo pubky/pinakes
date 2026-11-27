@@ -44,6 +44,11 @@ groups:
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "Pinakes answered over ten map cluster counts 503 in ten minutes for ten minutes: all four turns were taken, a client held its two, or views too wide for their filter ran past limits.map_cluster_timeout_ms"}
+      - alert: HeavySearchBusy
+        expr: sum by (instance, job) (increase(pinakes_search_heavy_busy_total[10m])) > 10
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes answered over ten facet, trending or related searches 503 in ten minutes for ten minutes: every turn of limits.search_heavy_searches was taken for limits.search_heavy_wait_ms, or one client held its share"}
       - alert: MetricsMissing
         expr: absent(pinakes_ingest_last_success_timestamp_seconds)
         for: 5m

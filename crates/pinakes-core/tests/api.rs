@@ -1877,6 +1877,116 @@ async fn facet_and_trending_searches_cost_their_configured_units(pool: PgPool) {
     }
 }
 
+/// Facet, trending and related searches share `limits.search_heavy_searches` turns: with every
+/// turn taken, each waits `limits.search_heavy_wait_ms`, then answers 503 with `Retry-After: 1`,
+/// while a card read and a plain search still answer. A freed turn serves them again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_heavy_search_waits_for_a_turn_and_a_card_read_does_not(pool: PgPool) {
+    let id = store::ensure_resource(&pool, "https://example.org/heavy")
+        .await
+        .unwrap();
+    let config = Config::from_value(json!({"limits": {
+        "search_heavy_searches": 1,
+        "search_heavy_wait_ms": 200,
+    }}))
+    .unwrap();
+    let state = AppState::new(pool.clone(), config).unwrap();
+    let held = state.hold_heavy_search().unwrap();
+    let app = api::router(state);
+    let busy = pinakes_core::telemetry::search_heavy_busy_count("turn");
+    let heavy = [
+        "/v1/search?facet=type".to_owned(),
+        "/v1/search?sort=trending&window=90d".to_owned(),
+        format!("/v1/search?related={id}"),
+    ];
+    for path in &heavy {
+        let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.2:1234".parse::<SocketAddr>().unwrap(),
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 503, "{path}");
+        assert_eq!(response.headers()["retry-after"], "1", "{path}");
+    }
+    assert!(pinakes_core::telemetry::search_heavy_busy_count("turn") >= busy + 3);
+    assert_eq!(
+        call(&app, "GET", &format!("/v1/resources/{id}"), None)
+            .await
+            .0,
+        200
+    );
+    assert_eq!(call(&app, "GET", "/v1/search", None).await.0, 200);
+    drop(held);
+    for path in &heavy {
+        assert_eq!(call(&app, "GET", path, None).await.0, 200, "{path}");
+    }
+}
+
+/// A heavy search keeps its turn until Postgres is done with it, also when its client leaves
+/// mid-search: the connection it reads on stays busy that long, so the turn does too. Here the
+/// read waits for a lock; its client goes away; another client's facet search finds no turn
+/// (503) until the read ends, and then one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_heavy_search_keeps_its_turn_after_its_client_leaves(pool: PgPool) {
+    let config = Config::from_value(json!({"limits": {
+        "search_heavy_searches": 1,
+        "search_heavy_wait_ms": 300,
+    }}))
+    .unwrap();
+    let app = api::router(AppState::new(pool.clone(), config).unwrap());
+    let facet = |peer: &'static str| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder()
+                .uri("/v1/search?facet=type")
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<SocketAddr>().unwrap(),
+            ));
+            app.oneshot(request).await.unwrap().status()
+        }
+    };
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE resource_score IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let leaving = tokio::spawn(facet("127.0.0.2:1"));
+    let waiting = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND datname=current_database()",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    for _ in 0..200 {
+        if waiting().await > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(waiting().await > 0, "the search reads");
+    // The client leaves; Postgres still reads.
+    leaving.abort();
+    let _ = leaving.await;
+    let other = tokio::time::timeout(std::time::Duration::from_secs(4), facet("127.0.0.3:1"))
+        .await
+        .expect("a search with no turn answers within its wait");
+    assert_eq!(other, 503);
+    lock.rollback().await.unwrap();
+    let mut answered = StatusCode::SERVICE_UNAVAILABLE;
+    for _ in 0..100 {
+        answered = facet("127.0.0.3:1").await;
+        if answered == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(answered, StatusCode::OK);
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn cursors_reject_payload_tampering_unsigned_forgery_and_another_daemon_key(pool: PgPool) {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};

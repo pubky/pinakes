@@ -102,6 +102,7 @@ impl Failure {
             400 => "fix the argument the error names",
             404 => "unknown here: nobody referenced it on Pubky, or it has not been read; try `card` with resolve: true, or `search` by q or key",
             429 => "over a per-IP limit: wait `retry_after_s` seconds (a minute when absent), then ask fewer, larger questions",
+            503 if self.error.contains("search is busy") => "the instance's searches of this kind are all taken (a text search, or one with facets, trending or related): wait `retry_after_s` seconds and ask again, or ask without facets",
             503 => "not available for now (the instance's new previews for this hour are taken): wait `retry_after_s` seconds; a link the index knows still reads",
             501 => "this instance does not serve that: for `wot_2`, use `following` or `friends`",
             502 | 504 => "not answered in time (an upstream, or the request's own deadline): retry once",
@@ -1621,5 +1622,28 @@ mod tests {
             hint.contains("retry_after_s") && !hint.contains("retry once"),
             "{hint}"
         );
+        assert!(hint.contains("previews"), "{hint}");
+        // A busy search is told it is a busy search, not a preview's.
+        for error in [
+            "search is busy, try again shortly",
+            "text search is busy, try again shortly",
+        ] {
+            let result = Failure {
+                status: 503,
+                error: error.into(),
+                url: Some("https://pinakes.example/v1/search?facet=type".into()),
+                retry_after: Some(1),
+            }
+            .result();
+            let ContentBlock::Text(text) = &result.content[0] else {
+                panic!("text content")
+            };
+            let body: Value = serde_json::from_str(&text.text).unwrap();
+            let hint = body["hint"].as_str().unwrap();
+            assert!(
+                hint.contains("searches") && !hint.contains("previews"),
+                "{error}: {hint}"
+            );
+        }
     }
 }

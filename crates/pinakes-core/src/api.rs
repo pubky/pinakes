@@ -93,6 +93,8 @@ pub struct AppState {
     /// The text index a search with `q` reads its candidates from: one in memory, read up before
     /// each search, until the daemon sets its own on disk (`search_index`).
     pub search_index: Arc<crate::search_index::SearchIndex>,
+    /// The turns of heavy searches (`limits.search_heavy_searches`): facets, trending, related.
+    pub(crate) heavy_searches: Arc<crate::search_index::Turns>,
 }
 impl AppState {
     pub fn new(pool: PgPool, mut config: Config) -> anyhow::Result<Self> {
@@ -104,6 +106,7 @@ impl AppState {
         metrics.catalogue_switches(&config.catalogues);
         metrics.catalogue_contact(&config);
         let trusted_proxies = Arc::new(config.api.trusted_proxy_nets()?);
+        let heavy_searches = crate::search_index::Turns::new(config.search.heavy_searches);
         Ok(Self {
             pool,
             trusted_proxies,
@@ -125,7 +128,14 @@ impl AppState {
                 index.set_catalogues(&config_catalogues);
                 index
             },
+            heavy_searches,
         })
+    }
+    /// Take one turn of the heavy searches now and keep it until the guard is dropped (tests: a
+    /// busy instance).
+    #[doc(hidden)]
+    pub fn hold_heavy_search(&self) -> Option<crate::search_index::Turn> {
+        self.heavy_searches.hold(None)
     }
     /// Now, for relative times and search cursors.
     pub fn now(&self) -> DateTime<Utc> {
@@ -3138,6 +3148,18 @@ async fn within_turn<T>(
         None => Some(read.await),
     }
 }
+/// The 503 of a heavy search with no free turn: asked again a second later, one is likely free.
+fn search_busy() -> Response {
+    let mut response = ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "search is busy, try again shortly".into(),
+    )
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+    response
+}
 /// The answer to a text search the text index could not serve in time: `503` with
 /// `Retry-After: 1` (a turn is likely free a second later).
 fn text_search_busy() -> Response {
@@ -3592,10 +3614,27 @@ fn scope(
 /// seen a change never carries the revision that includes it.
 pub const REVISION: &str = "jsonb_build_array((SELECT jsonb_agg(jsonb_build_array(cursor,epoch) ORDER BY nexus) FROM feed_cursor),(SELECT revision FROM search_revision WHERE id=1))";
 
-#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResponse),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable"),(status=503,description="Text search is busy: the text index had no turn for the search, the search ran past its time (`limits.search_index_budget_ms`), or its client runs its share of turns already",headers(("Retry-After"=u64,description="Seconds to wait before asking again: 1")))))]
+#[utoipa::path(get,tag="Search",path="/v1/search",params(SearchQuery),responses((status=200,body=SearchResponse),(status=304,description="ETag unchanged"),(status=400,description="Invalid or unavailable filter"),(status=501,description="wot_2 asked of an instance whose Nexus serves no reach set"),(status=502,description="Nexus reach unavailable"),(status=503,description="Search is busy: the text index had no turn for a text search, the search ran past its time (`limits.search_index_budget_ms`), or its client runs its share of turns already; or a facet, trending or related search found none of its turns (`limits.search_heavy_searches`) within `limits.search_heavy_wait_ms`",headers(("Retry-After"=u64,description="Seconds to wait before asking again: 1")))))]
 pub async fn search(
     State(state): State<AppState>,
     Query(q): Query<SearchQuery>,
+    headers: HeaderMap,
+    client: Option<axum::Extension<ClientAddr>>,
+) -> Result<Response, ApiError> {
+    // A search runs in a task of its own, which holds its turns (the heavy searches', the text
+    // index's) until its statements are done: a client that leaves mid-search drops only the
+    // wait for the answer, while Postgres still reads on the search's connection.
+    use tracing::Instrument;
+    match tokio::spawn(search_in_turn(state, q, headers, client).in_current_span()).await {
+        Ok(answer) => answer,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "stopping".into())),
+    }
+}
+/// [`search`] itself, run in its own task.
+async fn search_in_turn(
+    state: AppState,
+    q: SearchQuery,
     headers: HeaderMap,
     client: Option<axum::Extension<ClientAddr>>,
 ) -> Result<Response, ApiError> {
@@ -3677,6 +3716,29 @@ pub async fn search(
     }
     let sort = effective_sort(&q);
     let trending = sort == Some("trending");
+    // A heavy search (facets, which count the whole matching set; trending, which counts every
+    // reference in its window; related) takes one of `limits.search_heavy_searches` turns for the
+    // rest of the request, so such searches never hold the whole API pool: with none free within
+    // `limits.search_heavy_wait_ms` (or its client past its share while others wait) it answers
+    // 503. Held to the end of the search (a binding, not `_`).
+    let _heavy_turn = if trending || q.related.is_some() || facets_asked(q.facet.as_deref())?.any()
+    {
+        let client = client.as_ref().map(|axum::Extension(ClientAddr(ip))| *ip);
+        let wait = Duration::from_millis(state.config.search.heavy_wait_ms);
+        match state
+            .heavy_searches
+            .take(client, tokio::time::Instant::now() + wait)
+            .await
+        {
+            Ok(turn) => Some(turn),
+            Err(reason) => {
+                crate::telemetry::search_heavy_busy(reason);
+                return Ok(search_busy());
+            }
+        }
+    } else {
+        None
+    };
     // `related`: the resource's root (an alias reads as it).
     let related: Option<String> = match &q.related {
         Some(id) => Some(

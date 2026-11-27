@@ -868,6 +868,12 @@ pub struct SearchConfig {
     /// How long one `GET /v1/map/clusters` count may take before it answers 503 (milliseconds).
     #[serde(skip)]
     pub map_cluster_timeout_ms: u64,
+    /// Facet, trending and related searches Postgres runs at once (`api::search`'s heavy
+    /// searches); one more waits for a turn, at most `heavy_wait_ms`, then answers 503.
+    #[serde(skip)]
+    pub heavy_searches: usize,
+    #[serde(skip)]
+    pub heavy_wait_ms: u64,
     #[serde(skip)]
     pub reach_timeout_secs: u64,
     /// The taggers a related page samples: the authors of a resource's most recent tags, at most
@@ -907,6 +913,8 @@ impl Default for SearchConfig {
             index_budget_ms: 2000,
             map_cluster_cells: 4096,
             map_cluster_timeout_ms: 3000,
+            heavy_searches: 4,
+            heavy_wait_ms: 1000,
             reach_timeout_secs: 5,
             related_taggers: 200,
             related_window_days: 365,
@@ -1480,6 +1488,17 @@ impl Config {
         if !(100..=60_000).contains(&self.search.map_cluster_timeout_ms) {
             bail!("limits.map_cluster_timeout_ms must be 100–60000");
         }
+        // Under the API pool's 10 connections: at least two stay free of heavy searches.
+        if !(1..=8).contains(&self.search.heavy_searches) {
+            bail!("limits.search_heavy_searches must be 1 to 8");
+        }
+        // A search with no turn answers 503 before the request's deadline answers 504, also
+        // through an MCP tool call (`ApiConfig::tool_timeout`).
+        if self.search.heavy_wait_ms > 30_000
+            || u128::from(self.search.heavy_wait_ms) >= self.api.tool_timeout().as_millis()
+        {
+            bail!("limits.search_heavy_wait_ms must be 0 to 30000 and under the MCP tool timeout (limits.request_timeout_secs - 2 s)");
+        }
         // A search's reach reads share this one deadline (`Nexus::reach_by`). Reads that
         // outlast the request are a 504 where they would be the reach's own answer, and
         // through MCP the tool call's deadline comes first.
@@ -1657,6 +1676,34 @@ mod tests {
         let mut applied = Config::default();
         Limits::default().apply(&mut applied);
         assert_eq!(format!("{applied:?}"), format!("{:?}", Config::default()));
+    }
+    /// The heavy searches' turns stay under the API pool, and their wait under the MCP tool
+    /// timeout, so a search with no turn answers 503 before any deadline answers 504.
+    #[test]
+    fn heavy_search_limits_have_config_bounds() {
+        assert_eq!(Config::default().search.heavy_searches, 4);
+        assert_eq!(Config::default().search.heavy_wait_ms, 1000);
+        for (limits, ok) in [
+            (serde_json::json!({"search_heavy_searches": 0}), false),
+            (serde_json::json!({"search_heavy_searches": 9}), false),
+            (serde_json::json!({"search_heavy_searches": 8}), true),
+            (serde_json::json!({"search_heavy_wait_ms": 0}), true),
+            (serde_json::json!({"search_heavy_wait_ms": 30_001}), false),
+            (
+                serde_json::json!({"request_timeout_secs": 8, "search_heavy_wait_ms": 5_999}),
+                true,
+            ),
+            (
+                serde_json::json!({"request_timeout_secs": 8, "search_heavy_wait_ms": 6_000}),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                with(serde_json::json!({ "limits": limits })).is_ok(),
+                ok,
+                "{limits}"
+            );
+        }
     }
     #[test]
     fn related_limits_have_config_bounds() {
@@ -3004,6 +3051,10 @@ limits! {
     map_cluster_cells: usize = |c| c.search.map_cluster_cells => [|c, v| c.search.map_cluster_cells = v],
     /// Milliseconds one map clusters count may take before it answers 503 (100–60000).
     map_cluster_timeout_ms: u64 = |c| c.search.map_cluster_timeout_ms => [|c, v| c.search.map_cluster_timeout_ms = v],
+    /// Facet, trending and related searches Postgres runs at once (1–8, under the API pool's 10 connections).
+    search_heavy_searches: usize = |c| c.search.heavy_searches => [|c, v| c.search.heavy_searches = v],
+    /// How long a facet, trending or related search waits for a turn before it answers 503 (0–30000 ms).
+    search_heavy_wait_ms: u64 = |c| c.search.heavy_wait_ms => [|c, v| c.search.heavy_wait_ms = v],
     /// Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget. Also the client addresses the dump download limiter remembers per hour.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
     /// Seconds a request may take on either listener before it is answered 504 (8–600).
