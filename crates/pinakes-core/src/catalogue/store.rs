@@ -403,7 +403,7 @@ pub async fn remove(
 /// reason first (`run::record_failure` takes the allowance back). Refused in any other state.
 pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<Allowance> {
     let state: Option<bool> = sqlx::query_scalar(
-        "UPDATE catalogue_state SET shrink_allowed=shrink_allowed OR coalesce(run='import' AND phase='failed' AND last_error='shrunk',false),updated_at=now() WHERE catalogue=$1 RETURNING shrink_allowed",
+        "UPDATE catalogue_state SET shrink_allowed=shrink_allowed OR coalesce(run='import' AND phase='failed' AND (last_error='shrunk' OR last_error LIKE 'shrunk (%'),false),updated_at=now() WHERE catalogue=$1 RETURNING shrink_allowed",
     )
     .bind(catalogue.name())
     .fetch_optional(pool)

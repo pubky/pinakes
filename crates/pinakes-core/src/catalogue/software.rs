@@ -337,6 +337,20 @@ impl Software {
             .filter(|(name, _)| !done.contains_key(name))
             .collect();
         let refused_now = !refused.is_empty();
+        // Each registry's shrink floor, before the runner's sweep (which counts the catalogue
+        // whole): a short file of one registry never sweeps that registry's other cards.
+        if import && !refused_now {
+            let counted: Vec<(String, i64, i64)> = sqlx::query_as(
+                "SELECT source,count(*) FILTER (WHERE seen_generation=$2),count(*) FROM catalogue_card WHERE catalogue=$1 GROUP BY source ORDER BY source",
+            )
+            .bind(Catalogue::Software.name())
+            .bind(job.generation())
+            .fetch_all(job.pool())
+            .await?;
+            for (registry, read, held) in counted {
+                job.check_floor(held, read, &registry).await?;
+            }
+        }
         let note = refused
             .iter()
             .map(|(name, version)| {

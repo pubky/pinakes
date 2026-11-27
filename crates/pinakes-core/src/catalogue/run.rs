@@ -499,6 +499,22 @@ impl<'a> Job<'a> {
                 }
             });
         }
+        self.floor(held, read, allowed, None)
+    }
+    /// The shrink floor of one part of a full import (one of the software catalogue's registries,
+    /// `what`: its cards held and read), as [`Job::check_shrink`] applies it to the whole
+    /// catalogue: under [`SHRINK_FLOOR`] of the part's cards read fails (`shrunk`), unless the drop
+    /// is expected, allowed or the scope narrower. Checked by the importer before the sweep.
+    pub async fn check_floor(&self, held: i64, read: i64, what: &str) -> Result<()> {
+        let allowed: bool =
+            sqlx::query_scalar("SELECT shrink_allowed FROM catalogue_state WHERE catalogue=$1")
+                .bind(self.catalogue.name())
+                .fetch_one(self.pool)
+                .await?;
+        self.floor(held, read, allowed, Some(what))
+    }
+    fn floor(&self, held: i64, read: i64, allowed: bool, what: Option<&str>) -> Result<()> {
+        let part = what.unwrap_or("");
         // A state row from before scopes were kept: the limit its position records.
         let old_scope = self.state.scope.clone().or_else(|| {
             self.state
@@ -515,14 +531,22 @@ impl<'a> Job<'a> {
             if !expected {
                 tracing::warn!(
                 catalogue = self.catalogue.name(),
+                part,
                 held,
                 read,
                 "catalogue full import read far fewer cards than the catalogue holds; nothing is removed (pinakesd catalogue allow-shrink lets the next try remove them)"
             );
-                return Err(Failure::new("shrunk").into());
+                return Err(match what {
+                    Some(what) => {
+                        Failure::new("shrunk").at(format!("{what}: {read} of {held} cards read"))
+                    }
+                    None => Failure::new("shrunk"),
+                }
+                .into());
             }
             tracing::warn!(
             catalogue = self.catalogue.name(),
+            part,
             held,
             read,
             importer = self.shrink_expected,

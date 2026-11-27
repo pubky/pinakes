@@ -2129,3 +2129,43 @@ async fn tranco_removes_at_most_a_tenth_in_a_run(pool: PgPool) {
     assert!(failed.to_string().contains("homepage reads"), "{failed}");
     assert!(count(&pool, "tranco", None).await >= 2);
 }
+
+/// The shrink floor holds per registry: a full import reading a short Flathub file (one app of
+/// three) fails `shrunk` and removes none of Flathub's cards, though the catalogue as a whole
+/// read most of its cards; `allow-shrink` lets the next try through.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_short_registry_file_meets_its_own_floor(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let files = Files::default();
+    let sources = software_server(&files, 60).await;
+    let importer = Arc::new(software::Software::new(sources, "test@example.org").unwrap());
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
+    let full = String::from_utf8(fixture("software", "flathub-appstream.xml")).unwrap();
+    let second = full.match_indices("<component ").nth(1).unwrap().0;
+    let short = format!("{}</components>\n", &full[..second]);
+    files.put("/appstream.xml.gz", gzip(short.as_bytes()), "f2");
+    let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains("shrunk (flathub: 1 of 3 cards read)"),
+        "{failed}"
+    );
+    assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
+    assert_eq!(
+        store::allow_shrink(&pool, Catalogue::Software)
+            .await
+            .unwrap(),
+        store::Allowance::Allowed
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "software", Some("flathub")).await, 1);
+}

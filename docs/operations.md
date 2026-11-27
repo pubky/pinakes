@@ -2041,7 +2041,8 @@ catch-up that stopped still alerts.
 
 ### A full import that shrinks the catalogue
 
-A full import that read fewer than half the cards the catalogue holds fails as `shrunk`, removes
+A full import that read fewer than half the cards the catalogue holds (for software, also one
+registry's: `shrunk (<registry>: …)`) fails as `shrunk`, removes
 nothing and is tried again every ten minutes from its last cursor (`CatalogueImportFailed` fires;
 `catalogue status` shows `shrunk`). The catalogue's cards stay as they were.
 
@@ -2049,7 +2050,7 @@ nothing and is tried again every ten minutes from its last cursor (`CatalogueImp
    in the importer's log lines.
 2. If upstream really holds that few items, run `pinakesd --config <path> catalogue allow-shrink
    <name>`. It is refused unless the full import under way has failed and its last error is
-   `shrunk`. The next try removes the cards it did not read, and the allowance is used up; a run
+   `shrunk` (for software, `shrunk (<registry>: …)` too). The next try removes the cards it did not read, and the allowance is used up; a run
    that fails for any reason first takes it back.
 3. A narrower scope (a lower `limit`, a higher `min_citations`) needs no allowance: its first full
    import removes the rest on its own. `catalogue import NAME --limit N --force` runs one such

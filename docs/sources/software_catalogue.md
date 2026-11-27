@@ -79,7 +79,9 @@ import is asked for (`pinakesd catalogue import software --request` with the dae
 `catalogue import software` with it stopped), or until `pinakesd catalogue clear-refusal
 software` clears it ([a refused dump or file](../operations.md#a-refused-dump-or-file)). A full
 import that reads no card of a registry refuses that registry's file the same way (`empty`) and
-removes nothing; a full import of the importer's own ends at once while a refused file is still
+removes nothing; one that reads under half the cards a registry holds fails `shrunk` and removes
+none of them (each registry has its own floor, besides the catalogue's), until `pinakesd
+catalogue allow-shrink software` lets the next try through; a full import of the importer's own ends at once while a refused file is still
 its registry's newest. A registry whose file can't be read (a download error)
 leaves the others to be read too; the run then fails and is tried again. The cards are as
 current as the newest of the three files (`current_as_of`; F-Droid publishes every few days);
