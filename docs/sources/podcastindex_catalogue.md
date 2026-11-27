@@ -31,6 +31,8 @@ the read's two passes over the table at most 50 million rows (`size`), and the r
 six hours. Podcast Index's server does not answer ranged requests, so a broken download starts
 again; each attempt writes a part file of its own, and a run that is cut off stops its download
 within a megabyte. A full import that finds no live feed is refused (`empty`) and removes nothing.
+Podcast Index publishes no checksum of the archive: its integrity rests on TLS, the archive's
+length and the gzip stream's own CRC.
 
 Private feeds are never imported: a feed on a host that serves paid subscribers' feeds
 (`patreon.com`, `supercast.com`, `supercast.tech`, `supportingcast.fm`, `glow.fm`,

@@ -474,17 +474,24 @@ impl<R: BufRead> Read for Xz<R> {
     }
 }
 
-/// A reader that keeps the SHA-256 of every byte read through it.
-pub struct Hashed<R> {
+/// A reader that keeps the digest (SHA-256 unless named, [`Hashed::with`]) of every byte read
+/// through it.
+pub struct Hashed<R, D = sha2::Sha256> {
     inner: R,
-    hash: sha2::Sha256,
+    hash: D,
     bytes: u64,
 }
 impl<R> Hashed<R> {
     pub fn new(inner: R) -> Self {
+        Self::with(inner)
+    }
+}
+impl<R, D: Digest + Clone> Hashed<R, D> {
+    /// A reader that keeps the digest `D` (`md5::Md5`, …).
+    pub fn with(inner: R) -> Self {
         Self {
             inner,
-            hash: sha2::Sha256::new(),
+            hash: D::new(),
             bytes: 0,
         }
     }
@@ -492,7 +499,7 @@ impl<R> Hashed<R> {
     pub fn count(&self) -> u64 {
         self.bytes
     }
-    /// The lower-case hex SHA-256 of what was read.
+    /// The lower-case hex digest of what was read.
     pub fn hex(&self) -> String {
         self.hash
             .clone()
@@ -502,7 +509,7 @@ impl<R> Hashed<R> {
             .collect()
     }
 }
-impl<R: Read> Read for Hashed<R> {
+impl<R: Read, D: Digest> Read for Hashed<R, D> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.hash.update(&buf[..n]);
@@ -514,11 +521,16 @@ impl<R: Read> Read for Hashed<R> {
 /// The files of a `SHA256SUMS` list (`<hex>  <name>` or `<hex> *<name>` per line): name and
 /// lower-case hex digest.
 pub fn sha256_sums(text: &str) -> Vec<(String, String)> {
+    sums(text, 64)
+}
+/// The files of a checksum list (`md5sum`'s or `sha256sum`'s lines: `<hex>  <name>` or
+/// `<hex> *<name>`) whose digests have `hex_len` hex digits: name and lower-case hex digest.
+pub fn sums(text: &str, hex_len: usize) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
             let (hex, name) = line.trim().split_once(char::is_whitespace)?;
             let name = name.trim_start().trim_start_matches('*');
-            (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) && !name.is_empty())
+            (hex.len() == hex_len && hex.bytes().all(|b| b.is_ascii_hexdigit()) && !name.is_empty())
                 .then(|| (name.to_owned(), hex.to_ascii_lowercase()))
         })
         .collect()

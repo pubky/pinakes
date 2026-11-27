@@ -34,7 +34,8 @@ names every file; a file outside the bucket's works tree is refused (`manifest`)
   512 bytes of each text (title, venue, author). A file may hold at
   most 16 GiB, the manifest 64 MiB and at most 100,000 files.
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range` with
-  `If-Range`), up to five times in a row. A file may take 12 hours.
+  `If-Range`), up to five times in a row. A file may take 12 hours. The manifest lists no checksum
+  of a works file; each is read as it arrives, and its gzip members' own CRC and length check it.
 
 ## Cards
 

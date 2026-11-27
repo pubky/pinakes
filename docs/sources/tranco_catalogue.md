@@ -24,6 +24,7 @@ without a fetch.
   site goes into `catalogue_site` with its rank and the day of the last list that named it (both
   moved at most weekly, so a daily list rewrites few rows). A rank past 2,000,000 is passed over,
   and a list's day is never later than the time it is read. A new site is due at once.
+  Tranco publishes no checksum of a list: its integrity rests on TLS and the lines' own checks.
 - **Homepages.** Sites are read best ranked first, 16 at a time (a new read starts as one ends),
   through the same egress as every fetch: pinned DNS, no private address, each host's pace, the
   body caps. First `https://<site>/robots.txt` (RFC 9309): when its rules for `pinakes`, else for

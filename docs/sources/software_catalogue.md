@@ -27,7 +27,9 @@ catalogue without a fetch.
   `crates_categories.csv` or `crates_keywords.csv`, or one that ends inside a file, is refused
   (`archive`).
 - **F-Droid.** `entry.json` names the index file with its SHA-256 and size; the index is read
-  whole and checked against both before any card is written (`checksum`).
+  whole and checked against both before any card is written (`checksum`). crates.io and Flathub
+  publish no checksum of their files: their integrity rests on TLS, the file's length and the gzip
+  stream's own CRC.
 - **Flathub.** The AppStream catalogue as a stream of XML elements: components of type
   `desktop-application`, `console-application` and `desktop`; runtimes, add-ons and
   localizations make no card. Texts in other languages (`xml:lang`) are passed over.

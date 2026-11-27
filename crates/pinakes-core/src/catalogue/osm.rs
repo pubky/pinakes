@@ -230,6 +230,23 @@ async fn get_text(client: &super::fetch::Client, url: &str) -> Result<Option<Str
     let body = client.small(url, 64 * 1024).await?;
     Ok(body.map(|b| String::from_utf8_lossy(&b).into_owned()))
 }
+/// The MD5 OpenStreetMap's file servers publish beside a bulk file (`<file>.md5`: an `md5sum`
+/// line naming it), the planet's and Geofabrik's; none when none is published or it names
+/// another file.
+async fn published_md5(client: &super::fetch::Client, file: &url::Url) -> Result<Option<String>> {
+    let Some(name) = file.path_segments().and_then(|mut s| s.next_back()) else {
+        return Ok(None);
+    };
+    let mut sums = file.clone();
+    sums.set_path(&format!("{}.md5", file.path()));
+    let Some(text) = client.small(sums.as_str(), 4096).await? else {
+        return Ok(None);
+    };
+    Ok(super::bulk::sums(&String::from_utf8_lossy(&text), 32)
+        .into_iter()
+        .find(|(listed, _)| listed == name)
+        .map(|(_, hex)| hex))
+}
 /// The largest bulk file read (the planet is about 96 GB).
 const MAX_FILE: u64 = 250_000_000_000;
 /// The largest change file read, compressed (a planet day is about 130 MB).
@@ -264,18 +281,28 @@ async fn download(
         return Ok(false);
     }
     let _ = tokio::fs::remove_file(&done).await;
-    let (client, handle, parsed) = (
+    let (http, handle, parsed) = (
         client.clone(),
         tokio::runtime::Handle::current(),
         url::Url::parse(url)?,
     );
     let opened = tokio::task::spawn_blocking(move || {
-        super::bulk::Download::open(client, handle, parsed, MAX_FILE, Duration::from_secs(5))
+        super::bulk::Download::open(http, handle, parsed, MAX_FILE, Duration::from_secs(5))
     })
     .await
     .map_err(|_| Failure::new("panic"))??;
     let length = opened.length();
     room(length)?;
+    // The checksum published for the file the answer came from (a `-latest` name redirects to
+    // the dated file), asked before its bytes are read.
+    let answered = opened
+        .final_url()
+        .cloned()
+        .unwrap_or_else(|| url::Url::parse(url).expect("parsed above"));
+    let want = published_md5(client, &answered).await?;
+    if want.is_none() {
+        tracing::info!(catalogue = "osm", host = %host_of(answered.as_str()), "no checksum is published beside the file; TLS and its length check it");
+    }
     tracing::info!(
         catalogue = "osm",
         bytes = length,
@@ -283,18 +310,23 @@ async fn download(
     );
     let part = dest.with_extension("part");
     let (to, failed_at) = (part.clone(), host_of(url));
-    let read = tokio::task::spawn_blocking(move || -> Result<u64> {
-        let mut body = opened;
+    let (read, got) = tokio::task::spawn_blocking(move || -> Result<(u64, String)> {
+        let mut body = super::bulk::Hashed::<_, md5::Md5>::with(opened);
         let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&to)?);
         let read = std::io::copy(&mut body, &mut out)
             .with_context(|| Failure::new("download").at(failed_at))?;
         std::io::Write::flush(&mut out)?;
         out.get_ref().sync_all()?;
-        Ok(read)
+        Ok((read, body.hex()))
     })
     .await
     .map_err(|_| Failure::new("panic"))??;
     anyhow::ensure!(read == length, Failure::new("download").at(host_of(url)));
+    if want.is_some_and(|want| want != got) {
+        // Not the file its publisher listed: never used, and downloaded again next time.
+        let _ = tokio::fs::remove_file(&part).await;
+        anyhow::bail!(Failure::new("checksum").at(host_of(answered.as_str())));
+    }
     tokio::fs::rename(&part, dest).await?;
     tokio::fs::write(&done, url).await?;
     tracing::info!(

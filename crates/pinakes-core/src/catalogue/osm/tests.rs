@@ -932,6 +932,140 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A bulk file is checked against the MD5 published beside the file its answer came from
+/// (`<file>.md5`): one that differs is never used (`checksum`, no file left), one that matches is;
+/// with none published, or one naming another file, the download goes on.
+#[tokio::test]
+async fn a_file_whose_published_md5_differs_is_not_used() {
+    use md5::Digest as _;
+    let dir = tempfile_dir();
+    let cfg = with_contact(&dir);
+    let body = region();
+    let right: String = md5::Md5::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let wrong = "0".repeat(32);
+    let line = |hex: &str, name: &str| format!("{hex}  {name}\n").into_bytes();
+    let (base, asked) = mirror(vec![
+        ("/bad.osm.pbf", 200, vec![], body.clone()),
+        ("/bad.osm.pbf.md5", 200, vec![], line(&wrong, "bad.osm.pbf")),
+        // A `-latest` name redirects to the dated file, whose checksum is the one read.
+        (
+            "/x-latest.osm.pbf",
+            302,
+            vec![("Location", "/x-261126.osm.pbf".to_owned())],
+            vec![],
+        ),
+        (
+            "/x-latest.osm.pbf.md5",
+            200,
+            vec![],
+            line(&wrong, "x-latest.osm.pbf"),
+        ),
+        ("/x-261126.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/x-261126.osm.pbf.md5",
+            200,
+            vec![],
+            line(&right, "x-261126.osm.pbf"),
+        ),
+        ("/none.osm.pbf", 200, vec![], body.clone()),
+        ("/other.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/other.osm.pbf.md5",
+            200,
+            vec![],
+            line(&wrong, "another.osm.pbf"),
+        ),
+    ])
+    .await;
+    let client = crate::catalogue::fetch::client(&cfg.egress.contact, &["127.0.0.1"]).unwrap();
+    let dest = dir.join("import.osm.pbf");
+    let failed = download(&client, &format!("{base}/bad.osm.pbf"), &dest, |_| Ok(()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed.downcast_ref::<Failure>().map(|f| f.class),
+        Some("checksum")
+    );
+    assert!(!dest.exists() && !dir.join("import.osm.part").exists());
+    assert!(!dir.join("import.osm.done").exists());
+    for file in ["x-latest", "none", "other"] {
+        let _ = std::fs::remove_file(dir.join("import.osm.done"));
+        let _ = std::fs::remove_file(&dest);
+        assert!(
+            download(
+                &client,
+                &format!("{base}/{file}.osm.pbf"),
+                &dest,
+                |_| Ok(())
+            )
+            .await
+            .unwrap(),
+            "{file}"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "{file}");
+    }
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.get("/x-261126.osm.pbf.md5"), Some(&1));
+    assert_eq!(asked.get("/x-latest.osm.pbf.md5"), None);
+    assert_eq!(asked.get("/none.osm.pbf.md5"), Some(&1));
+    drop(asked);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An import whose file differs from its published MD5 fails as `checksum` and writes no card;
+/// with the right file the next run imports it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_import_of_a_file_that_fails_its_md5_writes_nothing(pool: PgPool) {
+    use md5::Digest as _;
+    let dir = tempfile_dir();
+    let body = region();
+    let right: String = md5::Md5::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let (bad, _) = mirror(vec![
+        ("/r.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/r.osm.pbf.md5",
+            200,
+            vec![],
+            format!("{}  r.osm.pbf\n", "f".repeat(32)).into_bytes(),
+        ),
+    ])
+    .await;
+    let (good, _) = mirror(vec![
+        ("/r.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/r.osm.pbf.md5",
+            200,
+            vec![],
+            format!("{right} *r.osm.pbf\n").into_bytes(),
+        ),
+    ])
+    .await;
+    let cfg = with_contact(&dir);
+    let mut ctx = Context::new(pool.clone(), cfg.clone());
+    ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
+    let failing = region_importer(&cfg, format!("{bad}/r.osm.pbf"), format!("{bad}/updates"));
+    let failed = runner::step(&failing, &ctx).await.unwrap_err();
+    assert_eq!(
+        crate::catalogue::failure::shown(&failed),
+        "checksum (127.0.0.1)"
+    );
+    assert!(hashes(&pool).await.is_empty());
+    assert!(!dir.join("osm/import.osm.pbf").exists());
+    let fine = region_importer(&cfg, format!("{good}/r.osm.pbf"), format!("{good}/updates"));
+    assert_eq!(
+        runner::step(&fine, &ctx).await.unwrap(),
+        runner::Next::Again
+    );
+    assert_eq!(hashes(&pool).await.len(), 6);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A cut-off run whose file changed starts over in a generation of its own, so the cards it wrote
 /// from the first file go at the end: the region changed, the file lost, the file downloaded
 /// anew (its earlier download expired), and a run at its end of another region.

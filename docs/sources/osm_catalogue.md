@@ -69,6 +69,10 @@ OpenStreetMap's buckets (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amaz
 
 - Before the download, the importer checks the free disk for the file and its index (the file's
   length is known from the server), and waits while it is short (`waiting`), as before any run.
+- The file is checked against the MD5 its server publishes beside it (`<file>.md5`, for the dated
+  file a `-latest` name redirects to): one that differs fails the run (`checksum`), is deleted and
+  is downloaded again by the next try. The change files have no published checksum: TLS, their
+  length and the gzip stream's own CRC check them.
 - A download broken within one attempt resumes where it broke, only from the same file (its
   `ETag`, sent as `If-Range`); a new attempt (a restart) downloads it again from its start. A
   finished download is used again by a later attempt for 7 days, so a failed import reads the same
