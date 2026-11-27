@@ -362,8 +362,8 @@ fn unpack<R: Read>(stream: R, to: &Path, at: &str, stop: &Stop) -> Result<()> {
 
 /// The columns a card reads.
 const COLUMNS: &str = "id,url,title,link,itunesId,originalUrl,itunesAuthor,language,episodeCount,popularityScore,podcastGuid,description,category1,category2,category3,category4,category5,category6,category7,category8,category9,category10,newestItemPubdate,explicit";
-/// What is read of each, texts cut: links to 2,048 bytes, the description to 4,096, the rest to
-/// 512.
+/// What is read of each, texts cut (SQLite counts characters): links to 2,048, the description to
+/// 4,096, the title and author to 512, the language, GUID and categories to 64.
 const SELECT: &str = "id,substr(url,1,2048),substr(title,1,512),substr(link,1,2048),itunesId,substr(originalUrl,1,2048),substr(itunesAuthor,1,512),substr(language,1,64),episodeCount,popularityScore,substr(podcastGuid,1,64),substr(description,1,4096),substr(category1,1,64),substr(category2,1,64),substr(category3,1,64),substr(category4,1,64),substr(category5,1,64),substr(category6,1,64),substr(category7,1,64),substr(category8,1,64),substr(category9,1,64),substr(category10,1,64),newestItemPubdate,explicit";
 
 /// A hostile database file can do little: SQLite in defensive mode, no trust in its schema, and

@@ -140,7 +140,7 @@ A link a catalogue holds ([operations](operations.md#shared-links-a-catalogue-ho
 card built from the catalogue card, with `labels` and `from` naming the catalogue. It is never
 fetched and changes with its card.
 
-A catalogue card nobody shared opens like a shared card, by its own link
+A catalogue card nobody referenced opens like a referenced card, by its own link
 (`GET /v1/resources/by-uri?uri=<its link>`) and by that link's resource ID
 (`GET /v1/resources/{id}`). The answer has `labels`, `refs: []`,
 `collections: 0`, the card's `keys` and `updated_at: null`. Its `group` and `also_on` are those of
@@ -154,10 +154,10 @@ a moment later shows them. With its catalogue off, the link is unknown again.
 A card whose root is no web link (an OpenAlex work, stored under its `doi:` root for its
 `doi.org` link) carries the root's web page ([Identifier pages](#identifier-pages)): in `open_in`
 named by the page's host (`[{"client": "doi.org", "url": "https://doi.org/…"}]`), wherever it is
-read, among an unshared card's `aliases`, and as its host for `host=` (`host=doi.org`).
+read, among the `aliases` of a card nobody referenced, and as its host for `host=` (`host=doi.org`).
 
-An OpenStreetMap card nobody shared opens the same way, by any spelling of its openstreetmap.org
-link and by that link's ID, as the card a shared OSM link has ([OpenStreetMap and
+An OpenStreetMap card nobody referenced opens the same way, by any spelling of its openstreetmap.org
+link and by that link's ID, as the card a referenced OSM link has ([OpenStreetMap and
 locations](#openstreetmap-and-locations)): with `attribution`, the category, address and bbox,
 and no `labels` or `from`.
 
@@ -168,7 +168,7 @@ and no `labels` or `from`.
 - `ids` (or `resource_ids`): resource IDs. An alias's ID answers with its root's card.
 - `uris`: links, each read as `by-uri` reads it, static alias rules included.
 
-A catalogue card nobody shared is answered by either list, as `by-uri` and
+A catalogue card nobody referenced is answered by either list, as `by-uri` and
 `GET /v1/resources/{id}` answer it ([Catalogue cards](#catalogue-cards)), with a lookup card's
 `also_on` and `maybe_same`; one request answers at most 8 of them, and the entries past those
 are skipped. The answer lists the cards in request order. Duplicates are kept and unknown entries are skipped. Sending both lists, or neither, is a 400.

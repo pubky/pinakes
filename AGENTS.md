@@ -50,6 +50,13 @@ thread clock (`CLOCK_THREAD_CPUTIME_ID`).
     says how to add one.
   - `event/`: event pages, calendar feeds, event platforms (`adapters/`).
   - `sources/`: official-API sources, one module per service (`kit.rs` holds shared helpers).
+  - `catalogue.rs` and `catalogue/`: the catalogues imported in bulk. `catalogue.rs` holds the
+    catalogue card and its checks; `catalogue/` one importer per catalogue (`musicbrainz`,
+    `wikidata`, `osm`, `openalex`, `podcastindex`, `tranco`, `software`), the runner that runs
+    them (`run.rs`) and the card store (`store.rs`), the readers and downloads they share
+    (`fetch.rs`, `bulk.rs`, `csv.rs`, `spill.rs`, `diff.rs`), and the joins of shared links with
+    the cards (`join.rs`, `extras.rs`); [docs/sources/](docs/sources/README.md) has a page per
+    catalogue.
   - `kinds/`: kinds of card with facts of their own whichever route reads them (job postings),
     their JSON-LD readers and their `FACTS`.
   - `also_on.rs` and `also_on/` (one module per also-on source), `lookups/` (one module per

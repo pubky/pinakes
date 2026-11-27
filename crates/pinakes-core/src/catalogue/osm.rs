@@ -157,7 +157,7 @@ pub struct OsmImporter {
     pub region: String,
     /// How many threads decode the file (at least one).
     pub threads: usize,
-    /// The run to make whatever is due (`pinakesd catalogue import|update`).
+    /// The run to make whatever is due (`pinakesd catalogue import osm [--update]`).
     pub force: Option<Run>,
     /// The node index's layout; none: by the region and the file's size.
     pub layout: Option<nodes::Layout>,

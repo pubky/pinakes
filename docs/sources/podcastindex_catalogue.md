@@ -25,8 +25,9 @@ A run downloads the archive and unpacks its `podcastindex_feeds.db` into
 the `podcasts` table's feeds with `dead = 0` in ID order, and deletes the file when it is done.
 A table without the columns read, a virtual table, a generated column, or a view or trigger in
 the file is refused (`schema`). The file is opened read only, with SQLite in defensive mode,
-its schema untrusted, and no value over 64 MiB; texts are read cut (links 2,048 bytes, the
-description 4,096, the rest 512). The archive may hold 8 GiB and the database 12 GiB; each of
+its schema untrusted, and no value over 64 MiB; texts are read cut (links to 2,048
+characters, the description to 4,096, the title and author to 512, the language, GUID and
+categories to 64). The archive may hold 8 GiB and the database 12 GiB; each of
 the read's two passes over the table at most 50 million rows (`size`), and the reading at most
 six hours. Podcast Index's server does not answer ranged requests, so a broken download starts
 again; each attempt writes a part file of its own, and a run that is cut off stops its download

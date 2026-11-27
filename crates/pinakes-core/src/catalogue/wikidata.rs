@@ -62,7 +62,7 @@ pub const RESTARTS: u32 = 3;
 /// The most items whose labels the end of an import asks the API for.
 pub const LABEL_LOOKUPS: usize = 50_000;
 /// The most labels of classes and genres kept (an entry is a few dozen bytes).
-pub const LABELS_CAP: usize = 16_000_000;
+pub const LABEL_MAP_CAP: usize = 16_000_000;
 /// The most cards listed as waiting for labels.
 pub const PENDING_CAP: u64 = 10_000_000;
 /// Items per `wbgetentities` request (the API's limit for a client that is not a bot).
@@ -1744,9 +1744,9 @@ impl Wikidata {
 /// One batch read, in order: its labels into the map and its file, its cards resolved against
 /// every label known now (those still waiting listed in the pending file), up to the limit.
 /// Whether the label map takes item `n`'s label: one it holds already, or a new one under
-/// [`LABELS_CAP`] (the import, the updates and the lookups alike).
+/// [`LABEL_MAP_CAP`] (the import, the updates and the lookups alike).
 fn room_for_label(labels: &Labels, n: u32) -> bool {
-    labels.len() < LABELS_CAP || labels.contains_key(&n)
+    labels.len() < LABEL_MAP_CAP || labels.contains_key(&n)
 }
 /// Whether the limit is reached.
 fn take_batch(

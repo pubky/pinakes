@@ -1,9 +1,9 @@
 # `openalex` catalogue: papers cited more than 50 times
 
 This catalogue imports OpenAlex's snapshot: one [catalogue card](../operations.md#catalogues) for
-each work cited more than `openalex.min_citations` times (50 by default, about 15 million
-works). A shared DOI, arXiv, PubMed or OpenAlex link of such a paper gets its card from the
-catalogue without a fetch.
+each work cited more than `catalogues.openalex.min_citations` times (50 by default, about 15
+million works). A shared DOI, arXiv, PubMed or OpenAlex link of such a paper gets its card from
+the catalogue without a fetch.
 
 | | |
 | --- | --- |
@@ -102,8 +102,9 @@ allowed lag is 100 days.
 
 ## Sample run
 
-`scripts/catalogue-sample openalex` imports a few real works files (their first 100 MB each) into
-a throwaway database, checks the cards, a search, a join and an update, and drops the database
+`scripts/catalogue-sample openalex` imports the first 80 MB of three real works files (of two
+dates) into a throwaway database, checks the cards, a search and a join, updates them with the
+first 40 MB of a file of a later date, and drops the database
 ([sample runs](../operations.md#catalogue-sample-runs)).
 
 ## Turn it off
