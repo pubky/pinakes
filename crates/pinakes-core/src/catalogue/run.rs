@@ -15,7 +15,12 @@
 //!   row and the log) while it is short: nothing is started half;
 //! - records the run in `catalogue_state` (`run`, `cursor`, `generation`), so a run cut off (a
 //!   restart, a failure) resumes from its importer's last cursor;
-//! - after a full import, removes the cards it did not read ([`store::finish_import`]);
+//! - after a full import, removes the cards it did not read ([`store::finish_import`]), unless the
+//!   import read fewer than half the cards the catalogue holds ([`SHRINK_FLOOR`]): then the run
+//!   fails (`shrunk`) and removes nothing, until the importer says the drop is expected
+//!   ([`Job::expect_shrink`]), the operator allows it (`pinakesd catalogue allow-shrink`,
+//!   [`store::allow_shrink`]) or the import's scope is narrower (a lower `limit`, a higher
+//!   `min_citations`; [`CataloguesConfig::scope`](super::CataloguesConfig::scope));
 //! - keeps how current the cards are (`current_as_of`, the upstream data time the importer
 //!   states with [`Job::set_current_as_of`]), which the update lag metric measures.
 //!
@@ -176,6 +181,9 @@ pub struct Job<'a> {
     state: State,
     /// A full import asked for ([`Job::asked`]).
     asked: bool,
+    /// Whether the importer said this full import may hold far fewer cards than the last
+    /// ([`Job::expect_shrink`]).
+    shrink_expected: bool,
     dir: &'a Path,
     config: &'a Config,
     report: WriteReport,
@@ -198,12 +206,14 @@ impl Job<'_> {
     /// A full import that starts over, dropping a cut-off attempt's cursor (of another source or
     /// dump): a generation of its own, so the cards that attempt wrote and this one does not read
     /// are removed at its end as any others.
+    /// The shrink floor counts only this generation's cards ([`SHRINK_FLOOR`]), and an operator's
+    /// allowance to shrink, given to the attempt dropped, is taken back.
     pub async fn new_generation(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.run == Run::Import,
             "only a full import starts a generation"
         );
-        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,cursor=NULL,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,generation_cards=0,shrink_allowed=false,cursor=NULL,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(self.catalogue.name())
             .fetch_one(self.pool)
             .await?;
@@ -246,6 +256,12 @@ impl Job<'_> {
     }
     pub fn config(&self) -> &Config {
         self.config
+    }
+    /// Say that this full import reads far fewer cards than the catalogue holds and that is
+    /// expected (upstream removed them, or the operator asked for it): the runner then removes the
+    /// cards it did not read even when they are more than [`SHRINK_FLOOR`] allows.
+    pub fn expect_shrink(&mut self) {
+        self.shrink_expected = true;
     }
     /// `limit` of Wikidata and MusicBrainz (`[catalogues.<name>] limit`).
     pub fn limit(&self) -> Option<u64> {
@@ -671,7 +687,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         .await?;
         (state.generation, state.cursor.clone())
     } else {
-        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,generation_cards=CASE WHEN $2='import' THEN 0 ELSE generation_cards END,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(catalogue.name())
             .bind(run.name())
             .fetch_one(pool)
@@ -696,6 +712,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         current_as_of: None,
         asked,
         state,
+        shrink_expected: false,
         dir: &dir,
         config: &ctx.config,
         report: WriteReport::default(),
@@ -761,7 +778,50 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         );
         return Ok(Next::Again);
     }
+    let scope = ctx.config.catalogues.scope(catalogue);
     if run == Run::Import {
+        // A full import that read far fewer cards than the catalogue holds (a dump cut at a clean
+        // boundary, an empty answer, a filter gone wrong) removes nothing: it fails (`shrunk`) with
+        // its cursor kept, and is tried again; it goes through once the importer says the drop is
+        // expected, the operator allows it (`pinakesd catalogue allow-shrink`, or `catalogue import
+        // --force`), or the import's scope is narrower than the last finished import's (a lower
+        // `limit`, a higher `min_citations`). No scope recorded: the limit the position records.
+        let (held, read, allowed): (i64, i64, bool) = sqlx::query_as(
+            "SELECT cards,generation_cards,shrink_allowed FROM catalogue_state WHERE catalogue=$1",
+        )
+        .bind(catalogue.name())
+        .fetch_one(pool)
+        .await?;
+        // A state row from before scopes were kept: the limit its position records.
+        let old_scope = job.state.scope.clone().or_else(|| {
+            job.state
+                .position
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .map(|limit| serde_json::json!({ "limit": limit }))
+        });
+        let narrower = old_scope.as_ref().is_some_and(|old| narrower(old, &scope));
+        let expected = job.shrink_expected || allowed || narrower;
+        if job.state.last_import_at.is_some() && shrunk(held, read) {
+            if !expected {
+                tracing::warn!(
+                    catalogue = catalogue.name(),
+                    held,
+                    read,
+                    "catalogue full import read far fewer cards than the catalogue holds; nothing is removed (pinakesd catalogue allow-shrink lets the next try remove them)"
+                );
+                return Err(Failure::new("shrunk").into());
+            }
+            tracing::warn!(
+                catalogue = catalogue.name(),
+                held,
+                read,
+                importer = job.shrink_expected,
+                operator = allowed,
+                narrower,
+                "catalogue full import removes the cards it did not read, more than half the catalogue"
+            );
+        }
         report.removed += store::finish_import(pool, catalogue, generation).await?;
     }
     sqlx::query(
@@ -770,12 +830,14 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
          import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,\
          last_update_at=CASE WHEN $2='update' THEN now() ELSE last_update_at END,\
          current_as_of=CASE WHEN $2='import' THEN coalesce($4,now()) ELSE coalesce($4,current_as_of) END,\
+         scope=CASE WHEN $2='import' THEN $5 ELSE scope END,shrink_allowed=CASE WHEN $2='import' THEN false ELSE shrink_allowed END,\
          updated_at=now() WHERE catalogue=$1",
     )
     .bind(catalogue.name())
     .bind(run.name())
     .bind(position)
     .bind(job.current_as_of)
+    .bind(&scope)
     .execute(pool)
     .await?;
     if let Some(lock) = large {
@@ -798,6 +860,8 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
 struct Forced {
     inner: Arc<dyn Importer>,
     run: Run,
+    /// The operator expects the drop (`--force`): [`Job::expect_shrink`].
+    expect_shrink: bool,
     written: std::sync::Mutex<WriteReport>,
 }
 #[async_trait]
@@ -815,6 +879,9 @@ impl Importer for Forced {
         self.run == Run::Import
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
+        if self.expect_shrink {
+            job.expect_shrink();
+        }
         let ran = self.inner.import(job).await;
         *self.written.lock().expect("the report") += job.report();
         ran
@@ -838,6 +905,17 @@ pub async fn run_once(
     importer: Arc<dyn Importer>,
     ctx: &Context,
     run: Run,
+    waiting: impl FnMut(&str),
+) -> Result<(State, WriteReport)> {
+    run_once_with(importer, ctx, run, false, waiting).await
+}
+/// [`run_once`]; with `expect_shrink`, a full import that reads far fewer cards than the catalogue
+/// holds removes the rest ([`Job::expect_shrink`]: `catalogue import --force`).
+pub async fn run_once_with(
+    importer: Arc<dyn Importer>,
+    ctx: &Context,
+    run: Run,
+    expect_shrink: bool,
     mut waiting: impl FnMut(&str),
 ) -> Result<(State, WriteReport)> {
     let catalogue = importer.catalogue();
@@ -867,6 +945,7 @@ pub async fn run_once(
         let forced = Forced {
             inner: importer.clone(),
             run,
+            expect_shrink,
             written: Default::default(),
         };
         let mut said: Option<String> = None;
@@ -924,6 +1003,28 @@ pub async fn request_import(pool: &PgPool, catalogue: Catalogue, reason: &str) -
     Ok(())
 }
 
+/// The share of a catalogue's cards a full import must read for the runner to remove the rest
+/// without being told the drop is expected ([`Job::expect_shrink`]): half.
+pub const SHRINK_FLOOR: f64 = 0.5;
+/// Whether a full import that read `read` of the `held` cards reads too few to remove the rest.
+fn shrunk(held: i64, read: i64) -> bool {
+    (read as f64) < SHRINK_FLOOR * held as f64
+}
+/// Whether the scope `new` holds fewer items than `old` ([`CataloguesConfig::scope`](super::CataloguesConfig::scope)):
+/// a `limit` set or lowered, a higher `min_citations`. Another `region` is not: it may be larger,
+/// and a cut-off file would then empty the catalogue (the operator allows it, `allow-shrink`).
+fn narrower(old: &serde_json::Value, new: &serde_json::Value) -> bool {
+    let limit = |v: &serde_json::Value| v.get("limit").map(|l| l.as_u64());
+    let narrower_limit = match (limit(old), limit(new)) {
+        (Some(None), Some(Some(_))) => true,
+        (Some(Some(was)), Some(Some(now))) => now < was,
+        _ => false,
+    };
+    let citations = |v: &serde_json::Value| v.get("min_citations").and_then(|c| c.as_u64());
+    let narrower_citations =
+        matches!((citations(old), citations(new)), (Some(was), Some(now)) if now > was);
+    narrower_limit || narrower_citations
+}
 /// The catalogue's lock was lost while a run went on (its session ended).
 #[derive(Debug)]
 struct CatalogueLockLost;
@@ -965,15 +1066,43 @@ async fn clear_waiting(pool: &PgPool, catalogue: Catalogue) -> Result<()> {
     Ok(())
 }
 /// A failed run: `failed`, its error (as logged: no secret) and one more in the count. The run
-/// and its cursor stay.
+/// and its cursor stay; an operator's allowance to shrink is taken back (the next `shrunk` failure
+/// is checked again).
 pub async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) -> Result<()> {
     let mut error = error.to_owned();
     crate::model::truncate(&mut error, 1024);
     store::ensure_state(pool, catalogue).await?;
-    sqlx::query("UPDATE catalogue_state SET phase='failed',waiting=NULL,last_error=$2,error_count=error_count+1,updated_at=now() WHERE catalogue=$1")
+    sqlx::query("UPDATE catalogue_state SET phase='failed',waiting=NULL,last_error=$2,error_count=error_count+1,shrink_allowed=false,updated_at=now() WHERE catalogue=$1")
         .bind(catalogue.name())
         .bind(error)
         .execute(pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A lower `limit` or a higher `min_citations` is a narrower scope; another `region` is not
+    /// (a larger one would let a cut-off file empty the catalogue): the floor holds for it.
+    #[test]
+    fn only_a_lower_limit_or_more_citations_is_narrower() {
+        assert!(narrower(&json!({"limit": null}), &json!({"limit": 10})));
+        assert!(narrower(&json!({"limit": 20}), &json!({"limit": 10})));
+        assert!(!narrower(&json!({"limit": 10}), &json!({"limit": 20})));
+        assert!(narrower(
+            &json!({"min_citations": 10}),
+            &json!({"min_citations": 50})
+        ));
+        assert!(!narrower(
+            &json!({"region": "europe/switzerland"}),
+            &json!({"region": "planet"})
+        ));
+        assert!(!narrower(
+            &json!({"region": "planet"}),
+            &json!({"region": "europe/switzerland"})
+        ));
+    }
 }

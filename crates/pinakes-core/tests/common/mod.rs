@@ -582,3 +582,21 @@ impl std::io::Write for Lines {
         Ok(())
     }
 }
+
+/// A new directory of this test's own under the temporary directory, with a random name nobody
+/// else can guess or have made (`create_dir` fails on one that exists, and another name is
+/// tried). The caller removes it.
+#[allow(dead_code)]
+pub fn unique_dir(name: &str) -> std::path::PathBuf {
+    loop {
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).expect("entropy");
+        let suffix: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("pinakes-{name}-{suffix}"));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("{}: {error}", dir.display()),
+        }
+    }
+}

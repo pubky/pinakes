@@ -297,6 +297,10 @@ async fn start(
     let mut state = AppState::new(api_pool, config.clone())?;
     let search_index = pinakes_core::search_index::SearchIndex::on_disk(&config.search.index_dir);
     search_index.set_catalogues(&config.catalogues.enabled_names());
+    search_index.set_bounds(
+        config.search.index_searches,
+        Duration::from_millis(config.search.index_budget_ms),
+    );
     state.search_index = search_index.clone();
     // Both listeners are bound before any task or worker starts: from here on nothing waits,
     // so a signal during startup never cuts off a worker that has claimed a job.
@@ -395,7 +399,8 @@ async fn start(
     });
     // Links built from a card of a catalogue that is off now go back to the fetch queue: the
     // joins task does that first, in the background (until then an answer shows nothing of such a
-    // catalogue), then checks the links each card's write names.
+    // catalogue), then checks the links each card's write names. With every catalogue off it
+    // checks the queue every ten minutes (it finds nothing there).
     let join_pool = pool.clone();
     let join_config = config.queue.clone();
     let mut join_shutdown = shutdown_rx.clone();
@@ -419,25 +424,33 @@ async fn start(
                 }
             }
             let batch = tokio::select! { _=join_shutdown.changed()=>break,result=pinakes_core::catalogue::join::drain(&join_pool,&join_config,JOIN_BATCH)=>result };
-            match batch {
-                Ok(n) if n as i64 == JOIN_BATCH => {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
+            let drained = match batch {
+                Ok(n) => n as i64,
                 Err(error) => {
-                    tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"catalogue join checks will retry")
+                    tracing::warn!(kind = pinakes_core::resolver::error_class(&error),"catalogue join checks will retry");
+                    0
                 }
-                _ => {}
+            };
+            match join_pause(drained, join_config.catalogues.is_empty()) {
+                None => tokio::task::yield_now().await,
+                Some(pause) => {
+                    tokio::select! {_=join_shutdown.changed()=>break,_=tokio::time::sleep(pause)=>{}}
+                }
             }
-            tokio::select! {_=join_shutdown.changed()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
         }
     });
     // The extras of cards built from catalogue cards (their Wikipedia summary), as they come due.
+    // With no catalogue on, none: nothing is read for a catalogue that is off.
     let extras_pool = pool.clone();
+    let extras_catalogues = config.queue.catalogues.clone();
     let mut extras_shutdown = shutdown_rx.clone();
     tasks.spawn("catalogue extras", async move {
+        if extras_catalogues.is_empty() {
+            let _ = extras_shutdown.changed().await;
+            return;
+        }
         loop {
-            let batch = tokio::select! { _=extras_shutdown.changed()=>break,result=pinakes_core::catalogue::extras::run_due(&extras_pool,&extras_egress,EXTRAS_BATCH)=>result };
+            let batch = tokio::select! { _=extras_shutdown.changed()=>break,result=pinakes_core::catalogue::extras::run_due(&extras_pool,&extras_egress,&extras_catalogues,EXTRAS_BATCH)=>result };
             match batch {
                 Ok(n) if n as i64 == EXTRAS_BATCH => continue,
                 Err(error) => {
@@ -586,6 +599,17 @@ async fn catalogue_command(
             let states = store::states(pool).await?;
             writeln!(out, "{}", store::status_table(&config.catalogues, &states))?;
         }
+        CatalogueCommand::AllowShrink(catalogue) => {
+            match store::allow_shrink(pool, catalogue).await? {
+                store::Allowance::Allowed => {}
+                store::Allowance::NotShrunk => bail!("catalogue {catalogue} has no full import under way that failed as shrunk: there is nothing to allow"),
+                store::Allowance::NoState => bail!("catalogue {catalogue} has no state yet: it has never run"),
+            }
+            writeln!(
+                out,
+                "the next full import of catalogue {catalogue} removes the cards it does not read, whatever their share; a run that failed as shrunk goes through at its next try"
+            )?;
+        }
         CatalogueCommand::Drop(catalogue) => {
             let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
                 bail!("an importer of catalogue {catalogue} is running (a pinakesd started with it enabled): switch it off and restart that daemon, then drop");
@@ -675,7 +699,7 @@ async fn import(
     if let Some(limit) = config.catalogues.limit(catalogue) {
         // A limit other than the one the cards were read with makes a full import of the new
         // subset (an update hands over to one), which removes the others.
-        if stored_limit != Some(limit) && (limit as i64) < cards && !force {
+        if stored_limit != Some(limit) && i64::try_from(limit).is_ok_and(|l| l < cards) && !force {
             bail!("catalogue {catalogue} holds {cards} cards: a full import with --limit {limit} removes all but at most {limit} of them; add --force to do so");
         }
     }
@@ -694,9 +718,23 @@ async fn import(
     } else {
         run::Run::Import
     };
-    let (state, written) = run::run_once(std::sync::Arc::new(importer), &ctx, kind, |why| {
-        let _ = writeln!(out, "waiting: {why}");
-    })
+    // `--force` says the drop is expected only for a `--limit` below the cards held and below the
+    // one the cards were read with (none stored: every card): the shrink floor then lets the run
+    // remove the rest. A full import with `--force` keeps the floor (`catalogue allow-shrink` lets
+    // a real shrink through).
+    let expect_shrink = force
+        && limit.is_some_and(|l| {
+            i64::try_from(l).is_ok_and(|l| l < cards) && stored_limit.is_none_or(|s| l < s)
+        });
+    let (state, written) = run::run_once_with(
+        std::sync::Arc::new(importer),
+        &ctx,
+        kind,
+        expect_shrink,
+        |why| {
+            let _ = writeln!(out, "waiting: {why}");
+        },
+    )
     .await?;
     // An update can have handed over to a full import (a limit changed, one asked for).
     let ran = if state.last_import_at != before.as_ref().and_then(|s| s.last_import_at) {
@@ -867,6 +905,22 @@ enum CatalogueCommand {
         /// A `--limit` below the cards stored (`--force`).
         force: bool,
     },
+    /// `catalogue allow-shrink NAME`: the next full import may remove what it did not read.
+    AllowShrink(Catalogue),
+}
+/// How long the joins task waits before its next drain after one that checked `drained` rows:
+/// none after a full batch; a second while a catalogue is joined; ten minutes with none to join
+/// (every catalogue off, or OpenStreetMap alone, which is never joined), so the checks a drop, a
+/// failed check or an OSM write marks are still made, a few at a time.
+fn join_pause(drained: i64, nothing_joined: bool) -> Option<Duration> {
+    if drained == JOIN_BATCH {
+        return None;
+    }
+    Some(if nothing_joined {
+        Duration::from_secs(600)
+    } else {
+        Duration::from_secs(1)
+    })
 }
 /// How long `pinakesd healthcheck` waits for the admin listener's answer, all of it.
 const HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -926,14 +980,21 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 let what = args.next().unwrap_or_default();
                 catalogue = Some(match what.as_str() {
                     "status" => CatalogueCommand::Status,
-                    "drop" => {
-                        let name = args.next().context("catalogue drop requires a catalogue name")?;
-                        CatalogueCommand::Drop(Catalogue::parse(&name).with_context(|| {
+                    "drop" | "allow-shrink" => {
+                        let name = args
+                            .next()
+                            .with_context(|| format!("catalogue {what} requires a catalogue name"))?;
+                        let catalogue = Catalogue::parse(&name).with_context(|| {
                             format!(
                                 "unknown catalogue {name:?}: one of {}",
                                 Catalogue::ALL.map(Catalogue::name).join(", ")
                             )
-                        })?)
+                        })?;
+                        if what == "drop" {
+                            CatalogueCommand::Drop(catalogue)
+                        } else {
+                            CatalogueCommand::AllowShrink(catalogue)
+                        }
                     }
                     "import" => {
                         let name = args.next().context("catalogue import requires a catalogue name")?;
@@ -984,7 +1045,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             force,
                         }
                     }
-                    _ => bail!("catalogue takes status, drop NAME or import NAME"),
+                    _ => bail!("catalogue takes status, drop NAME, import NAME or allow-shrink NAME"),
                 });
             }
             "--config" => {
@@ -1010,7 +1071,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | catalogue import NAME --request | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | catalogue import NAME --request | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -1042,6 +1103,16 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
 
 #[cfg(test)]
 mod tests {
+    /// The joins task never stops draining: a full batch goes on at once, a short one waits a
+    /// second while a catalogue is joined and ten minutes while none is.
+    #[test]
+    fn the_joins_task_keeps_draining_with_nothing_to_join() {
+        use std::time::Duration;
+        assert_eq!(super::join_pause(super::JOIN_BATCH, true), None);
+        assert_eq!(super::join_pause(3, false), Some(Duration::from_secs(1)));
+        assert_eq!(super::join_pause(0, true), Some(Duration::from_secs(600)));
+    }
+
     /// `parse-worker SECS` is the parse worker, whatever else is on the line.
     #[test]
     fn parse_worker_takes_its_cpu_seconds() {
@@ -1130,6 +1201,11 @@ mod tests {
             command,
             Command::Catalogue(CatalogueCommand::Status)
         ));
+        let (_, command) = parse(&["catalogue", "allow-shrink", "musicbrainz"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::AllowShrink(Catalogue::Musicbrainz))
+        ));
         for bad in [
             &["reextract"][..],
             &["reextract", "nonsense"],
@@ -1139,6 +1215,7 @@ mod tests {
             &["catalogue"],
             &["catalogue", "drop"],
             &["catalogue", "drop", "wikipedia"],
+            &["catalogue", "allow-shrink"],
             &["catalogue", "list"],
             &["catalogue", "status", "--migrate"],
             &["catalogue", "status", "reextract", "all"],
@@ -1477,13 +1554,156 @@ mod tests {
             .is_some());
     }
 
+    /// `catalogue import --force` lets the shrink floor remove the rest only for a `--limit` below
+    /// the cards held and the scope the cards were read with: a forced full import of a dump that
+    /// reads under half the cards fails `shrunk` and removes nothing, also with a `--limit` above
+    /// the cards; with a lower `--limit` it goes through.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_forced_import_passes_the_shrink_floor_only_for_a_lower_limit(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{store, Card};
+        use std::io::Write;
+        const FIXTURES: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pinakes-core/tests/fixtures/catalogue/musicbrainz"
+        );
+        // A ustar archive of these files, xz-packed, as the dump's mirror serves it.
+        fn tar_xz(files: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut out = vec![];
+            for (path, data) in files {
+                let mut h = [0u8; 512];
+                h[..path.len()].copy_from_slice(path.as_bytes());
+                h[100..108].copy_from_slice(b"0000644\0");
+                h[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+                h[156] = b'0';
+                h[257..265].copy_from_slice(b"ustar  \0");
+                h[148..156].copy_from_slice(b"        ");
+                let sum: u64 = h.iter().map(|b| u64::from(*b)).sum();
+                h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+                out.extend_from_slice(&h);
+                out.extend_from_slice(data);
+                out.resize(out.len().div_ceil(512) * 512, 0);
+            }
+            out.resize(out.len() + 1024, 0);
+            let mut encoder = liblzma::write::XzEncoder::new(vec![], 3);
+            encoder.write_all(&out).unwrap();
+            encoder.finish().unwrap()
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dump = temp.path().join("20261125-001001");
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut sums = String::new();
+        for entity in ["artist", "release-group", "release", "recording"] {
+            let body = std::fs::read(format!("{FIXTURES}/{entity}.jsonl")).unwrap();
+            let path = format!("mbdump/{entity}");
+            let packed = tar_xz(&[
+                ("TIMESTAMP", b"2026-11-25 01:17:36.116289+00\n"),
+                ("README", b"one entity per line\n"),
+                (&path, &body),
+            ]);
+            let digest: String = <sha2::Sha256 as sha2::Digest>::digest(&packed)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            sums.push_str(&format!("{digest} *{entity}.tar.xz\n"));
+            std::fs::write(dump.join(format!("{entity}.tar.xz")), packed).unwrap();
+        }
+        std::fs::write(dump.join("SHA256SUMS"), sums).unwrap();
+        // 40 cards from a finished full import: the fixture's dump holds 17, under half.
+        let old: Vec<Card> = (0..40)
+            .map(|n| Card {
+                source_id: format!("artist/9{n:07}-0000-4000-8000-000000000000"),
+                uri: format!("https://musicbrainz.org/artist/9{n:07}-0000-4000-8000-000000000000"),
+                r#type: "MusicGroup".into(),
+                name: format!("Old band {n}"),
+                ..Card::default()
+            })
+            .collect();
+        store::upsert(&pool, Catalogue::Musicbrainz, 1, &old, None)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE catalogue_state SET generation=1,cards=40,last_import_at=now(),run=NULL,phase='idle' WHERE catalogue='musicbrainz'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let olds = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM catalogue_card WHERE name LIKE 'Old band %'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let mut config = Config::default();
+        config.catalogues.dir = temp
+            .path()
+            .join("catalogues")
+            .to_string_lossy()
+            .into_owned();
+        let import = |limit, force| CatalogueCommand::Import {
+            catalogue: Catalogue::Musicbrainz,
+            from: Some(dump.to_string_lossy().into_owned()),
+            limit,
+            update: false,
+            request: false,
+            force,
+        };
+        // Forced, the whole catalogue: the floor holds.
+        let mut out = Vec::new();
+        let failed = catalogue_command(&pool, &config, import(None, true), &mut out)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{failed:#}").ends_with("failed: shrunk"),
+            "{failed:#}"
+        );
+        assert_eq!(olds().await, 40);
+        // Forced with a limit above the cards held drops nothing by its limit: the floor holds,
+        // also for a limit past what a signed count holds.
+        for limit in [100_000_000, u64::MAX] {
+            let mut out = Vec::new();
+            let failed = catalogue_command(&pool, &config, import(Some(limit), true), &mut out)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{failed:#}").ends_with("failed: shrunk"),
+                "{limit}: {failed:#}"
+            );
+            assert_eq!(olds().await, 40);
+        }
+        // Forced with a limit below the cards held and the stored scope (none: every card): the
+        // rest goes.
+        let mut out = Vec::new();
+        catalogue_command(&pool, &config, import(Some(20), true), &mut out)
+            .await
+            .unwrap();
+        assert_eq!(olds().await, 0, "{}", String::from_utf8_lossy(&out));
+    }
+
     /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
     /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
     /// prints the table.
     #[sqlx::test(migrations = "../../migrations")]
     async fn the_drop_command_takes_the_lock_and_removes_the_directory(pool: sqlx::PgPool) {
         use pinakes_core::catalogue::{run::SessionLock, store, Card};
-        let root = std::env::temp_dir().join(format!("pinakesd-drop-test-{}", std::process::id()));
+        // A directory of the test's own: `create_dir` refuses one that exists (a name another
+        // user made first, or a link), and another name is tried.
+        let root = (0u32..)
+            .map(|n| {
+                let at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                std::env::temp_dir().join(format!(
+                    "pinakesd-drop-test-{}-{at}-{n}",
+                    std::process::id()
+                ))
+            })
+            .find(|dir| match std::fs::create_dir(dir) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => panic!("{}: {error}", dir.display()),
+            })
+            .unwrap();
         let mut config = Config::default();
         config.catalogues.dir = root.to_string_lossy().into_owned();
         config.catalogues.wikidata.enabled = false;

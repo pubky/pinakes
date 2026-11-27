@@ -83,6 +83,8 @@ CREATE TABLE resource (
 );
 CREATE INDEX resource_category_idx ON resource USING btree (category);
 CREATE INDEX resource_catalogue_card_idx ON resource USING btree (catalogue_card) WHERE catalogue_card IS NOT NULL;
+-- The labels of the cards built from catalogue cards, which a search's `tags=` matches.
+CREATE INDEX resource_backed_labels_idx ON resource USING gin ((doc -> 'labels')) WHERE catalogue_card IS NOT NULL;
 CREATE INDEX resource_claim_priority_idx ON resource USING btree (resolver, priority_at DESC NULLS LAST, next_attempt_at) WHERE NOT dead_letter AND NOT final;
 CREATE INDEX resource_geography_idx ON resource USING gist ((point::geography));
 CREATE INDEX resource_host_idx ON resource USING btree (host);
@@ -799,7 +801,10 @@ CREATE TABLE resource_key (
 );
 CREATE INDEX resource_key_source_idx ON resource_key USING btree (resource_id, source);
 CREATE INDEX resource_key_key_idx ON resource_key USING btree (key);
-CREATE INDEX resource_key_catalogue_idx ON resource_key USING btree (key) WHERE source = 'catalogue';
+-- In byte order, where the keys of one catalogue (`catalogue:<name>:…`) are one range, then by
+-- resource: the start's sweep reads only those of the catalogues it removes, a page at a time from
+-- where the last ended, also inside one key many links hold.
+CREATE INDEX resource_key_catalogue_idx ON resource_key USING btree (key COLLATE "C", resource_id) WHERE source = 'catalogue';
 
 -- Facts a source reads for a resource (`isrc`, `upc`, `mbid`, `artist`, `duration`): shown in
 -- the read's `details.facts` and searchable by `key`; unlike keys they never join anything.
@@ -1283,7 +1288,8 @@ $$;
 -- same item; `related_uris` are links that belong to the item's group without being the item
 -- (an official website). `labels` are valid Pubky tag labels. `fame` is 0–1. A full import
 -- stamps every row it reads with its generation (`seen_generation`) and then removes the rows it
--- did not read; a row changes only when its `content_hash` does.
+-- did not read; a row changes only when its `content_hash` does, and only such a change fires the
+-- row triggers below (a stamp fires none).
 CREATE TABLE catalogue_card (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     catalogue text NOT NULL CONSTRAINT catalogue_card_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
@@ -1304,13 +1310,28 @@ CREATE TABLE catalogue_card (
     seen_generation bigint NOT NULL,
     updated_at timestamp with time zone NOT NULL DEFAULT now(),
     CONSTRAINT catalogue_card_source_id_key UNIQUE (catalogue, source_id)
-);
-CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (fame DESC);
+)
+-- A fifth of each page free: a full import's stamp of an unchanged card (`seen_generation`, in no
+-- index) that finds room on its page is a heap-only update, with no new index entries (about one
+-- stamp in four when a whole catalogue is stamped).
+WITH (fillfactor = 80);
+-- Searches without text read each catalogue that is on in fame order, by type and by host too, so
+-- the cards of one switched off but not dropped are never read.
+CREATE INDEX catalogue_card_fame_idx ON catalogue_card USING btree (catalogue, fame DESC, id);
 CREATE INDEX catalogue_card_keys_idx ON catalogue_card USING gin (keys);
 CREATE INDEX catalogue_card_labels_idx ON catalogue_card USING gin (labels);
-CREATE INDEX catalogue_card_point_idx ON catalogue_card USING gist (point);
+-- One `point` index per catalogue (partial): a search near a place reads only the catalogues that
+-- are on, nearest first in each, never the points of one switched off but not dropped. A new
+-- catalogue adds its own two.
+CREATE INDEX catalogue_card_point_wikidata_idx ON catalogue_card USING gist (point) WHERE catalogue = 'wikidata';
+CREATE INDEX catalogue_card_point_musicbrainz_idx ON catalogue_card USING gist (point) WHERE catalogue = 'musicbrainz';
+CREATE INDEX catalogue_card_point_osm_idx ON catalogue_card USING gist (point) WHERE catalogue = 'osm';
+CREATE INDEX catalogue_card_point_openalex_idx ON catalogue_card USING gist (point) WHERE catalogue = 'openalex';
+CREATE INDEX catalogue_card_point_podcastindex_idx ON catalogue_card USING gist (point) WHERE catalogue = 'podcastindex';
+CREATE INDEX catalogue_card_point_tranco_idx ON catalogue_card USING gist (point) WHERE catalogue = 'tranco';
+CREATE INDEX catalogue_card_point_software_idx ON catalogue_card USING gist (point) WHERE catalogue = 'software';
 CREATE INDEX catalogue_card_related_uris_idx ON catalogue_card USING gin (related_uris);
-CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (type, fame DESC);
+CREATE INDEX catalogue_card_type_fame_idx ON catalogue_card USING btree (catalogue, type, fame DESC, id);
 CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 
 -- Each catalogue's import: what it does now (`phase`: idle, import (a full import, the first or
@@ -1321,7 +1342,12 @@ CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 -- last update finished, how current the cards are (`current_as_of`: the upstream time of the data
 -- the last finished run left, which the update lag counts from), why an update asked for a full
 -- import (`import_requested`, until that import begins as a new one), why it waits (`waiting`:
--- free disk, another large import) and its errors.
+-- free disk, another large import), its errors, and the scope of its last finished full import
+-- (`scope`: its `limit`, `region` or `min_citations`), the cards the full import of `generation`
+-- has read so far (`generation_cards`; one of the same or a wider scope that read under half the
+-- cards fails instead of removing the rest) and whether the operator let the next full import
+-- remove what it did not read whatever its share (`shrink_allowed`, `pinakesd catalogue
+-- allow-shrink`).
 -- `pinakesd catalogue drop` deletes the row with the cards.
 CREATE TABLE catalogue_state (
     catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
@@ -1339,13 +1365,17 @@ CREATE TABLE catalogue_state (
     waiting text,
     last_error text,
     error_count bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_error_count_check CHECK (error_count >= 0),
-    updated_at timestamp with time zone NOT NULL DEFAULT now()
+    updated_at timestamp with time zone NOT NULL DEFAULT now(),
+    scope jsonb,
+    generation_cards bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_generation_cards_check CHECK (generation_cards >= 0),
+    shrink_allowed boolean NOT NULL DEFAULT false
 );
 
 
--- The catalogue cards an update run changed or removed, and the cards a full import changed in
--- place, for the text index (`search_index`). A full import's new and removed cards are not
--- queued: the index reads the catalogue's cards again once the import has finished
+-- The catalogue cards whose content changed in place, and those an update run inserted or
+-- removed, for the text index (`search_index`); after a catalogue's first full import, also the
+-- cards a full import inserts and removes. The first full import's cards are not queued: the index
+-- reads the catalogue's cards again once that import has finished
 -- (`catalogue_state.last_import_at`), so a first import of millions of cards never passes
 -- through this table.
 CREATE TABLE search_index_catalogue_queue (
@@ -1353,33 +1383,71 @@ CREATE TABLE search_index_catalogue_queue (
     card_id bigint NOT NULL
 );
 
--- The changed cards of a statement: in an update run every change, in a full import the cards
--- whose content changed in place.
+-- The inserted or removed cards of a statement: in an update run, and in a full import after the
+-- catalogue's first.
 CREATE FUNCTION queue_search_index_catalogue() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
     IF TG_OP = 'INSERT' THEN
         INSERT INTO search_index_catalogue_queue(card_id)
-            SELECT n.id FROM changed_new n JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run = 'update';
-    ELSIF TG_OP = 'UPDATE' THEN
-        INSERT INTO search_index_catalogue_queue(card_id)
-            SELECT n.id FROM changed_new n JOIN changed_old o ON o.id = n.id JOIN catalogue_state s ON s.catalogue = n.catalogue AND s.run IN ('update', 'import')
-            WHERE n.content_hash IS DISTINCT FROM o.content_hash OR n.catalogue IS DISTINCT FROM o.catalogue;
+            SELECT n.id FROM changed_new n JOIN catalogue_state s ON s.catalogue = n.catalogue
+            WHERE s.run = 'update' OR (s.run = 'import' AND s.last_import_at IS NOT NULL);
     ELSE
         INSERT INTO search_index_catalogue_queue(card_id)
-            SELECT o.id FROM changed_old o JOIN catalogue_state s ON s.catalogue = o.catalogue AND s.run = 'update';
+            SELECT o.id FROM changed_old o JOIN catalogue_state s ON s.catalogue = o.catalogue
+            WHERE s.run = 'update' OR (s.run = 'import' AND s.last_import_at IS NOT NULL);
+    END IF;
+    RETURN NULL;
+END $$;
+-- One card whose content changed, whatever wrote it (fired only then, so a full import's stamps
+-- queue nothing and copy no rows).
+CREATE FUNCTION queue_search_index_catalogue_card() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    INSERT INTO search_index_catalogue_queue(card_id) VALUES (NEW.id);
+    RETURN NULL;
+END $$;
+-- The search revision moves with a statement that inserted or removed cards (one that wrote none
+-- moves nothing).
+CREATE FUNCTION bump_search_revision_for_cards() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    IF current_setting('pinakes.search_write', true) IS DISTINCT FROM 'on' AND EXISTS (SELECT 1 FROM changed_cards) THEN
+        INSERT INTO search_write DEFAULT VALUES;
+        PERFORM set_config('pinakes.search_write', 'on', true);
     END IF;
     RETURN NULL;
 END $$;
 
+-- The host a catalogue card is listed under (`host=`): its link's, or for a root that is no web
+-- link (`doi:…`) its identifier page's (`catalogue::card_host` answers the same; a test holds
+-- them equal for every identifier page).
+CREATE FUNCTION catalogue_card_host(uri text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT coalesce(substring(uri FROM '^[a-z][a-z0-9+.-]*://(\[[^]]*\]|[^/?#:]+)'), CASE lower(split_part(uri, ':', 1)) WHEN 'artic' THEN 'www.artic.edu' WHEN 'btc' THEN 'mempool.space' WHEN 'btc-signet' THEN 'mempool.space' WHEN 'btc-testnet' THEN 'mempool.space' WHEN 'btc-testnet4' THEN 'mempool.space' WHEN 'cleveland' THEN 'www.clevelandart.org' WHEN 'commons' THEN 'commons.wikimedia.org' WHEN 'docker' THEN 'hub.docker.com' WHEN 'doi' THEN 'doi.org' WHEN 'figshare' THEN 'figshare.com' WHEN 'fr' THEN 'www.federalregister.gov' WHEN 'gbif' THEN 'www.gbif.org' WHEN 'hf' THEN 'huggingface.co' WHEN 'ia' THEN 'archive.org' WHEN 'inat' THEN 'www.inaturalist.org' WHEN 'isbn' THEN 'openlibrary.org' WHEN 'isrc' THEN 'musicbrainz.org' WHEN 'lei' THEN 'www.gleif.org' WHEN 'ln' THEN 'mempool.space' WHEN 'ln-testnet' THEN 'mempool.space' WHEN 'mb' THEN 'musicbrainz.org' WHEN 'met' THEN 'www.metmuseum.org' WHEN 'nct' THEN 'clinicaltrials.gov' WHEN 'osm' THEN 'www.openstreetmap.org' WHEN 'pdb' THEN 'www.rcsb.org' WHEN 'pubchem' THEN 'pubchem.ncbi.nlm.nih.gov' WHEN 'ror' THEN 'ror.org' WHEN 'uniprot' THEN 'www.uniprot.org' WHEN 'usgs' THEN 'earthquake.usgs.gov' WHEN 'wikidata' THEN 'www.wikidata.org' WHEN 'zenodo' THEN 'zenodo.org' END) $$;
 -- Searches without text read the cards near a point and on a host through these.
-CREATE INDEX catalogue_card_geography_idx ON catalogue_card USING gist ((point::geography));
-CREATE INDEX catalogue_card_host_idx ON catalogue_card USING btree ((substring(uri FROM '^[a-z][a-z0-9+.-]*://([^/?#:]+)')), fame DESC);
+CREATE INDEX catalogue_card_geography_wikidata_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'wikidata';
+CREATE INDEX catalogue_card_geography_musicbrainz_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'musicbrainz';
+CREATE INDEX catalogue_card_geography_osm_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'osm';
+CREATE INDEX catalogue_card_geography_openalex_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'openalex';
+CREATE INDEX catalogue_card_geography_podcastindex_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'podcastindex';
+CREATE INDEX catalogue_card_geography_tranco_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'tranco';
+CREATE INDEX catalogue_card_geography_software_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'software';
+CREATE INDEX catalogue_card_host_idx ON catalogue_card USING btree (catalogue, catalogue_card_host(uri), fame DESC, id);
 CREATE TRIGGER catalogue_card_search_index_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
-CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card REFERENCING OLD TABLE AS changed_old NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
+CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card FOR EACH ROW WHEN (OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.catalogue IS DISTINCT FROM NEW.catalogue) EXECUTE FUNCTION queue_search_index_catalogue_card();
 CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
--- Search pages without text read the cards: their ETag moves with them.
-CREATE TRIGGER catalogue_card_revision BEFORE INSERT OR DELETE OR UPDATE OF catalogue, uri, type, name, other_names, description, labels, point, fame OR TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
+-- Search pages without text read the cards: their ETag moves when a card is inserted, removed, or
+-- changes what a page shows or how cards merge there (its content, keys and point; the point
+-- compared as bytes, so a dump restores the trigger), never with a stamp or a write that changed
+-- nothing.
+CREATE TRIGGER catalogue_card_revision_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_cards FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision_for_cards();
+CREATE TRIGGER catalogue_card_revision_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_cards FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision_for_cards();
+CREATE TRIGGER catalogue_card_revision_update AFTER UPDATE ON catalogue_card FOR EACH ROW
+    WHEN ((OLD.content_hash, OLD.catalogue, OLD.source, OLD.uri, OLD.type, OLD.name, OLD.other_names, OLD.description, OLD.labels, OLD.keys, OLD.fame) IS DISTINCT FROM (NEW.content_hash, NEW.catalogue, NEW.source, NEW.uri, NEW.type, NEW.name, NEW.other_names, NEW.description, NEW.labels, NEW.keys, NEW.fame)
+        OR OLD.point::bytea IS DISTINCT FROM NEW.point::bytea)
+    EXECUTE FUNCTION bump_search_revision();
+CREATE TRIGGER catalogue_card_revision_truncate BEFORE TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 
 -- A resource built from a catalogue card stays final and out of the fetch queue whatever writes
 -- its row (a new reference, a requeue, `reextract`): it changes when its card does
@@ -1422,7 +1490,9 @@ CREATE TABLE catalogue_extras (
 CREATE INDEX catalogue_extras_due_idx ON catalogue_extras USING btree (due_at, resource_id) WHERE due_at IS NOT NULL;
 
 -- The canonical links a join key names (`catalogue::join::link_keys` reads each back to the key):
--- a row with one of these links joins a card holding the key when the card is written.
+-- a row with one of these links joins a card holding the key when the card is written. A crate's
+-- key spells `_` as `-` (crates.io takes them for one name): its pages with each, so a link to a
+-- crate published with `_` names it too.
 CREATE FUNCTION catalogue_key_links(key text) RETURNS text[]
     LANGUAGE sql IMMUTABLE
     AS $$
@@ -1433,7 +1503,8 @@ CREATE FUNCTION catalogue_key_links(key text) RETURNS text[]
   WHEN 'doi' THEN ARRAY[key]
   WHEN 'arxiv' THEN ARRAY['https://arxiv.org/abs/'||substr(key,7),'https://arxiv.org/pdf/'||substr(key,7)]
   WHEN 'openalex' THEN ARRAY['https://openalex.org/'||substr(key,10)]
-  WHEN 'crate' THEN ARRAY['https://crates.io/crates/'||substr(key,7),'https://docs.rs/'||substr(key,7),'https://docs.rs/crate/'||substr(key,7),'https://lib.rs/crates/'||substr(key,7)]
+  WHEN 'crate' THEN ARRAY(SELECT p.page||n.name FROM unnest(ARRAY['https://crates.io/crates/','https://docs.rs/','https://docs.rs/crate/','https://lib.rs/crates/']) WITH ORDINALITY AS p(page,i)
+   CROSS JOIN unnest(ARRAY[substr(key,7)]||CASE WHEN strpos(key,'-')>0 THEN ARRAY[replace(substr(key,7),'-','_')] ELSE '{}'::text[] END) WITH ORDINALITY AS n(name,j) ORDER BY p.i,n.j)
   WHEN 'android' THEN ARRAY['https://f-droid.org/packages/'||substr(key,9)||'/','https://f-droid.org/packages/'||substr(key,9),'https://f-droid.org/en/packages/'||substr(key,9)||'/']
   WHEN 'flathub' THEN ARRAY['https://flathub.org/apps/'||substr(key,9),'https://flathub.org/apps/details/'||substr(key,9)]
   WHEN 'homepage' THEN ARRAY['https://'||substr(key,10)||'/','https://www.'||substr(key,10)||'/','http://'||substr(key,10)||'/','http://www.'||substr(key,10)||'/']

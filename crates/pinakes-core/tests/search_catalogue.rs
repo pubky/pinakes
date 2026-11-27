@@ -418,9 +418,11 @@ async fn a_referenced_card_is_listed_once(pool: PgPool) {
     }
 }
 
-/// An update run's changes reach the index through its queue; an import's through its end.
+/// An update run's changes reach the index through its queue, and so do a later full import's
+/// (its new and removed cards too, so the catalogue is not read again); a first full import's
+/// by the index reading the catalogue's cards again.
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_update_run_changes_the_index(pool: PgPool) {
+async fn an_update_run_and_a_later_import_change_the_index_through_its_queue(pool: PgPool) {
     import(
         &pool,
         Catalogue::Wikidata,
@@ -461,13 +463,20 @@ async fn an_update_run_changes_the_index(pool: PgPool) {
         .await
         .unwrap();
     assert!(items(&common::get(&app, "/v1/search?q=weisshorn").await).is_empty());
-    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM search_index_catalogue_queue")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(queued > 0, "an update run queues its cards");
-    // An import queues its new cards nothing; the index reads the catalogue again when it ends.
-    sqlx::query("UPDATE catalogue_state SET run='import' WHERE catalogue='wikidata'")
+    let queued = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search_index_catalogue_queue")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let before = queued().await;
+    assert!(before > 0, "an update run queues its cards");
+    // A later full import (one has finished before) queues its new card and the card its end
+    // removes, and each reaches the index while the import still runs.
+    sqlx::query("UPDATE catalogue_state SET run='import',generation=2 WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
         .unwrap();
@@ -480,28 +489,51 @@ async fn an_update_run_changes_the_index(pool: PgPool) {
     )
     .await
     .unwrap();
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM search_index_catalogue_queue")
-        .fetch_one(&pool)
+    assert_eq!(queued().await, before + 1);
+    assert_eq!(names(&common::get(&app, "/v1/search?q=dom").await), ["Dom"]);
+    store::finish_import(&pool, Catalogue::Wikidata, 2)
         .await
         .unwrap();
-    assert_eq!(after, queued);
-    assert!(items(&common::get(&app, "/v1/search?q=dom").await).is_empty());
-    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now()+interval '1 second' WHERE catalogue='wikidata'")
+    assert!(items(&common::get(&app, "/v1/search?q=cervino").await).is_empty());
+    let later = queued().await;
+    // A first full import queues nothing: its cards are found once it has finished.
+    sqlx::query("INSERT INTO catalogue_state(catalogue,run,phase,generation) VALUES('musicbrainz','import','import',1)")
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(names(&common::get(&app, "/v1/search?q=dom").await), ["Dom"]);
+    let mut song = card(9, "Hörnli Song", "MusicRecording", &[], None, 0.4);
+    song.source_id = "recording/1".into();
+    store::upsert(&pool, Catalogue::Musicbrainz, 1, &[song], None)
+        .await
+        .unwrap();
+    assert_eq!(queued().await, later);
+    sqlx::query(
+        "UPDATE catalogue_state SET run=NULL,last_import_at=now() WHERE catalogue='musicbrainz'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=hornli").await),
+        ["Hörnli Song"]
+    );
+    assert_eq!(queued().await, later, "read again, not queued");
 }
 
-/// A catalogue read again after its import, a part per pass: the queues are drained before each
-/// part, so a new tag is found while the re-read is under way; a card changed in place during the
-/// import is found by its new name before the import ends; at the end the cards gone since leave.
+/// A catalogue read again after its first full import, a part per pass: the queues are drained
+/// before each part, so a new tag is found while the re-read is under way; a card changed in place
+/// during the import is found by its new name before the import ends; at the end the cards gone
+/// since leave.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
+    // The catalogue's first full import is under way (none has finished): the index reads the
+    // cards there are when it is built.
     let cards: Vec<Card> = (1..=6)
         .map(|n| card(n, &format!("Peak {n}"), "Mountain", &[], None, 0.5))
         .collect();
-    import(&pool, Catalogue::Wikidata, &cards).await;
+    store::upsert(&pool, Catalogue::Wikidata, 1, &cards, None)
+        .await
+        .unwrap();
     let index = search_index::SearchIndex::in_memory_with_reread_part(2);
     index.set_catalogues(&["wikidata"]);
     let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
@@ -511,7 +543,7 @@ async fn a_reread_goes_a_part_per_pass(pool: PgPool) {
         items(&common::get(&app, "/v1/search?q=peak").await).len(),
         6
     );
-    // A re-import: a card renamed in place, one added, one gone.
+    // The import goes on: a card renamed in place, one added, one gone at its end.
     sqlx::query("UPDATE catalogue_state SET run='import',generation=2 WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
@@ -762,8 +794,8 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
             .await
             .unwrap()
     };
-    let dir = std::env::temp_dir().join(format!("pinakes-index-bench-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let root = common::unique_dir("index-bench");
+    let dir = root.join("index");
     let index = search_index::SearchIndex::on_disk(&dir);
     index.set_catalogues(&["wikidata"]);
     let passed = prometheus::IntGauge::new("passed", "test").unwrap();
@@ -935,7 +967,7 @@ async fn catalogue_index_cost_at_100k_cards(pool: PgPool) {
         walk(&dir) / 1_000_000
     );
     assert!(gone);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
 }
 fn walk(dir: &std::path::Path) -> u64 {
     std::fs::read_dir(dir)
@@ -1000,4 +1032,627 @@ async fn switching_off_an_empty_catalogue_merges_nothing(pool: PgPool) {
     // does; either way the words leave the files.
     assert!(merged_out(&index, &pool, "matterhorn").await);
     assert!(!index.holds_word("guide"));
+}
+
+/// Card reads without text are bounded: by place, the twice `cap` best known cards are read first
+/// and those in the circle or box kept (the answer a read of the whole place gives, when they are
+/// `cap`); when they are fewer, the twice `cap` cards nearest to the circle's centre (or each
+/// box's) are read too and the best known of all of them listed, however many lie in it. By type,
+/// the best known of each type and subtype. A box across the antimeridian holds the cards on both
+/// sides.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_reads_without_text_are_bounded_by_place_and_type(pool: PgPool) {
+    // 450 peaks going north from 46,7, about 111 m apart, the farther the better known.
+    let peaks: Vec<Card> = (0..450)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Peak {n}"),
+                "Mountain",
+                &[],
+                Some((46.0 + 0.001 * n as f64, 7.0)),
+                n as f32 / 450.0,
+            )
+        })
+        .collect();
+    import(&pool, Catalogue::Wikidata, &peaks).await;
+    let mut config = Config::default();
+    config.search.text_candidates = 50;
+    let app = app(&pool, config);
+    // Every peak is in the circle: the 100 best known are, and the best 50 of them are listed.
+    let page = names(&common::get(&app, "/v1/search?near=46.0,7.0&radius=100000&limit=50").await);
+    assert_eq!(page.len(), 50);
+    assert_eq!(page.first().map(String::as_str), Some("Peak 449"));
+    // A circle of the first 135 peaks holds none of the 100 best known: of the 100 nearest the
+    // best known is listed first, not the best known in the circle (Peak 134).
+    let page = names(&common::get(&app, "/v1/search?near=46.0,7.0&radius=15000&limit=50").await);
+    assert_eq!(
+        page.first().map(String::as_str),
+        Some("Peak 99"),
+        "{page:?}"
+    );
+    assert!(
+        !page.iter().any(|n| n == "Peak 100" || n == "Peak 134"),
+        "{page:?}"
+    );
+    // Nearest first: the nearest 50.
+    let page = names(
+        &common::get(
+            &app,
+            "/v1/search?near=46.0,7.0&radius=100000&sort=distance&limit=50",
+        )
+        .await,
+    );
+    assert_eq!(page.first().map(String::as_str), Some("Peak 0"));
+    assert_eq!(page.len(), 50);
+    // A box of every peak: the best known.
+    let page = names(&common::get(&app, "/v1/search?bbox=6.9,45.99,7.1,46.46&limit=50").await);
+    assert_eq!(page.len(), 50);
+    assert_eq!(page.first().map(String::as_str), Some("Peak 449"));
+    // A box of the first 200: the best known of the 100 nearest to its centre (46.095).
+    let page = names(&common::get(&app, "/v1/search?bbox=6.9,45.99,7.1,46.1995&limit=50").await);
+    assert_eq!(page.len(), 50);
+    assert!(
+        !page
+            .iter()
+            .any(|n| n == "Peak 199" || n == "Peak 150" || n == "Peak 0"),
+        "{page:?}"
+    );
+    // By type: the best known of each subtype of Place come first, whichever type they are.
+    import(
+        &pool,
+        Catalogue::Musicbrainz,
+        &(0..3)
+            .map(|n| {
+                let mut c = card(
+                    1000 + n,
+                    &format!("Glacier {n}"),
+                    "Landform",
+                    &[],
+                    None,
+                    1.0,
+                );
+                c.source_id = format!("place/{n}");
+                c
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    let page = names(&common::get(&app, "/v1/search?type=Place&limit=5").await);
+    assert_eq!(page[..3].len(), 3);
+    assert!(
+        page[..3].iter().all(|n| n.starts_with("Glacier")),
+        "{page:?}"
+    );
+    assert_eq!(page[3], "Peak 449");
+    // Across the antimeridian.
+    import(
+        &pool,
+        Catalogue::Openalex,
+        &[
+            card(
+                2001,
+                "East of the line",
+                "Place",
+                &[],
+                Some((0.0, 179.9)),
+                0.1,
+            ),
+            card(
+                2002,
+                "West of the line",
+                "Place",
+                &[],
+                Some((0.0, -179.9)),
+                0.2,
+            ),
+            card(2003, "Far away", "Place", &[], Some((0.0, 0.0)), 0.3),
+        ]
+        .map(|mut c| {
+            c.source_id = c.source_id.replace('Q', "W");
+            c
+        }),
+    )
+    .await;
+    let mut page = names(&common::get(&app, "/v1/search?bbox=179,-1,-179,1").await);
+    page.sort();
+    assert_eq!(page, ["East of the line", "West of the line"]);
+}
+
+/// The card paths a search takes besides text, label, type and place: a host, with and without
+/// text; text ranked by activity (cards nobody referenced after every referenced link, the best
+/// known first); pages through a cursor over cards and links together, each unit once; a dropped
+/// catalogue's documents leave the index.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_paths_by_host_activity_cursor_and_drop(pool: PgPool) {
+    let mut cards: Vec<Card> = (1..=30)
+        .map(|n| {
+            card(
+                n,
+                &format!("Ridge {n}"),
+                "Mountain",
+                &["alps"],
+                None,
+                n as f32 / 30.0,
+            )
+        })
+        .collect();
+    for c in cards.iter_mut().take(5) {
+        c.uri = c.uri.replace("en.wikipedia.org", "www.example.net");
+    }
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    for n in 0..5 {
+        referenced(
+            &pool,
+            &format!("https://example.org/ridge-{n}"),
+            &format!("Ridge guide {n}"),
+            "alps",
+            1 + n,
+        )
+        .await;
+    }
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    for path in [
+        "/v1/search?host=www.example.net",
+        "/v1/search?q=ridge&host=www.example.net",
+    ] {
+        let mut page = names(&common::get(&app, path).await);
+        page.sort();
+        assert_eq!(
+            page,
+            ["Ridge 1", "Ridge 2", "Ridge 3", "Ridge 4", "Ridge 5"],
+            "{path}"
+        );
+    }
+    let page = names(&common::get(&app, "/v1/search?q=ridge&sort=activity&limit=7").await);
+    assert!(
+        page[..5].iter().all(|n| n.starts_with("Ridge guide")),
+        "{page:?}"
+    );
+    assert_eq!(&page[5..], ["Ridge 30", "Ridge 29"]);
+    // Every unit once across the pages.
+    let mut seen = vec![];
+    let mut path = "/v1/search?tags=alps&limit=8".to_owned();
+    loop {
+        let page = common::get(&app, &path).await;
+        seen.extend(names(&page));
+        match page["cursor"].as_str() {
+            Some(cursor) => path = format!("/v1/search?tags=alps&limit=8&cursor={cursor}"),
+            None => break,
+        }
+    }
+    let count = seen.len();
+    seen.sort();
+    seen.dedup();
+    assert_eq!((count, seen.len()), (35, 35));
+    // Dropped while off: its documents leave the index.
+    index.set_catalogues(&["musicbrainz"]);
+    store::drop_catalogue(&pool, Catalogue::Wikidata, |_| {})
+        .await
+        .unwrap();
+    index.sync(&pool).await.unwrap();
+    let held = index.documents();
+    assert!(
+        !held.iter().any(|d| d.starts_with("catalogue:")),
+        "{held:?}"
+    );
+    assert_eq!(held.len(), 5);
+}
+
+/// A later full import of a catalogue the index has read reaches it through the queue and is not
+/// read again; a first import after a drop (its generation starts at 1 again) is read in full.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_later_import_is_not_read_again_but_a_first_one_after_a_drop_is(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Matterhorn", "Mountain", &[], None, 0.9)],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&["wikidata"]);
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=matterhorn").await),
+        ["Matterhorn"]
+    );
+    // A re-import: a new card and the old one gone, then its end.
+    sqlx::query("UPDATE catalogue_state SET run='import',generation=2 WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        2,
+        &[card(2, "Weisshorn", "Mountain", &[], None, 0.5)],
+        None,
+    )
+    .await
+    .unwrap();
+    store::finish_import(&pool, Catalogue::Wikidata, 2)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now()+interval '1 second' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=weisshorn").await),
+        ["Weisshorn"]
+    );
+    assert!(items(&common::get(&app, "/v1/search?q=matterhorn").await).is_empty());
+    common::get(&app, "/v1/search?q=weisshorn").await;
+    assert_eq!(index.rereads(), 0, "read through the queue, not again");
+    // Dropped while the index still holds it, then imported anew: generation 1 again.
+    store::drop_catalogue(&pool, Catalogue::Wikidata, |_| {})
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalogue_state(catalogue,run,phase,generation) VALUES('wikidata','import','import',1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        1,
+        &[card(3, "Dom", "Mountain", &[], None, 0.4)],
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE catalogue_state SET run=NULL,last_import_at=now()+interval '2 seconds' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(names(&common::get(&app, "/v1/search?q=dom").await), ["Dom"]);
+    assert_eq!(index.rereads(), 1);
+    let held = index.documents();
+    assert_eq!(held.len(), 1, "only the new import's card: {held:?}");
+}
+
+/// The rows of `catalogue_card` itself the plans read (its indexes' entries left out): those each
+/// scan of the table returned or filtered out, over all its loops.
+fn card_heap_rows_read(plans: &[Value]) -> u64 {
+    fn walk(node: &Value) -> u64 {
+        let rows = |k: &str| node[k].as_f64().unwrap_or(0.0);
+        let own = if node["Relation Name"] == "catalogue_card" {
+            ((rows("Actual Rows")
+                + rows("Rows Removed by Filter")
+                + rows("Rows Removed by Index Recheck"))
+                * rows("Actual Loops").max(1.0)) as u64
+        } else {
+            0
+        };
+        own + node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(walk)
+            .sum::<u64>()
+    }
+    plans
+        .iter()
+        .flat_map(|p| p.as_array().cloned().unwrap_or_default())
+        .map(|p| walk(&p["Plan"]))
+        .sum()
+}
+/// The catalogue rows the plans read: those each scan of `catalogue_card` or of its indexes
+/// returned or filtered out, over all its loops.
+fn card_rows_read(plans: &[Value]) -> u64 {
+    fn walk(node: &Value) -> u64 {
+        let on_cards = node["Relation Name"] == "catalogue_card"
+            || node["Index Name"]
+                .as_str()
+                .is_some_and(|i| i.starts_with("catalogue_card"));
+        let rows = |k: &str| node[k].as_f64().unwrap_or(0.0);
+        let own = if on_cards {
+            ((rows("Actual Rows")
+                + rows("Rows Removed by Filter")
+                + rows("Rows Removed by Index Recheck"))
+                * rows("Actual Loops").max(1.0)) as u64
+        } else {
+            0
+        };
+        own + node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(walk)
+            .sum::<u64>()
+    }
+    plans
+        .iter()
+        .flat_map(|p| p.as_array().cloned().unwrap_or_default())
+        .map(|p| walk(&p["Plan"]))
+        .sum()
+}
+
+/// Reads without text go catalogue by catalogue, each in its `(catalogue, …)` index's order: the
+/// cards of a catalogue switched off but not dropped are never read, and by type only each type's
+/// best known are (not the better known cards of other types). A host is read in its index's
+/// order too, and a place in each catalogue's own `point` index, nearest first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_reads_without_text_skip_a_catalogue_that_is_off(pool: PgPool) {
+    // On: 2,000 people and 30 lesser known mountains. Off: 2,000 mountains better known than
+    // anything on, and nearer to 46,7 than any of them, so an index not led by the catalogue
+    // would read them all first, in fame order or nearest first.
+    let mut on: Vec<Card> = (0..2000)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Person {n}"),
+                "Person",
+                &[],
+                None,
+                0.3 + n as f32 / 10_000.0,
+            )
+        })
+        .collect();
+    on.extend((0..30).map(|n| {
+        card(
+            5000 + n,
+            &format!("Hill {n}"),
+            "Mountain",
+            &[],
+            Some((46.0 + 0.01 * n as f64, 7.0)),
+            n as f32 / 100.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &on).await;
+    let off: Vec<Card> = (0..2000)
+        .map(|n| {
+            let mut c = card(
+                10_000 + n,
+                &format!("Alp {n}"),
+                "Mountain",
+                &[],
+                Some((46.0 + 0.0001 * n as f64, 7.0)),
+                0.6 + n as f32 / 10_000.0,
+            );
+            c.source_id = format!("place/{n}");
+            c
+        })
+        .collect();
+    import(&pool, Catalogue::Musicbrainz, &off).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.catalogues.musicbrainz.enabled = false;
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    for (path, first) in [
+        ("/v1/search?type=Mountain&limit=20", "Hill 29"),
+        ("/v1/search?limit=20", "Person 1999"),
+        ("/v1/search?host=en.wikipedia.org&limit=20", "Person 1999"),
+        ("/v1/search?near=46.0,7.0&radius=100000&limit=20", "Hill 29"),
+        (
+            "/v1/search?near=46.0,7.0&radius=100000&sort=distance&limit=20",
+            "Hill 0",
+        ),
+        ("/v1/search?bbox=6.9,45.9,7.1,46.4&limit=20", "Hill 29"),
+    ] {
+        api::record_card_read_plans();
+        let page = names(&common::get(&app, path).await);
+        let read = card_rows_read(&api::card_read_plans());
+        assert_eq!(page.first().map(String::as_str), Some(first), "{path}");
+        assert!(!page.iter().any(|n| n.starts_with("Alp")), "{path}");
+        assert!(read > 0 && read <= 100, "{path}: {read} card rows read");
+    }
+}
+
+/// One character found inside names (a CJK character here), which the index leaves to Postgres,
+/// still lists the catalogue cards that hold it: the best known of each catalogue's best known
+/// (twice the candidates), read in fame order, with the character in their name.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_character_inside_names_finds_catalogue_cards(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[
+            card(
+                1,
+                "東京タワー",
+                "LandmarksOrHistoricalBuildings",
+                &[],
+                None,
+                0.9,
+            ),
+            card(2, "京都", "City", &[], None, 0.8),
+            card(3, "Mount Fuji", "Mountain", &[], None, 0.7),
+        ],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    // 東
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=%E6%9D%B1").await),
+        ["東京タワー"]
+    );
+    // 京
+    let mut both = names(&common::get(&app, "/v1/search?q=%E4%BA%AC").await);
+    both.sort();
+    assert_eq!(both, ["京都", "東京タワー"]);
+    // With a type, those of it.
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=%E4%BA%AC&type=City").await),
+        ["京都"]
+    );
+}
+
+/// One character inside names reads each catalogue's own twice `cap` best known cards, not the
+/// twice `cap` best known of all catalogues together: a catalogue whose cards are less known
+/// still lists those whose name holds the character.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_character_reads_each_catalogue_s_best_known(pool: PgPool) {
+    // Wikidata: 30 well known cards without the character. MusicBrainz: 3 lesser known with it.
+    let famous: Vec<Card> = (1..=30)
+        .map(|n| card(n, &format!("Famous {n}"), "Person", &[], None, 0.9))
+        .collect();
+    import(&pool, Catalogue::Wikidata, &famous).await;
+    let cats: Vec<Card> = (1..=3)
+        .map(|n| {
+            let mut c = card(100 + n, &format!("猫 {n}"), "MusicGroup", &[], None, 0.1);
+            c.source_id = format!("artist/{n}");
+            c
+        })
+        .collect();
+    import(&pool, Catalogue::Musicbrainz, &cats).await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut config = Config::default();
+    // Twice cap (10) is under each catalogue's count of Wikidata's 30.
+    config.search.text_candidates = 5;
+    let mut state = AppState::new(pool.clone(), config).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let mut found = names(&common::get(&app, "/v1/search?q=%E7%8C%AB").await);
+    found.sort();
+    assert_eq!(found, ["猫 1", "猫 2", "猫 3"]);
+}
+
+/// Whether a key two catalogues' listed cards share names one card of each (so the cards merge)
+/// is read through the key index, at most two cards per key and catalogue: a catalogue of many
+/// cards that holds the key once is not read through to prove there is no second card, and a key
+/// 400 cards of one catalogue hold costs two of them for that catalogue. The other catalogue's
+/// check of it goes once through the key's holders (the key index does not tell catalogues
+/// apart), not once per catalogue as a count of every holder did (828 rows here).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_shared_key_is_checked_through_the_key_index(pool: PgPool) {
+    const MBID: &str = "0383dadf-2a4e-4d10-a46a-e9e041da8eb3";
+    const ISRC: &str = "isrc:GBUM71029604";
+    let mut item = card(1, "Shared Band", "MusicGroup", &[], None, 1.0);
+    item.keys.push(format!("mb:artist:{MBID}"));
+    item.keys.push(ISRC.into());
+    import(&pool, Catalogue::Wikidata, &[item]).await;
+    let mut artist = card(2, "Shared Band", "MusicGroup", &[], None, 1.0);
+    artist.source_id = format!("artist/{MBID}");
+    artist.uri = format!("https://musicbrainz.org/artist/{MBID}");
+    artist.keys = vec![format!("mb:artist:{MBID}")];
+    let mut others: Vec<Card> = (0..3000)
+        .map(|n| {
+            let mut c = card(10 + n, &format!("Band {n}"), "MusicGroup", &[], None, 0.2);
+            c.source_id = format!("artist/{n:08}-0000-4000-8000-000000000000");
+            c.uri = format!("https://musicbrainz.org/artist/{n:08}-0000-4000-8000-000000000000");
+            c.keys = vec![format!("mb:artist:{n:08}-0000-4000-8000-000000000000")];
+            c
+        })
+        .collect();
+    others.push(artist);
+    // 400 recordings holding one ISRC, better known than the other bands.
+    others.extend((0..400).map(|n| {
+        let mut c = card(
+            5000 + n,
+            &format!("Dup {n}"),
+            "MusicRecording",
+            &[],
+            None,
+            0.9,
+        );
+        c.source_id = format!("recording/{n:08}-0000-4000-8000-000000000001");
+        c.uri = format!("https://musicbrainz.org/recording/{n:08}-0000-4000-8000-000000000001");
+        c.keys = vec![
+            format!("mb:recording:{n:08}-0000-4000-8000-000000000001"),
+            ISRC.into(),
+        ];
+        c
+    }));
+    import(&pool, Catalogue::Musicbrainz, &others).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?limit=20").await);
+    let read = card_heap_rows_read(&api::card_read_plans());
+    assert_eq!(
+        page.iter().filter(|n| *n == "Shared Band").count(),
+        1,
+        "merged: {page:?}"
+    );
+    assert!(page.iter().any(|n| n.starts_with("Dup ")), "{page:?}");
+    assert!(read <= 500, "{read} card rows read from the table");
+}
+
+/// Every read a one-character search makes while it holds its turn stops with the turn's budget,
+/// the catalogue cards' too: held up past it (here by a lock on `catalogue_card`), the search
+/// answers 503 with `Retry-After: 1`, counted as `budget`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_one_character_card_read_stops_with_the_budget(pool: PgPool) {
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(
+            1,
+            "東京タワー",
+            "LandmarksOrHistoricalBuildings",
+            &[],
+            None,
+            0.9,
+        )],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?q=%E6%9D%B1").await),
+        ["東京タワー"]
+    );
+    index.set_bounds(1, std::time::Duration::from_millis(500));
+    let spent = pinakes_core::telemetry::search_index_busy_count("budget");
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE catalogue_card IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let (status, _) = common::get_from(&app, "127.0.0.2:1234", "/v1/search?q=%E6%9D%B1").await;
+    let took = started.elapsed();
+    lock.rollback().await.unwrap();
+    assert_eq!(status, 503);
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "{took:?}: the budget, not the pool's 5 s"
+    );
+    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
+}
+
+/// Each catalogue has its own two `point` indexes (geometry and geography, partial on it), which
+/// the reads near a place use one catalogue at a time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_catalogue_has_its_own_point_indexes(pool: PgPool) {
+    for catalogue in Catalogue::ALL {
+        for kind in ["point", "geography"] {
+            let name = format!("catalogue_card_{kind}_{}_idx", catalogue.name());
+            let definition: Option<String> =
+                sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE indexname=$1")
+                    .bind(&name)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            let definition = definition.unwrap_or_else(|| panic!("{name} is missing"));
+            assert!(
+                definition.contains(&format!("catalogue = '{}'", catalogue.name())),
+                "{definition}"
+            );
+        }
+    }
 }

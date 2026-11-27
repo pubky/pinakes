@@ -235,6 +235,10 @@ impl Source for X {
     fn facts(&self) -> &'static [&'static str] {
         &["author", "author_name", "published", "handle", "blocked"]
     }
+    fn social_link(&self, uri: &str) -> Option<bool> {
+        // A post and a profile both are.
+        Target::of_uri(uri).map(|_| true)
+    }
     fn social(&self, doc: &ResourceMeta) -> bool {
         // A post, and a profile (its bio is its author's own text).
         matches!(doc.type_name.as_str(), "SocialMediaPosting" | "Person")

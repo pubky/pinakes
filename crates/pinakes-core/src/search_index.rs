@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
 use sqlx::PgPool;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Bound,
     path::{Path, PathBuf},
     sync::{
@@ -30,8 +30,8 @@ use std::{
 use tantivy::{
     collector::TopDocs,
     query::{
-        BooleanQuery, BoostQuery, ConstScoreQuery, ExistsQuery, FuzzyTermQuery, Occur, PhraseQuery,
-        Query, RangeQuery, RegexQuery, TermQuery, TermSetQuery,
+        BooleanQuery, BoostQuery, ConstScoreQuery, ExistsQuery, Occur, PhraseQuery, Query,
+        RangeQuery, TermQuery, TermSetQuery,
     },
     schema::{
         Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
@@ -47,7 +47,7 @@ use tantivy::{
 
 /// The version of the index's fields and analyzers, kept in each commit: an index written with
 /// another is rebuilt.
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 5;
 /// How much a match in each field weighs (BM25 times this): the name most, then people's tags,
 /// other names and source labels, then the description.
 const NAME_BOOST: Score = 3.0;
@@ -108,6 +108,26 @@ const ADD_BATCH: usize = 1000;
 const PROGRESS_EVERY: u64 = 10_000;
 /// The memory of the writer that commits the queue, and of each of a rebuild's threads.
 const WRITER_BYTES: usize = 64_000_000;
+/// The most items (words, phrases, words to leave out) a text's query holds; the rest of the text
+/// is read by Postgres alone, which checks every candidate.
+const MAX_ITEMS: usize = 32;
+/// The most three-letter pieces a similar-name proposal asks for: the rarest, the count needed
+/// lowered by one for each left out.
+const MAX_PIECES: usize = 64;
+/// The most words of a name field a word start expands to, in all: of the first [`PREFIX_SCAN`]
+/// words that start so in each segment (in dictionary order), those the most names hold.
+const PREFIX_TERMS: usize = 1_000;
+/// The most words of a name field starting with a word that are read per segment to choose them.
+const PREFIX_SCAN: usize = 20_000;
+/// The most postings the words a word start expands to hold, in all (summed over segments).
+const PREFIX_POSTINGS: u64 = if cfg!(test) { 2_000 } else { 500_000 };
+/// The most documents the rarest word of a phrase may be in for the index to match it as a phrase.
+const PHRASE_POSTINGS: u64 = if cfg!(test) { 100 } else { 50_000 };
+/// The most words of one phrase the index matches as a phrase; Postgres checks the whole phrase.
+const MAX_PHRASE_WORDS: usize = 8;
+/// The most removed resources whose merge a commit records ([`Payload::owed`]); past it the next
+/// open merges every segment with deleted documents.
+const OWED_CAP: usize = 10_000;
 const REBUILD_THREADS: usize = 4;
 /// The tokenizers' names.
 const WORDS: &str = "pinakes_words";
@@ -168,8 +188,8 @@ fn schema() -> (Schema, Fields) {
     };
     let number = || NumericOptions::default().set_indexed().set_fast();
     let fields = Fields {
-        unit_id: s.add_text_field("unit_id", STRING | STORED),
-        resource_id: s.add_text_field("resource_id", STRING | STORED),
+        unit_id: s.add_text_field("unit_id", STRING | STORED | FAST),
+        resource_id: s.add_text_field("resource_id", STRING | STORED | FAST),
         name: s.add_text_field("name", text(WORDS, true)),
         name_exact: s.add_text_field("name_exact", text(EXACT, false)),
         name_grams: s.add_text_field("name_grams", text(GRAMS, false)),
@@ -392,6 +412,15 @@ struct Payload {
     /// The database the index was built from ([`database_identity`]).
     #[serde(default)]
     database: String,
+    /// The removed resources whose words a merge must still take out of the files ([`Purges`]),
+    /// recorded with the commit that deleted them, so a restart before the merge finishes merges
+    /// them at the next open; cleared by a commit once merged.
+    #[serde(default)]
+    owed: Vec<String>,
+    /// A merge of every segment with deleted documents is owed (a catalogue switched off, or more
+    /// owed resources than [`OWED_CAP`]).
+    #[serde(default)]
+    owed_all: bool,
 }
 /// The database's identity for the index: the token made with it (`search_index_database`) and
 /// its ID in the cluster (`pg_database.oid`). A copy restored elsewhere, or another database on the
@@ -508,10 +537,7 @@ fn card_document(f: &Fields, card: &CardRow, import: &str) -> Option<TantivyDocu
     for t in crate::model::type_path(&card.type_name) {
         doc.add_text(f.type_path, t);
     }
-    if let Some(host) = url::Url::parse(&card.uri)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-    {
+    if let Some(host) = crate::catalogue::card_host(&card.uri) {
         doc.add_text(f.host, host);
     }
     doc.add_text(f.source, &card.source);
@@ -633,16 +659,22 @@ struct Open {
     merging: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Searches that read the proposals (the text inside names, similar names), for tests.
     proposed: AtomicU64,
+    /// Re-reads of a catalogue begun, for tests.
+    rereads: AtomicU64,
     /// Searches that counted the names holding every word (whether to read the proposals), for
     /// tests.
     counted: AtomicU64,
 }
-/// Sets [`Purges::running`] back to false when dropped.
+/// Sets [`Purges::running`] back to false when dropped, and owes again what the merge under way
+/// did not finish (a merge that failed, or whose thread panicked).
 struct Running<'a>(&'a std::sync::Mutex<Purges>);
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         if let Ok(mut purging) = self.0.lock() {
             purging.running = false;
+            let merging = std::mem::take(&mut purging.merging);
+            purging.resources.extend(merging);
+            purging.catalogues |= std::mem::take(&mut purging.merging_catalogues);
         }
     }
 }
@@ -657,10 +689,30 @@ struct Purges {
     running: bool,
     resources: Vec<String>,
     catalogues: bool,
+    /// What the merge under way takes out: owed until it finishes, and recorded as owed by every
+    /// commit until then ([`Payload::owed`]).
+    merging: Vec<String>,
+    merging_catalogues: bool,
 }
 impl Purges {
     fn owed(&self) -> bool {
         !self.resources.is_empty() || self.catalogues
+    }
+    /// What a commit records as owed: the merges not started and the one under way.
+    fn recorded(&self) -> (Vec<String>, bool) {
+        let mut owed: Vec<String> = self
+            .resources
+            .iter()
+            .chain(&self.merging)
+            .cloned()
+            .collect();
+        owed.sort();
+        owed.dedup();
+        let all = self.catalogues || self.merging_catalogues || owed.len() > OWED_CAP;
+        if owed.len() > OWED_CAP {
+            owed.clear();
+        }
+        (owed, all)
     }
 }
 /// A catalogue read again after a full import, a part per pass ([`SearchIndex::sync_catalogues`]):
@@ -681,11 +733,14 @@ struct Progress {
     applied: HashSet<u64>,
 }
 impl Open {
+    /// An open index; `owed`: the merges its last commit recorded as owed ([`Payload::owed`],
+    /// [`Payload::owed_all`]), started at the next pass.
     fn new(
         index: Index,
         boundary: u64,
         catalogues: BTreeMap<String, String>,
         database: String,
+        owed: (Vec<String>, bool),
     ) -> Result<Self> {
         register(&index);
         let fields = schema().1;
@@ -713,19 +768,27 @@ impl Open {
             database,
             reread: std::sync::Mutex::new(None),
             purges: AtomicU64::new(0),
-            purging: std::sync::Mutex::new(Purges::default()),
+            purging: std::sync::Mutex::new(Purges {
+                resources: owed.0,
+                catalogues: owed.1,
+                ..Purges::default()
+            }),
             merging: std::sync::Mutex::new(None),
             proposed: AtomicU64::new(0),
+            rereads: AtomicU64::new(0),
             counted: AtomicU64::new(0),
         })
     }
     /// What the next commit records, with `boundary`.
     fn stamp(&self, boundary: u64) -> Payload {
+        let (owed, owed_all) = self.purging.lock().expect("purges").recorded();
         Payload {
             format: FORMAT,
             boundary,
             catalogues: self.catalogues.lock().expect("markers").clone(),
             database: self.database.clone(),
+            owed,
+            owed_all,
         }
     }
 }
@@ -754,6 +817,159 @@ pub struct SearchIndex {
     served: AtomicU64,
     /// The catalogues whose cards the index holds: those switched on.
     catalogues: std::sync::RwLock<Vec<String>>,
+    /// The turns of text searches and each one's budget ([`SearchIndex::set_bounds`]).
+    bounds: std::sync::RwLock<(Arc<Turns>, Duration)>,
+}
+/// The address a client's share of turns is counted by: an IPv4 address, or an IPv6 address's
+/// /64 (one host's or one network's addresses, which a client may rotate through); an IPv4
+/// address written as IPv6 (`::ffff:a.b.c.d`) is that IPv4 address.
+fn share_key(client: std::net::IpAddr) -> std::net::IpAddr {
+    match client {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+                u128::from(v6) & !((1u128 << 64) - 1),
+            )),
+        },
+        v4 => v4,
+    }
+}
+/// The turns of text searches ([`SearchIndex::set_bounds`]), shared between clients: a search
+/// waits for a free turn; a client past its share (half the turns, at least one) takes one only
+/// while no other client under its share waits, so alone it takes every free turn. A waiting
+/// search holds nothing.
+struct Turns {
+    /// The number of turns.
+    limit: usize,
+    state: std::sync::Mutex<TurnState>,
+    /// Wakes the waiting searches when a turn is given back or a waiting search leaves.
+    changed: tokio::sync::Notify,
+}
+#[derive(Default)]
+struct TurnState {
+    free: usize,
+    /// The turns each client holds, by [`share_key`]; `None`: a search of no client.
+    running: HashMap<Option<std::net::IpAddr>, usize>,
+    /// The searches each client has waiting for a turn.
+    waiting: HashMap<Option<std::net::IpAddr>, usize>,
+}
+impl TurnState {
+    /// Whether `client` runs its share: never a search of no client.
+    fn at_share(&self, client: Option<std::net::IpAddr>, share: usize) -> bool {
+        client.is_some() && self.running.get(&client).copied().unwrap_or(0) >= share
+    }
+}
+/// One turn of a text search, given back when dropped.
+pub struct Turn {
+    turns: Arc<Turns>,
+    client: Option<std::net::IpAddr>,
+}
+impl Drop for Turn {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.turns.state.lock() {
+            state.free += 1;
+            if let Some(n) = state.running.get_mut(&self.client) {
+                *n -= 1;
+                if *n == 0 {
+                    state.running.remove(&self.client);
+                }
+            }
+        }
+        self.turns.changed.notify_waiters();
+    }
+}
+/// A search waiting for a turn, counted while it waits.
+struct Waiting<'a> {
+    turns: &'a Turns,
+    client: Option<std::net::IpAddr>,
+}
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.turns.state.lock() {
+            if let Some(n) = state.waiting.get_mut(&self.client) {
+                *n -= 1;
+                if *n == 0 {
+                    state.waiting.remove(&self.client);
+                }
+            }
+        }
+        // A search under its share leaving may let one past its share take a free turn.
+        self.turns.changed.notify_waiters();
+    }
+}
+impl Turns {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            state: std::sync::Mutex::new(TurnState {
+                free: limit,
+                ..Default::default()
+            }),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+    /// A client's share: half the turns, at least one.
+    fn share(&self) -> usize {
+        (self.limit / 2).max(1)
+    }
+    /// A turn for a search of `client`, now when one is free and the client may take it.
+    fn try_take(
+        self: &Arc<Self>,
+        state: &mut TurnState,
+        client: Option<std::net::IpAddr>,
+    ) -> Option<Turn> {
+        let share = self.share();
+        let others_under_share = state
+            .waiting
+            .iter()
+            .any(|(other, n)| *other != client && *n > 0 && !state.at_share(*other, share));
+        if state.free == 0 || (state.at_share(client, share) && others_under_share) {
+            return None;
+        }
+        state.free -= 1;
+        *state.running.entry(client).or_default() += 1;
+        Some(Turn {
+            turns: self.clone(),
+            client,
+        })
+    }
+    /// A turn for a search of `client` (its address), waited for until `deadline`; past it, why
+    /// none came: `turn` (every turn taken) or `share` (one free, the client past its share while
+    /// others waited).
+    async fn take(
+        self: &Arc<Self>,
+        client: Option<std::net::IpAddr>,
+        deadline: tokio::time::Instant,
+    ) -> std::result::Result<Turn, &'static str> {
+        let client = client.map(share_key);
+        {
+            let mut state = self.state.lock().expect("turns");
+            if let Some(turn) = self.try_take(&mut state, client) {
+                return Ok(turn);
+            }
+            *state.waiting.entry(client).or_default() += 1;
+        }
+        let _waiting = Waiting {
+            turns: self,
+            client,
+        };
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.state.lock().expect("turns");
+                // Its own wait no longer counts against it once a turn is taken.
+                if let Some(turn) = self.try_take(&mut state, client) {
+                    return Ok(turn);
+                }
+            }
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                let state = self.state.lock().expect("turns");
+                return Err(if state.free == 0 { "turn" } else { "share" });
+            }
+        }
+    }
 }
 impl SearchIndex {
     /// Hold the cards of these catalogues (the ones switched on, `config.catalogues`); the
@@ -864,6 +1080,12 @@ impl SearchIndex {
             }
         }
     }
+    /// How many re-reads of a catalogue began (tests).
+    #[doc(hidden)]
+    pub fn rereads(&self) -> u64 {
+        self.current()
+            .map_or(0, |open| open.rereads.load(Ordering::SeqCst))
+    }
     /// How many searches read the proposals (tests).
     #[doc(hidden)]
     pub fn proposed(&self) -> u64 {
@@ -884,6 +1106,12 @@ impl SearchIndex {
             reread_part: REREAD_PART,
             served: AtomicU64::new(0),
             catalogues: std::sync::RwLock::new(vec![]),
+            // The daemon sets its own (`limits.search_index_*`); an index in memory (tests, the
+            // e2e harness) waits long, so a loaded host answers no test with a 503.
+            bounds: std::sync::RwLock::new((
+                Turns::new(std::thread::available_parallelism().map_or(2, |n| n.get())),
+                Duration::from_secs(30),
+            )),
             home,
             open: std::sync::RwLock::new(None),
             pass: tokio::sync::Mutex::new(()),
@@ -936,8 +1164,8 @@ impl SearchIndex {
     }
     /// Open the index on disk, or build it from the database when it is missing, unreadable or
     /// of another format (logged), then commit the queue every `period` until `shutdown`.
-    /// `passed` is set to the time of each pass that read the queue without an error, `open` to 1
-    /// once the index is open.
+    /// `passed` is set to the time the index opens and of each pass after that read the queue
+    /// without an error, `open` to 1 once the index is open.
     pub async fn run(
         self: Arc<Self>,
         pool: PgPool,
@@ -956,6 +1184,8 @@ impl SearchIndex {
             };
             match opened {
                 Ok(()) => {
+                    // The last pass counts from the open: passes that fail from here on stall it.
+                    passed.set(chrono::Utc::now().timestamp());
                     open.set(1);
                     break;
                 }
@@ -1014,11 +1244,20 @@ impl SearchIndex {
                 tracing::warn!(dir = %dir.display(), "the text index was built from another database; rebuilding it from this one")
             }
             Ok(Some((index, payload))) if payload.format == FORMAT => {
+                let owed = (payload.owed, payload.owed_all);
+                if !owed.0.is_empty() || owed.1 {
+                    tracing::info!(
+                        resources = owed.0.len(),
+                        all = owed.1,
+                        "the text index owes merges after removals from before its restart; they run at the next pass"
+                    );
+                }
                 self.set(Open::new(
                     index,
                     payload.boundary,
                     payload.catalogues,
                     database,
+                    owed,
                 )?);
                 tracing::info!(dir = %dir.display(), "text index opened");
                 return Ok(());
@@ -1044,7 +1283,13 @@ impl SearchIndex {
             secs = started.elapsed().as_secs(),
             "text index built"
         );
-        self.set(Open::new(index, boundary, markers, database)?);
+        self.set(Open::new(
+            index,
+            boundary,
+            markers,
+            database,
+            Default::default(),
+        )?);
         // The build read every transaction below its boundary, and every catalogue card.
         sqlx::query("DELETE FROM search_index_queue WHERE xid<$1::text::xid8")
             .bind(boundary.to_string())
@@ -1066,7 +1311,13 @@ impl SearchIndex {
             register(&index);
             let (boundary, _, markers) = fill(pool, &index, 1, &self.catalogues(), |_| {}).await?;
             let database = database_identity(pool).await?;
-            self.set(Open::new(index, boundary, markers, database)?);
+            self.set(Open::new(
+                index,
+                boundary,
+                markers,
+                database,
+                Default::default(),
+            )?);
         }
         Ok(self.current())
     }
@@ -1259,24 +1510,51 @@ impl SearchIndex {
                 Home::Memory => open.catalogue_seq.store(last as u64, Ordering::SeqCst),
             }
         }
-        // One part of a re-read: the one under way, else a catalogue with a newer import.
+        // One part of a re-read: the one under way, else a catalogue whose first full import
+        // finished since the index read it. A later full import's inserted, changed and removed
+        // cards come through the queue (`search_index_catalogue_queue`), so only its end is
+        // recorded: the catalogue is not read again.
         let current = open.reread.lock().expect("reread").clone();
         let reread = match current {
             Some(reread) if enabled.contains(&reread.catalogue) => Some(reread),
             _ => {
                 let markers = import_markers(pool, &enabled).await?;
-                enabled
+                let mut reread = None;
+                for c in enabled
                     .iter()
-                    .find(|c| recorded.get(*c) != markers.get(*c))
-                    .map(|c| Reread {
-                        catalogue: c.clone(),
-                        marker: markers.get(c).cloned().unwrap_or_default(),
-                        after: String::new(),
-                    })
+                    .filter(|c| recorded.get(*c) != markers.get(*c))
+                {
+                    let marker = markers.get(c).cloned().unwrap_or_default();
+                    // A later import (its generation above 1) of a catalogue the index read
+                    // after an import before: its cards came through the queue.
+                    let read_before = recorded
+                        .get(c)
+                        .is_some_and(|m| marker_generation(m).is_some());
+                    let later = marker_generation(&marker).is_some_and(|g| g > 1);
+                    if read_before && later {
+                        let recording = open.clone();
+                        let (catalogue, at) = (c.clone(), marker.clone());
+                        tokio::task::spawn_blocking(move || {
+                            recording.record_marker(&catalogue, &at)
+                        })
+                        .await??;
+                        tracing::info!(catalogue = %c, "a catalogue's later full import reached the text index through its queue");
+                    } else if reread.is_none() {
+                        open.rereads.fetch_add(1, Ordering::SeqCst);
+                        tracing::info!(catalogue = %c, "the text index reads a catalogue's cards again after its first full import");
+                        reread = Some(Reread {
+                            catalogue: c.clone(),
+                            marker,
+                            after: String::new(),
+                        });
+                    }
+                }
+                reread
             }
         };
         *open.reread.lock().expect("reread") = reread.clone();
         let Some(reread) = reread else {
+            crate::telemetry::search_index_reread(None, 0);
             return Ok(());
         };
         let cards: Vec<CardRow> = sqlx::query_as(CARDS_PART)
@@ -1289,10 +1567,16 @@ impl SearchIndex {
         let after = cards
             .last()
             .map_or(reread.after.clone(), |c| c.source_id.clone());
+        let read = cards.len() as u64;
         let rewriting = open.clone();
         let part = reread.clone();
         tokio::task::spawn_blocking(move || rewriting.reread_part(&part, &cards, done)).await??;
         self.revision.fetch_add(1, Ordering::SeqCst);
+        crate::telemetry::search_index_reread(Some(&reread.catalogue), read);
+        if done {
+            tracing::info!(catalogue = %reread.catalogue, "the text index read the catalogue's cards again");
+            crate::telemetry::search_index_reread(None, 0);
+        }
         *open.reread.lock().expect("reread") = (!done).then_some(Reread { after, ..reread });
         Ok(())
     }
@@ -1341,24 +1625,114 @@ impl SearchIndex {
     }
     /// The best units for a text search, at most `cap`, in the order [`TextOrder`] asks for,
     /// with every filter the index holds applied; `None` when the daemon's index is not open
-    /// yet (the search then reads Postgres alone).
+    /// yet or the index leaves the text to Postgres (the search then reads Postgres alone).
     pub async fn candidates(
         &self,
         pool: &PgPool,
         query: TextQuery,
         cap: usize,
     ) -> Result<Option<Candidates>> {
+        Ok(self
+            .candidates_for(pool, query, cap, None)
+            .await?
+            .candidates)
+    }
+    /// [`SearchIndex::candidates`] for a search by `client` (its address), which shares the turns
+    /// with the others ([`Turns`]): a search that gets no turn within its budget, or runs past
+    /// it, answers like a busy index ([`Busy`]). A text the index leaves to Postgres (one
+    /// character found inside names) keeps its turn while Postgres reads it ([`Found::turn`]).
+    pub async fn candidates_for(
+        &self,
+        pool: &PgPool,
+        query: TextQuery,
+        cap: usize,
+        client: Option<std::net::IpAddr>,
+    ) -> Result<Found> {
         if let Home::Memory = self.home {
             self.sync(pool).await?;
         }
         // Read before the search: a commit during it moves the revision past this page's.
         let revision = self.revision();
         let Some(open) = self.current() else {
-            return Ok(None);
+            return Ok(Found::default());
         };
-        let units = tokio::task::spawn_blocking(move || open.search(&query, cap)).await??;
+        // At most `limits.search_index_searches` searches run at once, each within
+        // `limits.search_index_budget_ms`, its wait for a turn included. The turn goes with the
+        // search into its thread: a search whose request is gone still holds it until it stops.
+        let (turns, budget) = self.bounds();
+        let deadline = std::time::Instant::now() + budget;
+        let turn = turns
+            .take(client, deadline.into())
+            .await
+            .map_err(|reason| {
+                crate::telemetry::search_index_busy(reason);
+                Busy
+            })?;
+        let budget = Budget::new(deadline);
+        let (turn, units) = tokio::task::spawn_blocking(move || {
+            let units = open.search(&query, cap, &budget);
+            (turn, units)
+        })
+        .await?;
+        let units = match units {
+            Ok(Some(units)) => units,
+            Ok(None) => {
+                return Ok(Found {
+                    candidates: None,
+                    turn: Some(turn),
+                    deadline: Some(deadline),
+                })
+            }
+            Err(error) => {
+                if error.is::<Busy>() {
+                    crate::telemetry::search_index_busy("budget");
+                }
+                return Err(error);
+            }
+        };
+        drop(turn);
         self.served.fetch_add(1, Ordering::SeqCst);
-        Ok(Some(Candidates { units, revision }))
+        Ok(Found {
+            candidates: Some(Candidates { units, revision }),
+            turn: None,
+            deadline: None,
+        })
+    }
+    /// Take one turn of the text searches for `client` (its address, counted as [`share_key`]
+    /// counts it) now, whatever its share, and keep it until the guard is dropped (tests).
+    #[doc(hidden)]
+    pub fn hold_turn_for(&self, client: std::net::IpAddr) -> Option<Turn> {
+        self.hold(Some(share_key(client)))
+    }
+    /// Take one turn of the text searches now and keep it until the guard is dropped (tests: a busy
+    /// index).
+    #[doc(hidden)]
+    pub fn hold_turn(&self) -> Option<Turn> {
+        self.hold(None)
+    }
+    fn hold(&self, client: Option<std::net::IpAddr>) -> Option<Turn> {
+        let turns = self.bounds().0;
+        let mut state = turns.state.lock().expect("turns");
+        if state.free == 0 {
+            return None;
+        }
+        state.free -= 1;
+        *state.running.entry(client).or_default() += 1;
+        drop(state);
+        Some(Turn { turns, client })
+    }
+    /// Run at most `searches` text searches at once (0: one per CPU core), each within `budget`
+    /// (`limits.search_index_searches`, `limits.search_index_budget_ms`).
+    pub fn set_bounds(&self, searches: usize, budget: Duration) {
+        let searches = match searches {
+            0 => std::thread::available_parallelism().map_or(2, |n| n.get()),
+            n => n,
+        };
+        *self.bounds.write().expect("bounds") = (Turns::new(searches), budget);
+    }
+    fn bounds(&self) -> (Arc<Turns>, Duration) {
+        let (turns, budget) = &*self.bounds.read().expect("bounds");
+        (turns.clone(), *budget)
     }
 }
 /// The boundary the index's last commit recorded.
@@ -1375,10 +1749,20 @@ impl Open {
         units: &[Unit],
         boundary: u64,
     ) -> Result<()> {
-        // The segments holding a document with text of these resources, before they are
-        // replaced: if one loses its text, only those segments are merged.
+        // The resources whose document had text and now has none (a post found gone, emptied or
+        // opted out, a card no longer searchable): a merge of the segments that hold their
+        // documents is owed, so their words leave the index files, not only its searches. Owed
+        // before the commit that deletes them, so that commit records it ([`Payload::owed`]) and
+        // a restart before the merge still merges them. A pass that only adds or changes
+        // documents owes nothing.
         let texts = self.text_documents(resources)?;
+        let lost: Vec<String> = texts
+            .iter()
+            .filter(|(id, _)| !units.iter().any(|u| &u.resource_id == id && has_text(u)))
+            .map(|(id, _)| id.clone())
+            .collect();
         let mut writer = self.writer.lock().expect("writer lock");
+        self.owe(&lost);
         let result = (|| -> Result<()> {
             for id in resources {
                 writer.delete_term(Term::from_field_text(self.fields.resource_id, id));
@@ -1390,22 +1774,23 @@ impl Open {
             Ok(())
         })();
         if result.is_err() {
-            // Nothing half done stays for the next commit.
+            // Nothing half done stays for the next commit. The merge owed stays owed: it merges
+            // nothing the documents' segments do not hold, and taking it back could take back one
+            // a merge thread owed again meanwhile.
             let _ = writer.rollback();
         }
         result?;
         self.reader.reload()?;
-        // A resource whose document had text and now has none (a post found gone, emptied or opted
-        // out, a card no longer searchable): merge the segments that held its document now, so its
-        // words leave the index files, not only its searches. A pass that only adds or changes
-        // documents merges nothing.
-        let lost: Vec<String> = texts
-            .iter()
-            .filter(|(id, _)| !units.iter().any(|u| &u.resource_id == id && has_text(u)))
-            .map(|(id, _)| id.clone())
-            .collect();
-        self.purge(&mut writer, lost, false)?;
+        self.purge(&mut writer, vec![], false)?;
         Ok(())
+    }
+    /// Owe a merge for `resources`.
+    fn owe(&self, resources: &[String]) {
+        self.purging
+            .lock()
+            .expect("purges")
+            .resources
+            .extend(resources.iter().cloned());
     }
     /// Of `resources`, those with a document that has text, each with its segment.
     fn text_documents(
@@ -1463,6 +1848,11 @@ impl Open {
             writer.delete_term(Term::from_field_text(self.fields.catalogue, catalogue));
             self.catalogues.lock().expect("markers").remove(catalogue);
         }
+        // A catalogue that had no documents (never read, or read empty) leaves nothing to merge;
+        // one that had owes a merge of every segment with deleted documents, recorded by this
+        // commit ([`Payload::owed_all`]).
+        // (A commit that fails leaves it owed: a merge too many, never one too few.)
+        self.purging.lock().expect("purges").catalogues |= had_documents;
         let result = commit(&mut writer, &self.stamp(boundary));
         if let Err(error) = result {
             *self.catalogues.lock().expect("markers") = before;
@@ -1470,8 +1860,7 @@ impl Open {
             return Err(error);
         }
         self.reader.reload()?;
-        // A catalogue that had no documents (never read, or read empty) leaves nothing to merge.
-        self.purge(&mut writer, vec![], had_documents)?;
+        self.purge(&mut writer, vec![], false)?;
         Ok(())
     }
     /// One part of `reread`: rewrite the documents of `cards`, marked with its import; when it is
@@ -1516,6 +1905,24 @@ impl Open {
             commit(&mut writer, &self.stamp(boundary))
         })();
         if let Err(error) = result {
+            *self.catalogues.lock().expect("markers") = before;
+            let _ = writer.rollback();
+            return Err(error);
+        }
+        self.reader.reload()?;
+        Ok(())
+    }
+    /// Record `marker` as the full import of `catalogue` the index holds, without reading its cards
+    /// again (its changes came through the queue). One commit.
+    fn record_marker(&self, catalogue: &str, marker: &str) -> Result<()> {
+        let mut writer = self.writer.lock().expect("writer lock");
+        let before = self.catalogues.lock().expect("markers").clone();
+        self.catalogues
+            .lock()
+            .expect("markers")
+            .insert(catalogue.to_owned(), marker.to_owned());
+        let boundary = committed_boundary(&self.index).unwrap_or(0);
+        if let Err(error) = commit(&mut writer, &self.stamp(boundary)) {
             *self.catalogues.lock().expect("markers") = before;
             let _ = writer.rollback();
             return Err(error);
@@ -1596,21 +2003,30 @@ impl Open {
                 return Ok(());
             }
             purging.running = true;
-            (
-                std::mem::take(&mut purging.resources),
-                std::mem::take(&mut purging.catalogues),
-            )
+            let resources = std::mem::take(&mut purging.resources);
+            let catalogues = std::mem::take(&mut purging.catalogues);
+            purging.merging = resources.clone();
+            purging.merging_catalogues = catalogues;
+            (resources, catalogues)
         };
         let merged = match self.start_merge(writer, &resources, catalogues) {
             Ok(Some(merged)) => merged,
             done => {
-                // Nothing left to merge (the merge policy, or a merge before, took them), or the
-                // segments did not read: owed again then.
-                let mut purging = self.purging.lock().expect("purges");
-                purging.running = false;
-                if done.is_err() {
-                    purging.resources.extend(resources);
-                    purging.catalogues |= catalogues;
+                // Nothing left to merge (the merge policy, or a merge before, took them): a commit
+                // records that nothing is owed for them. The segments did not read: owed again.
+                let failed = done.is_err();
+                {
+                    let mut purging = self.purging.lock().expect("purges");
+                    purging.running = false;
+                    purging.merging.clear();
+                    purging.merging_catalogues = false;
+                    if failed {
+                        purging.resources.extend(resources);
+                        purging.catalogues |= catalogues;
+                    }
+                }
+                if !failed {
+                    self.record_owed(writer)?;
                 }
                 return done.map(|_| ());
             }
@@ -1630,6 +2046,8 @@ impl Open {
             Err(error) => {
                 let mut purging = self.purging.lock().expect("purges");
                 purging.running = false;
+                purging.merging.clear();
+                purging.merging_catalogues = false;
                 purging.resources.extend(owed);
                 purging.catalogues |= owed_catalogues;
                 return Err(error.into());
@@ -1689,19 +2107,27 @@ impl Open {
             }
         };
         // `running` stays set: the thread's guard clears it as its very last action, so no second
-        // merge starts while this one still reloads or re-owes.
+        // merge starts while this one still reloads or re-owes; it owes again what a failed merge
+        // took (`Purges::merging`).
         match failed {
             None => {
                 if let Err(error) = self.reader.reload() {
                     tracing::debug!(error = %crate::resolver::log_error(&error), "the text index read after a merge failed");
                 }
+                {
+                    let mut purging = self.purging.lock().expect("purges");
+                    purging.merging.clear();
+                    purging.merging_catalogues = false;
+                }
+                // A commit records that the merged removals are owed no more.
+                let mut writer = self.writer.lock().expect("writer lock");
+                if let Err(error) = self.record_owed(&mut writer) {
+                    tracing::warn!(error = %crate::resolver::log_error(&error), "the text index did not record a finished merge; it merges again after a restart");
+                }
                 self.purges.fetch_add(1, Ordering::SeqCst);
             }
             Some(error) => {
-                tracing::debug!(error = %crate::resolver::log_error(&error), "a text index merge after a removal failed; it is tried again at the next pass");
-                let mut purging = self.purging.lock().expect("purges");
-                purging.resources.extend(resources);
-                purging.catalogues |= catalogues;
+                tracing::warn!(resources = resources.len(), all = catalogues, error = %crate::resolver::log_error(&error), "a text index merge after a removal failed; it is tried again at the next pass");
             }
         }
     }
@@ -1714,6 +2140,16 @@ impl Open {
             IndexRecordOption::Basic,
         );
         Ok(searcher.search(&query, &tantivy::collector::Count)? > 0)
+    }
+    /// Commit what is owed now ([`Payload::owed`]), with the boundary of the last commit: a merge
+    /// that finished, or found nothing left, is owed no more after a restart.
+    fn record_owed(&self, writer: &mut IndexWriter) -> Result<()> {
+        let boundary = committed_boundary(&self.index).unwrap_or(0);
+        let result = commit(writer, &self.stamp(boundary));
+        if result.is_err() {
+            let _ = writer.rollback();
+        }
+        result
     }
     /// Whether a merge is owed and none runs: the pass then starts it ([`Open::purge`]).
     fn purge_owed(&self) -> bool {
@@ -1952,11 +2388,14 @@ async fn fill(
     drop(cards);
     tx.commit().await?;
     let mut writer = Arc::try_unwrap(writer).map_err(|_| anyhow::anyhow!("writer still shared"))?;
+    // A new build holds no deleted documents: no merge is owed.
     let payload = Payload {
         format: FORMAT,
         boundary,
         catalogues: markers.clone(),
         database,
+        owed: vec![],
+        owed_all: false,
     };
     tokio::task::spawn_blocking(move || -> Result<()> {
         commit(&mut writer, &payload)?;
@@ -1966,13 +2405,20 @@ async fn fill(
     .await??;
     Ok((boundary, written, markers))
 }
+/// The generation of the full import a marker names ([`import_markers`]); `None` for none (no
+/// finished import, or a marker of an index from before the generation was recorded).
+fn marker_generation(marker: &str) -> Option<i64> {
+    marker.rsplit_once(" #").and_then(|(_, g)| g.parse().ok())
+}
 /// For each catalogue given, the end of its last full import (empty when none has finished).
 async fn import_markers(
     db: impl sqlx::PgExecutor<'_>,
     catalogues: &[String],
 ) -> Result<BTreeMap<String, String>> {
+    // The end of the last full import, with the import's generation after it: a catalogue dropped
+    // and imported again starts at generation 1, a first import the index must read in full.
     let found: Vec<(String, String)> = sqlx::query_as(
-        "SELECT catalogue, coalesce(last_import_at::text,'') FROM catalogue_state WHERE catalogue=ANY($1)",
+        "SELECT catalogue, CASE WHEN last_import_at IS NULL THEN '' ELSE last_import_at::text||' #'||generation END FROM catalogue_state WHERE catalogue=ANY($1)",
     )
     .bind(catalogues)
     .fetch_all(db)
@@ -2048,12 +2494,27 @@ pub struct TextQuery {
     /// Whether the text may match inside a name's words or a similar name, as Postgres' `ILIKE`
     /// and `%`: not for a short text of letters and digits, which matches only where words start.
     pub inside_words: bool,
+    /// Whether the labels of cards built from catalogue cards match `tags` as people's tags do:
+    /// only where the search may list catalogue cards (not with `referenced=true` or a social
+    /// filter), so they never take candidate places Postgres then drops.
+    pub labels: bool,
 }
 /// A text search's candidates, and the index revision they were read at (for the page's ETag).
 #[derive(Clone, Debug)]
 pub struct Candidates {
     pub units: Vec<Candidate>,
     pub revision: u64,
+}
+/// What [`SearchIndex::candidates_for`] found.
+#[derive(Default)]
+pub struct Found {
+    /// The candidates; `None` when Postgres reads the text alone.
+    pub candidates: Option<Candidates>,
+    /// The turn the search keeps while Postgres reads a text the index left to it (one
+    /// character found inside names): dropped when that read ends.
+    pub turn: Option<Turn>,
+    /// With the turn, the end of the search's budget: Postgres' read stops there too.
+    pub deadline: Option<std::time::Instant>,
 }
 /// One candidate: its unit, its resource, and its text relevance times (1 + fame).
 #[derive(Clone, Debug, PartialEq)]
@@ -2069,7 +2530,7 @@ pub struct Candidate {
 }
 
 /// One item of the text: words to find (one word, or several as a phrase), with its sign.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Item {
     /// Words, and whether the word was written with letters and digits alone (`c++` is not), so
     /// it may be the start of a longer one.
@@ -2082,43 +2543,71 @@ enum Item {
 /// `-word` to leave out, and `or` between two items. Each word is split and folded as the index
 /// splits the fields; a word that is several tokens (`pinakes-test`) is a phrase.
 fn items(index: &Index, text: &str) -> Vec<Item> {
-    let mut out = vec![];
-    let mut rest = text;
-    while let Some(start) = rest.find(|c: char| !c.is_whitespace()) {
-        rest = &rest[start..];
-        let negated = rest.starts_with('-');
-        if negated {
-            rest = &rest[1..];
-        }
-        let (raw, quoted) = if let Some(inner) = rest.strip_prefix('"') {
-            let end = inner.find('"').unwrap_or(inner.len());
-            let raw = &inner[..end];
-            rest = inner.get(end + 1..).unwrap_or("");
-            (raw, true)
-        } else {
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            let raw = &rest[..end];
-            rest = &rest[end..];
-            (raw, false)
-        };
-        if !quoted && !negated && raw.eq_ignore_ascii_case("or") {
+    let push = |out: &mut Vec<Item>, item: Item| match item {
+        // `or` between two items: never first, never twice.
+        Item::Or => {
             if !matches!(out.last(), None | Some(Item::Or)) {
                 out.push(Item::Or);
             }
-            continue;
         }
-        let words = tokens(index, WORDS, raw);
-        if !words.is_empty() {
-            let whole = !quoted
-                && raw.chars().all(|c| {
-                    crate::api::word_char(c)
-                        || (crate::api::unspaced_script(c) && c.is_alphanumeric())
-                });
-            out.push(if negated {
-                Item::Not(words)
-            } else {
-                Item::Words(words, whole)
-            });
+        item => out.push(item),
+    };
+    let mut out = vec![];
+    let mut rest = text;
+    // At most MAX_ITEMS items: a longer text's rest is Postgres' alone to check.
+    while out.len() < MAX_ITEMS {
+        let Some((item, after)) = next_item(index, rest) else {
+            break;
+        };
+        rest = after;
+        if let Some(item) = item {
+            push(&mut out, item);
+        }
+    }
+    // A cut inside an `or` chain (the next item past it that holds a word is `or`, a `-word` or a
+    // piece of no word between, also right after a closing quote; or the last item kept is `or`):
+    // the chain would be required in part, and what only a later item finds missed.
+    let joins_next = {
+        let mut ahead = rest;
+        loop {
+            match next_item(index, ahead) {
+                Some((None | Some(Item::Not(..)), after)) => ahead = after,
+                Some((Some(Item::Or), _)) => break true,
+                _ => break false,
+            }
+        }
+    };
+    let or_last = matches!(out.last(), Some(Item::Or)) && !rest.trim().is_empty();
+    if out.len() == MAX_ITEMS && (joins_next || or_last) {
+        let kept = out.clone();
+        drop_last_chain(&mut out);
+        if !out.iter().any(|i| matches!(i, Item::Words(..))) {
+            // The chain held every word to find: it is read on past the cut, whole, as main's
+            // index read it (with no cut), up to MAX_PIECES words; a longer one leaves the query.
+            out = kept;
+            let mut words = out.iter().filter(|i| matches!(i, Item::Words(..))).count();
+            let mut whole = true;
+            while let Some((item, after)) = next_item(index, rest) {
+                rest = after;
+                match item {
+                    None | Some(Item::Not(..)) => {}
+                    Some(Item::Or) => push(&mut out, Item::Or),
+                    Some(item) if matches!(out.last(), Some(Item::Or)) => {
+                        words += 1;
+                        if words > MAX_PIECES {
+                            whole = false;
+                            break;
+                        }
+                        out.push(item);
+                    }
+                    // A word `or` does not join: the chain ended (the rest, past the cut, is
+                    // Postgres' alone to check).
+                    Some(_) => break,
+                }
+            }
+            if !whole {
+                drop_last_chain(&mut out);
+            }
         }
     }
     while matches!(out.last(), Some(Item::Or)) {
@@ -2126,32 +2615,347 @@ fn items(index: &Index, text: &str) -> Vec<Item> {
     }
     out
 }
+/// One item at the start of `rest` and what follows it; `None` at the end, and no item for a piece
+/// that holds no word to find.
+fn next_item<'a>(index: &Index, rest: &'a str) -> Option<(Option<Item>, &'a str)> {
+    let start = rest.find(|c: char| !c.is_whitespace())?;
+    let mut rest = &rest[start..];
+    let negated = rest.starts_with('-');
+    if negated {
+        rest = &rest[1..];
+    }
+    let (raw, quoted) = if let Some(inner) = rest.strip_prefix('"') {
+        let end = inner.find('"').unwrap_or(inner.len());
+        let raw = &inner[..end];
+        rest = inner.get(end + 1..).unwrap_or("");
+        (raw, true)
+    } else {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let raw = &rest[..end];
+        rest = &rest[end..];
+        (raw, false)
+    };
+    if !quoted && !negated && raw.eq_ignore_ascii_case("or") {
+        return Some((Some(Item::Or), rest));
+    }
+    let words = tokens(index, WORDS, raw);
+    if words.is_empty() {
+        return Some((None, rest));
+    }
+    let whole = !quoted
+        && raw.chars().all(|c| {
+            crate::api::word_char(c) || (crate::api::unspaced_script(c) && c.is_alphanumeric())
+        });
+    Some((
+        Some(if negated {
+            Item::Not(words)
+        } else {
+            Item::Words(words, whole)
+        }),
+        rest,
+    ))
+}
+/// Leaves out the last `or` chain of `out`: the items `or` joins as the query joins them (a
+/// `-word` between them is no part of it, and goes too), back to the first. Leaving out more only
+/// widens what the index finds.
+fn drop_last_chain(out: &mut Vec<Item>) {
+    while matches!(out.last(), Some(Item::Or | Item::Not(..))) {
+        out.pop();
+    }
+    out.pop();
+    loop {
+        let mut at = out.len();
+        while at > 0 && matches!(out[at - 1], Item::Not(..)) {
+            at -= 1;
+        }
+        if at == 0 || !matches!(out[at - 1], Item::Or) {
+            break;
+        }
+        out.truncate(at - 1);
+        while matches!(out.last(), Some(Item::Not(..))) {
+            out.pop();
+        }
+        out.pop();
+    }
+}
+
+/// A text search's time: its deadline, and whether a part of it ran past it.
+struct Budget {
+    deadline: std::time::Instant,
+    spent: std::sync::atomic::AtomicBool,
+    /// Tests: the budget runs out after this many checks, whatever the time.
+    #[cfg(test)]
+    checks_left: Option<AtomicU64>,
+}
+impl Budget {
+    fn new(deadline: std::time::Instant) -> Arc<Self> {
+        Arc::new(Self {
+            deadline,
+            spent: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            checks_left: None,
+        })
+    }
+    /// Whether the deadline has passed (and so the search is cut off).
+    fn over(&self) -> bool {
+        if self.spent.load(Ordering::Relaxed) {
+            return true;
+        }
+        #[cfg(test)]
+        if let Some(left) = &self.checks_left {
+            if left.fetch_sub(1, Ordering::SeqCst) <= 1 {
+                self.spent.store(true, Ordering::Relaxed);
+                return true;
+            }
+        }
+        let over = std::time::Instant::now() >= self.deadline;
+        if over {
+            self.spent.store(true, Ordering::Relaxed);
+        }
+        over
+    }
+    /// An error once the deadline has passed: the search stops there.
+    fn check(&self) -> Result<()> {
+        if self.over() {
+            return Err(Busy.into());
+        }
+        Ok(())
+    }
+}
+thread_local! {
+    /// The budget of the search the thread runs ([`Open::search`]): every leaf query it builds
+    /// checks it ([`leaf`]).
+    static SEARCH_BUDGET: std::cell::RefCell<Option<Arc<Budget>>> = const { std::cell::RefCell::new(None) };
+}
+/// `query`, a leaf of a search's query (a word, a phrase, a set of words, a filter), stopping
+/// once the thread's search budget runs out: every posting step checks it, so a part of the
+/// query that matches nothing for long (a word left out of everything, an intersection) stops
+/// too. Without a search under way, `query` as it is.
+fn leaf(query: Box<dyn Query>) -> Box<dyn Query> {
+    leaf_every(query, 1024)
+}
+/// [`leaf`], checking the budget every `every` posting steps (a phrase's step may read far).
+fn leaf_every(query: Box<dyn Query>, every: u32) -> Box<dyn Query> {
+    SEARCH_BUDGET.with(|budget| match &*budget.borrow() {
+        Some(budget) => Box::new(Budgeted {
+            inner: query,
+            budget: budget.clone(),
+            every,
+        }),
+        None => query,
+    })
+}
+/// Sets the thread's search budget for as long as it lives.
+struct InBudget;
+impl InBudget {
+    fn new(budget: &Arc<Budget>) -> Self {
+        SEARCH_BUDGET.with(|b| *b.borrow_mut() = Some(budget.clone()));
+        Self
+    }
+}
+impl Drop for InBudget {
+    fn drop(&mut self) {
+        SEARCH_BUDGET.with(|b| *b.borrow_mut() = None);
+    }
+}
+#[cfg(test)]
+thread_local! {
+    /// The steps budgeted scorers took on this thread (tests).
+    static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// The text index could not answer within `limits.search_index_budget_ms`: every turn was taken
+/// for that long, or the search ran past it. The search answers 503.
+#[derive(Debug)]
+pub struct Busy;
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the text index is busy")
+    }
+}
+impl std::error::Error for Busy {}
+/// A query that stops matching once its search's [`Budget`] has run out: each segment checks it
+/// before it starts, and every `every` posting steps.
+#[derive(Debug)]
+struct Budgeted {
+    inner: Box<dyn Query>,
+    budget: Arc<Budget>,
+    every: u32,
+}
+impl Clone for Budgeted {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.box_clone(),
+            budget: self.budget.clone(),
+            every: self.every,
+        }
+    }
+}
+impl std::fmt::Debug for Budget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Budget")
+    }
+}
+impl Query for Budgeted {
+    fn weight(
+        &self,
+        scoring: tantivy::query::EnableScoring<'_>,
+    ) -> tantivy::Result<Box<dyn tantivy::query::Weight>> {
+        Ok(Box::new(BudgetedWeight {
+            inner: self.inner.weight(scoring)?,
+            budget: self.budget.clone(),
+            every: self.every,
+        }))
+    }
+    fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
+        self.inner.query_terms(visitor)
+    }
+}
+struct BudgetedWeight {
+    inner: Box<dyn tantivy::query::Weight>,
+    budget: Arc<Budget>,
+    every: u32,
+}
+impl tantivy::query::Weight for BudgetedWeight {
+    fn scorer(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> tantivy::Result<Box<dyn tantivy::query::Scorer>> {
+        if self.budget.over() {
+            return Ok(Box::new(tantivy::query::EmptyScorer));
+        }
+        Ok(Box::new(BudgetedScorer {
+            inner: self.inner.scorer(reader, boost)?,
+            budget: self.budget.clone(),
+            every: self.every.max(1),
+            steps: 0,
+            ended: false,
+        }))
+    }
+    fn explain(
+        &self,
+        reader: &SegmentReader,
+        doc: DocId,
+    ) -> tantivy::Result<tantivy::query::Explanation> {
+        self.inner.explain(reader, doc)
+    }
+}
+struct BudgetedScorer {
+    inner: Box<dyn tantivy::query::Scorer>,
+    budget: Arc<Budget>,
+    every: u32,
+    steps: u32,
+    ended: bool,
+}
+impl BudgetedScorer {
+    fn spent(&mut self) -> bool {
+        #[cfg(test)]
+        STEPS.with(|n| n.set(n.get() + 1));
+        self.steps = self.steps.wrapping_add(1);
+        if !self.ended && self.steps.is_multiple_of(self.every) && self.budget.over() {
+            self.ended = true;
+        }
+        self.ended
+    }
+}
+impl tantivy::DocSet for BudgetedScorer {
+    fn advance(&mut self) -> DocId {
+        if self.spent() {
+            return tantivy::TERMINATED;
+        }
+        self.inner.advance()
+    }
+    fn seek(&mut self, target: DocId) -> DocId {
+        if self.spent() {
+            return tantivy::TERMINATED;
+        }
+        self.inner.seek(target)
+    }
+    fn doc(&self) -> DocId {
+        if self.ended {
+            tantivy::TERMINATED
+        } else {
+            self.inner.doc()
+        }
+    }
+    fn size_hint(&self) -> u32 {
+        self.inner.size_hint()
+    }
+}
+impl tantivy::query::Scorer for BudgetedScorer {
+    fn score(&mut self) -> Score {
+        self.inner.score()
+    }
+}
 
 impl Open {
-    fn search(&self, q: &TextQuery, cap: usize) -> Result<Vec<Candidate>> {
+    /// The best `cap` units for `q`, within `budget`: `None` when the index does not serve the
+    /// text (one character it would have to find inside names: Postgres reads it alone), an error
+    /// ([`Busy`]) when the budget ran out.
+    fn search(
+        &self,
+        q: &TextQuery,
+        cap: usize,
+        budget: &Arc<Budget>,
+    ) -> Result<Option<Vec<Candidate>>> {
+        // One character found inside names (`ILIKE '%c%'`) would read the whole dictionary of
+        // the names' pieces: Postgres reads such a text alone. Decided before any index work.
+        let items = items(&self.index, &q.text);
+        let one_character = q.text.trim().chars().count() == 1;
+        let has_words = items.iter().any(|i| matches!(i, Item::Words(..)));
+        if one_character && (!has_words || q.inside_words) {
+            return Ok(None);
+        }
+        budget.check()?;
+        // Every leaf query built from here on checks the budget ([`leaf`]).
+        let _in_budget = InBudget::new(budget);
         let searcher = self.reader.searcher();
         let order = q.order.unwrap_or(TextOrder::Relevance);
         let now = q.at.timestamp() as f64;
-        let items = items(&self.index, &q.text);
         let filters = self.filters(q);
-        let words = self.words_query(&q.text, &items, &filters);
-        let found = |query: &dyn Query, words: bool| -> Result<Vec<Candidate>> {
-            searcher
-                .search(query, &ranked(cap, order, now))?
-                .into_iter()
+        let words = self.words_query(&searcher, &q.text, &items, &filters);
+        budget.check()?;
+        // Each document's IDs from the fast fields (no stored document is read), the columns of a
+        // segment opened once a candidate is in it.
+        type Columns = (
+            Option<tantivy::columnar::StrColumn>,
+            Option<tantivy::columnar::StrColumn>,
+        );
+        let columns: std::cell::RefCell<HashMap<u32, Columns>> = Default::default();
+        let ids_of = |segment: u32, doc: DocId| -> Result<(String, String)> {
+            let mut columns = columns.borrow_mut();
+            let (units, resources) = columns.entry(segment).or_insert_with(|| {
+                let fast = searcher.segment_reader(segment).fast_fields();
+                (
+                    fast.str("unit_id").ok().flatten(),
+                    fast.str("resource_id").ok().flatten(),
+                )
+            });
+            let id = |column: &Option<tantivy::columnar::StrColumn>| -> Result<String> {
+                let column = column.as_ref().context("an ID column")?;
+                let ord = column.term_ords(doc).next().context("an ID")?;
+                let mut out = String::new();
+                column.ord_to_str(ord, &mut out)?;
+                Ok(out)
+            };
+            Ok((id(units)?, id(resources)?))
+        };
+        let found = |query: Box<dyn Query>, words: bool| -> Result<Vec<Candidate>> {
+            let query = Budgeted {
+                inner: query,
+                budget: budget.clone(),
+                every: 1024,
+            };
+            let hits = searcher.search(&query, &ranked(cap, order, now))?;
+            budget.check()?;
+            hits.into_iter()
                 .map(|((_, relevance), address)| {
-                    let doc: TantivyDocument = searcher.doc(address)?;
-                    let text = |field| {
-                        doc.get_first(field)
-                            .and_then(|v| v.as_str().map(str::to_owned))
-                            .context("stored ID")
-                    };
-                    let resource_id = text(self.fields.resource_id)?;
+                    let (unit_id, resource_id) = ids_of(address.segment_ord, address.doc_id)?;
                     let card = resource_id
                         .strip_prefix("catalogue:")
                         .and_then(|id| id.parse().ok());
                     Ok(Candidate {
-                        unit_id: text(self.fields.unit_id)?,
+                        unit_id,
                         resource_id,
                         relevance,
                         words,
@@ -2160,8 +2964,8 @@ impl Open {
                 })
                 .collect()
         };
-        let mut out = match &words {
-            Some(query) => found(query.as_ref(), true)?,
+        let mut out = match words {
+            Some(query) => found(query, true)?,
             None => vec![],
         };
         // The text inside a name and similar names, as Postgres finds them, for a text that is
@@ -2169,29 +2973,66 @@ impl Open {
         // asked for (`cap`) hold every word in their name, in any order and on any page: with
         // that many, the candidates are those names already.
         // Counted only when the proposals may be read: without words they always are, and a text
-        // that matches only where words start never needs them.
-        let propose = words.is_none()
+        // that matches only where words start never needs them. The count stops at `cap`.
+        let propose = !has_words
             || (q.inside_words
-                && match self.name_words_query(&items, &filters) {
+                && match self.name_words_query(&searcher, &items, &filters) {
                     Some(names) => {
                         self.counted.fetch_add(1, Ordering::SeqCst);
-                        searcher.search(names.as_ref(), &tantivy::collector::Count)? < cap
+                        budget.check()?;
+                        count_up_to(&searcher, names.as_ref(), cap, budget)? < cap
                     }
                     None => true,
                 });
         if propose {
+            budget.check()?;
             if let Some(query) = self.proposals(&searcher, &q.text, &filters) {
                 self.proposed.fetch_add(1, Ordering::SeqCst);
                 let seen: HashSet<String> = out.iter().map(|c| c.unit_id.clone()).collect();
                 out.extend(
-                    found(query.as_ref(), false)?
+                    found(query, false)?
                         .into_iter()
                         .filter(|c| !seen.contains(&c.unit_id)),
                 );
             }
         }
-        Ok(out)
+        Ok(Some(out))
     }
+}
+/// How many documents `query` matches, counting no further than `cap` (deleted ones left out).
+fn count_up_to(
+    searcher: &tantivy::Searcher,
+    query: &dyn Query,
+    cap: usize,
+    budget: &Arc<Budget>,
+) -> Result<usize> {
+    use tantivy::DocSet;
+    let weight = query.weight(tantivy::query::EnableScoring::disabled_from_searcher(
+        searcher,
+    ))?;
+    let mut count = 0;
+    for segment in searcher.segment_readers() {
+        budget.check()?;
+        let mut scorer = weight.scorer(segment, 1.0)?;
+        let alive = segment.alive_bitset();
+        let mut doc = scorer.doc();
+        let mut steps = 0usize;
+        while doc != tantivy::TERMINATED {
+            if alive.is_none_or(|a| a.is_alive(doc)) {
+                count += 1;
+                if count >= cap {
+                    return Ok(count);
+                }
+            }
+            // Deleted documents count as steps too.
+            steps += 1;
+            if steps.is_multiple_of(4096) {
+                budget.check()?;
+            }
+            doc = scorer.advance();
+        }
+    }
+    Ok(count)
 }
 /// The best `cap` units in `order`, each with its key and its relevance times (1 + fame).
 fn ranked(
@@ -2315,8 +3156,11 @@ impl Open {
             out.push(must(Box::new(ExistsQuery::new("type".into(), false))));
             out.push((Occur::MustNot, set(f.type_path, &q.exclude_types)));
         }
-        // A tag matches people's tags and source labels alike.
+        // A tag matches people's tags, and source labels where they count as tags.
         let either = |tags: &[String]| -> Box<dyn Query> {
+            if !q.labels {
+                return set(f.tag, tags);
+            }
             Box::new(BooleanQuery::new(vec![
                 (Occur::Should, set(f.tag, tags)),
                 (Occur::Should, set(f.label, tags)),
@@ -2404,32 +3248,123 @@ impl Open {
                 .collect();
             out.push(must(Box::new(BooleanQuery::new(boxes))));
         }
-        out
+        // Each filter stops with the search's budget.
+        out.into_iter()
+            .map(|(occur, query)| (occur, leaf(query)))
+            .collect()
     }
     /// The words of one item in one field, as a word or a phrase.
-    fn words_in(&self, field: Field, words: &[String]) -> Box<dyn Query> {
-        let terms: Vec<Term> = words
+    /// A phrase is matched as one in the index by its first [`MAX_PHRASE_WORDS`] words, checking
+    /// the budget at every step, and as all of its words when every one is common (in
+    /// [`COMMON_PIECE_DOCS`] and [`COMMON_PIECE`] of the documents: `"the the of"`) or its rarest
+    /// is in more than [`PHRASE_POSTINGS`] documents (`"york new"`): one step of a phrase reads
+    /// its words' lists until a document holds them in order, which for such words may be the
+    /// whole lists. Postgres checks the whole phrase on every candidate.
+    fn words_in(
+        &self,
+        searcher: &tantivy::Searcher,
+        field: Field,
+        words: &[String],
+    ) -> Box<dyn Query> {
+        let mut terms: Vec<Term> = words
             .iter()
+            .take(MAX_PHRASE_WORDS)
             .map(|w| Term::from_field_text(field, w))
             .collect();
+        let one = |term: Term| -> Box<dyn Query> {
+            leaf(Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)))
+        };
         if terms.len() == 1 {
-            Box::new(TermQuery::new(
-                terms.into_iter().next().expect("one term"),
-                IndexRecordOption::WithFreqs,
-            ))
-        } else {
-            Box::new(PhraseQuery::new(terms))
+            return one(terms.pop().expect("one term"));
         }
+        let docs = searcher.num_docs().max(1) as f64;
+        let common = terms.iter().all(|t| {
+            searcher
+                .doc_freq(t)
+                .is_ok_and(|n| n >= COMMON_PIECE_DOCS && n as f64 / docs > COMMON_PIECE)
+        });
+        let rarest = terms
+            .iter()
+            .map(|t| searcher.doc_freq(t).unwrap_or(u64::MAX))
+            .min()
+            .unwrap_or(0);
+        if common || rarest > PHRASE_POSTINGS {
+            terms.sort();
+            terms.dedup();
+            return Box::new(BooleanQuery::new(
+                terms.into_iter().map(|t| (Occur::Must, one(t))).collect(),
+            ));
+        }
+        leaf_every(Box::new(PhraseQuery::new(terms)), 1)
+    }
+    /// The words of `field` that start with `word` (`word` too), at most [`PREFIX_TERMS`] in all:
+    /// of the first [`PREFIX_SCAN`] such words of each segment, in dictionary order, those the
+    /// most documents hold, each while the documents of those taken stay within
+    /// [`PREFIX_POSTINGS`] in all (a word set reads every posting of its words in one go). A short
+    /// start in a large dictionary expands to a bounded set of words; the scan stops with the
+    /// search's budget.
+    fn prefix_terms(&self, searcher: &tantivy::Searcher, field: Field, word: &str) -> Vec<Term> {
+        let over = || SEARCH_BUDGET.with(|b| b.borrow().as_ref().is_some_and(|b| b.over()));
+        let mut held: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        for segment in searcher.segment_readers() {
+            if over() {
+                break;
+            }
+            let Ok(inverted) = segment.inverted_index(field) else {
+                continue;
+            };
+            let Ok(mut stream) = inverted.terms().range().ge(word.as_bytes()).into_stream() else {
+                continue;
+            };
+            let mut read = 0;
+            while read < PREFIX_SCAN && stream.advance() {
+                if !stream.key().starts_with(word.as_bytes()) {
+                    break;
+                }
+                read += 1;
+                if read % 4096 == 0 && over() {
+                    break;
+                }
+                *held.entry(stream.key().to_vec()).or_default() +=
+                    u64::from(stream.value().doc_freq);
+            }
+        }
+        let mut held: Vec<(u64, Vec<u8>)> = held.into_iter().map(|(k, n)| (n, k)).collect();
+        held.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut postings = 0u64;
+        held.retain(|(n, _)| {
+            let fits = postings + n <= PREFIX_POSTINGS;
+            if fits {
+                postings += n;
+            }
+            fits
+        });
+        held.truncate(PREFIX_TERMS);
+        held.into_iter()
+            .filter_map(|(_, key)| {
+                std::str::from_utf8(&key)
+                    .ok()
+                    .map(|text| Term::from_field_text(field, text))
+            })
+            .collect()
     }
     /// One item where it may match: the name, other names or the description; as the last item,
-    /// also the start of a word in the name. People's tags and source labels holding it add to
-    /// its score but never match alone.
-    fn item_query(&self, words: &[String], last: bool) -> Box<dyn Query> {
+    /// also the start of a word in the name ([`Open::prefix_terms`]). People's tags and source
+    /// labels holding it add to its score but never match alone.
+    fn item_query(
+        &self,
+        searcher: &tantivy::Searcher,
+        words: &[String],
+        last: bool,
+    ) -> Box<dyn Query> {
         let f = &self.fields;
         let boosted = |field: Field, boost: Score| -> (Occur, Box<dyn Query>) {
             (
                 Occur::Should,
-                Box::new(BoostQuery::new(self.words_in(field, words), boost)),
+                Box::new(BoostQuery::new(
+                    self.words_in(searcher, field, words),
+                    boost,
+                )),
             )
         };
         let mut matches: Vec<(Occur, Box<dyn Query>)> = vec![
@@ -2439,11 +3374,16 @@ impl Open {
         ];
         if let ([word], true) = (words, last) {
             for field in [f.name, f.other_names] {
-                let prefix =
-                    FuzzyTermQuery::new_prefix(Term::from_field_text(field, word), 0, false);
+                let terms = self.prefix_terms(searcher, field, word);
+                if terms.is_empty() {
+                    continue;
+                }
                 matches.push((
                     Occur::Should,
-                    Box::new(ConstScoreQuery::new(Box::new(prefix), PREFIX_SCORE)),
+                    Box::new(ConstScoreQuery::new(
+                        leaf(Box::new(TermSetQuery::new(terms))),
+                        PREFIX_SCORE,
+                    )),
                 ));
             }
         }
@@ -2454,17 +3394,13 @@ impl Open {
         ]))
     }
     /// The whole text inside the name (`ILIKE '%text%'`): every three characters of it (two for
-    /// a text of two), across words; one character is any name holding it.
+    /// a text of two), across words. One character is not looked up here (it would read the
+    /// whole dictionary of the names' pieces): [`Open::search`] leaves such a text to Postgres.
     fn substring(&self, text: &str) -> Option<Box<dyn Query>> {
         let f = &self.fields;
         let length = text.chars().count();
         let query: Box<dyn Query> = match length {
-            0 => return None,
-            1 => {
-                let folded = tokens(&self.index, EXACT, text).pop()?;
-                let pattern = format!(".*{}.*", regex_escape(&folded));
-                Box::new(RegexQuery::from_pattern(&pattern, f.name_grams).ok()?)
-            }
+            0 | 1 => return None,
             _ => {
                 let grams = tokens(&self.index, if length == 2 { GRAMS2 } else { GRAMS3 }, text);
                 if grams.is_empty() {
@@ -2478,10 +3414,10 @@ impl Open {
                         .map(|g| -> (Occur, Box<dyn Query>) {
                             (
                                 Occur::Must,
-                                Box::new(TermQuery::new(
+                                leaf(Box::new(TermQuery::new(
                                     Term::from_field_text(f.name_grams, &g),
                                     IndexRecordOption::Basic,
-                                )),
+                                ))),
                             )
                         })
                         .collect(),
@@ -2495,6 +3431,7 @@ impl Open {
     /// whole text or holds its words in order. `None` for a text without words.
     fn words_query(
         &self,
+        searcher: &tantivy::Searcher,
         text: &str,
         items: &[Item],
         filters: &[(Occur, Box<dyn Query>)],
@@ -2509,7 +3446,7 @@ impl Open {
             match item {
                 Item::Or => joined = true,
                 Item::Words(words, whole) => {
-                    let query = self.item_query(words, position == last_words && *whole);
+                    let query = self.item_query(searcher, words, position == last_words && *whole);
                     match (joined, groups.last_mut()) {
                         (true, Some(group)) => group.push(query),
                         _ => groups.push(vec![query]),
@@ -2517,7 +3454,7 @@ impl Open {
                     joined = false;
                 }
                 Item::Not(words) => {
-                    clauses.push((Occur::MustNot, self.item_query(words, false)));
+                    clauses.push((Occur::MustNot, self.item_query(searcher, words, false)));
                     joined = false;
                 }
             }
@@ -2537,32 +3474,28 @@ impl Open {
             clauses.push((
                 Occur::Should,
                 Box::new(ConstScoreQuery::new(
-                    Box::new(TermQuery::new(
+                    leaf(Box::new(TermQuery::new(
                         Term::from_field_text(f.name_exact, &exact),
                         IndexRecordOption::Basic,
-                    )),
+                    ))),
                     EXACT_NAME_SCORE,
                 )),
             ));
         }
-        let plain: Vec<&String> = items
+        let plain: Vec<String> = items
             .iter()
             .filter_map(|i| match i {
                 Item::Words(w, _) => Some(w),
                 _ => None,
             })
             .flatten()
+            .cloned()
             .collect();
         if plain.len() > 1 && !items.iter().any(|i| matches!(i, Item::Or)) {
             clauses.push((
                 Occur::Should,
                 Box::new(BoostQuery::new(
-                    Box::new(PhraseQuery::new(
-                        plain
-                            .iter()
-                            .map(|w| Term::from_field_text(f.name, w))
-                            .collect(),
-                    )),
+                    self.words_in(searcher, f.name, &plain),
                     NAME_PHRASE_BOOST,
                 )),
             ));
@@ -2574,6 +3507,7 @@ impl Open {
     /// when the text has `or` (it is not one set of words).
     fn name_words_query(
         &self,
+        searcher: &tantivy::Searcher,
         items: &[Item],
         filters: &[(Occur, Box<dyn Query>)],
     ) -> Option<Box<dyn Query>> {
@@ -2583,8 +3517,8 @@ impl Open {
         }
         let in_name = |words: &[String]| -> Box<dyn Query> {
             Box::new(BooleanQuery::new(vec![
-                (Occur::Should, self.words_in(f.name, words)),
-                (Occur::Should, self.words_in(f.other_names, words)),
+                (Occur::Should, self.words_in(searcher, f.name, words)),
+                (Occur::Should, self.words_in(searcher, f.other_names, words)),
             ]))
         };
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = items
@@ -2620,16 +3554,20 @@ impl Open {
         // the count asked for lowered by one each, to one at least: a similar name still meets it
         // with the rest, and the query reads only the rarer pieces' lists.
         let names = searcher.num_docs().max(1) as f64;
-        let pieces: Vec<&String> = all
+        // Of the rest, the MAX_PIECES rarest: the count asked for is lowered by one for each left
+        // out too, so the query reads a bounded number of lists.
+        let mut pieces: Vec<(u64, &String)> = all
             .iter()
-            .filter(|p| {
-                searcher
+            .filter_map(|p| {
+                let n = searcher
                     .doc_freq(&Term::from_field_text(f.name_pieces, p))
-                    .map_or(true, |n| {
-                        n < COMMON_PIECE_DOCS || (n as f64) / names <= COMMON_PIECE
-                    })
+                    .unwrap_or(0);
+                (n < COMMON_PIECE_DOCS || (n as f64) / names <= COMMON_PIECE).then_some((n, p))
             })
             .collect();
+        pieces.sort();
+        pieces.truncate(MAX_PIECES);
+        let pieces: Vec<&String> = pieces.into_iter().map(|(_, p)| p).collect();
         let least = ((all.len() as f64 * SIMILARITY).ceil() as usize)
             .saturating_sub(all.len() - pieces.len())
             .max(1);
@@ -2641,10 +3579,10 @@ impl Open {
                         (
                             Occur::Should,
                             Box::new(ConstScoreQuery::new(
-                                Box::new(TermQuery::new(
+                                leaf(Box::new(TermQuery::new(
                                     Term::from_field_text(f.name_pieces, p),
                                     IndexRecordOption::Basic,
-                                )),
+                                ))),
                                 SIMILAR_PIECE_SCORE,
                             )),
                         )
@@ -2663,18 +3601,6 @@ impl Open {
         Some(Box::new(BooleanQuery::new(clauses)))
     }
 }
-/// `text` as a literal in a regular expression.
-fn regex_escape(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        if !c.is_alphanumeric() {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2720,7 +3646,16 @@ mod tests {
     /// after a removal finds the document's words in the new segment, not nothing.
     #[test]
     fn a_merge_after_a_removal_reads_the_segments_as_they_are_now() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
         docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
         open.reader.reload().unwrap();
@@ -2750,7 +3685,16 @@ mod tests {
     /// a switch-off whose merge runs is not removed again at the next pass.
     #[test]
     fn deleted_documents_of_a_catalogue_are_not_documents() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         docs(
             &open,
             &[("catalogue:1", "peak", "wikidata"), ("r", "page", "")],
@@ -2776,7 +3720,16 @@ mod tests {
     /// pass would then join under the writer lock).
     #[test]
     fn a_merge_stays_running_until_its_thread_ends() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         docs(&open, &[("a", "aurora", ""), ("c", "cosmos", "")]);
         docs(&open, &[("b", "borealis", ""), ("d", "dawn", "")]);
         open.reader.reload().unwrap();
@@ -2813,7 +3766,16 @@ mod tests {
     /// the removed document's words leave the files.
     #[test]
     fn a_removal_while_a_merge_runs_is_merged_at_the_next_pass() {
-        let open = Arc::new(Open::new(index(), 0, BTreeMap::new(), String::new()).unwrap());
+        let open = Arc::new(
+            Open::new(
+                index(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
         let f = open.fields;
         {
             let mut writer = open.writer.lock().unwrap();
@@ -2915,7 +3877,7 @@ mod tests {
             .chars()
             .collect();
         let index = index();
-        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut seed = crate::catalogue::testgen::seed("tokenizer", 0x9e37_79b9_7f4a_7c15).max(1);
         let mut next = || {
             seed ^= seed << 13;
             seed ^= seed >> 7;
@@ -2965,6 +3927,593 @@ mod tests {
             }
             assert_eq!(got, expected, "{text:?}");
         }
+    }
+
+    /// Searchable documents named `names`, as the index holds a referenced unit's: IDs, the name
+    /// in every name field, one commit.
+    fn named(open: &Open, names: &[String]) {
+        let f = open.fields;
+        let mut writer = open.writer.lock().unwrap();
+        for (n, name) in names.iter().enumerate() {
+            let id = format!("{n:032x}");
+            let mut doc = TantivyDocument::default();
+            doc.add_text(f.unit_id, &id);
+            doc.add_text(f.resource_id, &id);
+            for field in [f.name, f.name_exact, f.name_grams, f.name_pieces] {
+                doc.add_text(field, name);
+            }
+            doc.add_u64(f.referenced, 1);
+            doc.add_u64(f.has_text, 1);
+            writer.add_document(doc).unwrap();
+        }
+        commit(&mut writer, &open.stamp(0)).unwrap();
+        drop(writer);
+        open.reader.reload().unwrap();
+    }
+
+    /// Property (fuzz): any text up to the API's 256 bytes (many words, phrases, `-`, `or` chains,
+    /// one character, symbols, scripts written without spaces) is searched over a seeded index:
+    /// candidates, or `None` (Postgres reads it alone); never a panic, never more than the
+    /// candidates asked for from each part. Each text holds at most MAX_ITEMS items, and each of
+    /// its words' starts expands to at most PREFIX_TERMS words holding at most PREFIX_POSTINGS
+    /// postings, and does at most a ceiling of posting steps. The index has four segments. The
+    /// budget is generous (a loaded host is slow): no wall-clock bound is checked.
+    #[test]
+    fn any_text_of_256_bytes_is_searched_within_its_budget() {
+        let mut gen =
+            crate::catalogue::testgen::Gen::new("text search fuzz", 0x2f8a_51c3_77e1_0b9d);
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let syllables = [
+            "a", "an", "ar", "ba", "bo", "ca", "de", "el", "ka", "lo", "ma", "ra", "st", "th", "zu",
+        ];
+        let names: Vec<String> = (0..20_000)
+            .map(|_| {
+                (0..1 + gen.below(4))
+                    .map(|_| {
+                        (0..1 + gen.below(4))
+                            .map(|_| *gen.pick(&syllables))
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        // In four commits: four segments, so the per-segment scans and the sums across segments
+        // are what each search meets.
+        for part in names.chunks(names.len() / 4) {
+            named(&open, part);
+        }
+        let mut served = 0;
+        let mut most_steps = 0;
+        // The ceiling of posting steps per search: with the fixed seed, about twice the most its
+        // searches take (59,792, measured; the run prints its own), so a lost bound shows as many
+        // times more; with another seed (`PINAKES_TEST_SEED`), every posting of the index once.
+        let step_ceiling: u64 = if std::env::var("PINAKES_TEST_SEED").is_err() {
+            120_000
+        } else {
+            let searcher = open.reader.searcher();
+            let f = open.fields;
+            searcher
+                .segment_readers()
+                .iter()
+                .flat_map(|segment| {
+                    [f.name, f.name_exact, f.name_grams, f.name_pieces]
+                        .map(|field| segment.inverted_index(field).ok())
+                })
+                .flatten()
+                .map(|inverted| {
+                    let mut terms = inverted.terms().stream().expect("terms");
+                    let mut postings = 0u64;
+                    while terms.advance() {
+                        postings += u64::from(terms.value().doc_freq);
+                    }
+                    postings
+                })
+                .sum()
+        };
+        let pieces = [
+            "or",
+            "OR",
+            "-",
+            "\"",
+            "a",
+            "ab",
+            "an",
+            "ar",
+            "bo",
+            "ca",
+            "the",
+            "ka lo",
+            "-ma",
+            "\"ra st\"",
+            "東",
+            "京",
+            "ภา",
+            "€",
+            "(",
+            "!!!",
+            "c++",
+            "é",
+            "zürich",
+            "x",
+            "0",
+            "\u{301}",
+            "😀",
+            "a-b",
+        ];
+        for round in 0..300 {
+            let mut text = String::new();
+            while text.len() < 256 {
+                text.push_str(gen.pick(&pieces));
+                if gen.chance(3) {
+                    text.push(' ');
+                }
+            }
+            let mut cut = if gen.chance(4) { 1 + gen.below(4) } else { 256 };
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            let q = TextQuery {
+                text: text.clone(),
+                at: chrono::Utc::now(),
+                inside_words: gen.chance(2),
+                order: Some(*gen.pick(&[
+                    TextOrder::Relevance,
+                    TextOrder::Activity,
+                    TextOrder::Recent,
+                ])),
+                ..Default::default()
+            };
+            let parts = items(&open.index, &text);
+            // MAX_ITEMS items, or one chain of `or`s read whole, up to MAX_PIECES words.
+            let chain_words = parts
+                .iter()
+                .filter(|i| matches!(i, Item::Words(..)))
+                .count();
+            assert!(
+                parts.len() <= MAX_ITEMS
+                    || (chain_words <= MAX_PIECES
+                        && parts
+                            .iter()
+                            .all(|i| matches!(i, Item::Words(..) | Item::Or))),
+                "{round}: {text:?}"
+            );
+            let searcher = open.reader.searcher();
+            for word in text.split_whitespace().take(4) {
+                let word = word.to_lowercase();
+                let terms = open.prefix_terms(&searcher, open.fields.name, &word);
+                let postings: u64 = terms
+                    .iter()
+                    .map(|t| searcher.doc_freq(t).unwrap_or(0))
+                    .sum();
+                assert!(terms.len() <= PREFIX_TERMS, "{round}: {word:?}");
+                assert!(postings <= PREFIX_POSTINGS, "{round}: {word:?}: {postings}");
+            }
+            let budget =
+                Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(600));
+            let before = STEPS.with(|n| n.get());
+            let searched = open.search(&q, 500, &budget);
+            // The work, counted in posting steps of the budgeted leaves (no clock): far below what
+            // reading every posting of the texts' parts would take.
+            let steps = STEPS.with(|n| n.get()) - before;
+            most_steps = most_steps.max(steps);
+            assert!(steps <= step_ceiling, "{round}: {text:?}: {steps} steps");
+            match searched {
+                Ok(Some(found)) => {
+                    served += 1;
+                    assert!(found.len() <= 1000, "{round}: {text:?}")
+                }
+                Ok(None) => assert_eq!(text.trim().chars().count(), 1, "{text:?}"),
+                Err(error) => panic!("{round}: {text:?}: {error}"),
+            }
+        }
+        // Near the measured count with the fixed seed (282; the run prints it): the index answers
+        // every text but those of one character found inside names, which Postgres reads alone
+        // (the `None` arm above accepts no other).
+        assert!(served >= 270, "{served} of 300 answered");
+        eprintln!(
+            "most posting steps of one search: {most_steps} (ceiling {step_ceiling}); {served} of 300 answered"
+        );
+    }
+
+    /// A part of a query that matches nothing for long (every name holds `the`, `of` and `and`,
+    /// and `-the` leaves each out) stops with the budget at its leaves, not at the end of the
+    /// segment: a budget spent after a few checks stops the search within a few thousand steps
+    /// of 60,000 documents, and the search answers `Busy`.
+    #[test]
+    fn a_query_that_matches_nothing_stops_at_its_leaves() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let names: Vec<String> = (0..60_000).map(|n| format!("the of and x{n}")).collect();
+        named(&open, &names);
+        let q = TextQuery {
+            text: "the of and -the".into(),
+            ..Default::default()
+        };
+        let budget = Arc::new(Budget {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            spent: std::sync::atomic::AtomicBool::new(false),
+            // A few for the setup's own checks, then the leaves'.
+            checks_left: Some(AtomicU64::new(12)),
+        });
+        let before = STEPS.with(|n| n.get());
+        let answer = open.search(&q, 10, &budget);
+        let steps = STEPS.with(|n| n.get()) - before;
+        assert!(answer.unwrap_err().is::<Busy>());
+        // Without the leaves' checks it would be every posting of the four words, 240,000.
+        assert!(
+            (1_000..50_000).contains(&steps),
+            "{steps} steps: the leaves check the budget"
+        );
+        // With time to spare, the same search answers (nothing matches).
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        assert_eq!(open.search(&q, 10, &budget).unwrap().unwrap().len(), 0);
+    }
+
+    /// A phrase of common words (`"the the of"`) is matched as all its words in the index (its
+    /// position lists would be read in one step); one with a rarer word stays a phrase; a phrase
+    /// is matched by its first eight words.
+    #[test]
+    fn phrases_of_common_words_are_matched_as_words() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut names: Vec<String> = (0..12_000).map(|n| format!("the of z{n}")).collect();
+        names.push("of the rare".into());
+        names.push("rare the".into());
+        names.push("w w w w w w w w".into());
+        named(&open, &names);
+        let searcher = open.reader.searcher();
+        let field = open.fields.name;
+        let words = |w: &[&str]| w.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let found = |query: Box<dyn Query>| {
+            searcher
+                .search(query.as_ref(), &tantivy::collector::Count)
+                .unwrap()
+        };
+        // Every name holds both: as words, all of them (in either order).
+        assert_eq!(
+            found(open.words_in(&searcher, field, &words(&["the", "of"]))),
+            12_001
+        );
+        // `rare` is rare: a phrase, in order only.
+        assert_eq!(
+            found(open.words_in(&searcher, field, &words(&["the", "rare"]))),
+            1
+        );
+        // Twenty words: the first eight, which one name holds in a row.
+        let long: Vec<String> = (0..20).map(|_| "w".to_string()).collect();
+        assert_eq!(found(open.words_in(&searcher, field, &long)), 1);
+    }
+
+    /// A budget that has run out stops the search: `Busy`, not candidates.
+    #[test]
+    fn a_search_past_its_budget_is_busy() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        named(&open, &["aurora borealis".to_owned()]);
+        let q = TextQuery {
+            text: "aurora".into(),
+            ..Default::default()
+        };
+        let live = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        assert_eq!(open.search(&q, 10, &live).unwrap().unwrap().len(), 1);
+        let spent = Budget::new(std::time::Instant::now());
+        assert!(open.search(&q, 10, &spent).unwrap_err().is::<Busy>());
+    }
+
+    /// A word start expands to at most PREFIX_TERMS words per segment, those the most names hold
+    /// first; a text holds at most MAX_ITEMS items; a count stops at the number asked for.
+    #[test]
+    fn expansions_items_and_counts_are_bounded() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let mut names: Vec<String> = (0..PREFIX_TERMS + 500).map(|n| format!("a{n}")).collect();
+        names.extend((0..50).map(|_| "apple".to_owned()));
+        named(&open, &names);
+        let searcher = open.reader.searcher();
+        let terms = open.prefix_terms(&searcher, open.fields.name, "a");
+        assert_eq!(terms.len(), PREFIX_TERMS);
+        assert!(terms.contains(&Term::from_field_text(open.fields.name, "apple")));
+        assert_eq!(
+            open.prefix_terms(&searcher, open.fields.name, "apple")
+                .len(),
+            1
+        );
+        assert_eq!(items(&open.index, &"word ".repeat(100)).len(), MAX_ITEMS);
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let all = tantivy::query::AllQuery;
+        assert_eq!(count_up_to(&searcher, &all, 10, &budget).unwrap(), 10);
+        assert_eq!(
+            count_up_to(&searcher, &all, 1_000_000, &budget).unwrap(),
+            names.len()
+        );
+    }
+
+    /// A free turn goes to a client under its share (half the turns, at least one) before one past
+    /// it, while both wait; with nobody else waiting, the one past its share takes it. A waiting
+    /// search holds nothing.
+    #[tokio::test]
+    async fn turns_go_to_a_client_under_its_share_first() {
+        let turns = Turns::new(2);
+        let at = |a: &str| Some(share_key(a.parse().unwrap()));
+        let deadline = || tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let own = turns.take(at("2001:db8::1"), deadline()).await.unwrap();
+        let other = turns.take(None, deadline()).await.unwrap();
+        let past = {
+            let turns = turns.clone();
+            tokio::spawn(async move { turns.take(at("2001:db8::2"), deadline()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let under = {
+            let turns = turns.clone();
+            tokio::spawn(async move { turns.take(at("192.0.2.3"), deadline()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!past.is_finished() && !under.is_finished());
+        drop(other);
+        let turn = tokio::time::timeout(std::time::Duration::from_secs(10), under)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!past.is_finished(), "every turn is taken");
+        drop(turn);
+        let last = tokio::time::timeout(std::time::Duration::from_secs(10), past)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            last.is_ok(),
+            "alone, past its share, it takes the free turn"
+        );
+        drop(own);
+        let state = turns.state.lock().unwrap();
+        assert!(state.waiting.is_empty());
+    }
+
+    /// A client's share is counted by its IPv4 address or its IPv6 address's /64; an IPv4 address
+    /// written as IPv6 is that address.
+    #[test]
+    fn a_client_is_its_address_or_its_v6_network() {
+        let key = |a: &str| share_key(a.parse().unwrap());
+        assert_eq!(key("2001:db8::1"), key("2001:db8::ffff:2"));
+        assert_ne!(key("2001:db8::1"), key("2001:db8:0:1::1"));
+        assert_eq!(key("::ffff:192.0.2.1"), key("192.0.2.1"));
+        assert_ne!(key("192.0.2.1"), key("192.0.2.2"));
+    }
+
+    /// A text that is one chain of `or`s, cut at MAX_ITEMS and read whole, finds a unit only its
+    /// last word names.
+    #[test]
+    fn a_long_or_chain_finds_what_only_its_last_word_names() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let names: Vec<String> = (0..20).map(|n| format!("c{n}")).collect();
+        named(&open, &names);
+        let q = TextQuery {
+            text: (0..20)
+                .map(|n| format!("c{n}"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            at: chrono::Utc::now(),
+            ..Default::default()
+        };
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let found = open.search(&q, 500, &budget).unwrap().unwrap();
+        assert!(
+            found.iter().any(|c| c.unit_id == format!("{:032x}", 19)),
+            "{found:?}"
+        );
+        assert_eq!(found.len(), 20);
+    }
+
+    /// A text cut at MAX_ITEMS inside an `or` chain leaves the whole chain out of the index's query
+    /// (Postgres checks it on every candidate): `… w32 or w33` would otherwise require `w32`. A text
+    /// that is one chain is read whole instead, as main's index reads it, up to MAX_PIECES words.
+    #[test]
+    fn a_cut_inside_an_or_chain_drops_the_chain() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let head: Vec<String> = (0..MAX_ITEMS - 1).map(|n| format!("w{n}")).collect();
+        let words = |text: &str| {
+            items(&open.index, text)
+                .iter()
+                .filter(|i| !matches!(i, Item::Or))
+                .count()
+        };
+        assert_eq!(words(&format!("{} last", head.join(" "))), MAX_ITEMS);
+        assert_eq!(words(&format!("{} a or b", head.join(" "))), MAX_ITEMS - 1);
+        let shorter = &head[..MAX_ITEMS - 3];
+        assert_eq!(
+            words(&format!("{} a or b or c", shorter.join(" "))),
+            MAX_ITEMS - 3,
+            "a or b is cut before c: the chain goes"
+        );
+        assert_eq!(
+            words(&format!("{} a or b", shorter.join(" "))),
+            MAX_ITEMS - 1
+        );
+        // A text that is one chain of `or`s is read whole, as main's index reads it (with no cut),
+        // up to MAX_PIECES words: 16 words are 31 items, 20 are cut with `or` the 32nd and read on;
+        // a longer chain leaves the query (dropping it leaves no word to find).
+        let chain = |n: usize| {
+            (0..n)
+                .map(|n| format!("c{n}"))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        };
+        assert_eq!(words(&chain(16)), 16);
+        assert_eq!(words(&chain(20)), 20, "read whole, as main reads it");
+        assert_eq!(words(&chain(MAX_PIECES)), MAX_PIECES);
+        assert_eq!(words(&chain(MAX_PIECES + 6)), 0);
+        // A chain that goes on past the cut through a `-word`: the cut is inside it.
+        assert_eq!(
+            words(&format!("{} a -n or b", head.join(" "))),
+            MAX_ITEMS - 1
+        );
+        // … or through a piece of no word to find (`""`).
+        assert_eq!(
+            words(&format!("{} a \"\" or b", head.join(" "))),
+            MAX_ITEMS - 1
+        );
+        // `or` right after a closing quote, past the cut: the quoted phrase it joins goes.
+        assert_eq!(
+            words(&format!("{} \"p q\"or z", head.join(" "))),
+            MAX_ITEMS - 1
+        );
+        // A word left out between the chain's items is no part of it, and goes with it.
+        assert_eq!(
+            words(&format!("{} a -n or b", head[..MAX_ITEMS - 3].join(" "))),
+            MAX_ITEMS - 3
+        );
+    }
+
+    /// A word start expands to the words the most names hold while the postings they hold, in all,
+    /// stay within PREFIX_POSTINGS (a word set reads every posting of its words in one go); a
+    /// phrase whose rarest word more names hold than PHRASE_POSTINGS is matched as all its words,
+    /// each read a step at a time, and a phrase leaf checks the budget at every step.
+    #[test]
+    fn expansions_and_phrases_are_bounded_by_the_postings_they_read() {
+        let open = Open::new(
+            index(),
+            0,
+            BTreeMap::new(),
+            String::new(),
+            Default::default(),
+        )
+        .unwrap();
+        let per = PREFIX_POSTINGS / 4 + 1;
+        let mut names: Vec<String> = (0..6)
+            .flat_map(|n| (0..per).map(move |_| format!("b{n} york new")))
+            .collect();
+        names.push("b9".to_owned());
+        named(&open, &names);
+        let searcher = open.reader.searcher();
+        let terms = open.prefix_terms(&searcher, open.fields.name, "b");
+        let postings: u64 = terms.iter().map(|t| searcher.doc_freq(t).unwrap()).sum();
+        assert!(postings <= PREFIX_POSTINGS, "{postings}");
+        assert_eq!(
+            terms.len(),
+            4,
+            "three of the frequent words and the rare one"
+        );
+        let words = ["new".to_owned(), "york".to_owned()];
+        let query = format!("{:?}", open.words_in(&searcher, open.fields.name, &words));
+        assert!(!query.contains("PhraseQuery"), "{query}");
+        let rare = ["b9".to_owned(), "york".to_owned()];
+        let budget = Budget::new(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let _in = InBudget::new(&budget);
+        let phrase = open.words_in(&searcher, open.fields.name, &rare);
+        assert!(format!("{phrase:?}").contains("PhraseQuery"));
+        assert_eq!(
+            format!("{phrase:?}").matches("every: 1 }").count(),
+            1,
+            "{phrase:?}"
+        );
+    }
+
+    /// A merge owed for a removal is recorded by the commit that deletes the document, so an index
+    /// opened again (a restart before the merge ran) merges it; the merge then records that nothing
+    /// is owed.
+    #[test]
+    fn an_owed_merge_outlives_a_restart() {
+        let index = index();
+        let open = Arc::new(
+            Open::new(
+                index.clone(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        docs(&open, &[("a", "aurora", ""), ("b", "borealis", "")]);
+        docs(&open, &[("c", "cosmos", "")]);
+        open.reader.reload().unwrap();
+        // Another merge runs: this removal's merge is owed, not started.
+        open.purging.lock().unwrap().running = true;
+        open.replace(&["a".to_owned()], &[], 0).unwrap();
+        let payload = |index: &Index| -> Payload {
+            serde_json::from_str(index.load_metas().unwrap().payload.as_deref().unwrap()).unwrap()
+        };
+        let recorded = payload(&index);
+        assert_eq!(
+            (recorded.owed.clone(), recorded.owed_all),
+            (vec!["a".to_owned()], false)
+        );
+        assert!(holds(&open, "aurora"), "its words are still in the files");
+        drop(open);
+        // The restart: opened from the files, the merge is owed and runs at the next pass.
+        let open = Arc::new(
+            Open::new(
+                index.clone(),
+                0,
+                BTreeMap::new(),
+                String::new(),
+                (recorded.owed, recorded.owed_all),
+            )
+            .unwrap(),
+        );
+        assert!(open.purge_owed());
+        {
+            let mut writer = open.writer.lock().unwrap();
+            open.purge(&mut writer, vec![], false).unwrap();
+        }
+        if let Some(waiting) = open.merging.lock().unwrap().take() {
+            waiting.join().unwrap();
+        }
+        open.reader.reload().unwrap();
+        assert!(!holds(&open, "aurora"));
+        assert!(holds(&open, "cosmos"));
+        let cleared = payload(&index);
+        assert!(cleared.owed.is_empty() && !cleared.owed_all);
+        assert!(!open.purge_owed());
     }
 
     #[test]

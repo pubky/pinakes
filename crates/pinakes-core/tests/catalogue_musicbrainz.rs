@@ -1260,7 +1260,9 @@ async fn finished_foreign_and_handed_over_cursors(pool: PgPool) {
     let set = |cursor: Value, run: &'static str| {
         let pool = pool.clone();
         async move {
-            sqlx::query("UPDATE catalogue_state SET run=$2,phase=$2,generation=1,cursor=$1 WHERE catalogue='musicbrainz'")
+            // The generation stays: a run never goes back below the generation its cards were
+            // read in (the shrink floor counts the cards of a generation).
+            sqlx::query("UPDATE catalogue_state SET run=$2,phase=$2,cursor=$1 WHERE catalogue='musicbrainz'")
                 .bind(cursor)
                 .bind(run)
                 .execute(&pool)
@@ -2065,6 +2067,9 @@ async fn the_plan_polls_latest_hourly(pool: PgPool) {
         last_error: None,
         error_count: 0,
         updated_at: chrono::Utc::now(),
+        scope: None,
+        generation_cards: 0,
+        shrink_allowed: false,
     };
     let m = mirror(BTreeMap::new(), B, Breaks::Never).await;
     let at_b = state(json!({"version": B, "limit": null}));

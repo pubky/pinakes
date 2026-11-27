@@ -4144,6 +4144,19 @@
           },
           "502": {
             "description": "Nexus reach unavailable"
+          },
+          "503": {
+            "description": "Text search is busy: the text index had no turn for the search, the search ran past its time (`limits.search_index_budget_ms`), or its client runs its share of turns already",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before asking again: 1",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "tags": [

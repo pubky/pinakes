@@ -854,6 +854,13 @@ pub struct SearchConfig {
     /// Seconds between two passes that commit queued changes to the text index.
     #[serde(skip)]
     pub index_commit_secs: u64,
+    /// Text searches the index runs at once (0: one per CPU core); one more waits for a turn.
+    #[serde(skip)]
+    pub index_searches: usize,
+    /// The most a text search's index stage takes, its wait for a turn included (milliseconds):
+    /// past it the search answers 503 and its work stops.
+    #[serde(skip)]
+    pub index_budget_ms: u64,
     #[serde(skip)]
     pub reach_timeout_secs: u64,
     /// The taggers a related page samples: the authors of a resource's most recent tags, at most
@@ -889,6 +896,8 @@ impl Default for SearchConfig {
             index_dir: "search-index".into(),
             text_candidates: 500,
             index_commit_secs: 2,
+            index_searches: 0,
+            index_budget_ms: 2000,
             reach_timeout_secs: 5,
             related_taggers: 200,
             related_window_days: 365,
@@ -1440,6 +1449,12 @@ impl Config {
             || !(1..=60).contains(&self.search.index_commit_secs)
         {
             bail!("invalid OSM or spatial budget (public Nominatim maximum 1 request/s)");
+        }
+        if self.search.index_searches > 256 {
+            bail!("limits.search_index_searches must be 0 (one per CPU core) to 256");
+        }
+        if !(100..=30_000).contains(&self.search.index_budget_ms) {
+            bail!("limits.search_index_budget_ms must be 100 to 30000");
         }
         // A search's reach reads share this one deadline (`Nexus::reach_by`). Reads that
         // outlast the request are a 504 where they would be the reach's own answer, and
@@ -2949,6 +2964,10 @@ limits! {
     search_text_candidates: usize = |c| c.search.text_candidates => [|c, v| c.search.text_candidates = v],
     /// Seconds between two passes that commit queued changes to the text index (1–60).
     search_index_commit_secs: u64 = |c| c.search.index_commit_secs => [|c, v| c.search.index_commit_secs = v],
+    /// Text searches the index runs at once (0–256; 0: one per CPU core).
+    search_index_searches: usize = |c| c.search.index_searches => [|c, v| c.search.index_searches = v],
+    /// The most a text search's index stage takes, its wait for a turn included (100–30000 ms).
+    search_index_budget_ms: u64 = |c| c.search.index_budget_ms => [|c, v| c.search.index_budget_ms = v],
     /// Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget. Also the client addresses the dump download limiter remembers per hour.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
     /// Seconds a request may take on either listener before it is answered 504 (8–600).

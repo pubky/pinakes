@@ -151,3 +151,88 @@ tests:
           - exp_labels: {severity: warning, instance: a, job: pinakes}
             exp_annotations:
               summary: "Catalogue joins keep failing (more than ten an hour for an hour): the log line names each resource and the error's kind; links are fetched instead or checked again later"
+  # The text index: on a every pass fails from its open at 0:01 (the last pass stays there); on b
+  # passes go on; c never opened (0: SearchIndexClosed, not SearchIndexStalled).
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_search_index_last_pass_timestamp_seconds{instance="a",job="pinakes"}'
+        values: '60x60'
+      - series: 'pinakes_search_index_last_pass_timestamp_seconds{instance="b",job="pinakes"}'
+        values: '0+60x60'
+      - series: 'pinakes_search_index_last_pass_timestamp_seconds{instance="c",job="pinakes"}'
+        values: '0x60'
+      - series: 'pinakes_search_index_open{instance="a",job="pinakes"}'
+        values: '1x60'
+      - series: 'pinakes_search_index_open{instance="b",job="pinakes"}'
+        values: '1x60'
+      - series: 'pinakes_search_index_open{instance="c",job="pinakes"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: SearchIndexStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SearchIndexStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes}
+            exp_annotations:
+              summary: "The Pinakes text index has not read its queue for 10 minutes: text searches miss newer changes"
+      - eval_time: 20m
+        alertname: SearchIndexClosed
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SearchIndexClosed
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: c, job: pinakes}
+            exp_annotations:
+              summary: "The Pinakes text index has not opened for 30 minutes (unwritable search.index_dir or a failing build): text searches read Postgres alone"
+  # Text searches answered 503: about 30 per ten minutes on a, 5 on b.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_search_index_busy_total{instance="a",job="pinakes",reason="turn"}'
+        values: '0+3x40'
+      - series: 'pinakes_search_index_busy_total{instance="b",job="pinakes",reason="budget"}'
+        values: '0+0.5x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: TextSearchBusy
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes}
+            exp_annotations:
+              summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches), searches ran past limits.search_index_budget_ms, or one client held its share of turns"
+  # Refused cards: on a, 300 of 1,000 read an hour (fires); on b, 150 of 10,000 (a few, fires not).
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",result="rejected"}'
+        values: '0+5x90'
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",result="inserted"}'
+        values: '0+11.67x90'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",result="rejected"}'
+        values: '0+2.5x90'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",result="unchanged"}'
+        values: '0+164x90'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: CatalogueCardsRejected
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: musicbrainz}
+            exp_annotations:
+              summary: "The musicbrainz catalogue's runs refused over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the refused cards"
+  # Removed cards: a removes 5,000 of 20,000 in a day (fires); b 2,000 of 1,000,000.
+  - interval: 1h
+    input_series:
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="tranco",result="removed"}'
+        values: '0 5000x30'
+      - series: 'pinakes_catalogue_cards{instance="a",job="pinakes",catalogue="tranco"}'
+        values: '20000 15000x30'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="tranco",result="removed"}'
+        values: '0 2000x30'
+      - series: 'pinakes_catalogue_cards{instance="b",job="pinakes",catalogue="tranco"}'
+        values: '1000000 998000x30'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: CatalogueCardsRemoved
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: tranco}
+            exp_annotations:
+              summary: "The tranco catalogue removed over a tenth of its cards in a day: check that upstream removed them (pinakesd catalogue status; a full import under half its cards fails instead)"

@@ -296,6 +296,10 @@ impl Source for Reddit {
     }
     /// A post's card, and its blocked card (a post Reddit refused to show), whose type is the
     /// same: storage asks the stored card whether to purge the post's history once it is gone.
+    fn social_link(&self, uri: &str) -> Option<bool> {
+        // A post and a user's profile are; a subreddit is a community's page.
+        Target::of_uri(uri).map(|t| !matches!(t, Target::Subreddit(_)))
+    }
     fn social(&self, doc: &ResourceMeta) -> bool {
         // A post or comment, and a user's profile (its bio is its author's own text); a
         // subreddit is a community's page.

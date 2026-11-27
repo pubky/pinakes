@@ -231,6 +231,30 @@ impl Metrics {
         for stage in ["referenced", "before_fetch", "drain", "extras"] {
             CATALOGUE_JOIN_ERRORS.with_label_values(&[stage]);
         }
+        // Every catalogue's joins from 0, so a dashboard and a rate see them before the first.
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            for outcome in ["built", "released", "invalid"] {
+                CATALOGUE_JOINS.with_label_values(&[catalogue.name(), outcome]);
+            }
+        }
+        registry.register(Box::new(CATALOGUE_CARDS.clone()))?;
+        registry.register(Box::new(SEARCH_INDEX_QUEUE.clone()))?;
+        registry.register(Box::new(SEARCH_INDEX_REREAD.clone()))?;
+        registry.register(Box::new(SEARCH_INDEX_BUSY.clone()))?;
+        for queue in ["resources", "catalogue"] {
+            SEARCH_INDEX_QUEUE.with_label_values(&[queue]);
+        }
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            SEARCH_INDEX_REREAD.with_label_values(&[catalogue.name()]);
+        }
+        for reason in ["turn", "budget", "share"] {
+            SEARCH_INDEX_BUSY.with_label_values(&[reason]);
+        }
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            for outcome in CATALOGUE_CARD_OUTCOMES {
+                CATALOGUE_CARDS.with_label_values(&[catalogue.name(), outcome]);
+            }
+        }
         let out = Self {
             api_panics,
             api_requests,
@@ -496,6 +520,14 @@ impl Metrics {
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
+        // The text index's queues by their sequence span (read from each one's key, not counted
+        // over the table): rows written and not yet read by a pass.
+        let index_queues = sqlx::query("SELECT (SELECT coalesce(max(seq)-min(seq)+1,0) FROM search_index_queue) AS resources,(SELECT coalesce(max(seq)-min(seq)+1,0) FROM search_index_catalogue_queue) AS catalogue").fetch_one(pool).await?;
+        for queue in ["resources", "catalogue"] {
+            SEARCH_INDEX_QUEUE
+                .with_label_values(&[queue])
+                .set(index_queues.try_get(queue)?);
+        }
         let backlog = sqlx::query("SELECT (SELECT count(*) FROM catalogue_join_due WHERE due_at<=now()) AS joins,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_join_due WHERE due_at<=now()) AS joins_age,(SELECT count(*) FROM catalogue_extras WHERE due_at<=now()) AS extras,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_extras WHERE due_at<=now()) AS extras_age").fetch_one(pool).await?;
         let previews: i64 = sqlx::query_scalar("SELECT count(*) FROM resource r WHERE r.orphaned_at IS NOT NULL AND r.orphaned_at=r.created_at AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id)")
             .fetch_one(pool)
@@ -764,6 +796,102 @@ pub fn catalogue_join(catalogue: &str, outcome: &'static str) {
     CATALOGUE_JOINS
         .with_label_values(&[catalogue, outcome])
         .inc();
+}
+/// The rows the text index's queues hold (`search_index_queue`: resources; `search_index_catalogue_queue`:
+/// catalogue cards), by their sequence span, from each metrics refresh.
+static SEARCH_INDEX_QUEUE: std::sync::LazyLock<IntGaugeVec> = std::sync::LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "pinakes_search_index_queue",
+            "Rows the text index's queues hold, not yet read by a pass: resources (search_index_queue) and catalogue cards (search_index_catalogue_queue)",
+        ),
+        &["queue"],
+    )
+    .expect("static metric")
+});
+/// The cards of each catalogue the text index has read again so far in the re-read under way
+/// after the catalogue's first full import (0 when none runs).
+static SEARCH_INDEX_REREAD: std::sync::LazyLock<IntGaugeVec> = std::sync::LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "pinakes_search_index_reread_cards",
+            "Cards of each catalogue the text index has read again so far after its first full import (0: no re-read under way)",
+        ),
+        &["catalogue"],
+    )
+    .expect("static metric")
+});
+/// Add `read` cards to the re-read of `catalogue`; `None`: no re-read runs (every gauge 0).
+pub fn search_index_reread(catalogue: Option<&str>, read: u64) {
+    match catalogue {
+        Some(catalogue) => SEARCH_INDEX_REREAD
+            .with_label_values(&[catalogue])
+            .add(read as i64),
+        None => {
+            for catalogue in crate::catalogue::Catalogue::ALL {
+                SEARCH_INDEX_REREAD
+                    .with_label_values(&[catalogue.name()])
+                    .set(0);
+            }
+        }
+    }
+}
+/// Text searches the text index answered 503, by why: no turn within the budget (`turn`), the
+/// search ran past it (`budget`), or its client ran its share of turns already (`share`).
+static SEARCH_INDEX_BUSY: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_search_index_busy_total",
+            "Text searches answered 503 because the text index was busy: no turn within the budget (turn), past the budget (budget), or the client's share of turns taken (share)",
+        ),
+        &["reason"],
+    )
+    .expect("static metric")
+});
+pub fn search_index_busy(reason: &'static str) {
+    SEARCH_INDEX_BUSY.with_label_values(&[reason]).inc();
+}
+/// The busy searches counted for `reason` so far.
+pub fn search_index_busy_count(reason: &'static str) -> u64 {
+    SEARCH_INDEX_BUSY.with_label_values(&[reason]).get()
+}
+/// The cards each catalogue's writes read, by what became of them: `inserted`, `changed`,
+/// `unchanged` (stamped only), `rejected` (refused by `Card::checked` or the table's checks) and
+/// `removed` (by an update, or as unread at the end of a full import).
+static CATALOGUE_CARDS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_catalogue_cards_total",
+            "Cards each catalogue's imports and updates wrote, by result: inserted, changed, unchanged (stamped only), rejected (refused as invalid) or removed",
+        ),
+        &["catalogue", "result"],
+    )
+    .expect("static metric")
+});
+/// The outcomes of [`catalogue_cards`].
+pub const CATALOGUE_CARD_OUTCOMES: [&str; 5] =
+    ["inserted", "changed", "unchanged", "rejected", "removed"];
+/// Count what one write of `catalogue`'s cards did.
+pub fn catalogue_cards(catalogue: &str, report: crate::catalogue::store::WriteReport) {
+    for (outcome, n) in CATALOGUE_CARD_OUTCOMES.into_iter().zip([
+        report.inserted,
+        report.changed,
+        report.unchanged,
+        report.rejected,
+        report.removed,
+    ]) {
+        if n > 0 {
+            CATALOGUE_CARDS
+                .with_label_values(&[catalogue, outcome])
+                .inc_by(n);
+        }
+    }
+}
+/// The cards counted for `catalogue` and `outcome` so far.
+pub fn catalogue_cards_counted(catalogue: &str, outcome: &'static str) -> u64 {
+    CATALOGUE_CARDS
+        .with_label_values(&[catalogue, outcome])
+        .get()
 }
 /// Failed catalogue joins and extras reads, by where they ran (`referenced`, `before_fetch`,
 /// `drain`, `extras`): each is tried again (a fetch, a later check).

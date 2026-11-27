@@ -2620,6 +2620,9 @@ mod tests {
             last_error: None,
             error_count: 0,
             updated_at: chrono::Utc::now(),
+            scope: None,
+            generation_cards: 0,
+            shrink_allowed: false,
         };
         assert_eq!(
             importer.disk_need(Run::Import, &state(None, None)),

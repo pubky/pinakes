@@ -894,6 +894,48 @@ async fn the_query_set_finds_what_postgres_finds(pool: PgPool) {
         "{} served",
         index.served()
     );
+    // Texts with `or`: the index reads `or` as main's index does, joining the items around it
+    // (`daft punk or kraftwerk` is daft, and punk or kraftwerk), where Postgres alone binds it
+    // looser (`daft punk`, or `kraftwerk`); a text cut inside a chain of `or`s leaves the chain
+    // out. Each answer is the same with every catalogue off; what Postgres alone finds besides is
+    // printed, main's reading and not a loss.
+    let chain = std::iter::repeat_n("daft", 19)
+        .chain(["kraftwerk"])
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let or_texts = [
+        "q=daft punk or kraftwerk".to_owned(),
+        "q=daft -punk or kraftwerk".to_owned(),
+        "q=-punk or kraftwerk".to_owned(),
+        "q=\"daft punk\"or kraftwerk".to_owned(),
+        format!("q={chain}"),
+    ];
+    for query in &or_texts {
+        let page = common::get(&indexed, &path(query)).await;
+        assert_eq!(
+            uncursored(&page),
+            uncursored(&common::get(&off, &path(query)).await),
+            "{query}: catalogues off"
+        );
+        let found = ids_of(&page);
+        let alone: Vec<&str> = ids_of(&common::get(&postgres, &path(query)).await)
+            .iter()
+            .filter(|id| !found.contains(id))
+            .map(|id| name[id])
+            .collect();
+        println!("or, main's reading: {query}: Postgres alone also finds {alone:?}");
+    }
+    // The chain of 20, cut at 32 items, is read whole as main's index reads it (no cut): the same
+    // units as `daft or kraftwerk`.
+    let sorted = |page: &Value| {
+        let mut ids = ids_of(page);
+        ids.sort();
+        ids
+    };
+    let whole = sorted(&common::get(&indexed, &path(&format!("q={chain}&limit=50"))).await);
+    let short = sorted(&common::get(&indexed, &path("q=daft or kraftwerk&limit=50")).await);
+    assert!(!short.is_empty());
+    assert_eq!(whole, short, "the chain of 20 as main reads it");
     // The orders that differ (BM25 and the activity's weight against the former tiers), for the
     // record: run with --nocapture to read them.
     for line in report {

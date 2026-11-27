@@ -63,6 +63,15 @@ pub struct State {
     pub upstream_version: Option<String>,
     pub last_import_at: Option<DateTime<Utc>>,
     pub last_update_at: Option<DateTime<Utc>>,
+    /// The scope of the last finished full import (`CataloguesConfig::scope`): a full import of a
+    /// narrower scope may remove more cards than `run::SHRINK_FLOOR` lets one of the same scope.
+    pub scope: Option<serde_json::Value>,
+    /// The cards the full import of `generation` has read so far (written, changed or stamped):
+    /// what `run::SHRINK_FLOOR` compares with `cards`.
+    pub generation_cards: i64,
+    /// The operator let the next full import remove the cards it did not read, whatever their
+    /// share (`pinakesd catalogue allow-shrink`); cleared when that import ends.
+    pub shrink_allowed: bool,
     /// Why an update asked for a full import (its importer's fixed words), until that import
     /// begins; none when none is asked for.
     pub import_requested: Option<String>,
@@ -143,7 +152,10 @@ fn rows(catalogue: Catalogue, cards: &[Card]) -> (Vec<Row>, u64) {
             },
             Err(reject) => {
                 rejected += 1;
-                tracing::debug!(catalogue = catalogue.name(), source_id = %card.source_id, ?reject, "catalogue card refused");
+                // Its ID as far as a valid one goes: an over-long ID is one reason to refuse.
+                let mut shown: String = card.source_id.chars().take(128).collect();
+                shown.retain(|c| !c.is_control());
+                tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card refused");
             }
         }
     }
@@ -180,6 +192,13 @@ pub async fn upsert_rows(
         rejected,
         ..WriteReport::default()
     };
+    crate::telemetry::catalogue_cards(
+        catalogue.name(),
+        WriteReport {
+            rejected,
+            ..WriteReport::default()
+        },
+    );
     let parts = rows.chunks(BATCH_ROWS).count();
     if parts == 0 {
         if let Some(cursor) = cursor {
@@ -189,7 +208,8 @@ pub async fn upsert_rows(
     }
     for (n, part) in rows.chunks(BATCH_ROWS).enumerate() {
         let mut tx = pool.begin().await?;
-        report += write_part(&mut tx, catalogue, generation, part).await?;
+        let written = write_part(&mut tx, catalogue, generation, part).await?;
+        report += written;
         if n + 1 == parts {
             if let Some(cursor) = cursor {
                 sqlx::query(
@@ -202,6 +222,7 @@ pub async fn upsert_rows(
             }
         }
         tx.commit().await?;
+        crate::telemetry::catalogue_cards(catalogue.name(), written);
     }
     Ok(report)
 }
@@ -267,15 +288,19 @@ async fn write_part(
         .map(|r| r.source_id.as_str())
         .filter(|id| !refused.iter().any(|r| r == id))
         .collect();
-    sqlx::query("UPDATE catalogue_card SET seen_generation=$2 WHERE catalogue=$1 AND source_id=ANY($3) AND seen_generation<$2")
+    let stamped = sqlx::query("UPDATE catalogue_card SET seen_generation=$2 WHERE catalogue=$1 AND source_id=ANY($3) AND seen_generation<$2")
         .bind(catalogue.name())
         .bind(generation)
         .bind(&ids)
         .execute(&mut **tx)
-        .await?;
-    sqlx::query("UPDATE catalogue_state SET cards=cards+$2,updated_at=now() WHERE catalogue=$1")
+        .await?
+        .rows_affected() as i64;
+    // The cards this generation has read: new ones, changed ones and stamped ones (a resumed run
+    // writing a part again counts its changed cards twice, never its unchanged ones).
+    sqlx::query("UPDATE catalogue_state SET cards=cards+$2,generation_cards=generation_cards+$3,updated_at=now() WHERE catalogue=$1")
         .bind(catalogue.name())
         .bind(inserted)
+        .bind(inserted + changed + stamped)
         .execute(&mut **tx)
         .await?;
     Ok(WriteReport {
@@ -318,6 +343,13 @@ pub async fn remove(
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        crate::telemetry::catalogue_cards(
+            catalogue.name(),
+            WriteReport {
+                removed: gone,
+                ..WriteReport::default()
+            },
+        );
         removed += gone;
     }
     if parts == 0 {
@@ -328,12 +360,51 @@ pub async fn remove(
     Ok(removed)
 }
 
+/// Let the next full import of `catalogue` remove the cards it does not read, whatever their share
+/// of the catalogue (`pinakesd catalogue allow-shrink`), while the full import under way last
+/// failed as `shrunk`: it then goes through at its next try, unless a run fails for another
+/// reason first (`run::record_failure` takes the allowance back). Refused in any other state.
+pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<Allowance> {
+    let state: Option<bool> = sqlx::query_scalar(
+        "UPDATE catalogue_state SET shrink_allowed=shrink_allowed OR coalesce(run='import' AND phase='failed' AND last_error='shrunk',false),updated_at=now() WHERE catalogue=$1 RETURNING shrink_allowed",
+    )
+    .bind(catalogue.name())
+    .fetch_optional(pool)
+    .await?;
+    Ok(match state {
+        Some(true) => Allowance::Allowed,
+        Some(false) => Allowance::NotShrunk,
+        None => Allowance::NoState,
+    })
+}
+/// What [`allow_shrink`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Allowance {
+    /// The next try of the run that failed as shrunk removes what it does not read.
+    Allowed,
+    /// No full import under way last failed as shrunk: nothing is allowed.
+    NotShrunk,
+    /// The catalogue has no state row: it never ran.
+    NoState,
+}
 /// The end of a full import of `generation`: remove the cards of `catalogue` it did not read
 /// (`seen_generation` below it), so an item removed upstream leaves with the import that no
 /// longer finds it. Reads the catalogue's rows in `source_id` order, [`SWEEP_ROWS`] per
 /// transaction. The number removed.
 pub async fn finish_import(pool: &PgPool, catalogue: Catalogue, generation: i64) -> Result<u64> {
-    sweep(pool, catalogue, Some(generation), |_| {}).await
+    // `sweep` tells the total so far: each page's own count is counted.
+    let mut counted = 0;
+    sweep(pool, catalogue, Some(generation), |total| {
+        crate::telemetry::catalogue_cards(
+            catalogue.name(),
+            WriteReport {
+                removed: total - counted,
+                ..WriteReport::default()
+            },
+        );
+        counted = total;
+    })
+    .await
 }
 
 /// Delete every card of `catalogue` and its state row (`pinakesd catalogue drop`), in
@@ -514,6 +585,9 @@ mod tests {
             last_import_at: Some("2026-11-24T10:00:00Z".parse().unwrap()),
             last_update_at: None,
             current_as_of: Some("2026-11-23T00:00:00Z".parse().unwrap()),
+            scope: None,
+            generation_cards: 0,
+            shrink_allowed: false,
             import_requested: None,
             waiting: None,
             last_error: Some("timed\nout".into()),
@@ -560,6 +634,9 @@ mod tests {
             last_import_at: None,
             last_update_at: None,
             current_as_of: None,
+            scope: None,
+            generation_cards: 0,
+            shrink_allowed: false,
             import_requested: Some("the change stream is gone".into()),
             waiting: Some("osm's full import is under way".into()),
             last_error: None,
@@ -612,6 +689,9 @@ mod tests {
             last_error: Some("removals (8 of 17 cards gone)".into()),
             error_count: 1,
             updated_at: Utc::now(),
+            scope: None,
+            generation_cards: 0,
+            shrink_allowed: false,
         };
         let row = |state: &State| {
             status_table(&CataloguesConfig::default(), std::slice::from_ref(state))

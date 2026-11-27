@@ -208,6 +208,10 @@ impl Source for Substack {
         let (_, normalized, _) = crate::model::identity(uri).ok()?;
         (root != normalized).then_some(root)
     }
+    fn social_link(&self, uri: &str) -> Option<bool> {
+        // A profile is; a publication and its posts (articles) are not.
+        Target::of_uri(uri).map(|t| matches!(t, Target::Profile(_)))
+    }
     fn social(&self, doc: &ResourceMeta) -> bool {
         // A profile (its bio is its author's own text); a publication's post is an article.
         doc.type_name == "Person" || crate::changes::gone_post_type(doc)

@@ -1338,7 +1338,11 @@ async fn a_pending_preview_is_waited_for_by_its_status_and_read_once(pool: PgPoo
 /// a time: a lock on the table holds each until this lets it go. Two of the wait's reads of the
 /// row's status are let through as they are (the row is pending), and while the third waits at
 /// the lock `change` is run (a statement over `$1`, the link's ID, and `$2`, `root`), so that
-/// read is the first to see it. The answer; how many status reads waited at the lock up to and
+/// read is the first to see it. A statement waits at the lock in a transaction of its own (the
+/// request's reads are single statements): `pg_stat_activity` reads a backend's wait event live
+/// but its query and transaction from what the backend last recorded, so a backend seen waiting
+/// outside a transaction is between two statements (the read before still named) and is looked
+/// at again; and a transaction seen again is the same read, not another. The answer; how many status reads waited at the lock up to and
 /// with the one that saw the change (fewer than three: the request answered before it); and how
 /// many came after it. The API's connection must have the status read prepared already: a
 /// statement stops at the lock once more the first time, to be prepared. A request that has not
@@ -1370,11 +1374,12 @@ async fn resolved_with_a_change_at_its_third_read(
     });
     let (reads, after) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
     let gated = async {
+        let mut last_read: Option<String> = None;
         loop {
             // The statement of the request that waits at the lock now; none once it has
             // answered.
-            let waiting: Option<String> = loop {
-                let waiting: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' LIMIT 1")
+            let waiting: Option<(String, String)> = loop {
+                let waiting: Option<(String, String)> = sqlx::query_as("SELECT query,extract(epoch FROM xact_start)::text FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND xact_start IS NOT NULL LIMIT 1")
                     .fetch_optional(pool)
                     .await
                     .unwrap();
@@ -1383,10 +1388,13 @@ async fn resolved_with_a_change_at_its_third_read(
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             };
-            let Some(statement) = waiting else {
+            let Some((statement, transaction)) = waiting else {
                 break;
             };
-            if statement.starts_with("SELECT status FROM resource") {
+            // Another stop of the read let through last (the same transaction) is no new read.
+            let again = last_read.as_deref() == Some(transaction.as_str());
+            if statement.starts_with("SELECT status FROM resource") && !again {
+                last_read = Some(transaction);
                 if reads.get() == 3 {
                     after.set(after.get() + 1);
                 } else {
