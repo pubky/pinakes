@@ -218,7 +218,7 @@ async fn an_import_reads_places_ways_and_relations(pool: PgPool) {
         );
         assert_eq!(state.cursor, None);
         assert_eq!(
-            state.current_as_of.map(|t| t.timestamp()),
+            state.upstream_at.map(|t| t.timestamp()),
             Some(1_764_000_000)
         );
         assert_eq!(state.cards, 6);
@@ -300,7 +300,7 @@ async fn an_update_changes_only_what_the_file_changes(pool: PgPool) {
             .await
             .unwrap()
             .unwrap()
-            .current_as_of
+            .upstream_at
             .map(|t| t.to_rfc3339()),
         Some("2026-11-25T13:00:00+00:00".into())
     );
@@ -618,7 +618,7 @@ async fn an_update_reads_the_change_files_after_its_sequence(pool: PgPool) {
     let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
     assert_eq!(state.position.as_ref().unwrap()["sequence"], 4979);
     assert_eq!(
-        state.current_as_of.map(|t| t.to_rfc3339()),
+        state.upstream_at.map(|t| t.to_rfc3339()),
         Some("2026-11-25T14:00:00+00:00".into())
     );
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 3);

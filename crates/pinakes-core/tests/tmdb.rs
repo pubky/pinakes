@@ -914,7 +914,7 @@ async fn change_lines_with_tmdb_values_go_after_120_days(pool: PgPool) {
     let age = |days: i32| {
         let pool = pool.clone();
         async move {
-            sqlx::query("UPDATE resource_change SET at=now()-$1*interval '1 day'")
+            sqlx::query("UPDATE resource_change SET changed_at=now()-$1*interval '1 day'")
                 .bind(days as f64)
                 .execute(&pool)
                 .await

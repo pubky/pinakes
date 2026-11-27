@@ -590,7 +590,7 @@ async fn alias_entries_read(one: &sqlx::PgPool) -> i64 {
         .await
         .unwrap();
     sqlx::query_scalar(
-        "SELECT coalesce(idx_tup_read,0) FROM pg_stat_user_indexes WHERE indexrelname='resource_alias_root'",
+        "SELECT coalesce(idx_tup_read,0) FROM pg_stat_user_indexes WHERE indexrelname='resource_alias_root_idx'",
     )
     .fetch_one(one)
     .await

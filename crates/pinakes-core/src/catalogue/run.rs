@@ -21,8 +21,8 @@
 //!   ([`Job::expect_shrink`]), the operator allows it (`pinakesd catalogue allow-shrink`,
 //!   [`store::allow_shrink`]) or the import's scope is narrower (a lower `limit`, a higher
 //!   `min_citations`; [`CataloguesConfig::scope`](super::CataloguesConfig::scope));
-//! - keeps how current the cards are (`current_as_of`, the upstream data time the importer
-//!   states with [`Job::set_current_as_of`]), which the update lag metric measures.
+//! - keeps how current the cards are (`upstream_at`, the upstream data time the importer
+//!   states with [`Job::set_upstream_at`]), which the update lag metric measures.
 //!
 //! A failed run is recorded (`phase` failed, `last_error` as [`failure::shown`] shows it,
 //! `error_count`) and tried again after [`Pace::retry`], from its cursor. Importers do not use
@@ -67,7 +67,7 @@ impl Run {
 /// How an update ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateEnd {
-    /// The update is done: the cards are as current as [`Job::set_current_as_of`] says (or as
+    /// The update is done: the cards are as current as [`Job::set_upstream_at`] says (or as
     /// before, when it says nothing).
     Done,
     /// The changes can't be applied (a Wikidata change stream more than five days behind, a
@@ -114,7 +114,7 @@ pub trait Importer: Send + Sync + 'static {
     /// resumes (`run`, `cursor`), so a resumed run asks only for what its files do not hold yet.
     fn disk_need(&self, run: Run, state: &State) -> u64;
     /// How long after the last finished import or update the next update is due (the default
-    /// [`Importer::plan`]'s pace). A day. The update lag is measured from `current_as_of`, the
+    /// [`Importer::plan`]'s pace). A day. The update lag is measured from `upstream_at`, the
     /// upstream data time the importer states, not from when a run finished: an update that
     /// finds nothing new finishes without moving it, and a source that stops publishing shows
     /// as lag.
@@ -139,7 +139,7 @@ pub trait Importer: Send + Sync + 'static {
     }
     /// A full import: read the whole catalogue and write every card through `job`
     /// ([`Job::write`]), from [`Job::cursor`] when it resumes, and say how current it is
-    /// ([`Job::set_current_as_of`]: the dump's date; the time the import finishes when it says
+    /// ([`Job::set_upstream_at`]: the dump's date; the time the import finishes when it says
     /// nothing). The cards it does not write are removed when it returns `Ok`. A failure is a
     /// [`Failure`] (`failure`), so no upstream's text reaches the log.
     async fn import(&self, job: &mut Job<'_>) -> Result<()>;
@@ -147,7 +147,7 @@ pub trait Importer: Send + Sync + 'static {
     /// ([`Job::remove`]), from [`Job::cursor`] when it resumes. It starts from
     /// [`Job::position`], where the last finished run left off (a replication sequence, a time),
     /// leaves the next one with [`Job::set_position`], and says how current the cards are now
-    /// ([`Job::set_current_as_of`]: the time of the last change it applied). Finding nothing new
+    /// ([`Job::set_upstream_at`]: the time of the last change it applied). Finding nothing new
     /// is a finished update that moves nothing. [`UpdateEnd::NeedsImport`] hands over to a full
     /// import.
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd>;
@@ -178,8 +178,8 @@ pub struct Job<'a> {
     cursor: Option<serde_json::Value>,
     /// The position to keep when the run finishes ([`Job::set_position`]).
     position: Option<serde_json::Value>,
-    /// How current the cards are when the run finishes ([`Job::set_current_as_of`]).
-    current_as_of: Option<chrono::DateTime<chrono::Utc>>,
+    /// How current the cards are when the run finishes ([`Job::set_upstream_at`]).
+    upstream_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The state row as the run started.
     state: State,
     /// A full import asked for ([`Job::asked`]).
@@ -266,9 +266,9 @@ impl<'a> Job<'a> {
         self.position = Some(position);
     }
     /// The upstream time of the data the run leaves (a dump's date, the time of the last change
-    /// applied): kept as `current_as_of` when the run finishes, and what the update lag measures.
-    pub fn set_current_as_of(&mut self, at: chrono::DateTime<chrono::Utc>) {
-        self.current_as_of = Some(at);
+    /// applied): kept as `upstream_at` when the run finishes, and what the update lag measures.
+    pub fn set_upstream_at(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.upstream_at = Some(at);
     }
     pub fn config(&self) -> &Config {
         self.config
@@ -810,7 +810,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         generation,
         cursor,
         position: None,
-        current_as_of: None,
+        upstream_at: None,
         asked,
         state,
         shrink_expected: false,
@@ -905,14 +905,14 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
          last_import_at=CASE WHEN $2='import' THEN now() ELSE last_import_at END,\
          import_requested=CASE WHEN $2='import' THEN NULL ELSE import_requested END,\
          last_update_at=CASE WHEN $2='update' THEN now() ELSE last_update_at END,\
-         current_as_of=CASE WHEN $2='import' THEN coalesce($4,now()) ELSE coalesce($4,current_as_of) END,\
+         upstream_at=CASE WHEN $2='import' THEN coalesce($4,now()) ELSE coalesce($4,upstream_at) END,\
          scope=CASE WHEN $2='import' THEN $5 ELSE scope END,shrink_allowed=CASE WHEN $2='import' THEN false ELSE shrink_allowed END,\
          updated_at=now() WHERE catalogue=$1",
     )
     .bind(catalogue.name())
     .bind(run.name())
     .bind(position)
-    .bind(job.current_as_of)
+    .bind(job.upstream_at)
     .bind(&scope)
     .execute(pool)
     .await?;

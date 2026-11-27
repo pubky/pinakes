@@ -293,7 +293,7 @@ async fn paging_lookup_retention_and_deleted_history(pool: PgPool) {
             .len(),
         2
     );
-    sqlx::query("UPDATE resource_change SET at=now()-interval '91 days' WHERE seq<=3")
+    sqlx::query("UPDATE resource_change SET changed_at=now()-interval '91 days' WHERE seq<=3")
         .execute(&pool)
         .await
         .unwrap();
@@ -1322,7 +1322,7 @@ async fn new_preview_is_prioritized_and_change_time_follows_lock(pool: PgPool) {
     lock.commit().await.unwrap();
     worker.await.unwrap();
     let at: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT at FROM resource_change WHERE resource_id=$1")
+        sqlx::query_scalar("SELECT changed_at FROM resource_change WHERE resource_id=$1")
             .bind(id)
             .fetch_one(&pool)
             .await
@@ -1337,7 +1337,7 @@ async fn maintenance_runs_without_an_idle_ingestion_tick(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE resource_change SET at=now()-interval '100 days'")
+    sqlx::query("UPDATE resource_change SET changed_at=now()-interval '100 days'")
         .execute(&pool)
         .await
         .unwrap();
@@ -1497,11 +1497,13 @@ async fn retention_and_an_opted_out_save_of_the_same_post_never_deadlock(pool: P
         .unwrap();
     tx.commit().await.unwrap();
     // The post's lines are past retention.
-    sqlx::query("UPDATE resource_change SET at=now()-interval '200 days' WHERE resource_id=$1")
-        .bind(&id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE resource_change SET changed_at=now()-interval '200 days' WHERE resource_id=$1",
+    )
+    .bind(&id)
+    .execute(&pool)
+    .await
+    .unwrap();
     // Holding the alias's row stops the save between deleting the post's lines and appending.
     let mut hold = pool.begin().await.unwrap();
     sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")

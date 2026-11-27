@@ -79,7 +79,7 @@ impl Catalogue {
             Catalogue::Wikidata | Catalogue::Musicbrainz | Catalogue::Osm | Catalogue::Openalex
         )
     }
-    /// How far behind upstream its cards may fall (`current_as_of`) before the update lag
+    /// How far behind upstream its cards may fall (`upstream_at`) before the update lag
     /// alert fires: the source's own publication rhythm and a margin. Wikidata's change stream,
     /// OpenStreetMap's daily diffs, Tranco's daily list and the package registries: two days.
     /// MusicBrainz's dumps, twice a week: five days. Podcast Index's weekly database: nine days.

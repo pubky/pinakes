@@ -833,7 +833,7 @@ impl OsmImporter {
             "timestamp": at_time,
         }));
         if let Some(t) = at_time {
-            job.set_current_as_of(t);
+            job.set_upstream_at(t);
         }
         let name = header["name"].as_str().unwrap_or_default();
         job.upstream_version(&match at_time {
@@ -1218,7 +1218,7 @@ impl Importer for OsmImporter {
                 apply(job, changes, json!({"files": true})).await?;
             }
             if let Some(t) = latest.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()) {
-                job.set_current_as_of(t.with_timezone(&chrono::Utc));
+                job.set_upstream_at(t.with_timezone(&chrono::Utc));
             }
             return Ok(UpdateEnd::Done);
         }
@@ -1350,7 +1350,7 @@ impl Importer for OsmImporter {
             json!({"region": region, "base": base, "sequence": applied, "timestamp": timestamp}),
         );
         if let Some(t) = last_time {
-            job.set_current_as_of(t);
+            job.set_upstream_at(t);
         }
         Ok(UpdateEnd::Done)
     }

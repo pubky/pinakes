@@ -399,8 +399,10 @@ from the Nexus feed; you carry curation and the change journal over by hand.
 3. Create the new database with its extensions and run the target binary's `pinakesd --migrate`.
 4. Copy the change journal before the new daemon first starts, so the cursors clients hold stay
    valid. The two versions' `resource_change` tables must have the same columns (`\d
-   resource_change` in each). Run the second command only when the first has succeeded; it loads
-   the whole file or nothing.
+   resource_change` in each). Where only a column's name differs (the change's time is
+   `changed_at`), write the new names into the column list of the dump's `COPY resource_change (…)`
+   line before loading it. Run the second command only when the first has succeeded; it loads the
+   whole file or nothing.
 
    ```sh
    DATABASE_URL="$OLD_DATABASE_URL" scripts/pg-env pg_dump --data-only --table=resource_change --file=resource_change.sql
@@ -1803,7 +1805,7 @@ hold no cards.
 `catalogue_state` holds one row per catalogue: its phase (`idle`, `import`, `update`, `failed`,
 `disabled`), the run under way and where it resumes, where the next update starts, its cards, the
 upstream version, when the last full import and update finished, how current its cards are
-(`current_as_of`: the upstream time of the data the last finished run left), why it waits, its
+(`upstream_at`: the upstream time of the data the last finished run left), why it waits, its
 errors, the last finished full import's scope (`scope`), the cards the full import under way has
 read (`generation_cards`) and an operator's allowance to shrink (`shrink_allowed`).
 
@@ -1962,7 +1964,7 @@ is on (in this version: `musicbrainz` and `osm`), and follows these rules:
 | --- | --- |
 | One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
 | What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
-| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. Each catalogue may lag as far as its source's publication rhythm allows (below). |
+| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `upstream_at`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. Each catalogue may lag as far as its source's publication rhythm allows (below). |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
 | Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
 | Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |

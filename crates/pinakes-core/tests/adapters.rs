@@ -4609,7 +4609,7 @@ async fn derived_links_expire_within_the_horizon(pool: PgPool) {
         .unwrap();
     store::save_document(&pool, &id, 0, &doc).await.unwrap();
     let modified: Option<chrono::DateTime<Utc>> =
-        sqlx::query_scalar("SELECT modified FROM occurrence WHERE resource_id=$1 AND uid='2'")
+        sqlx::query_scalar("SELECT modified_at FROM occurrence WHERE resource_id=$1 AND uid='2'")
             .bind(&id)
             .fetch_one(&pool)
             .await
@@ -4789,7 +4789,7 @@ async fn a_far_event_keeps_its_link_as_the_horizon_moves(pool: PgPool) {
         let pool = pool.clone();
         async move {
             sqlx::query_as::<_, (chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>)>(
-                "SELECT d.expires_at,d.until FROM resource_derivation d JOIN resource r ON r.id=d.child_id WHERE r.uri='https://example.org/far18'",
+                "SELECT d.expires_at,d.linked_until FROM resource_derivation d JOIN resource r ON r.id=d.child_id WHERE r.uri='https://example.org/far18'",
             )
             .fetch_one(&pool)
             .await
@@ -4816,7 +4816,7 @@ async fn a_far_event_keeps_its_link_as_the_horizon_moves(pool: PgPool) {
     let shift = || {
         let pool = pool.clone();
         async move {
-            sqlx::query("UPDATE resource_derivation SET expires_at=expires_at-interval '7 months',until=until-interval '7 months'")
+            sqlx::query("UPDATE resource_derivation SET expires_at=expires_at-interval '7 months',linked_until=linked_until-interval '7 months'")
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -5493,7 +5493,7 @@ async fn a_30_month_event_link_comes_back(pool: PgPool) {
     .unwrap()
     .unwrap();
     // Nineteen months later: the capped link lapsed seven months ago, the event is 11 out.
-    sqlx::query("UPDATE resource_derivation SET expires_at=expires_at-interval '19 months',until=until-interval '19 months'")
+    sqlx::query("UPDATE resource_derivation SET expires_at=expires_at-interval '19 months',linked_until=linked_until-interval '19 months'")
         .execute(&pool)
         .await
         .unwrap();
@@ -5504,7 +5504,7 @@ async fn a_30_month_event_link_comes_back(pool: PgPool) {
         1
     );
     let (expires, until): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
-        sqlx::query_as("SELECT expires_at,until FROM resource_derivation")
+        sqlx::query_as("SELECT expires_at,linked_until FROM resource_derivation")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -5513,7 +5513,7 @@ async fn a_30_month_event_link_comes_back(pool: PgPool) {
 }
 
 /// A link records at most 64 naming rows, those asking for the farthest instants, so its
-/// `until` is still the farthest any row asked for.
+/// `linked_until` is still the farthest any row asked for.
 #[sqlx::test(migrations = "../../migrations")]
 async fn link_sources_are_capped_per_link(pool: PgPool) {
     let parent = "https://api.btcmap.org/v4/events";
@@ -5537,7 +5537,7 @@ async fn link_sources_are_capped_per_link(pool: PgPool) {
         .await
         .unwrap();
     let (count, until): (i64, chrono::DateTime<Utc>) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM jsonb_object_keys(sources)),until FROM resource_derivation",
+        "SELECT (SELECT count(*) FROM jsonb_object_keys(sources)),linked_until FROM resource_derivation",
     )
     .fetch_one(&pool)
     .await
@@ -5575,7 +5575,7 @@ async fn link_sources_follow_tombstones_relinks_and_shared_sites(pool: PgPool) {
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
-                "SELECT d.until FROM resource_derivation d JOIN resource r ON r.id=d.child_id WHERE r.uri=$1",
+                "SELECT d.linked_until FROM resource_derivation d JOIN resource r ON r.id=d.child_id WHERE r.uri=$1",
             )
             .bind(site)
             .fetch_one(&pool)

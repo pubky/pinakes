@@ -336,3 +336,31 @@ async fn a_named_venue_cannot_be_deleted(pool: PgPool) {
         .to_string();
     assert!(named.contains("occurrence_venue_id_fkey"), "{named}");
 }
+
+/// Names say what they are: an index that backs no primary key or unique constraint ends in
+/// `_idx`, and a column holding a time ends in `_at` (an instant), `_until` or `_since` (a bound),
+/// or `_start` / `_end` (a span's ends). sqlx's own table is not ours to name.
+#[sqlx::test(migrations = "../../migrations")]
+async fn indexes_and_time_columns_are_named_for_what_they_are(pool: PgPool) {
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT i.relname::text FROM pg_class i JOIN pg_namespace s ON s.oid=i.relnamespace JOIN pg_index x ON x.indexrelid=i.oid
+         WHERE s.nspname='public' AND i.relname !~ '_idx$'
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid=i.oid AND c.contype IN ('p','u'))
+         ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(indexes, Vec::<String>::new());
+    let times: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname||'.'||a.attname FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace s ON s.oid=c.relnamespace
+         WHERE s.nspname='public' AND c.relkind='r' AND c.relname<>'_sqlx_migrations' AND a.attnum>0 AND NOT a.attisdropped
+           AND a.atttypid IN ('timestamptz'::regtype,'timestamp'::regtype,'date'::regtype)
+           AND a.attname !~ '_(at|until|since|start|end)$'
+         ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(times, Vec::<String>::new());
+}

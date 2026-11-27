@@ -131,7 +131,7 @@ CREATE TABLE resource_alias (
     CONSTRAINT resource_alias_check CHECK (alias_id <> root_id),
     CONSTRAINT resource_alias_basis CHECK (basis IN ('cursor', 'osm', 'identifier', 'service', 'tracking', 'canonical', 'source'))
 );
-CREATE INDEX resource_alias_root ON resource_alias USING btree (root_id);
+CREATE INDEX resource_alias_root_idx ON resource_alias USING btree (root_id);
 
 -- One reference from the Nexus feed (a tag, reply, embed, collection entry, or a post naming
 -- itself), keyed by the object that makes it.
@@ -220,17 +220,18 @@ CREATE TABLE resource_derivation (
     -- list here).
     adapter text NOT NULL,
     expires_at timestamp with time zone,
-    until timestamp with time zone,
+    -- The latest instant the parent's feed rows ask for (`sources`' greatest).
+    linked_until timestamp with time zone,
     first_seen_at timestamp with time zone NOT NULL DEFAULT now(),
     -- Feed row key -> the instant that row asks for (store::link_sources).
     sources jsonb NOT NULL DEFAULT '{}',
     PRIMARY KEY (parent_id, child_id),
     CONSTRAINT resource_derivation_check CHECK (parent_id <> child_id),
     CONSTRAINT resource_derivation_expires_at_range CHECK (expires_at >= '0001-01-01 00:00:00+00' AND expires_at < '10000-01-01 00:00:00+00'),
-    CONSTRAINT resource_derivation_until_range CHECK (until >= '0001-01-01 00:00:00+00' AND until < '10000-01-01 00:00:00+00')
+    CONSTRAINT resource_derivation_linked_until_range CHECK (linked_until >= '0001-01-01 00:00:00+00' AND linked_until < '10000-01-01 00:00:00+00')
 );
-CREATE INDEX resource_derivation_adapter_expiry ON resource_derivation USING btree (adapter, expires_at);
-CREATE INDEX resource_derivation_child ON resource_derivation USING btree (child_id);
+CREATE INDEX resource_derivation_adapter_expires_idx ON resource_derivation USING btree (adapter, expires_at);
+CREATE INDEX resource_derivation_child_idx ON resource_derivation USING btree (child_id);
 
 -- A resource's score from its references (tags count most), for ranking.
 CREATE TABLE resource_score (
@@ -384,7 +385,7 @@ CREATE TABLE occurrence (
     doc jsonb NOT NULL DEFAULT '{}',
     point geometry(Point,4326),
     sequence bigint NOT NULL DEFAULT 0,
-    modified timestamp with time zone,
+    modified_at timestamp with time zone,
     content_hash text NOT NULL DEFAULT '',
     search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(doc->>'description', ''))) STORED,
     PRIMARY KEY (resource_id, uid, recurrence_id),
@@ -393,7 +394,7 @@ CREATE TABLE occurrence (
     CONSTRAINT occurrence_status CHECK (status IN ('scheduled', 'cancelled', 'postponed', 'rescheduled', 'moved_online', 'superseded')),
     CONSTRAINT occurrence_start_at_range CHECK (start_at >= '0001-01-01 00:00:00+00' AND start_at < '10000-01-01 00:00:00+00'),
     CONSTRAINT occurrence_end_at_range CHECK (end_at >= '0001-01-01 00:00:00+00' AND end_at < '10000-01-01 00:00:00+00'),
-    CONSTRAINT occurrence_modified_range CHECK (modified >= '0001-01-01 00:00:00+00' AND modified < '10000-01-01 00:00:00+00')
+    CONSTRAINT occurrence_modified_at_range CHECK (modified_at >= '0001-01-01 00:00:00+00' AND modified_at < '10000-01-01 00:00:00+00')
 );
 CREATE INDEX occurrence_geography_idx ON occurrence USING gist ((point::geography));
 CREATE INDEX occurrence_hash_idx ON occurrence USING btree (resource_id, content_hash, start_at, name);
@@ -435,13 +436,13 @@ CREATE TABLE podcast_episode (
     url text NOT NULL CONSTRAINT podcast_episode_url_check CHECK (octet_length(url) <= 2048),
     name text CONSTRAINT podcast_episode_name_check CHECK (octet_length(name) <= 512),
     image text CONSTRAINT podcast_episode_image_check CHECK (octet_length(image) <= 2048),
-    published timestamp with time zone,
+    published_at timestamp with time zone,
     stream jsonb CONSTRAINT podcast_episode_stream_check CHECK (octet_length(stream::text) <= 4096),
     PRIMARY KEY (resource_id, position),
-    CONSTRAINT podcast_episode_published_range CHECK (published >= '0001-01-01 00:00:00+00' AND published < '10000-01-01 00:00:00+00')
+    CONSTRAINT podcast_episode_published_at_range CHECK (published_at >= '0001-01-01 00:00:00+00' AND published_at < '10000-01-01 00:00:00+00')
 );
 -- An episode's link, for the look-up of whether a stored list names a page (`episodes::join_page`).
-CREATE INDEX podcast_episode_url ON podcast_episode (url);
+CREATE INDEX podcast_episode_url_idx ON podcast_episode USING btree (url);
 -- A show's stored list as its last read of the feed left it: whether the feed lists older episodes
 -- than the list holds (the read ended before the feed did, or the feed has more than are kept).
 -- Written and cleared with the list's rows (`episodes::replace`, `episodes::clear`).
@@ -468,7 +469,7 @@ CREATE TABLE resource_change (
     seq bigint NOT NULL,
     resource_id text NOT NULL,
     occurrence_key text,
-    at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
+    changed_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
     class text NOT NULL CONSTRAINT resource_change_class_check CHECK (class IN ('created', 'rescheduled', 'relocated', 'cancelled', 'uncancelled', 'renamed', 'details', 'deleted', 'aliased')),
     fields text[] NOT NULL,
     before jsonb,
@@ -486,7 +487,7 @@ CREATE SEQUENCE resource_change_seq_seq START WITH 1 INCREMENT BY 1 NO MINVALUE 
 ALTER TABLE resource_change ALTER COLUMN seq SET DEFAULT nextval('resource_change_seq_seq');
 ALTER TABLE resource_change ADD PRIMARY KEY (seq);
 CREATE INDEX resource_change_after_venue_idx ON resource_change USING btree ((after #>> '{venue,osm_id}'), (after #>> '{venue,osm_version}'));
-CREATE INDEX resource_change_at_idx ON resource_change USING btree (at);
+CREATE INDEX resource_change_changed_at_idx ON resource_change USING btree (changed_at);
 CREATE INDEX resource_change_before_venue_idx ON resource_change USING btree ((before #>> '{venue,osm_id}'), (before #>> '{venue,osm_version}'));
 CREATE INDEX resource_change_osm_idx ON resource_change USING btree (osm_type, osm_id) WHERE osm_type IS NOT NULL;
 CREATE INDEX resource_change_resource_idx ON resource_change USING btree (resource_id, seq);
@@ -494,7 +495,7 @@ CREATE INDEX resource_change_resource_idx ON resource_change USING btree (resour
 -- Changes as they are read: an OSM change shows the place versions it names, an event change its
 -- venue's location.
 CREATE VIEW change_document AS
-    SELECT c.seq, c.resource_id, c.occurrence_key, c.at, c.class, c.fields, c.source,
+    SELECT c.seq, c.resource_id, c.occurrence_key, c.changed_at, c.class, c.fields, c.source,
         CASE WHEN c.source = 'osm' AND c.before IS NOT NULL THEN o.versions -> (c.before->>'version') ELSE event_document(c.before) END AS before,
         CASE WHEN c.source = 'osm' AND c.after IS NOT NULL THEN o.versions -> (c.after->>'version') ELSE event_document(c.after) END AS after,
         CASE WHEN c.source = 'osm' OR c.before #>> '{venue,osm_id}' IS NOT NULL OR c.after #>> '{venue,osm_id}' IS NOT NULL
@@ -907,7 +908,8 @@ CREATE TABLE derived_link (
     source text NOT NULL,
     via text NOT NULL,
     kind text,
-    at timestamp with time zone,
+    -- A time that belongs to the link (an archived copy's capture), its `at` in `also_on`.
+    captured_at timestamp with time zone,
     key text,
     seen_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
@@ -1097,7 +1099,7 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
  -- two tagged spellings of one F-Droid page share its slot even when the derived link is one of them.
  services AS (SELECT DISTINCT lower(l.site) AS service FROM derived_link l JOIN owners o USING(resource_id)
    WHERE l.expires_at>now() AND l.site IS NOT NULL AND l.source NOT IN (SELECT source FROM also_on_source_off)),
- derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.at,
+ derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.captured_at,
      count(*) OVER (PARTITION BY l.link_id) AS named
    FROM derived_link l JOIN owners o USING(resource_id)
    WHERE l.expires_at>now() AND l.source NOT IN (SELECT source FROM also_on_source_off)
@@ -1112,7 +1114,7 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
      CASE WHEN starts_with(lower(album),(SELECT title FROM original)) THEN -1 ELSE 0 END::bigint AS rank,
      CASE WHEN service IS NOT NULL AND (music OR lower(service) IN (SELECT service FROM services)) THEN lower(service) ELSE 'member:'||id END AS service,
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged LEFT JOIN placed p ON p.link_id=tagged.id
-   UNION ALL SELECT 2,lower(site),uri,p.rank,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived LEFT JOIN placed p ON p.link_id=derived.link_id),
+   UNION ALL SELECT 2,lower(site),uri,p.rank,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',captured_at)) FROM derived LEFT JOIN placed p ON p.link_id=derived.link_id),
  -- The card's own service, by its URL alone, like a member's.
  own AS (SELECT lower(coalesce(r.doc->>'service',CASE WHEN r.osm_type IS NOT NULL THEN 'OpenStreetMap' END)) AS service,lower(r.host) AS host,
    r.type IN ('MusicRecording','MusicAlbum','MusicGroup','MusicPlaylist') AS music FROM resource r WHERE r.id=also_on.resource),
@@ -1456,7 +1458,7 @@ CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 -- is under way), so a restart resumes it, the generation of the last full import begun, where
 -- the next update starts (`position`: a replication sequence, a time; kept from run to run), the
 -- cards it holds, the upstream version read (a dump's date), when the last full import and the
--- last update finished, how current the cards are (`current_as_of`: the upstream time of the data
+-- last update finished, how current the cards are (`upstream_at`: the upstream time of the data
 -- the last finished run left, which the update lag counts from), why an update asked for a full
 -- import (`import_requested`, until that import begins as a new one), why it waits (`waiting`:
 -- free disk, another large import), its errors, and the scope of its last finished full import
@@ -1477,7 +1479,7 @@ CREATE TABLE catalogue_state (
     upstream_version text CONSTRAINT catalogue_state_upstream_version_check CHECK (octet_length(upstream_version) <= 256),
     last_import_at timestamp with time zone,
     last_update_at timestamp with time zone,
-    current_as_of timestamp with time zone,
+    upstream_at timestamp with time zone,
     -- These three are text for the operator (`pinakesd catalogue status`), each cut to 1 KiB by its
     -- writer.
     import_requested text CONSTRAINT catalogue_state_import_requested_check CHECK (octet_length(import_requested) <= 1024),

@@ -3024,7 +3024,7 @@ async fn change_lookup_pins_a_relative_since_per_cursor(pool: PgPool) {
     let uri = "https://example.org/changing";
     let id = store::ensure_resource(&pool, uri).await.unwrap();
     for second in [10, 20, 30] {
-        sqlx::query("INSERT INTO resource_change(resource_id,class,fields,after,source,at) VALUES($1,'details',ARRAY['name'],$2,'web',$3)")
+        sqlx::query("INSERT INTO resource_change(resource_id,class,fields,after,source,changed_at) VALUES($1,'details',ARRAY['name'],$2,'web',$3)")
             .bind(&id)
             .bind(json!({"name": format!("v{second}")}))
             .bind(minute + chrono::Duration::seconds(second))

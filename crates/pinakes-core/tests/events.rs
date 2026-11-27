@@ -883,7 +883,7 @@ async fn a_date_its_publisher_cancelled_stays_cancelled_beside_a_new_twin(pool: 
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE resource_change SET at=at-interval '1 hour' WHERE occurrence_key='[\"event_c0@meetup.com\",\"\"]'")
+    sqlx::query("UPDATE resource_change SET changed_at=changed_at-interval '1 hour' WHERE occurrence_key='[\"event_c0@meetup.com\",\"\"]'")
         .execute(&pool)
         .await
         .unwrap();
@@ -4064,7 +4064,7 @@ async fn out_of_range_instants_never_fail_a_feed(pool: PgPool) {
         let pool = pool.clone();
         async move {
             sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Value)>(
-                "SELECT uid,end_at,modified,coalesce(doc->'warnings','null') FROM occurrence WHERE resource_id=$1 ORDER BY uid",
+                "SELECT uid,end_at,modified_at,coalesce(doc->'warnings','null') FROM occurrence WHERE resource_id=$1 ORDER BY uid",
             )
             .bind(id)
             .fetch_all(&pool)
@@ -4353,13 +4353,16 @@ async fn sub_microsecond_instants_never_round_past_9999(pool: PgPool) {
     let cfg = EventConfig::default();
     snapshot(&pool, &id, uri, &body(&["a", "b", "c"]), &cfg).await;
     // The schema itself refuses an instant Postgres rounded into year 10000.
-    let refused = sqlx::query("UPDATE occurrence SET modified=make_timestamptz(10000,1,1,0,0,0,'UTC') WHERE resource_id=$1 AND uid='a'")
+    let refused = sqlx::query("UPDATE occurrence SET modified_at=make_timestamptz(10000,1,1,0,0,0,'UTC') WHERE resource_id=$1 AND uid='a'")
         .bind(&id)
         .execute(&pool)
         .await
         .unwrap_err()
         .to_string();
-    assert!(refused.contains("occurrence_modified_range"), "{refused}");
+    assert!(
+        refused.contains("occurrence_modified_at_range"),
+        "{refused}"
+    );
 }
 
 /// chrono reads 9999-12-31T23:59:60Z as year 9999 while Postgres rolls it into

@@ -259,7 +259,7 @@ async fn a_dump_becomes_cards(pool: PgPool) {
     assert_eq!(state.upstream_version.as_deref(), Some(B));
     assert_eq!(state.position, Some(json!({ "version": B, "limit": null })));
     assert_eq!(
-        state.current_as_of.unwrap().to_rfc3339(),
+        state.upstream_at.unwrap().to_rfc3339(),
         "2026-11-25T01:17:36.116289+00:00"
     );
     assert!(state.last_import_at.is_some() && state.run.is_none());
@@ -743,7 +743,7 @@ async fn the_dump_is_as_current_as_its_earliest_file(pool: PgPool) {
     );
     let state = run(&s, &dir, Run::Import).await.unwrap();
     assert_eq!(
-        state.current_as_of.unwrap().to_rfc3339(),
+        state.upstream_at.unwrap().to_rfc3339(),
         "2026-11-24T23:00:00.500+00:00"
     );
 }
@@ -2062,7 +2062,7 @@ async fn the_plan_polls_latest_hourly(pool: PgPool) {
         last_import_at: Some(chrono::Utc::now()),
         last_update_at: None,
         import_requested: None,
-        current_as_of: None,
+        upstream_at: None,
         waiting: None,
         last_error: None,
         error_count: 0,

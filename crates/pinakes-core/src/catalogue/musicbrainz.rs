@@ -596,7 +596,7 @@ impl MusicBrainz {
                 .await?;
         }
         if let Some(at) = as_of {
-            job.set_current_as_of(at);
+            job.set_upstream_at(at);
         }
         job.set_position(serde_json::json!({ "version": version, "limit": job.limit() }));
         job.upstream_version(&version).await?;
@@ -2615,7 +2615,7 @@ mod tests {
             last_import_at: None,
             last_update_at: None,
             import_requested: None,
-            current_as_of: None,
+            upstream_at: None,
             waiting: None,
             last_error: None,
             error_count: 0,

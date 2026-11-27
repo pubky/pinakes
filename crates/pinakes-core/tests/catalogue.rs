@@ -43,7 +43,7 @@ struct Fixture {
     changes: Mutex<(Vec<Card>, Vec<String>)>,
     /// How an update ends.
     update_end: Mutex<UpdateEnd>,
-    /// The upstream time a run states (`Job::set_current_as_of`); none: it states nothing.
+    /// The upstream time a run states (`Job::set_upstream_at`); none: it states nothing.
     current: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Panic once, in the next import.
     panic_once: AtomicBool,
@@ -130,7 +130,7 @@ impl Importer for Fixture {
         }
         job.upstream_version("2026-11-24").await?;
         if let Some(at) = *self.current.lock().unwrap() {
-            job.set_current_as_of(at);
+            job.set_upstream_at(at);
         }
         Ok(())
     }
@@ -149,7 +149,7 @@ impl Importer for Fixture {
             .unwrap_or(0);
         job.set_position(json!({ "sequence": sequence + 1 }));
         if let Some(at) = *self.current.lock().unwrap() {
-            job.set_current_as_of(at);
+            job.set_upstream_at(at);
         }
         Ok(*self.update_end.lock().unwrap())
     }
@@ -802,7 +802,7 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     store::ensure_state(&pool, Catalogue::Wikidata)
         .await
         .unwrap();
-    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '1 hour',current_as_of=now()-interval '50 hours',position='{\"refused\":\"20261125\"}' WHERE catalogue='wikidata'")
+    sqlx::query("UPDATE catalogue_state SET cards=42,error_count=3,last_import_at=now()-interval '3 days',last_update_at=now()-interval '1 hour',upstream_at=now()-interval '50 hours',position='{\"refused\":\"20261125\"}' WHERE catalogue='wikidata'")
         .execute(&pool)
         .await
         .unwrap();
@@ -1032,14 +1032,14 @@ async fn a_card_the_table_refuses_does_not_stop_its_part(pool: PgPool) {
 /// where it was. An update can hand over to a full import, which starts in a new generation
 /// without marking the data current.
 #[sqlx::test(migrations = "../../migrations")]
-async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(pool: PgPool) {
+async fn current_at_follows_upstream_and_an_update_can_ask_for_a_full_import(pool: PgPool) {
     let (ctx, _dir) = context(&pool, plenty());
     let at = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
     let fixture = Fixture::new(Catalogue::Wikidata, cards(5));
     *fixture.current.lock().unwrap() = Some(at("2026-11-20T00:00:00Z"));
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
     assert_eq!(
-        state(&pool, Catalogue::Wikidata).await.current_as_of,
+        state(&pool, Catalogue::Wikidata).await.upstream_at,
         Some(at("2026-11-20T00:00:00Z"))
     );
     // An update that finds nothing new and says nothing: finished, the data no more current.
@@ -1048,7 +1048,7 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
     let s = state(&pool, Catalogue::Wikidata).await;
     assert!(s.last_update_at.is_some());
-    assert_eq!(s.current_as_of, Some(at("2026-11-20T00:00:00Z")));
+    assert_eq!(s.upstream_at, Some(at("2026-11-20T00:00:00Z")));
     let metrics = Metrics::new().unwrap();
     metrics.refresh(&pool).await.unwrap();
     let lag = metrics.catalogue_lag.with_label_values(&["wikidata"]).get();
@@ -1059,7 +1059,7 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
     *fixture.next.lock().unwrap() = Some(Run::Update);
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
     assert_eq!(
-        state(&pool, Catalogue::Wikidata).await.current_as_of,
+        state(&pool, Catalogue::Wikidata).await.upstream_at,
         Some(at("2026-11-22T00:00:00Z"))
     );
     // An update that can't apply the changes asks for a full import: nothing marked current,
@@ -1078,8 +1078,8 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
     );
     assert_eq!(s.generation, before.generation);
     assert_eq!(
-        (s.current_as_of, s.last_update_at),
-        (before.current_as_of, before.last_update_at)
+        (s.upstream_at, s.last_update_at),
+        (before.upstream_at, before.last_update_at)
     );
     // The next step runs that import from the start as a new one, without asking the importer.
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
@@ -1087,15 +1087,12 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
     assert_eq!(s.import_requested, None);
     assert_eq!(fixture.started_from.lock().unwrap().last(), Some(&None));
     assert_eq!((s.run, s.generation, s.cards), (None, 2, 5));
-    assert_eq!(s.current_as_of, Some(at("2026-11-25T00:00:00Z")));
+    assert_eq!(s.upstream_at, Some(at("2026-11-25T00:00:00Z")));
     // A full import that says nothing is current as of its end.
     *fixture.current.lock().unwrap() = None;
     *fixture.next.lock().unwrap() = Some(Run::Import);
     assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
-    let current = state(&pool, Catalogue::Wikidata)
-        .await
-        .current_as_of
-        .unwrap();
+    let current = state(&pool, Catalogue::Wikidata).await.upstream_at.unwrap();
     assert!((chrono::Utc::now() - current).num_seconds() < 60);
 }
 

@@ -75,7 +75,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_catalogue_needs_contact{catalogue}` | Whether the catalogue is on but its importer does not start for want of `http.contact` (1; MusicBrainz and OpenStreetMap) or not (0) |
 | `pinakes_catalogue_last_import_timestamp_seconds{catalogue}` | When its last full import finished; 0 before the first |
 | `pinakes_catalogue_last_update_timestamp_seconds{catalogue}` | When its last update finished; 0 before the first |
-| `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds its cards are behind upstream: since `current_as_of`, the upstream time of the data its last finished run left (a dump's date, the last change applied); 0 before its first full import has finished. An update that finds nothing new doesn't lower it |
+| `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds its cards are behind upstream: since `upstream_at`, the upstream time of the data its last finished run left (a dump's date, the last change applied); 0 before its first full import has finished. An update that finds nothing new doesn't lower it |
 | `pinakes_catalogue_max_update_lag_seconds{catalogue}` | How far behind upstream its cards may fall before `CatalogueUpdateLag` fires: its source's publication rhythm with a margin (2 days for Wikidata, OpenStreetMap, Tranco and the package registries; 5 for MusicBrainz; 9 for Podcast Index; 100 for OpenAlex) |
 | `pinakes_catalogue_waiting_for_turn{catalogue}` | 1 while its full import waits for another large catalogue's full import (one runs at a time), else 0 |
 | `pinakes_catalogue_import_errors_total{catalogue}` | Failed import and update runs; kept in the database (`catalogue_state.error_count`), so a restart does not reset it |
