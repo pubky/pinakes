@@ -1809,9 +1809,9 @@ errors, the last finished full import's scope (`scope`), the cards the full impo
 read (`generation_cards`) and an operator's allowance to shrink (`shrink_allowed`).
 
 `catalogue_card` leaves a fifth of each page free (`fillfactor = 80`), so a full import's stamp of an
-unchanged card can stay on its page: its heap is about a quarter larger than a packed table's (at
-about 1.3 KB per card, 1M cards take about 1.6 GB of heap, not 1.3 GB). About one stamp in four is
-heap-only on a full re-import.
+unchanged card can stay on its page: its heap is about a quarter larger than a packed table's
+(1.03 KB per card measured over 1.3 million real cards, against about 0.8 KB packed). About one
+stamp in four is heap-only on a full re-import.
 
 ### Turn a catalogue off
 

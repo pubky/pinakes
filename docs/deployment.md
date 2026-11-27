@@ -240,7 +240,7 @@ docker buildx imagetools inspect "ghcr.io/pubky/pinakes:$VERSION"
 | Nexus | The reference feed and social and reach reads (`nexus_url`) | A Nexus that serves the `/v1` routes Pinakes reads ([README](../README.md)). It is a fixed, trusted upstream; optional authorization comes from the environment. |
 | Dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | Persistent and writable, with room for two copies of the file ([ODbL dump](operations.md#odbl-dump)). A CDN can cache the file by its `ETag`. |
 | Catalogue directory | `catalogues.dir`: downloads and temporary files of catalogue imports, one directory per catalogue | Writable by UID 10001, with room for the largest large catalogue's full import ([catalogues](#catalogues)). It need not be backed up. |
-| Text index directory | `search.index_dir`: the index text searches read ([text index](operations.md#text-index)) | Local disk, writable by UID 10001, with room for two copies during `reindex` (about 0.7 KB per searchable unit on the development data, and 170 B per catalogue card measured on 100,000 synthetic cards). Derived data: a missing index is rebuilt from the database at start, so a volume only saves that rebuild. |
+| Text index directory | `search.index_dir`: the index text searches read ([text index](operations.md#text-index)) | Local disk, writable by UID 10001, with room for two copies during `reindex` (about 0.7 KB per searchable unit on the development data, and 360-380 B per catalogue card on the real cards of the [small regional profile](#small-regional-profile)). Derived data: a missing index is rebuilt from the database at start, so a volume only saves that rebuild. |
 | Prometheus and Alertmanager | Scraping the admin `/metrics` and evaluating the supplied alerts | A private scrape path. [ops/README.md](../ops/README.md) has the rules and a Grafana dashboard. |
 | MusicBrainz mirror (optional) | Music lookups, at `[also_on.sources.musicbrainz] base_url` | Optional. The mirror's host gets the shared per-host pace, and a mirror on a private address is refused ([operations](operations.md#also-on)). See the [MusicBrainz Server documentation](https://musicbrainz.org/doc/MusicBrainz_Server). |
 
@@ -328,7 +328,8 @@ To count the graph again, count `MATCH ()-[t:TAGGED]->(x:Resource)` and return `
 
 ### Catalogue cards
 
-A catalogue card takes about 1 KB in PostgreSQL with its indexes (measured on 1.9 million cards).
+A catalogue card takes 1.2-4 KB in PostgreSQL with its indexes, depending on the catalogue (2.1 KB
+on average over the [small regional profile](#small-regional-profile)'s 1.3 million cards).
 Every catalogue is on by default; switch off the ones you don't want
 ([operations](operations.md#catalogue-sections)). A small instance takes a part:
 `catalogues.osm.region` for one region of OpenStreetMap, `catalogues.wikidata.limit` and
@@ -350,78 +351,261 @@ Each catalogue's importer follows these ([importer rules](operations.md#importer
   size PostgreSQL's disk from the [storage model](#storage-model).
 - **One large import at a time.** Full imports of Wikidata, MusicBrainz, OpenStreetMap and
   OpenAlex run one at a time, so their temporary files don't pile up: one cut off by a failure or
-  a restart keeps the turn until it has finished. Give `catalogues.dir` room for the largest of
-  them. A large catalogue switched off in the middle of its full import keeps its files there
+  a restart keeps the turn until it has finished. Updates and the other catalogues' runs take no
+  turn and run beside them. Give `catalogues.dir` room for the largest large import and the runs
+  beside it. A large catalogue switched off in the middle of its full import keeps its files there
   until it is on again and finishes, or until `pinakesd catalogue drop <name>` deletes its
   directory with its cards.
+- **A contact.** Every importer needs `http.contact`; without it, it doesn't start and
+  `catalogue status` says it waits for one.
 
-### MusicBrainz
+### Sizes
 
-The importer needs `http.contact` ([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md)).
-Measured on a sample of the real dump (the first 60 MB of the release file and a few MB of the
-others: 63,313 lines, 177,190 cards) on a 20-core host, and estimated from it for the whole
-dump (48.8 million cards):
+Each catalogue at full size. The measured figures come from samples of the real files (each
+catalogue's page, and the [small regional profile](#small-regional-profile)); the full-size
+figures are estimates from them.
 
-| | Sample | Whole dump (estimate) |
-| --- | --- | --- |
-| Download | 84 MB a dump | 26 GB, once per run, streamed (MusicBrainz serves at about 35 MB/s) |
-| Disk under `catalogues.dir/musicbrainz` | 51 MB of sorted runs (0.6 of the files) | about 16 GB for an import, 19 GB for an update (the stored cards' hashes too); a run waits for 40 GB free (`DISK_NEED`), less what a cut-off run left there |
-| PostgreSQL | 254 MB (1.4 KB a card with its indexes) | about 70 GB |
-| Memory | 195 MB for the import, 214 MB for the update | about 1.5 GB (512 MiB of records being sorted, the xz decoder, the lines in flight) |
-| Read and sort | 2.2 s | 15–20 minutes, bound by the download |
-| Write | 8.1 s (21,800 cards a second) | about 40 minutes for a full import; an update writes only what changed (0.9% of the sample's cards from one dump to the next) |
-
-A full import takes about an hour; the text index then reads the new cards in the background
-([text index](operations.md#text-index)).
-### OpenStreetMap
-
-The `osm` catalogue ([source page](sources/osm_catalogue.md)) starts once `http.contact` is set.
-With the default `catalogues.osm.region = "planet"`, a daemon with the catalogue on downloads the
-planet file as soon as `catalogues.dir` has the room: set a region (`europe/switzerland`) on a
-small or staging instance, or switch the catalogue off.
-
-| | Planet | A region |
-| --- | --- | --- |
-| Download | About 96 GB (`planet-latest.osm.pbf`: 96,072,105,092 bytes on 2026-11-26) | The extract (Switzerland about 550 MB) |
-| Temporary disk while importing | The file, the node index (about 115 GB, dense; the import stops with `disk` past about 172 GB) and the set-aside relations (a few GB) | The file and about twice its size (the node index, 16 bytes per node) |
-| Memory | Up to about 2.5 GB for the relations' member ways, plus the decoded blocks waiting: at most 2 per decoding thread (at most 8 threads), each at most about 250 MB (real blocks: a few MB), so at most about 4 GB | Hundreds of MB |
-| Cards | About 35 million (estimate), about 1.4 KB each in PostgreSQL with their indexes: about 49 GB. The map cells' totals add a few million rows (Switzerland: 48,914 rows, 7.5 MB) | Switzerland: 400,838 cards, 1,391 B each (measured) |
-| Import time | About 15 hours plus the download at the measured rate (673 cards/s, a debug build on a busy host; a release build is faster). The map cells' triggers take about 40% of a card write (Switzerland: 100,000 located cards in 7.7 s with them, 4.7 s without) | Switzerland: 596 s after a 552 MB download (measured, debug build) |
-| Updates | One daily change file (about 130 MB compressed), read to `catalogues.dir/osm`; about 1 GB of memory while it is applied (estimate: every object's last version, the changed nodes' locations); a file that would hold more than 1 GiB is refused (`too_large`) | The region's daily file (kilobytes to a few MB) |
-| Update lag | Updates wait while a full import runs (every 90 days, about 15 hours plus the download, estimate): the lag can pass the 2-day alert when the import waits for the large-import turn or free disk | Minutes of import every 30 days |
-| ODbL dump | Adds one line per imported place, written from one repeatable-read snapshot: Switzerland's 400,839 places took 32 s and 21 MB compressed (measured), so the planet's about 45 minutes and 2 GB (estimate); the dump directory holds two copies while one is written | Megabytes |
-
-The file and the index are removed once the import has finished; every 30 days (the planet: every
-90) a full import reads a new file again.
-
-### Wikidata
-
-The importer needs `http.contact` ([the Wikidata catalogue](sources/catalogue_wikidata.md)).
-Catalogues are on by default: a daemon whose configuration has no `[catalogues]` section and sets
-`http.contact` starts the Wikidata importer, which waits for 129 GB free under `catalogues.dir`,
-downloads the 104 GB dump and puts its cards in search. An instance that should import nothing sets
-`[catalogues] enabled = false`; one that should import other catalogues but not Wikidata sets
-`[catalogues.wikidata] enabled = false` (or `limit = N` for a part of it, read as a stream).
-Measured on a 150,000-card sample of the real dump; full-size figures are estimates:
-
-| Catalogue | Disk under `catalogues.dir` while it runs | PostgreSQL | Memory | First import | Updates |
+| Catalogue | Cards | A card in PostgreSQL, with its indexes | Database | First import | Downloads |
 | --- | --- | --- | --- | --- | --- |
-| `wikidata` | The dump, about 104 GB, until the import ends (and the label files, kept). A first import waits for 129 GB free before it knows the dump's size, then for the dump's size and 4%, and a resumed download for what is left of it and 4 GB | About 21.4 million cards, estimated at 35-45 GB with their indexes (3.3 KB a card on the first 150,000 items, which are the best known and carry the most keys) | Up to about 1 GB for the read (bounded queues; decoded text waiting to be cut is held near 512 MB), plus the labels of classes and genres, which the daemon keeps in memory between updates (estimate: a few million labels, a few hundred MB; at most 16 million), and during an update one API answer at a time (up to 64 MB of JSON, a few hundred MB once parsed) | About 3 hours to download on two connections at Wikimedia's ~5 MB/s each, then the read on half the cores (estimate) | Every 15 minutes, one request at a time: the changed items' sitelinks first, and only those with a Wikipedia article (or a label the catalogue keeps) read in full. Measured on one 19-minute window of real changes (a 20,000-card sample with room to grow): 2,179 items named in 90 s, about 24 a second. Estimate at full size: a median day of changes (about 240,000 items) in about 3 hours, the 2-3 days a first import starts behind in 6-8 hours |
+| `wikidata` | 21.4 million (estimate) | 1.6-2.1 KB on average (estimate: an average item has 4-5 keys); the first 100,000-150,000 items, the best known, measured 3.3-3.9 KB with 11-13 keys | 35-45 GB (estimate) | 4-5 hours (estimate): 3 hours to download on two connections at Wikimedia's ~5 MB/s each, the read on half the cores, and about an hour to write again the ~60% of cards whose labels come later in the dump | The 104 GB dump once; then API requests |
+| `musicbrainz` | 48.8 million (estimate) | 1.4-1.8 KB (measured: 1.43 KB on a 177,190-card sample of the whole dump, 1.77 KB on a 84,621-card limited subset) | 70-90 GB (estimate) | About an hour (estimate): 15-20 minutes to read and sort, bound by the download (about 35 MB/s), about 40 minutes to write | 26 GB a dump, streamed; two dumps a week |
+| `osm` | About 35 million for the planet (estimate); Switzerland 400,838 (measured) | 1.4 KB (1,391 B measured on Switzerland) | About 49 GB for the planet (estimate), and a few million rows of map-cell totals (Switzerland: 48,914 rows, 7.5 MB); Switzerland 0.56 GB | Up to 15 hours plus the download for the planet (estimate from a debug build's 673 cards a second; a release build wrote 5,420 a second on Luxembourg); Switzerland 596 s after the download (measured, debug build) | The planet's 96 GB file every 90 days (a region's extract every 30), and one change file a day (about 130 MB for the planet) |
+| `openalex` | About 15 million (estimate) | 1.9-2.1 KB (1,855 and 2,132 B measured on samples) | 28-32 GB (estimate) | About 2 hours (estimate), bound by the read from S3 | 675 GB from S3 for each full import (the first new snapshot 180 days after the last); a new snapshot's newer files after |
+| `podcastindex` | About 4.8 million (estimate) | 1.7-2.2 KB (1,678 and 2,143 B measured on samples) | 8-10.5 GB (estimate) | 15-30 minutes (estimate): the 1.9 GB download, then 3,900-10,700 cards a second (measured) | 1.9 GB a week |
+| `software` | About 400,000 (396,252 measured on the full files) | 1.2-1.5 KB (1,241 and 1,486 B measured) | About 0.5 GB (estimate) | About a minute (measured: 50.5 s on the full files) | About 0.6 GB a day (the part of the crates.io dump read, F-Droid's 75 MB index, Flathub's 11 MB) |
+| `tranco` | About 650,000 (estimate) | 1.65 KB (measured) | About 1.1 GB (estimate), and 0.15 GB for the list's million sites (measured) | The list in seconds; the homepages in about 46 hours (estimate: about 6 a second, 16 at a time), after the large imports | The 22 MB list a day; each homepage and robots.txt once per 90 days (about 140 GB in all at first, estimate) |
+| All | About 126 million (estimate) | | 190-230 GB (estimate) | 15-25 hours of large imports, one at a time (estimate) | |
 
-With `catalogues.wikidata.limit` the dump is read as a stream and nothing is downloaded to disk;
-the stream is read only up to the limit.
+The text index takes 360-380 B a catalogue card (measured on 1.3 million real cards): about 48 GB
+for all of them (estimate).
 
-### OpenAlex, Podcast Index, software and Tranco
+### Disk and memory while importing
 
-What each importer needs (measured on samples, see each catalogue's page; the full numbers are
-estimates):
+| Catalogue | Free disk it waits for under `catalogues.dir` | Disk while it runs | Memory |
+| --- | --- | --- | --- |
+| `wikidata` | 129 GB before it knows the dump's size, then the dump's size and 4 GB; a resumed download what is left of it and 4 GB; 1 GB with a `limit` and for an update | The dump until the import ends, and the label files (kept); nothing with a `limit` (read as a stream up to the limit) | Up to about 1 GB for the read (bounded queues; decoded text waiting to be cut is held near 512 MB), plus the labels of classes and genres, kept between updates (estimate: a few hundred MB; at most 16 million labels), and during an update one API answer at a time (up to 64 MB of JSON, a few hundred MB once parsed) |
+| `musicbrainz` | 40 GB (`DISK_NEED`), less what a cut-off run left; with a `limit`, 16 KiB a card of it | Sorted runs: 0.6 of the dump files' bytes on a sample, so about 16 GB for an import and 19 GB for an update (estimate; the stored cards' hashes too) | About 1.5 GB (estimate: 512 MiB of records being sorted, the xz decoder, the lines in flight); 158-229 MB measured on samples |
+| `osm` | The planet 215 GB (120 GB to resume); a region 2 GB, then three times its file once it is downloaded; an update 1 GB | The file, the node index (the planet's about 115 GB, dense: the import stops with `disk` past about 172 GB; a region's about twice its file, 16 bytes a node) and the set-aside relations (a few GB); removed once the import has finished | The planet up to about 4 GB: 2.5 GB for the relations' member ways, plus decoded blocks waiting (at most 2 per decoding thread, at most 8 threads, each at most about 250 MB; real blocks are a few MB); a region hundreds of MB (131-225 MB measured); an update about 1 GB (estimate), and a change file that would hold more than 1 GiB is refused (`too_large`) |
+| `openalex` | 32 GiB for a full import, 4 GiB for an update (the cards' database share; nothing is downloaded to disk) | Nothing | Up to 16 files' kept cards (50,000 cards each at most: 1-2 GB at worst, a few hundred MB as a rule) and the IDs with a card (64-bit numbers, about 250-500 MB at full size) |
+| `podcastindex` | 20 GiB, less what a cut-off run's unpacked database holds | The unpacked database (5 GB today) while a run reads it | Under 1 GB (54-83 MB measured) |
+| `software` | 1 GiB | Nothing (streamed) | The crates of the dump, without READMEs, and their downloads, categories and keywords: at most 1 GiB as counted (about 150 MB today) |
+| `tranco` | 1 GiB | Nothing | Up to about 250 MB while a list loads (195-219 MB measured); 16 reads after, and the robots.txt rules kept for deferred pages (about 33 MiB at most: 2,000 origins, 16 KiB each counted with every rule's own memory) |
 
-| Catalogue | Free disk it waits for (`catalogues.dir`) | Memory while it reads | Read | Cards, database |
-| --- | --- | --- | --- | --- |
-| `openalex` | 32 GB for a full import, 4 GB for an update (nothing is downloaded to disk; the cards' database share) | Up to 16 files' kept cards (50,000 cards each at most: 1-2 GB at worst, a few hundred MB as a rule) and the IDs with a card (64-bit numbers, about 250-500 MB at full size) | 675 GB from S3 in each full import; a new snapshot's newer files after | ~15M cards, ~26 GB |
-| `podcastindex` | 20 GB (the unpacked database, 5 GB today, while a run reads it, and the cards) | Under 1 GB | 1.9 GB a week | ~4.8M cards, ~8 GB (1.7 KB a card measured) |
-| `software` | 1 GB (streamed) | The crates of the dump, without READMEs, and their downloads, categories and keywords: at most 1 GiB as counted (about 150 MB today) | ~0.6 GB a day (the part of the crates.io dump read, F-Droid's 75 MB index, Flathub's 11 MB) | ~0.4M cards, ~0.4 GB |
-| `tranco` | 1 GB | Up to about 250 MB while a list loads (195-219 MB measured); 16 reads after, and the robots.txt rules kept for deferred pages (about 33 MiB at most: 2,000 origins, 16 KiB each counted with every rule's own memory) | The 22 MB list a day; then each homepage and robots.txt once per 90 days (about 140 GB in all at first, estimate) | ~0.65M cards, ~1.1 GB (1.65 KB a card measured) |
+### Notes per catalogue
+
+- **Wikidata** ([catalogue page](sources/catalogue_wikidata.md)). Catalogues are on by default: a
+  daemon whose configuration has no `[catalogues]` section and sets `http.contact` starts the
+  Wikidata importer, which downloads the 104 GB dump once the disk is free. An instance that
+  should import nothing sets `[catalogues] enabled = false`; one that should import other
+  catalogues but not Wikidata sets `[catalogues.wikidata] enabled = false`, or `limit = N` for a
+  part of it. An update asks the changed items' sitelinks first and reads in full only those with
+  a Wikipedia article or a label the catalogue keeps: 24 items a second measured on one window of
+  real changes, so a median day of changes (about 240,000 items) in about 3 hours, and the 2-3 days
+  a first import starts behind in 6-8 hours (estimates).
+- **MusicBrainz** ([catalogue page](sources/musicbrainz_catalogue.md)). An update writes only the
+  cards that changed (0.9% of a sample's cards from one dump to the next). With a `limit`, a run
+  reads the release file until the limit is full, then the release-group and artist files until
+  it has found every item the subset needs, which is most of those files (1.2 GB and 1.8 GB).
+- **OpenStreetMap** ([catalogue page](sources/osm_catalogue.md)). With the default
+  `catalogues.osm.region = "planet"`, a daemon with the catalogue on downloads the planet file as
+  soon as `catalogues.dir` has the room: set a region (`europe/switzerland`) on a small or staging
+  instance, or switch the catalogue off. The map cells' triggers take about 40% of a card write
+  (Switzerland: 100,000 located cards in 7.7 s with them, 4.7 s without). Updates wait while a full
+  import runs, so the lag can pass the 2-day alert when the planet's import (every 90 days) waits
+  for the large-import turn or free disk. The ODbL dump adds one line per imported place, written
+  from one repeatable-read snapshot: Switzerland's took 32 s and 21 MB compressed (measured; its
+  400,839 lines are the 400,838 places and the one place the run's lookups had cached), so the
+  planet's about 45 minutes and 2 GB (estimate). The dump directory holds two copies while one is
+  written.
+- **The text index** reads each import's new cards in the background
+  ([text index](operations.md#text-index)): 6,400 cards a second measured.
+
+### Update jobs
+
+Each importer runs its updates in the daemon, on its own:
+
+| Catalogue | Update | How often | `CatalogueUpdateLag` after |
+| --- | --- | --- | --- |
+| `osm` | The region's change files; a full import that reads a new file | Looked for hourly, a new file daily; the full import every 30 days (the planet: every 90) | 2 days |
+| `wikidata` | The recent changes | Every 15 minutes, at once while more than an hour behind | 2 days |
+| `musicbrainz` | The next dump | `LATEST` read hourly; two dumps a week | 5 days |
+| `openalex` | A new snapshot's newer files; a full import of the first new snapshot 180 days after the last full import | Daily look at the manifest | 100 days |
+| `podcastindex` | The weekly database, read whole | Daily look, a new file weekly | 9 days |
+| `software` | Each registry's file, read whole | Daily | 2 days |
+| `tranco` | The day's list, then the homepages that are due | The list daily; homepages as they fall due (at once while some are due); a homepage again after 90 days | 2 days |
+
+The alert fires once a catalogue's lag has been past its allowed lag for 15 minutes. While the
+updates catch up after a full import (`pinakes_catalogue_catching_up` is 1), it waits up to 5
+days longer ([allowed update lag](operations.md#allowed-update-lag)). `pinakesd catalogue status`
+shows each catalogue's last import and update, how current it is and why it waits;
+`pinakes_catalogue_update_lag_seconds` is the lag the alert reads.
+
+### Memory
+
+PostgreSQL and the text index read fastest from memory. Size RAM for the importers that can run
+at once, the daemon, PostgreSQL's cache of the catalogue indexes (about half of `catalogue_card`'s
+size) and the text index, which the daemon reads memory-mapped through the page cache. With less,
+part of both is read from disk and lookups and text searches slow down by the disk's latency
+(not measured).
+
+## Small regional profile
+
+A regional instance imports one region of OpenStreetMap, the first part of Wikidata and
+MusicBrainz, and the software and Tranco catalogues. Set these in the configuration and leave the
+rest as in `pinakes.example.toml`:
+
+```toml
+[http]
+# contact = "operator@example.org" # Set your own address: the importers start once it is set.
+
+[catalogues.wikidata]
+limit = 100000
+[catalogues.musicbrainz]
+limit = 100000
+[catalogues.osm]
+region = "europe/luxembourg"
+[catalogues.openalex]
+enabled = false
+[catalogues.podcastindex]
+enabled = false
+```
+
+OpenAlex has only `min_citations`; Podcast Index, software and Tranco have no size setting: the
+daemon imports each of them whole ([sizes](#sizes)). This block switches OpenAlex and Podcast Index
+off, because whole they need more than the rest of the profile (below).
+
+### Measured
+
+Measured on 2026-11-27 with a release build and PostgreSQL 16, on a shared 20-core host while
+other builds ran (load average 40-60): times are one run each. Each catalogue was imported with
+`pinakesd catalogue import NAME` while the daemon served searches. OpenStreetMap read the
+Luxembourg extract and Wikidata its dump up to the limit. MusicBrainz read the first 143 MB of one
+dump's files, OpenAlex, Podcast Index and crates.io the first 252-315 MB of their real files (all
+with `--from`), F-Droid and Flathub their whole files, and Tranco its list and 45 homepages. The
+run imported samples of OpenAlex and Podcast Index too.
+
+| Catalogue | Read | Cards | First import | Import's peak memory | Database growth | One update |
+| --- | --- | --- | --- | --- | --- | --- |
+| `osm` | Luxembourg, 48 MB | 31,435 | 5.8 s (37 s with the download) | 131 MB | 46 MB | 2 daily change files: 0.7 s |
+| `wikidata` | 340 MB of the dump, streamed | 100,000 | 181 s | 200 MB | 395 MB | 30 minutes of changes: 12 s |
+| `musicbrainz` | 143 MB of one dump's files | 84,621 | 18 s | 158 MB | 150 MB | The next dump: 25 s |
+| `openalex` | 252 MB of three works files | 8,063 | 2.2 s | 61 MB | 17 MB | A 42 MB newer file: 1.7 s |
+| `podcastindex` | 315 MB of the archive | 845,813 | 215 s | 58 MB | 1.84 GB | The database again: 312 s |
+| `software` | 348 MB (262 MB of the crates.io dump) | 262,236 | 86 s | 150 MB | 386 MB | The files again: 86 s |
+| `tranco` | The list (22 MB) and 45 homepages | 10 | 23 s | 133 MB | 154 MB (the list's million sites) | 5 homepages: 1.2 s |
+| All | 1.47 GB | 1,332,178 | 530 s | | 2.95 GB at the end | |
+
+| Measure | Value |
+| --- | --- |
+| Daemon memory (RSS) | 55 MB at start; up to 412 MB while the text index read the new cards; 344 MB idle after the imports; 623-657 MB under a search load (4 clients, 37 searches a second); 891 MB at most, while the text index took in the updates' changes |
+| Database (`pg_database_size`) | 2.95 GB; `catalogue_card` 2.76 GB, half of it indexes |
+| Text index | 509 MB (382 B a card); 479 MB after the updates |
+| `catalogues.dir` | At most 117 MB (OpenStreetMap's file and node index while it imports); 0.4 MB kept after |
+| Text index behind an import | 16 s after Wikidata's, 132 s after Podcast Index's 845,813 cards |
+| Search, busy host | Median 98 ms, 95th percentile 227 ms under the load above; 84 ms and 173 ms for one client |
+
+The block above, run as configured, holds other amounts than this run (estimate): a database of
+about 2.5 GB (Wikidata 0.4 GB, MusicBrainz 0.2 GB, OpenStreetMap 0.05 GB, software 0.5 GB and
+Tranco 1.25 GB once its homepages are read) and a text index of about 0.5 GB. It downloads the
+Luxembourg extract (48 MB) every 30 days and a change file a day, 340 MB of the Wikidata dump once,
+about 0.1 GB of MusicBrainz's release file and most of its release-group and artist files (up to
+3 GB) for each dump, twice a week, about 0.6 GB of software files a day, and Tranco's 22 MB list a
+day and its homepages (about 140 GB in its first pass of about two days).
+
+For the block above, plan on 2 vCPU, 4 GB of RAM and 20 GB of disk (estimate). The daemon peaked
+at 891 MB with the importers in their own processes; with one running in it, about 1.1 GB
+(estimate). The rest of the RAM holds the catalogue indexes and the text index. The disk holds the
+database with room for updates, the text index twice during `reindex`, and the importers'
+free-disk checks (1-2 GB each). OpenAlex and Podcast Index switched on and imported whole add
+36-42 GB of database, 7.5 GB of text index and their own disk checks (32 GiB and 20 GiB under
+`catalogues.dir`): about 4 vCPU, 32 GB of RAM (about 20 GB of catalogue indexes and 8 GB of text
+index) and 140 GB of disk (estimate).
+
+A bigger region grows only OpenStreetMap: its download, the node index (about twice the file) and
+about 1.4 KB a card in PostgreSQL. Switzerland's 552 MB extract gives 400,838 cards and 0.56 GB.
+
+## Staging and production
+
+### Configuration
+
+A staging instance takes a region and limited Wikidata and MusicBrainz, with the other catalogues
+on:
+
+```toml
+[http]
+# contact = "operator@example.org" # Set your own address (or PINAKES__HTTP__CONTACT): the importers start once it is set.
+
+[catalogues]
+enabled = true
+dir = "catalogues" # The container image sets /var/lib/pinakes/catalogues.
+[catalogues.wikidata]
+enabled = true
+limit = 1000000
+[catalogues.musicbrainz]
+enabled = true
+limit = 1000000
+[catalogues.osm]
+enabled = true
+region = "europe/switzerland"
+[catalogues.openalex]
+enabled = true
+min_citations = 50
+[catalogues.podcastindex]
+enabled = true
+[catalogues.tranco]
+enabled = true
+[catalogues.software]
+enabled = true
+```
+
+A production instance imports every catalogue whole. These are the defaults, so a configuration
+without a `[catalogues]` section does the same once `http.contact` is set:
+
+```toml
+[http]
+# contact = "operator@example.org" # Set your own address: the importers start once it is set.
+
+[catalogues]
+enabled = true
+dir = "catalogues"
+[catalogues.wikidata]
+enabled = true
+[catalogues.musicbrainz]
+enabled = true
+[catalogues.osm]
+enabled = true
+region = "planet"
+[catalogues.openalex]
+enabled = true
+min_citations = 50
+[catalogues.podcastindex]
+enabled = true
+[catalogues.tranco]
+enabled = true
+[catalogues.software]
+enabled = true
+```
+
+### What each instance needs
+
+Estimates from the catalogues' [sizes](#sizes), the [small regional profile](#small-regional-profile)
+and an OpenStreetMap import of Switzerland. Size PostgreSQL's data disk at 1.5 times the database,
+for updates, a full import's rewrites and WAL; shared links add to it
+([storage model](#storage-model)). RAM follows the [memory](#memory) rule.
+
+| Need | Staging (estimate) | Production (estimate) |
+| --- | --- | --- |
+| PostgreSQL | About 40-50 GB: OpenAlex 28-32 GB, Podcast Index 8-10.5 GB, Wikidata 2-4 GB (its first million items are the best known, between the 1.6-2.1 KB average and 3.9 KB a card), MusicBrainz 1.4-1.8 GB, Tranco 1.25 GB, OpenStreetMap 0.6 GB, software 0.5 GB | About 190-230 GB: MusicBrainz 70-90 GB, OpenStreetMap 49 GB, Wikidata 35-45 GB, OpenAlex 28-32 GB, Podcast Index 8-10.5 GB, Tranco 1.25 GB, software 0.5 GB |
+| Text index (`search.index_dir`) | About 9 GB; 18 GB during `reindex` | About 48 GB; 95 GB during `reindex` |
+| `catalogues.dir` | About 75-80 GB: OpenAlex's full import waits for 32 GiB free; beside it Podcast Index's run waits for 20 GiB, a MusicBrainz update for 16 GB (16 KiB a card of its limit), the Wikidata and OpenStreetMap updates for 1 GB each, and software and Tranco for 1 GiB each | About 285 GB: the planet's import waits for 215 GB (the 96 GB file and the 115 GB node index), Wikidata's for 129 GB (its 104 GB dump), one at a time; beside it a MusicBrainz update waits for 40 GB, Podcast Index's run for 20 GiB, an OpenAlex update for 4 GiB, a Wikidata update for 1 GB, and software and Tranco for 1 GiB each |
+| Dump directory (`osm.dump_dir`) | About 50 MB (two copies) | About 4 GB (two copies) |
+| Downloads | OpenAlex 675 GB from S3 for each full import; Switzerland's 552 MB extract every 30 days and a change file a day (kilobytes to a few MB); Wikidata 3.4 GB streamed once; MusicBrainz up to 4 GB streamed for each dump (a limit still reads most of the release-group and artist files); Podcast Index 1.9 GB a week; software 0.6 GB a day; Tranco's 22 MB list a day and its homepages (about 140 GB in the first pass) | OpenStreetMap 96 GB every 90 days and a change file a day (about 130 MB); Wikidata 104 GB once; MusicBrainz 26 GB for each dump; OpenAlex 675 GB for each full import; Podcast Index 1.9 GB a week; software 0.6 GB a day; Tranco 22 MB a day and its homepages (about 140 GB in the first pass) |
+| RAM | 48 GB: about 25 GB of catalogue indexes, 9 GB of text index, up to 6 GB for the importers that run at once, 1-2 GB for the daemon | 256 GB: about 95-115 GB of catalogue indexes, 48 GB of text index, up to 10 GB for the importers that run at once (the planet's import up to 4 GB), the daemon; the rest caches card data. 192 GB holds the indexes alone |
+| vCPU | 8 | 16 |
+| First import | About 3-3.5 hours: OpenAlex about 2 hours (bound by the read from S3), Wikidata 30-45 minutes, MusicBrainz 10-20 minutes, OpenStreetMap a few minutes, one at a time; Podcast Index and software beside them | 15-25 hours: OpenStreetMap up to 15 hours plus the download, Wikidata 4-5 hours, OpenAlex about 2 hours, MusicBrainz about an hour, one at a time |
+
+Tranco's first pass of homepage reads takes about two days after the large imports (estimate).
+Each catalogue's update jobs and their cadence are in [update jobs](#update-jobs).
 
 ## Network and secrets
 
@@ -461,7 +645,11 @@ pins DNS answers and checks redirects itself for every request a link can steer
 `download.geofabrik.de`, `planet.openstreetmap.org` and the two buckets the planet's site redirects
 them to (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com`,
 `osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com`), over https, following redirects only
-to those names. Allow them where outbound traffic is filtered by host.
+to those names. The other catalogues read theirs from `dumps.wikimedia.org` and
+`www.wikidata.org` (Wikidata), `data.metabrainz.org` (MusicBrainz), `openalex.s3.amazonaws.com`,
+`public.podcastindex.org`, `tranco-list.eu`, `static.crates.io` (and `cloudfront-static.crates.io`,
+which it redirects to), `f-droid.org` and `dl.flathub.org`; Tranco's homepage reads go to the listed
+sites through the egress policy. Allow them where outbound traffic is filtered by host.
 
 **Nexus and Nominatim.** These are trusted upstreams the operator configures, outside that
 policy: their clients follow no redirect and don't apply the DNS pinning or the private-address
