@@ -621,7 +621,7 @@ async fn a_recurring_uid_is_scoped_to_start_and_a_page_naming_no_calendar_never_
     drained(&pool, &cfg).await;
     // The page's UID key reached the feed's occurrences: the join refused them.
     let shared: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT x.key) FROM resource_group x JOIN resource_group y ON y.key=x.key WHERE x.key LIKE 'ics_uid:%' AND x.resource_id=$1 AND y.resource_id=$2",
+        "SELECT count(DISTINCT x.key) FROM resource_group x JOIN group_unit xu USING(unit_id) JOIN resource_group y ON y.key=x.key JOIN group_unit yu ON yu.unit_id=y.unit_id WHERE x.key LIKE 'ics_uid:%' AND xu.resource_id=$1 AND yu.resource_id=$2",
     )
     .bind(&page)
     .bind(&id)
@@ -694,7 +694,7 @@ async fn forged_or_colon_uids_never_join_across_feeds(pool: PgPool) {
         let pool = pool.clone();
         async move {
             sqlx::query_scalar::<_, i64>(
-                "SELECT count(DISTINCT x.key) FROM resource_group x JOIN resource_group y ON y.key=x.key WHERE x.key LIKE 'ics_uid:%' AND x.resource_id=$1 AND y.resource_id=$2",
+                "SELECT count(DISTINCT x.key) FROM resource_group x JOIN group_unit xu USING(unit_id) JOIN resource_group y ON y.key=x.key JOIN group_unit yu ON yu.unit_id=y.unit_id WHERE x.key LIKE 'ics_uid:%' AND xu.resource_id=$1 AND yu.resource_id=$2",
             )
             .bind(a)
             .bind(b)
@@ -763,7 +763,7 @@ async fn a_uid_never_joins_two_feeds_under_one_name(pool: PgPool) {
     drained(&pool, &cfg).await;
     // Both feeds hold each UID's key, so the key reached both: the join refused them.
     let shared: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM (SELECT key FROM resource_group WHERE key LIKE 'ics_uid:%' GROUP BY key HAVING count(DISTINCT resource_id)=2) k",
+        "SELECT count(*) FROM (SELECT k.key FROM resource_group k JOIN group_unit u USING(unit_id) WHERE k.key LIKE 'ics_uid:%' GROUP BY k.key HAVING count(DISTINCT u.resource_id)=2) k",
     )
     .fetch_one(&pool)
     .await
@@ -1908,7 +1908,7 @@ async fn registry_trust_needs_the_records_own_edition_and_a_real_landing_host(po
     assert_ne!(gid(&pool, &landing).await, gid(&pool, &card).await);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM resource_group WHERE resource_id=$1 AND key LIKE 'cite:%'"
+            "SELECT count(*) FROM resource_group k JOIN group_unit u USING(unit_id) WHERE u.resource_id=$1 AND k.key LIKE 'cite:%'"
         )
         .bind(&card)
         .fetch_one(&pool)
@@ -2764,7 +2764,7 @@ async fn an_expired_member_leaves_its_group(pool: PgPool) {
     };
     for sql in [
         "SELECT count(*) FROM group_unit WHERE resource_id=$1",
-        "SELECT count(*) FROM resource_group WHERE resource_id=$1",
+        "SELECT count(*) FROM resource_group k JOIN group_unit u USING(unit_id) WHERE u.resource_id=$1",
     ] {
         assert_eq!(count(sql).await, 0, "{sql}");
     }

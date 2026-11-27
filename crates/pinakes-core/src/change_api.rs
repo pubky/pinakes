@@ -83,14 +83,14 @@ async fn query(
     if cursor < 0 || !(1..=500).contains(&limit) {
         return Err(ApiError::bad("invalid change cursor or limit"));
     }
-    let mut sql=QueryBuilder::<Postgres>::new("WITH head AS (SELECT coalesce(min(seq)-1,0) AS oldest,coalesce(max(seq),0) AS newest FROM resource_change), filtered AS (SELECT c.seq,c.resource_id,c.occurrence_key,c.at,c.class,c.fields,CASE WHEN c.class='aliased' THEN c.after->>'root' END AS root FROM resource_change c WHERE c.seq>");
+    let mut sql=QueryBuilder::<Postgres>::new("WITH head AS (SELECT coalesce(min(seq)-1,0) AS oldest,coalesce(max(seq),0) AS newest FROM resource_change), filtered AS (SELECT c.seq,c.resource_id,c.occurrence_key,c.changed_at,c.class,c.fields,CASE WHEN c.class='aliased' THEN c.after->>'root' END AS root FROM resource_change c WHERE c.seq>");
     sql.push_bind(cursor);
     // An alias's changes are its root's, beside its own (the line that made it one).
     sql.push(" AND c.resource_id IN (SELECT x FROM unnest(")
         .push_bind(ids)
         .push("::text[]) w(id) LEFT JOIN resource_alias a ON a.alias_id=w.id CROSS JOIN LATERAL (VALUES (w.id),(a.root_id)) v(x) WHERE x IS NOT NULL)");
-    sql.push(" AND c.at>=").push_bind(since);
-    sql.push(" ORDER BY seq LIMIT ").push_bind((limit+1) as i64).push(") SELECT head.*,coalesce((SELECT jsonb_agg(jsonb_build_object('seq',seq,'resource_id',resource_id,'class',class,'fields',fields,'at',floor(extract(epoch FROM at)*1000)::bigint,'occurrence',occurrence_key,'root',root) ORDER BY seq) FROM filtered c),'[]') AS lines FROM head");
+    sql.push(" AND c.changed_at>=").push_bind(since);
+    sql.push(" ORDER BY seq LIMIT ").push_bind((limit+1) as i64).push(") SELECT head.*,coalesce((SELECT jsonb_agg(jsonb_build_object('seq',seq,'resource_id',resource_id,'class',class,'fields',fields,'at',floor(extract(epoch FROM changed_at)*1000)::bigint,'occurrence',occurrence_key,'root',root) ORDER BY seq) FROM filtered c),'[]') AS lines FROM head");
     let row = sql.build().fetch_one(&state.pool).await?;
     let oldest: i64 = row.try_get("oldest")?;
     if cursor > 0 && cursor < oldest {
@@ -159,7 +159,7 @@ pub async fn lookup(
     // re-resolving `now` would otherwise skip lines from the minutes between the pages.
     if relative && body.cursor.is_some_and(|c| c > 0) {
         let cursor_at: Option<chrono::DateTime<chrono::Utc>> =
-            sqlx::query_scalar("SELECT at FROM resource_change WHERE seq=$1")
+            sqlx::query_scalar("SELECT changed_at FROM resource_change WHERE seq=$1")
                 .bind(body.cursor)
                 .fetch_optional(&state.pool)
                 .await?;

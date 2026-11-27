@@ -277,7 +277,7 @@ pub(crate) async fn append(
     // writer passed the key.
     let occurrence = occurrence.map(stored_key);
     lock_sequence(tx).await?;
-    sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,osm_type,osm_id,at,occurrence_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),$9)")
+    sqlx::query("INSERT INTO resource_change(resource_id,class,fields,before,after,source,osm_type,osm_id,changed_at,occurrence_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp(),$9)")
         .bind(id).bind(diff.class).bind(diff.fields).bind(before).bind(after).bind(source).bind(osm.as_ref().map(|o|&o.osm_type)).bind(osm.as_ref().map(|o|o.id)).bind(occurrence.as_deref()).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO source_state(source,change_totals) VALUES($1,jsonb_build_object($2::text,1)) ON CONFLICT(source) DO UPDATE SET change_totals=source_state.change_totals || jsonb_build_object($2::text,coalesce((source_state.change_totals->>$2)::bigint,0)+1)")
         .bind(source).bind(diff.class).execute(&mut **tx).await?;
@@ -1016,7 +1016,7 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
         // The sequence is the last lock a writer takes, so holding it this never waits for a
         // line a writer holds (an opted-out post deleting its history before it appends): those
         // lines go with that writer, or at the next run.
-        let deleted = sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change WHERE at<now()-$1*interval '1 day' FOR UPDATE SKIP LOCKED LIMIT $2)")
+        let deleted = sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change WHERE changed_at<now()-$1*interval '1 day' FOR UPDATE SKIP LOCKED LIMIT $2)")
             .bind(days as f64)
             .bind(RETAIN_BATCH)
             .execute(&mut *tx)
@@ -1036,7 +1036,7 @@ pub async fn retain(pool: &PgPool, days: u32) -> Result<()> {
         let Some(cap) = provider.change_days_cap().filter(|cap| *cap < days) else {
             continue;
         };
-        sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change r WHERE at<now()-$1*interval '1 day' AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(r.before->'credits') WHEN 'array' THEN r.before->'credits' ELSE '[]' END || CASE jsonb_typeof(r.after->'credits') WHEN 'array' THEN r.after->'credits' ELSE '[]' END) c WHERE c->>'provider'=$2) FOR UPDATE SKIP LOCKED)")
+        sqlx::query("DELETE FROM resource_change WHERE seq IN (SELECT seq FROM resource_change r WHERE changed_at<now()-$1*interval '1 day' AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE jsonb_typeof(r.before->'credits') WHEN 'array' THEN r.before->'credits' ELSE '[]' END || CASE jsonb_typeof(r.after->'credits') WHEN 'array' THEN r.after->'credits' ELSE '[]' END) c WHERE c->>'provider'=$2) FOR UPDATE SKIP LOCKED)")
             .bind(cap as f64)
             .bind(provider.name())
             .execute(&mut *tx)

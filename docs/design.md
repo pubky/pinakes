@@ -374,7 +374,7 @@ main tables:
 | `reference` | One row per social reference |
 | `occurrence` | Calendar dates |
 | `resource_alias` | Alias to root |
-| `resource_group`, `group_override` | Group membership and operator curation |
+| `group_unit`, `resource_group`, `group_override` | Group membership (each unit's group), each unit's grouping keys, and operator curation |
 | `resource_key`, `resource_fact`, `derived_link` | What the also-on sources found |
 | `resource_change` | The change journal |
 | `osm_place` | OpenStreetMap-derived facts (published as the ODbL dump) |

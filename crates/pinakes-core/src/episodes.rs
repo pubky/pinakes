@@ -669,7 +669,7 @@ async fn under_stored(
         Option<bool>,
     );
     let rows: Vec<Stored> = sqlx::query_as(
-        "SELECT e.guid,e.url,e.name,e.image,e.published,e.stream::text,l.older FROM podcast_episode e LEFT JOIN podcast_episode_list l ON l.resource_id=e.resource_id WHERE e.resource_id=$1 ORDER BY e.position",
+        "SELECT e.guid,e.url,e.name,e.image,e.published_at,e.stream::text,l.older FROM podcast_episode e LEFT JOIN podcast_episode_list l ON l.resource_id=e.resource_id WHERE e.resource_id=$1 ORDER BY e.position",
     )
     .bind(id)
     .fetch_all(&mut **tx)
@@ -804,7 +804,7 @@ async fn replace(
     let images: Vec<Option<&str>> = list.iter().map(|(e, _)| e.image.as_deref()).collect();
     let published: Vec<Option<DateTime<Utc>>> = list.iter().map(|(e, _)| e.published).collect();
     let streams: Vec<Option<&str>> = list.iter().map(|(_, s)| s.as_deref()).collect();
-    sqlx::query("INSERT INTO podcast_episode(resource_id,position,guid,url,name,image,published,stream) SELECT $1,p,g,u,n,i,d,s::jsonb FROM unnest($2::smallint[],$3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[],$8::text[]) AS t(p,g,u,n,i,d,s)")
+    sqlx::query("INSERT INTO podcast_episode(resource_id,position,guid,url,name,image,published_at,stream) SELECT $1,p,g,u,n,i,d,s::jsonb FROM unnest($2::smallint[],$3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[],$8::text[]) AS t(p,g,u,n,i,d,s)")
         .bind(id).bind(&positions).bind(&guids).bind(&urls).bind(&names).bind(&images).bind(&published).bind(&streams)
         .execute(&mut **tx).await?;
     Ok(())
@@ -968,7 +968,7 @@ pub(crate) async fn on_cards<'a>(
 const CHOSEN: &str = "WITH asked AS (SELECT DISTINCT ON (id) id,borrow FROM unnest($1::text[],$2::bool[]) AS t(id,borrow) ORDER BY id,borrow DESC),\
      chosen AS (SELECT a.id AS card,coalesce(\
        (SELECT a.id WHERE EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=a.id AND e.position=0)),\
-       (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id AND e.position=0) ORDER BY (SELECT max(published) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,(SELECT max(e.position) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC,m.resource_id LIMIT 1)) AS source FROM asked a)";
+       (SELECT m.resource_id FROM group_unit u JOIN group_unit m ON m.group_id=u.group_id WHERE a.borrow AND u.unit_id=a.id AND u.group_id IS NOT NULL AND m.resource_id<>a.id AND m.occurrence_key='' AND EXISTS (SELECT 1 FROM podcast_episode e WHERE e.resource_id=m.resource_id AND e.position=0) ORDER BY (SELECT max(published_at) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC NULLS LAST,(SELECT max(e.position) FROM podcast_episode e WHERE e.resource_id=m.resource_id) DESC,m.resource_id LIMIT 1)) AS source FROM asked a)";
 
 /// Each resource's stored list ([`CHOSEN`]), in order, from its `skip`th episode on, at most
 /// `limit` per resource, as `(resource ID, episode)`. With `playable`, only that list's episodes
@@ -983,8 +983,8 @@ async fn stored(
 ) -> Result<Vec<(String, Episode)>, sqlx::Error> {
     let (ids, shows): (Vec<&str>, Vec<bool>) = ids.iter().map(|(i, s)| (i.as_str(), *s)).unzip();
     let rows: Vec<Row> = sqlx::query_as(&format!(
-        "{CHOSEN} SELECT c.card,e.guid,e.url,e.name,e.image,e.published,e.stream FROM chosen c CROSS JOIN LATERAL \
-           (SELECT e.position,e.guid,e.url,e.name,e.image,e.published,e.stream::text AS stream FROM podcast_episode e WHERE e.resource_id=c.source AND (NOT $4 OR e.stream IS NOT NULL) ORDER BY e.position OFFSET $5 LIMIT $3) e \
+        "{CHOSEN} SELECT c.card,e.guid,e.url,e.name,e.image,e.published_at,e.stream FROM chosen c CROSS JOIN LATERAL \
+           (SELECT e.position,e.guid,e.url,e.name,e.image,e.published_at,e.stream::text AS stream FROM podcast_episode e WHERE e.resource_id=c.source AND (NOT $4 OR e.stream IS NOT NULL) ORDER BY e.position OFFSET $5 LIMIT $3) e \
          ORDER BY c.card,e.position",
     ))
     .bind(&ids)

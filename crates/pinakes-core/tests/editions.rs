@@ -1393,7 +1393,7 @@ async fn an_album_cards_own_pages_stay_from_run_to_run(pool: PgPool) {
     let sources: Vec<Arc<dyn Source>> = vec![Arc::new(Editions)];
     let state = || async {
         sqlx::query_scalar::<_, String>(
-            "SELECT 'link '||uri||' '||coalesce(key,'') FROM derived_link WHERE resource_id=$1 AND source='editions' UNION ALL SELECT 'place '||link_id||' '||coalesce(release,'-')||' '||rank FROM link_release WHERE resource_id=$1 ORDER BY 1",
+            "SELECT 'link '||uri||' '||coalesce(key,'') FROM derived_link WHERE resource_id=$1 AND source='editions' UNION ALL SELECT 'place '||link_id||' '||coalesce(release::text,'-')||' '||rank FROM link_release WHERE resource_id=$1 ORDER BY 1",
         )
         .bind(&card)
         .fetch_all(&pool)

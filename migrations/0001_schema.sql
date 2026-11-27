@@ -37,10 +37,14 @@ CREATE TABLE resource (
     point geometry(Point,4326),
     start_at timestamp with time zone,
     end_at timestamp with time zone,
-    venue_id text,
+    -- The venue's resource (`doc.event.venue.resource_id`). A venue anything names is never
+    -- deleted (the orphan cleanup skips it, and the key refuses it).
+    venue_id text CONSTRAINT resource_venue_id_fkey REFERENCES resource(id),
     doc jsonb NOT NULL DEFAULT '{}' CONSTRAINT resource_doc_check CHECK (octet_length(doc::text) <= 8192),
     search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(doc->>'description', ''))) STORED,
-    resolver text,
+    -- The route that reads it: one of `resolver::ROUTES` or `cards::KINDS` (a test holds the list
+    -- equal to them); NULL for a row no route reads (an alias).
+    resolver text CONSTRAINT resource_resolver_check CHECK (resolver IN ('web', 'pubky', 'geo', 'osm', 'event', 'event_platform', 'media', 'isbn', 'doi', 'nostr', 'activitypub', 'official')),
     resolved_at timestamp with time zone,
     refresh_at timestamp with time zone,
     status text NOT NULL DEFAULT 'pending' CONSTRAINT resource_status_check CHECK (status IN ('ok', 'pending', 'missing', 'unreachable', 'error')),
@@ -53,6 +57,8 @@ CREATE TABLE resource (
     lease_until timestamp with time zone,
     generation bigint NOT NULL DEFAULT 0,
     dead_letter boolean NOT NULL DEFAULT false,
+    -- The class of the last failure (`resolver::error_class`, a `RetryLater` class): a short name,
+    -- never the error's text. Each resolver and source names its own, so the set is open.
     last_error text,
     osm_type text,
     osm_id bigint,
@@ -69,7 +75,11 @@ CREATE TABLE resource (
     -- Bumped by any change grouping reads (groups::fence).
     group_revision bigint NOT NULL DEFAULT 0,
     -- The catalogue card the card is built from (`catalogue_card.id`), while it is: such a row is
-    -- never fetched (`keep_catalogue_backed`); it follows its catalogue card instead.
+    -- never fetched (`keep_catalogue_backed`); it follows its catalogue card instead. No foreign
+    -- key: an import removes cards in bulk while rows still name them, and the removal marks those
+    -- rows (`catalogue_cards_deleted`), whose check (`catalogue::join::drain`) builds them again or
+    -- gives them back to the fetch queue. A key would refuse the removal, or, cleared on delete,
+    -- leave the rows final and out of the queue.
     catalogue_card bigint,
     CONSTRAINT resource_event_boundary CHECK (event_boundary(doc) AND (coalesce(doc #>> '{venue,location_source}' NOT IN ('geocoded', 'osm'), true) OR point IS NULL)),
     CONSTRAINT resource_event_status CHECK (doc->>'event_status' IS NULL OR doc->>'event_status' IN ('scheduled', 'cancelled', 'postponed', 'rescheduled', 'moved_online')),
@@ -99,7 +109,8 @@ CREATE INDEX resource_type_path_idx ON resource USING gin (type_path);
 CREATE INDEX resource_venue_idx ON resource USING btree (venue_id);
 CREATE INDEX resource_venue_version_idx ON resource USING btree ((doc #>> '{venue,osm_id}'), (doc #>> '{venue,osm_version}'));
 
--- A resource whose last error is not a denial starts its denial streak over.
+-- A resource whose last error is not a denial starts its denial streak over. The denials are
+-- `queue::DENIAL_CLASSES` (a test holds the two lists equal).
 CREATE FUNCTION reset_denial_streak() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
@@ -120,7 +131,7 @@ CREATE TABLE resource_alias (
     CONSTRAINT resource_alias_check CHECK (alias_id <> root_id),
     CONSTRAINT resource_alias_basis CHECK (basis IN ('cursor', 'osm', 'identifier', 'service', 'tracking', 'canonical', 'source'))
 );
-CREATE INDEX resource_alias_root ON resource_alias USING btree (root_id);
+CREATE INDEX resource_alias_root_idx ON resource_alias USING btree (root_id);
 
 -- One reference from the Nexus feed (a tag, reply, embed, collection entry, or a post naming
 -- itself), keyed by the object that makes it.
@@ -205,19 +216,22 @@ CREATE VIEW effective_reference AS
 CREATE TABLE resource_derivation (
     parent_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     child_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
+    -- The event adapter that derived it: an `id` of `data/event-adapters.json` (a registry, so no
+    -- list here).
     adapter text NOT NULL,
     expires_at timestamp with time zone,
-    until timestamp with time zone,
+    -- The latest instant the parent's feed rows ask for (`sources`' greatest).
+    linked_until timestamp with time zone,
     first_seen_at timestamp with time zone NOT NULL DEFAULT now(),
     -- Feed row key -> the instant that row asks for (store::link_sources).
     sources jsonb NOT NULL DEFAULT '{}',
     PRIMARY KEY (parent_id, child_id),
     CONSTRAINT resource_derivation_check CHECK (parent_id <> child_id),
     CONSTRAINT resource_derivation_expires_at_range CHECK (expires_at >= '0001-01-01 00:00:00+00' AND expires_at < '10000-01-01 00:00:00+00'),
-    CONSTRAINT resource_derivation_until_range CHECK (until >= '0001-01-01 00:00:00+00' AND until < '10000-01-01 00:00:00+00')
+    CONSTRAINT resource_derivation_linked_until_range CHECK (linked_until >= '0001-01-01 00:00:00+00' AND linked_until < '10000-01-01 00:00:00+00')
 );
-CREATE INDEX resource_derivation_adapter_expiry ON resource_derivation USING btree (adapter, expires_at);
-CREATE INDEX resource_derivation_child ON resource_derivation USING btree (child_id);
+CREATE INDEX resource_derivation_adapter_expires_idx ON resource_derivation USING btree (adapter, expires_at);
+CREATE INDEX resource_derivation_child_idx ON resource_derivation USING btree (child_id);
 
 -- A resource's score from its references (tags count most), for ranking.
 CREATE TABLE resource_score (
@@ -260,6 +274,12 @@ CREATE TABLE source_state (
 
 -- ── Events and places ────────────────────────────────────────────────────────────────────────
 
+-- Whether `versions` is an object of documents each within a document's cap (`osm_place.doc`'s):
+-- as many as the retention keeps, none larger than a document.
+CREATE FUNCTION osm_versions_fit(versions jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT CASE WHEN jsonb_typeof(versions) = 'object' THEN NOT EXISTS (SELECT 1 FROM jsonb_each(versions) v WHERE octet_length(v.value::text) > 8192) ELSE false END $$;
+
 -- An OpenStreetMap object as Pinakes read it, with each version a resource or event refers to
 -- (`versions`). OSM-derived values live only here, in the OSM catalogue's cards
 -- (`catalogue_card` rows of catalogue `osm`), `osm_rename`, `osm_removed` and `osm_successor`:
@@ -268,7 +288,8 @@ CREATE TABLE osm_place (
     osm_type text NOT NULL CONSTRAINT osm_place_osm_type_check CHECK (osm_type IN ('node', 'way', 'relation')),
     osm_id bigint NOT NULL CONSTRAINT osm_place_osm_id_check CHECK (osm_id > 0),
     point geometry(Point,4326),
-    bbox double precision[],
+    -- The place's four bounding edges (`ResourceMeta.bbox`).
+    bbox double precision[] CONSTRAINT osm_place_bbox_check CHECK (array_ndims(bbox) = 1 AND cardinality(bbox) = 4),
     name text,
     category text,
     address jsonb NOT NULL DEFAULT '{}',
@@ -283,7 +304,9 @@ CREATE TABLE osm_place (
     search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(display_name, ''))) STORED,
     fetch_doc jsonb NOT NULL,
     fetch_display_name text,
-    versions jsonb NOT NULL DEFAULT '{}',
+    -- One normalised document per version, by its md5, each within `doc`'s cap; the retention
+    -- (`changes::retain`) drops those nothing refers to.
+    versions jsonb NOT NULL DEFAULT '{}' CONSTRAINT osm_place_versions_check CHECK (osm_versions_fit(versions)),
     PRIMARY KEY (osm_type, osm_id)
 );
 COMMENT ON TABLE osm_place IS 'Derivative database © OpenStreetMap contributors, licensed under ODbL 1.0: https://opendatacommons.org/licenses/odbl/1-0/';
@@ -355,13 +378,14 @@ CREATE TABLE occurrence (
     start_at timestamp with time zone NOT NULL,
     end_at timestamp with time zone,
     name text,
-    venue_id text,
+    -- The venue's resource, as `resource.venue_id`.
+    venue_id text CONSTRAINT occurrence_venue_id_fkey REFERENCES resource(id),
     status text NOT NULL,
     url text,
     doc jsonb NOT NULL DEFAULT '{}',
     point geometry(Point,4326),
     sequence bigint NOT NULL DEFAULT 0,
-    modified timestamp with time zone,
+    modified_at timestamp with time zone,
     content_hash text NOT NULL DEFAULT '',
     search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(doc->>'description', ''))) STORED,
     PRIMARY KEY (resource_id, uid, recurrence_id),
@@ -370,7 +394,7 @@ CREATE TABLE occurrence (
     CONSTRAINT occurrence_status CHECK (status IN ('scheduled', 'cancelled', 'postponed', 'rescheduled', 'moved_online', 'superseded')),
     CONSTRAINT occurrence_start_at_range CHECK (start_at >= '0001-01-01 00:00:00+00' AND start_at < '10000-01-01 00:00:00+00'),
     CONSTRAINT occurrence_end_at_range CHECK (end_at >= '0001-01-01 00:00:00+00' AND end_at < '10000-01-01 00:00:00+00'),
-    CONSTRAINT occurrence_modified_range CHECK (modified >= '0001-01-01 00:00:00+00' AND modified < '10000-01-01 00:00:00+00')
+    CONSTRAINT occurrence_modified_at_range CHECK (modified_at >= '0001-01-01 00:00:00+00' AND modified_at < '10000-01-01 00:00:00+00')
 );
 CREATE INDEX occurrence_geography_idx ON occurrence USING gist ((point::geography));
 CREATE INDEX occurrence_hash_idx ON occurrence USING btree (resource_id, content_hash, start_at, name);
@@ -387,7 +411,9 @@ CREATE INDEX occurrence_venue_version_idx ON occurrence USING btree ((doc #>> '{
 CREATE TABLE event_fetch (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     validators jsonb NOT NULL DEFAULT '{}',
-    last_snapshot_at bigint,
+    -- The `fetched_at` of the document whose snapshot was last stored (`ResourceMeta.fetched_at`,
+    -- to the millisecond).
+    last_snapshot_at timestamp with time zone,
     held_keys text[],
     missing_keys jsonb NOT NULL DEFAULT '{}',
     hold_count integer NOT NULL DEFAULT 0,
@@ -410,13 +436,13 @@ CREATE TABLE podcast_episode (
     url text NOT NULL CONSTRAINT podcast_episode_url_check CHECK (octet_length(url) <= 2048),
     name text CONSTRAINT podcast_episode_name_check CHECK (octet_length(name) <= 512),
     image text CONSTRAINT podcast_episode_image_check CHECK (octet_length(image) <= 2048),
-    published timestamp with time zone,
+    published_at timestamp with time zone,
     stream jsonb CONSTRAINT podcast_episode_stream_check CHECK (octet_length(stream::text) <= 4096),
     PRIMARY KEY (resource_id, position),
-    CONSTRAINT podcast_episode_published_range CHECK (published >= '0001-01-01 00:00:00+00' AND published < '10000-01-01 00:00:00+00')
+    CONSTRAINT podcast_episode_published_at_range CHECK (published_at >= '0001-01-01 00:00:00+00' AND published_at < '10000-01-01 00:00:00+00')
 );
 -- An episode's link, for the look-up of whether a stored list names a page (`episodes::join_page`).
-CREATE INDEX podcast_episode_url ON podcast_episode (url);
+CREATE INDEX podcast_episode_url_idx ON podcast_episode USING btree (url);
 -- A show's stored list as its last read of the feed left it: whether the feed lists older episodes
 -- than the list holds (the read ended before the feed did, or the feed has more than are kept).
 -- Written and cleared with the list's rows (`episodes::replace`, `episodes::clear`).
@@ -443,11 +469,13 @@ CREATE TABLE resource_change (
     seq bigint NOT NULL,
     resource_id text NOT NULL,
     occurrence_key text,
-    at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
+    changed_at timestamp with time zone NOT NULL DEFAULT clock_timestamp(),
     class text NOT NULL CONSTRAINT resource_change_class_check CHECK (class IN ('created', 'rescheduled', 'relocated', 'cancelled', 'uncancelled', 'renamed', 'details', 'deleted', 'aliased')),
     fields text[] NOT NULL,
     before jsonb,
     after jsonb,
+    -- Who wrote the change: the resource's route, an event adapter, a source's name (`sources`),
+    -- `alias`, or '' when none is known. Drawn from registries, so no list here.
     source text NOT NULL,
     osm_type text,
     osm_id bigint,
@@ -459,7 +487,7 @@ CREATE SEQUENCE resource_change_seq_seq START WITH 1 INCREMENT BY 1 NO MINVALUE 
 ALTER TABLE resource_change ALTER COLUMN seq SET DEFAULT nextval('resource_change_seq_seq');
 ALTER TABLE resource_change ADD PRIMARY KEY (seq);
 CREATE INDEX resource_change_after_venue_idx ON resource_change USING btree ((after #>> '{venue,osm_id}'), (after #>> '{venue,osm_version}'));
-CREATE INDEX resource_change_at_idx ON resource_change USING btree (at);
+CREATE INDEX resource_change_changed_at_idx ON resource_change USING btree (changed_at);
 CREATE INDEX resource_change_before_venue_idx ON resource_change USING btree ((before #>> '{venue,osm_id}'), (before #>> '{venue,osm_version}'));
 CREATE INDEX resource_change_osm_idx ON resource_change USING btree (osm_type, osm_id) WHERE osm_type IS NOT NULL;
 CREATE INDEX resource_change_resource_idx ON resource_change USING btree (resource_id, seq);
@@ -467,7 +495,7 @@ CREATE INDEX resource_change_resource_idx ON resource_change USING btree (resour
 -- Changes as they are read: an OSM change shows the place versions it names, an event change its
 -- venue's location.
 CREATE VIEW change_document AS
-    SELECT c.seq, c.resource_id, c.occurrence_key, c.at, c.class, c.fields, c.source,
+    SELECT c.seq, c.resource_id, c.occurrence_key, c.changed_at, c.class, c.fields, c.source,
         CASE WHEN c.source = 'osm' AND c.before IS NOT NULL THEN o.versions -> (c.before->>'version') ELSE event_document(c.before) END AS before,
         CASE WHEN c.source = 'osm' AND c.after IS NOT NULL THEN o.versions -> (c.after->>'version') ELSE event_document(c.after) END AS after,
         CASE WHEN c.source = 'osm' OR c.before #>> '{venue,osm_id}' IS NOT NULL OR c.after #>> '{venue,osm_id}' IS NOT NULL
@@ -678,19 +706,15 @@ CREATE TABLE group_unit (
 CREATE INDEX group_unit_group_idx ON group_unit USING btree (group_id, resource_id, unit_id);
 CREATE INDEX group_unit_resource_idx ON group_unit USING btree (resource_id);
 
--- The grouping keys (evidence) of each unit.
+-- The grouping keys (evidence) of each unit. The unit's resource and group are its `group_unit`
+-- row's, read by the unit.
 CREATE TABLE resource_group (
     unit_id text NOT NULL REFERENCES group_unit(unit_id) ON DELETE CASCADE,
-    resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
-    group_id text REFERENCES "group"(id) DEFERRABLE INITIALLY DEFERRED,
     key text NOT NULL CONSTRAINT resource_group_key_check CHECK (octet_length(key) <= 2200),
     admitted_at timestamp with time zone NOT NULL DEFAULT now(),
     PRIMARY KEY (unit_id, key)
 );
 CREATE INDEX resource_group_admission_idx ON resource_group USING btree (key, admitted_at, unit_id);
-CREATE INDEX resource_group_group_idx ON resource_group USING btree (group_id);
-CREATE INDEX resource_group_key_idx ON resource_group USING btree (key);
-CREATE INDEX resource_group_resource_idx ON resource_group USING btree (resource_id);
 
 -- A unit an operator placed in a curated group.
 CREATE TABLE group_override (
@@ -714,7 +738,8 @@ CREATE TABLE group_input (
 CREATE TABLE group_dirty (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     attempts integer NOT NULL DEFAULT 0,
-    last_error text,
+    -- Why the last run was deferred (`groups`; a test holds the list equal to what the code writes).
+    last_error text CONSTRAINT group_dirty_last_error_check CHECK (last_error IN ('work_budget', 'lock_busy', 'snapshot_changed', 'group_failed')),
     next_attempt_at timestamp with time zone NOT NULL DEFAULT now(),
     fence_attempts integer NOT NULL DEFAULT 0,
     resume_key text,
@@ -883,7 +908,8 @@ CREATE TABLE derived_link (
     source text NOT NULL,
     via text NOT NULL,
     kind text,
-    at timestamp with time zone,
+    -- A time that belongs to the link (an archived copy's capture), its `at` in `also_on`.
+    captured_at timestamp with time zone,
     key text,
     seen_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
@@ -908,14 +934,13 @@ CREATE INDEX derived_link_key_idx ON derived_link USING btree (key) WHERE key IS
 CREATE TABLE link_release (
     resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     link_id text NOT NULL,
-    release text,
+    release uuid,
     rank smallint NOT NULL,
     source text NOT NULL,
     seen_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     PRIMARY KEY (resource_id, link_id),
     CONSTRAINT link_release_link_id_check CHECK ((link_id ~ '^[0-9a-f]{32}$'::text)),
-    CONSTRAINT link_release_release_check CHECK ((release IS NULL OR release ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)),
     CONSTRAINT link_release_rank_check CHECK ((rank BETWEEN 0 AND 1000)),
     CONSTRAINT link_release_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
 );
@@ -958,6 +983,7 @@ CREATE TABLE also_on_dirty (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
     attempts integer DEFAULT 0 NOT NULL,
+    -- The class of the last failed run (`resolver::error_class`), as `resource.last_error`.
     last_error text
 );
 CREATE INDEX also_on_dirty_due_idx ON also_on_dirty USING btree (next_attempt_at, resource_id);
@@ -1073,7 +1099,7 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
  -- two tagged spellings of one F-Droid page share its slot even when the derived link is one of them.
  services AS (SELECT DISTINCT lower(l.site) AS service FROM derived_link l JOIN owners o USING(resource_id)
    WHERE l.expires_at>now() AND l.site IS NOT NULL AND l.source NOT IN (SELECT source FROM also_on_source_off)),
- derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.at,
+ derived AS (SELECT DISTINCT ON (l.link_id) l.link_id,l.uri,l.site,l.via,l.kind,l.captured_at,
      count(*) OVER (PARTITION BY l.link_id) AS named
    FROM derived_link l JOIN owners o USING(resource_id)
    WHERE l.expires_at>now() AND l.source NOT IN (SELECT source FROM also_on_source_off)
@@ -1088,7 +1114,7 @@ CREATE FUNCTION also_on(unit text, resource text, cap integer, members boolean, 
      CASE WHEN starts_with(lower(album),(SELECT title FROM original)) THEN -1 ELSE 0 END::bigint AS rank,
      CASE WHEN service IS NOT NULL AND (music OR lower(service) IN (SELECT service FROM services)) THEN lower(service) ELSE 'member:'||id END AS service,
      jsonb_build_object('id',id,'uri',uri,'host',host,'site',site) AS e FROM tagged LEFT JOIN placed p ON p.link_id=tagged.id
-   UNION ALL SELECT 2,lower(site),uri,p.rank,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',at)) FROM derived LEFT JOIN placed p ON p.link_id=derived.link_id),
+   UNION ALL SELECT 2,lower(site),uri,p.rank,-named,lower(site),jsonb_strip_nulls(jsonb_build_object('uri',uri,'site',site,'derived',true,'via',via,'kind',kind,'at',captured_at)) FROM derived LEFT JOIN placed p ON p.link_id=derived.link_id),
  -- The card's own service, by its URL alone, like a member's.
  own AS (SELECT lower(coalesce(r.doc->>'service',CASE WHEN r.osm_type IS NOT NULL THEN 'OpenStreetMap' END)) AS service,lower(r.host) AS host,
    r.type IN ('MusicRecording','MusicAlbum','MusicGroup','MusicPlaylist') AS music FROM resource r WHERE r.id=also_on.resource),
@@ -1365,6 +1391,12 @@ $$;
 
 -- ── Catalogues ───────────────────────────────────────────────────────────────────────────────
 
+-- The catalogues: `Catalogue::ALL`'s names (a test holds the two lists equal). Every table with a
+-- `catalogue` column checks it with this.
+CREATE FUNCTION is_catalogue(name text) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT name IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software') $$;
+
 -- One item a catalogue import holds (`catalogue`): Wikidata, MusicBrainz, OpenStreetMap, OpenAlex,
 -- Podcast Index, Tranco or software packages. The catalogue's importer is its only writer; the
 -- fetch queue, the refresh times and the change journal never touch these rows. `source` is the
@@ -1379,7 +1411,7 @@ $$;
 -- row triggers below (a stamp fires none).
 CREATE TABLE catalogue_card (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    catalogue text NOT NULL CONSTRAINT catalogue_card_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
+    catalogue text NOT NULL CONSTRAINT catalogue_card_catalogue_check CHECK (is_catalogue(catalogue)),
     source text NOT NULL CONSTRAINT catalogue_card_source_check CHECK (source ~ '^[a-z0-9][a-z0-9._-]{0,31}$'),
     source_id text NOT NULL CONSTRAINT catalogue_card_source_id_check CHECK (octet_length(source_id) BETWEEN 1 AND 512),
     uri text NOT NULL CONSTRAINT catalogue_card_uri_check CHECK (octet_length(uri) BETWEEN 1 AND 2048),
@@ -1426,7 +1458,7 @@ CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 -- is under way), so a restart resumes it, the generation of the last full import begun, where
 -- the next update starts (`position`: a replication sequence, a time; kept from run to run), the
 -- cards it holds, the upstream version read (a dump's date), when the last full import and the
--- last update finished, how current the cards are (`current_as_of`: the upstream time of the data
+-- last update finished, how current the cards are (`upstream_at`: the upstream time of the data
 -- the last finished run left, which the update lag counts from), why an update asked for a full
 -- import (`import_requested`, until that import begins as a new one), why it waits (`waiting`:
 -- free disk, another large import), its errors, and the scope of its last finished full import
@@ -1437,7 +1469,7 @@ CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 -- allow-shrink`).
 -- `pinakesd catalogue drop` deletes the row with the cards.
 CREATE TABLE catalogue_state (
-    catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
+    catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (is_catalogue(catalogue)),
     phase text NOT NULL DEFAULT 'idle' CONSTRAINT catalogue_state_phase_check CHECK (phase IN ('idle', 'import', 'update', 'failed', 'disabled')),
     run text CONSTRAINT catalogue_state_run_check CHECK (run IN ('import', 'update')),
     generation bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_generation_check CHECK (generation >= 0),
@@ -1447,10 +1479,12 @@ CREATE TABLE catalogue_state (
     upstream_version text CONSTRAINT catalogue_state_upstream_version_check CHECK (octet_length(upstream_version) <= 256),
     last_import_at timestamp with time zone,
     last_update_at timestamp with time zone,
-    current_as_of timestamp with time zone,
-    import_requested text,
-    waiting text,
-    last_error text,
+    upstream_at timestamp with time zone,
+    -- These three are text for the operator (`pinakesd catalogue status`), each cut to 1 KiB by its
+    -- writer.
+    import_requested text CONSTRAINT catalogue_state_import_requested_check CHECK (octet_length(import_requested) <= 1024),
+    waiting text CONSTRAINT catalogue_state_waiting_check CHECK (octet_length(waiting) <= 1024),
+    last_error text CONSTRAINT catalogue_state_last_error_check CHECK (octet_length(last_error) <= 1024),
     error_count bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_error_count_check CHECK (error_count >= 0),
     updated_at timestamp with time zone NOT NULL DEFAULT now(),
     scope jsonb,
@@ -1532,7 +1566,7 @@ CREATE TABLE catalogue_map_cell (
     level smallint NOT NULL CONSTRAINT catalogue_map_cell_level_check CHECK (level IN (4, 6, 8, 10, 12)),
     cx integer NOT NULL,
     cy integer NOT NULL,
-    catalogue text NOT NULL,
+    catalogue text NOT NULL CONSTRAINT catalogue_map_cell_catalogue_check CHECK (is_catalogue(catalogue)),
     type text NOT NULL,
     cards bigint NOT NULL,
     sum_lon double precision NOT NULL,

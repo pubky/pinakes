@@ -597,7 +597,7 @@ impl EventService {
                 .zip(place.name.as_deref())
                 .is_some_and(|(a, b)| !a.is_empty() && normalize(a) == normalize(b))
         {
-            let id = crate::store::ensure_resource(&self.pool, &place.url).await?;
+            let id = crate::store::ensure_venue(&self.pool, &place.url).await?;
             venue.resource_id = Some(id);
             venue.location_source = Some(crate::model::LocationSource::Osm);
         }

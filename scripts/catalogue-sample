@@ -219,8 +219,8 @@ bad=$(psql -c "SELECT count(*) FROM catalogue_card WHERE uri <> 'https://musicbr
 want=$(python3 -I -c 'import datetime,sys
 ts = [datetime.datetime.strptime(open(p).read().strip().replace("+00", "+0000"), "%Y-%m-%d %H:%M:%S.%f%z") for p in sys.argv[1:]]
 print(min(ts).isoformat())' "$work/dumps/$old"/build/TIMESTAMP-*)
-got=$(psql -c "SELECT to_char(current_as_of AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US')||'+00:00' FROM catalogue_state WHERE catalogue='musicbrainz'")
-[ "$got" = "$want" ] || fail "current_as_of is $got, the dump's TIMESTAMP $want"
+got=$(psql -c "SELECT to_char(upstream_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US')||'+00:00' FROM catalogue_state WHERE catalogue='musicbrainz'")
+[ "$got" = "$want" ] || fail "upstream_at is $got, the dump's TIMESTAMP $want"
 echo "imported $cards cards in $secs s (peak RSS $rss KB), current as of $got"
 
 # Links from the sample to share: a recording's page, its streaming link and its ISRC's page.

@@ -182,7 +182,7 @@ pub async fn prepare(
     } else {
         container
     };
-    let state=sqlx::query("SELECT last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
+    let state=sqlx::query("SELECT (extract(epoch FROM last_snapshot_at)*1000)::bigint AS last_snapshot_at,held_keys,missing_keys,hold_count FROM event_fetch WHERE resource_id=$1").bind(id).fetch_optional(pool).await?;
     let last = state
         .as_ref()
         .and_then(|r| r.get::<Option<i64>, _>("last_snapshot_at"));
@@ -200,7 +200,7 @@ pub async fn prepare(
         .fetch_one(pool)
         .await?;
     let canonical_id = crate::model::identity(&super::calendar::canonical_feed(&source_uri))?.0;
-    let rows=sqlx::query("SELECT uid,recurrence_id,doc,status,content_hash,sequence,modified FROM occurrence WHERE resource_id=$1 ORDER BY uid,recurrence_id").bind(id).fetch_all(pool).await?;
+    let rows=sqlx::query("SELECT uid,recurrence_id,doc,status,content_hash,sequence,modified_at FROM occurrence WHERE resource_id=$1 ORDER BY uid,recurrence_id").bind(id).fetch_all(pool).await?;
     let now = chrono::Utc::now();
     let mutable = |d: &ResourceMeta| {
         d.start
@@ -238,7 +238,7 @@ pub async fn prepare(
                 status,
                 row.get::<String, _>("content_hash"),
                 row.get::<i64, _>("sequence"),
-                row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("modified"),
+                row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("modified_at"),
             ),
         );
     }
@@ -526,7 +526,7 @@ pub async fn prepare(
             // A publisher's own cancellation is written with the fetch that listed it, so its
             // change is not later than `since`.
             let gone: BTreeMap<String, i64> = sqlx::query_as(
-                "SELECT occurrence_key,(extract(epoch FROM max(at))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND class='cancelled' AND occurrence_key=ANY($2) GROUP BY occurrence_key",
+                "SELECT occurrence_key,(extract(epoch FROM max(changed_at))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND class='cancelled' AND occurrence_key=ANY($2) GROUP BY occurrence_key",
             )
             .bind(id)
             .bind(&earlier)
@@ -554,7 +554,7 @@ pub async fn prepare(
                 .cloned()
                 .collect();
             let listed: BTreeMap<String, i64> = sqlx::query_as(
-                "SELECT occurrence_key,(extract(epoch FROM min(at) FILTER (WHERE class='created'))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND occurrence_key=ANY($2) GROUP BY occurrence_key HAVING count(*) FILTER (WHERE class='created')>0 AND NOT bool_or(coalesce(after ? 'supersedes',false))",
+                "SELECT occurrence_key,(extract(epoch FROM min(changed_at) FILTER (WHERE class='created'))*1000)::bigint FROM resource_change WHERE resource_id=$1 AND occurrence_key=ANY($2) GROUP BY occurrence_key HAVING count(*) FILTER (WHERE class='created')>0 AND NOT bool_or(coalesce(after ? 'supersedes',false))",
             )
             .bind(id)
             .bind(&twins)
@@ -647,7 +647,7 @@ pub async fn apply(
         .execute(&mut **tx)
         .await?;
     let current: Option<i64> = sqlx::query_scalar(
-        "SELECT last_snapshot_at FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
+        "SELECT (extract(epoch FROM last_snapshot_at)*1000)::bigint FROM event_fetch WHERE resource_id=$1 FOR UPDATE",
     )
     .bind(id)
     .fetch_one(&mut **tx)
@@ -660,7 +660,7 @@ pub async fn apply(
             return Ok(None);
         }
     }
-    sqlx::query("UPDATE event_fetch SET last_snapshot_at=$2,held_keys=$3,missing_keys=$4,hold_count=$5,horizon_start=$6,retention_days=$7,validators=coalesce($8,validators),horizon_end=$9 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
+    sqlx::query("UPDATE event_fetch SET last_snapshot_at=to_timestamp($2::float8/1000),held_keys=$3,missing_keys=$4,hold_count=$5,horizon_start=$6,retention_days=$7,validators=coalesce($8,validators),horizon_end=$9 WHERE resource_id=$1").bind(id).bind(plan.fetched_at).bind(&plan.held).bind(json!(plan.missing)).bind(plan.holds as i32).bind(plan.horizon).bind(plan.retention_days as i32).bind(&plan.validators).bind(plan.horizon_end).execute(&mut **tx).await?;
 
     if !plan.applied {
         sqlx::query("INSERT INTO source_state(source,feed_held_total) VALUES($1,1) ON CONFLICT(source) DO UPDATE SET feed_held_total=source_state.feed_held_total+1").bind(&plan.source).execute(&mut **tx).await?;
@@ -671,7 +671,7 @@ pub async fn apply(
     }
     // Bound the encoded jsonb[] buffer independently of the retained plan.
     for chunk in plan.rows.chunks(256) {
-        sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,doc,point,sequence,modified,content_hash) SELECT $1,j->>'uid',j->>'rid',(j->>'start')::timestamptz,(j->>'end')::timestamptz,j->>'name',j->>'venue_id',j->>'status',j->>'url',j->'doc',CASE WHEN j->>'lat' IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((j->>'lon')::float8,(j->>'lat')::float8),4326) END,(j->>'sequence')::bigint,(j->>'modified')::timestamptz,j->>'hash' FROM unnest($2::jsonb[]) j ON CONFLICT(resource_id,uid,recurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at,name=excluded.name,venue_id=excluded.venue_id,status=excluded.status,url=excluded.url,doc=excluded.doc,point=excluded.point,sequence=excluded.sequence,modified=excluded.modified,content_hash=excluded.content_hash").bind(id).bind(chunk).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO occurrence(resource_id,uid,recurrence_id,start_at,end_at,name,venue_id,status,url,doc,point,sequence,modified_at,content_hash) SELECT $1,j->>'uid',j->>'rid',(j->>'start')::timestamptz,(j->>'end')::timestamptz,j->>'name',j->>'venue_id',j->>'status',j->>'url',j->'doc',CASE WHEN j->>'lat' IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint((j->>'lon')::float8,(j->>'lat')::float8),4326) END,(j->>'sequence')::bigint,(j->>'modified')::timestamptz,j->>'hash' FROM unnest($2::jsonb[]) j ON CONFLICT(resource_id,uid,recurrence_id) DO UPDATE SET start_at=excluded.start_at,end_at=excluded.end_at,name=excluded.name,venue_id=excluded.venue_id,status=excluded.status,url=excluded.url,doc=excluded.doc,point=excluded.point,sequence=excluded.sequence,modified_at=excluded.modified_at,content_hash=excluded.content_hash").bind(id).bind(chunk).execute(&mut **tx).await?;
     }
     if let Some(cursor) = &plan.cursor {
         cursor.commit(tx, id).await?;

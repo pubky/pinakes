@@ -77,7 +77,7 @@ pub struct State {
     pub import_requested: Option<String>,
     /// How current the cards are: the upstream time of the data the last finished run left (a
     /// dump's date, the time of the last change applied). The update lag counts from it.
-    pub current_as_of: Option<DateTime<Utc>>,
+    pub upstream_at: Option<DateTime<Utc>>,
     /// Why the importer waits (free disk, another large import, its lock), while it does.
     pub waiting: Option<String>,
     /// The last failure, kept after a later success; `error_count` counts them all.
@@ -551,7 +551,7 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             state.map_or(0, |s| s.cards).to_string(),
             at(state.and_then(|s| s.last_import_at)),
             at(state.and_then(|s| s.last_update_at)),
-            at(state.and_then(|s| s.current_as_of)),
+            at(state.and_then(|s| s.upstream_at)),
             waiting_cell(state),
             one_line(state.and_then(|s| s.last_error.as_deref())),
         ]);
@@ -598,7 +598,7 @@ mod tests {
             upstream_version: Some("2026-11-24".into()),
             last_import_at: Some("2026-11-24T10:00:00Z".parse().unwrap()),
             last_update_at: None,
-            current_as_of: Some("2026-11-23T00:00:00Z".parse().unwrap()),
+            upstream_at: Some("2026-11-23T00:00:00Z".parse().unwrap()),
             scope: None,
             generation_cards: 0,
             shrink_allowed: false,
@@ -647,7 +647,7 @@ mod tests {
             upstream_version: None,
             last_import_at: None,
             last_update_at: None,
-            current_as_of: None,
+            upstream_at: None,
             scope: None,
             generation_cards: 0,
             shrink_allowed: false,
@@ -697,7 +697,7 @@ mod tests {
             upstream_version: None,
             last_import_at: None,
             last_update_at: None,
-            current_as_of: None,
+            upstream_at: None,
             import_requested: None,
             waiting: Some("free disk 1.0 GB".into()),
             last_error: Some("removals (8 of 17 cards gone)".into()),

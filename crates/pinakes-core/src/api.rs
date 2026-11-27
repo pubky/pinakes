@@ -6576,7 +6576,7 @@ async fn group_detail(
         return Ok(None);
     };
     let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM resource_group WHERE group_id=$1 GROUP BY key HAVING count(DISTINCT unit_id)>1 ORDER BY key",
+        "SELECT k.key FROM resource_group k JOIN group_unit u USING(unit_id) WHERE u.group_id=$1 GROUP BY k.key HAVING count(DISTINCT k.unit_id)>1 ORDER BY k.key",
     )
     .bind(id)
     .fetch_all(pool)

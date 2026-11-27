@@ -86,7 +86,7 @@ pub struct Metrics {
     /// Per catalogue (`catalogue::Catalogue`), each from the start: its cards, whether it is on
     /// in the daemon's configuration ([`Metrics::catalogue_switches`]), when its last full
     /// import and its last update finished (0: never), how far its cards are behind upstream
-    /// (`current_as_of`; 0 before its first finished import), its failed runs, and whether it
+    /// (`upstream_at`; 0 before its first finished import), its failed runs, and whether it
     /// waits for the large-import turn.
     pub catalogue_cards: IntGaugeVec,
     pub catalogue_enabled: IntGaugeVec,
@@ -526,7 +526,7 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version'))::int,0)::bigint AS refused FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR upstream_at IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-upstream_at),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version'))::int,0)::bigint AS refused FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.

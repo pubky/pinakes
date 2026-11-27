@@ -112,7 +112,7 @@ newer dump than the cards are from, an update runs:
 4. The listed cards are removed, and so are the cards whose items the dump now makes refused
    cards of (no name, say).
 
-The cards are as current as the dump's `TIMESTAMP` (`current_as_of`). MusicBrainz publishes on
+The cards are as current as the dump's `TIMESTAMP` (`upstream_at`). MusicBrainz publishes on
 Wednesdays and Saturdays, and a dump's files appear about 15 hours after its `TIMESTAMP`, so the
 cards fall up to about 4 days and 17 hours behind before the next update lands;
 `CatalogueUpdateLag` allows five days.

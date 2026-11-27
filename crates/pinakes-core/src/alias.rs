@@ -531,10 +531,6 @@ pub async fn assign(
         .bind(id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM resource_group WHERE resource_id=$1")
-        .bind(id)
-        .execute(&mut **tx)
-        .await?;
     // The root it left (when it moved) no longer counts its references either.
     let mut rescored: Vec<String> = [Some(id.to_owned()), Some(root_id), previous]
         .into_iter()
