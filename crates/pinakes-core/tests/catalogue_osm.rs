@@ -627,6 +627,90 @@ async fn a_link_read_missing_after_its_successor_was_found_becomes_its_alias(poo
     );
 }
 
+/// A deleted place an operator placed in a curated group hands its place to its successor:
+/// following the successor drops the old link's group unit, and the successor's next group run
+/// puts it in the curated group instead.
+#[sqlx::test(migrations = "../../migrations")]
+async fn following_a_successor_keeps_an_operators_curated_group(pool: PgPool) {
+    let cfg = pinakes_core::groups::GroupConfig::default();
+    sqlx::query("INSERT INTO catalogue_state(catalogue,phase) VALUES('osm','idle')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // An OSM link's card as the OSM route reads it, a web page's as the web route does.
+    let place = |uri: &str, name: &str| match pinakes_core::resolver::osm::parse_id(uri) {
+        Some(id) => {
+            let mut doc = ResourceMeta::new(&id.uri(), "osm", 86400);
+            doc.set_type("Restaurant");
+            doc.osm_id = Some(id.key());
+            doc.attribution = Some(pinakes_core::resolver::osm::ATTRIBUTION.into());
+            doc.name = Some(name.into());
+            doc.location = Some(Point {
+                lat: VADUZ.0,
+                lon: VADUZ.1,
+            });
+            doc
+        }
+        None => {
+            let mut doc = ResourceMeta::new(uri, "web", 86400);
+            doc.set_type("Restaurant");
+            doc.name = Some(name.into());
+            doc
+        }
+    };
+    let mut ids = vec![];
+    for (uri, name) in [
+        ("https://www.openstreetmap.org/node/70", "Löwen"),
+        ("https://loewen.example/", "Gasthaus Löwen"),
+    ] {
+        let id = pinakes_core::store::ensure_resource(&pool, uri)
+            .await
+            .unwrap();
+        pinakes_core::store::save_document(&pool, &id, 0, &place(uri, name))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    pinakes_core::groups::drain(&pool, &cfg, 100).await.unwrap();
+    let group = "c".repeat(32);
+    pinakes_core::groups::curate(
+        &pool,
+        &group,
+        serde_json::from_value(serde_json::json!({"members": ids.iter().map(|id| serde_json::json!({"resource_id": id})).collect::<Vec<_>>()})).unwrap(),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO osm_successor(old_type,old_id,new_type,new_id,basis) VALUES('node',70,'node',71,'wikidata')").execute(&pool).await.unwrap();
+    pinakes_core::catalogue::osm::follow(&pool, "node/70", "node/71")
+        .await
+        .unwrap();
+    let successor = id_of("https://www.openstreetmap.org/node/71");
+    let uri = "https://www.openstreetmap.org/node/71";
+    pinakes_core::store::save_document(&pool, &successor, 0, &place(uri, "Löwen"))
+        .await
+        .unwrap();
+    pinakes_core::groups::drain(&pool, &cfg, 100).await.unwrap();
+    let placed: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT u.resource_id,u.group_id,o.group_id FROM group_unit u LEFT JOIN group_override o USING(unit_id) ORDER BY u.resource_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut want = vec![
+        (ids[1].clone(), Some(group.clone()), Some(group.clone())),
+        (successor.clone(), Some(group.clone()), Some(group.clone())),
+    ];
+    want.sort();
+    assert_eq!(placed, want);
+    let curated: bool = sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1")
+        .bind(&group)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(curated);
+}
+
 /// The per-cell totals (zoom 12 and below) and the card-by-card count (above) agree: a shared
 /// OSM link with a card counts once on both, a card whose link is only stored (not referenced)
 /// counts on both, and a point on the last edge is in a cell of its own size.

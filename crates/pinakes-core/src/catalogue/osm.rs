@@ -1926,7 +1926,9 @@ async fn record(
 
 /// The shared links of a deleted object whose successor is known become aliases of the
 /// successor's link (`alias::source`: the change file is the evidence). The links stay as they
-/// were written; reads answer with the successor.
+/// were written; reads answer with the successor. A link an operator placed in a curated group
+/// hands that place to the successor (unless the successor has one of its own): becoming an
+/// alias drops the link's own group unit, and its place with it.
 pub async fn follow(pool: &PgPool, old: &str, new: &str) -> Result<()> {
     let Some((t, i)) = split(old) else {
         return Ok(());
@@ -1944,12 +1946,66 @@ pub async fn follow(pool: &PgPool, old: &str, new: &str) -> Result<()> {
             continue;
         };
         let mut tx = pool.begin().await?;
+        // The group writers' lock first, as curation and group runs take it: no group run reads
+        // the successor's unit while its curated place moves.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(crate::locks::GROUP)
+            .execute(&mut *tx)
+            .await?;
         crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
         crate::alias::lock(&mut tx).await?;
+        let curated: Option<String> = sqlx::query_scalar(
+            "SELECT o.group_id FROM group_override o JOIN group_unit u USING(unit_id) WHERE u.resource_id=$1 AND u.unit_id=u.resource_id",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await?;
         let line = crate::alias::assign(&mut tx, &id, &alias).await?;
+        if let Some(group) = curated {
+            hand_over_curation(&mut tx, &id, &group).await?;
+        }
         crate::alias::record(&mut tx, line.into_iter().collect()).await?;
         tx.commit().await?;
     }
+    Ok(())
+}
+
+/// The curated group `group` the alias `id` was placed in, given to its root's own unit (a
+/// unit the root has in a curated group of its own stays there). The root groups again with it.
+async fn hand_over_curation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &str,
+    group: &str,
+) -> Result<()> {
+    let root: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some(root) = root else {
+        return Ok(());
+    };
+    // A resource's own unit has the resource's ID (`groups::sync`).
+    sqlx::query("INSERT INTO group_unit(unit_id,resource_id) VALUES($1,$1) ON CONFLICT DO NOTHING")
+        .bind(&root)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO group_override(unit_id,group_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+    )
+    .bind(&root)
+    .bind(group)
+    .execute(&mut **tx)
+    .await?;
+    // Its next group run reads it anew (nothing it read before is taken as unchanged).
+    sqlx::query("DELETE FROM group_input WHERE resource_id=$1")
+        .bind(&root)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(&root)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

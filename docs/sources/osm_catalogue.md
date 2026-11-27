@@ -137,8 +137,10 @@ at it, and a full import follows once the files are 60 behind (`pinakesd catalog
   same changeset with the same name within 50 m. Geofabrik's change files name no changesets, so a
   region's updates find successors by Wikidata only. Shared links of the deleted object become
   aliases of the successor's link (also a link first read after the successor was found, once it
-  reads as missing). When the deleted object comes back (the deletion is reverted), its successor
-  is forgotten and its links answer for themselves again;
+  reads as missing). A link an operator placed in a curated group hands its place there to the
+  successor, unless the successor is in a curated group of its own. When the deleted object comes
+  back (the deletion is reverted), its successor is forgotten and its links answer for themselves
+  again;
 - records a named deleted object's last card (`osm_removed`: its name, category and point), which
   the deleted-place rule compares once the card is gone; gone again when the object comes back;
 - records a kept object's change to an unrelated name (`osm_rename`): a name whose words don't run
