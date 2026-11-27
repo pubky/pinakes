@@ -143,7 +143,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue is on but its importer does not start: set http.contact (or PINAKES__HTTP__CONTACT), or switch the catalogue off"}
       - alert: CatalogueFirstImportStalled
-        expr: (pinakes_catalogue_enabled{catalogue=~"musicbrainz|osm|wikidata"} == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds == 0)
+        expr: (pinakes_catalogue_enabled{catalogue=~"musicbrainz|osm|wikidata|openalex|podcastindex|software|tranco"} == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds == 0)
         for: 2d
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue is on and has finished no import in two days: pinakesd catalogue status shows why it waits (free disk, the large-import turn, http.contact)"}
@@ -162,6 +162,11 @@ groups:
         for: 30m
         labels: {severity: warning}
         annotations: {summary: "The oldest catalogue join check has been due for over six hours: links wait for their catalogue card or to go back to fetching; pinakes_catalogue_join_errors_total says whether checks fail"}
+      - alert: CatalogueHomepageReadsStalled
+        expr: (sum by (instance, job) (increase(pinakes_catalogue_homepage_reads_total{result="ok"}[6h])) == 0) and on (instance, job) (sum by (instance, job) (pinakes_catalogue_backlog{queue="homepages"}) > 0) and on (instance, job) (pinakes_catalogue_homepage_reads_waiting == 0) and on (instance, job) (pinakes_catalogue_enabled{catalogue="tranco"} == 1)
+        for: 1h
+        labels: {severity: warning}
+        annotations: {summary: "No Tranco homepage read has found a page for six hours while sites are due and the reads do not wait for a large import: every read is deferred (the egress gives them no turn) or fails; pinakes_catalogue_homepage_reads_total and pinakesd catalogue status say which"}
       - alert: CatalogueJoinErrors
         expr: sum by (instance, job) (increase(pinakes_catalogue_join_errors_total{stage!="extras"}[1h])) > 10
         for: 1h
