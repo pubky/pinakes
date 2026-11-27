@@ -168,7 +168,8 @@ impl PodcastIndex {
         // A database refused before is not downloaded again (a full import asked for reads it).
         job.reading(json!(version));
         if job.refused_before(&json!(version)) {
-            return Err(job.still_refused(format!("database {version}")));
+            let shown = super::run::shown_version(&json!(version));
+            return Err(job.still_refused(format!("database {shown}")));
         }
         // The download's and the read's threads stop when this run is over, however it ends.
         let stop = Stop::default();
@@ -207,7 +208,8 @@ impl PodcastIndex {
             .await?;
         self.cleanup(job.dir()).await;
         if finished == diff::Finished::Refused {
-            let note = format!("database {version} would remove more than a tenth of the cards");
+            let shown = super::run::shown_version(&json!(version));
+            let note = format!("database {shown} would remove more than a tenth of the cards");
             return Err(job.refuse(json!(version), "refused", note));
         }
         job.upstream_version(
@@ -238,7 +240,8 @@ impl PodcastIndex {
         match class {
             Some(class @ ("archive" | "size" | "database" | "schema")) => {
                 self.cleanup(job.dir()).await;
-                job.refuse(json!(version), class, format!("database {version}"))
+                let shown = super::run::shown_version(&json!(version));
+                job.refuse(json!(version), class, format!("database {shown}"))
             }
             _ => error,
         }

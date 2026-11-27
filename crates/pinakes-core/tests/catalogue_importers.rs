@@ -649,12 +649,19 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
     age(&pool, Catalogue::Podcastindex).await;
     let empty = edited_db(dir.path(), "empty.db", "UPDATE podcasts SET dead=1");
-    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&empty), "p2");
+    // An ETag with text of the server's own: it never reaches the failure, `last_error`, the
+    // log or `catalogue status`; the position alone keeps it.
+    files.put(
+        "/podcastindex_feeds.db.tgz",
+        podcast_archive(&empty),
+        "p2 CANARY-upstream-text",
+    );
     let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
         .unwrap_err();
     assert!(
-        failed.to_string().contains("refused (database \"p2\""),
+        failed.to_string().contains("refused (database #")
+            && !failed.to_string().contains("CANARY"),
         "{failed}"
     );
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
@@ -665,14 +672,18 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     );
     let state = state_of(&pool, Catalogue::Podcastindex).await;
     assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
+    assert!(!state.last_error.as_deref().unwrap().contains("CANARY"));
     let position = state.position.clone().unwrap();
-    assert_eq!(position["refused"], "\"p2\"");
+    assert_eq!(position["refused"], "\"p2 CANARY-upstream-text\"");
     assert_eq!(
         position["refused_source"],
         format!("{base}/podcastindex_feeds.db.tgz")
     );
     let table = store::status_table(&ctx.config.catalogues, std::slice::from_ref(&state));
-    assert!(table.contains("refused: \"p2\""), "{table}");
+    assert!(
+        table.contains("refused: #") && !table.contains("CANARY"),
+        "{table}"
+    );
     // The task's next update: no download, no failure.
     let gets = files.gets("/podcastindex_feeds.db.tgz");
     let again = run::step(&*importer, &ctx).await.unwrap_err();

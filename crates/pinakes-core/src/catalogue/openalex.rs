@@ -392,7 +392,8 @@ impl OpenAlex {
                     held,
                     "catalogue update refused: it would remove more than a tenth of the cards"
                 );
-                let note = format!("snapshot {snapshot}: {} cards gone, over a tenth", pending.len());
+                let shown = super::run::shown_version(&json!(snapshot));
+                let note = format!("snapshot {shown}: {} cards gone, over a tenth", pending.len());
                 return Err(job.refuse(json!(snapshot), "refused", note));
             }
             if !pending.is_empty() {
@@ -1122,7 +1123,10 @@ impl Importer for OpenAlex {
         // runner refuses it (`empty`), and it is not read again.
         job.reading(json!(manifest.date));
         if job.refused_before(&json!(manifest.date)) {
-            return Err(job.still_refused(format!("snapshot {}", manifest.date)));
+            return Err(job.still_refused(format!(
+                "snapshot {}",
+                super::run::shown_version(&json!(manifest.date))
+            )));
         }
         let all: Vec<usize> = (0..manifest.works.len()).collect();
         let done = cursor_done(job, &manifest.date);
@@ -1156,7 +1160,10 @@ impl Importer for OpenAlex {
             return Ok(UpdateEnd::Done);
         }
         if job.refused_before(&json!(manifest.date)) {
-            return Err(job.still_refused(format!("snapshot {}", manifest.date)));
+            return Err(job.still_refused(format!(
+                "snapshot {}",
+                super::run::shown_version(&json!(manifest.date))
+            )));
         }
         if job
             .state()

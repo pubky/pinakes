@@ -2110,8 +2110,11 @@ Index: `archive`, `size`, `database`, `schema`), a Wikidata dump that failed thr
 for the others. The position names what was refused (`refused`), with where it was read
 (`refused_source`: null for the catalogue's own files, else what `--from` named) and the
 `limit` it was read with (`refused_limit`); `catalogue status` shows `refused: <version>` in
-`waiting`, and `pinakes_catalogue_refused` is 1 while a refusal of the daemon's own source and
-`limit` stands (alert `CatalogueDumpRefused` after an hour).
+`waiting`, and the failure and the log name it the same way: a date or a count as it is, any
+other version (a server's ETag or Last-Modified, a list's ID) by a digest (`#` and 12 hex digits),
+so no upstream's text reaches them (the position alone keeps the value); and
+`pinakes_catalogue_refused` is 1 while a refusal of the daemon's own source and `limit` stands
+(alert `CatalogueDumpRefused` after an hour).
 
 The importer then reads nothing while that version is the newest: each try (an hour apart) asks
 only for the version (a `HEAD`, the dump list, `LATEST`) and ends without a failure (Tranco reads

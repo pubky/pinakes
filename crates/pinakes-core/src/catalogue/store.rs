@@ -614,19 +614,16 @@ async fn sweep(
 fn waiting_cell(state: Option<&State>) -> String {
     let position = state.and_then(|s| s.position.as_ref());
     let refused = match position.and_then(|p| p.get(super::run::REFUSED)) {
-        Some(serde_json::Value::String(v)) => Some(format!("refused: {v}")),
+        // Each version as `run::shown_version` shows it: a digest of an upstream's text.
         Some(serde_json::Value::Object(m)) => Some(format!(
             "refused: {}",
             m.iter()
-                .map(|(k, v)| match v {
-                    serde_json::Value::String(v) => format!("{k} {v}"),
-                    v => format!("{k} {v}"),
-                })
+                .map(|(k, v)| format!("{k} {}", super::run::shown_version(v)))
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
         Some(serde_json::Value::Null) | None => None,
-        Some(other) => Some(format!("refused: {other}")),
+        Some(other) => Some(format!("refused: {}", super::run::shown_version(other))),
     };
     let refused = refused
         // Tranco's homepage reads that wait for a large catalogue's full import (its last run).
@@ -888,7 +885,11 @@ mod tests {
         refused.position =
             Some(serde_json::json!({"refused": {"crates.io": "c2", "flathub": "f9"}}));
         assert!(
-            row(&refused).contains("refused: crates.io c2, flathub f9"),
+            row(&refused).contains(&format!(
+                "refused: crates.io {}, flathub {}",
+                super::super::run::shown_version(&serde_json::json!("c2")),
+                super::super::run::shown_version(&serde_json::json!("f9"))
+            )),
             "{}",
             row(&refused)
         );

@@ -2277,7 +2277,11 @@ async fn a_full_import_that_reads_no_record_is_refused(pool: PgPool) {
     let failed = run::step(&first, &ctx).await.unwrap_err();
     assert_eq!(
         pinakes_core::catalogue::failure::shown(&failed),
-        "empty (no record read in v1)"
+        // The version a digest: it might be an upstream's text.
+        format!(
+            "empty (no record read in {})",
+            run::shown_version(&json!("v1"))
+        )
     );
     let s = state(&pool, Catalogue::Openalex).await;
     assert_eq!((s.last_import_at, s.run.as_deref()), (None, None));

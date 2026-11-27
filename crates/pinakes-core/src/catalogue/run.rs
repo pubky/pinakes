@@ -1591,11 +1591,32 @@ impl std::error::Error for CatalogueLockLost {}
 /// The words every wait for the large-import turn ends with;
 /// `pinakes_catalogue_waiting_for_turn` counts the state rows whose `waiting` holds them.
 pub const TURN: &str = "one large import runs at a time";
-/// A refused version as a note shows it: a text as it is, anything else as JSON.
-fn shown_version(version: &serde_json::Value) -> String {
+/// A refused version as notes, the log and `catalogue status` show it: a date or a count as it
+/// is, anything else by the first 12 hex digits of its blake3 digest (`#0123456789ab`), so no
+/// upstream's text reaches `last_error` or the log.
+pub fn shown_version(version: &serde_json::Value) -> String {
     match version {
-        serde_json::Value::String(text) => text.clone(),
-        other => other.to_string(),
+        // A date, a time or a count (a dump's date, a replication sequence, a local file's size
+        // and time) as it is.
+        serde_json::Value::String(text)
+            if text.len() <= 40
+                && text.bytes().all(|b| {
+                    b.is_ascii_digit() || matches!(b, b'-' | b':' | b'.' | b'T' | b'Z')
+                }) =>
+        {
+            text.clone()
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        // Anything else may be an upstream's text (an ETag, a Last-Modified, a list's ID): shown
+        // by a digest only, the value itself kept in the position.
+        other => {
+            let text = match other {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            let digest = blake3::hash(text.as_bytes()).to_hex();
+            format!("#{}", &digest[..12])
+        }
     }
 }
 /// The words every wait for free disk begins with.
@@ -1680,6 +1701,32 @@ mod tests {
             "disk"
         );
         assert_eq!(wait_reason("http.contact is not set"), "other");
+    }
+
+    /// A refused version reaches notes, the log and `catalogue status` as it is only when it is a
+    /// date or a count; any other text (an ETag, a Last-Modified, an upstream's words) as a digest.
+    #[test]
+    fn a_refused_version_is_shown_without_an_upstream_s_text() {
+        for safe in [
+            "20261125-001001",
+            "2026-11-14",
+            "111:1795804651",
+            "20261123",
+        ] {
+            assert_eq!(shown_version(&json!(safe)), safe);
+        }
+        assert_eq!(shown_version(&json!(4982)), "4982");
+        for text in [
+            "\"CANARY secret page text\"",
+            "Wed, 21 Oct 2026 07:28:00 GMT",
+            "W/\"x\"",
+            "/srv/osm/file.osm.pbf:1:2",
+        ] {
+            let shown = shown_version(&json!(text));
+            assert!(shown.starts_with('#') && shown.len() == 13, "{shown}");
+            assert!(!shown.contains("CANARY"));
+        }
+        assert_ne!(shown_version(&json!("a")), shown_version(&json!("b")));
     }
 
     /// A lower `limit` or a higher `min_citations` is a narrower scope; another `region` is not

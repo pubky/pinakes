@@ -363,9 +363,7 @@ async fn remote_version(client: &super::fetch::Client, url: &str) -> Option<Valu
 }
 /// A version as a message names it.
 fn shown(version: &Value) -> String {
-    version
-        .as_str()
-        .map_or_else(|| version.to_string(), str::to_owned)
+    super::run::shown_version(version)
 }
 /// What one pass sends to be written: cards, removals, and the cursor saved with them.
 struct Batch {

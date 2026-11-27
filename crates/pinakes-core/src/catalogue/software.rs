@@ -360,10 +360,7 @@ impl Software {
                 } else {
                     "over a tenth of its cards gone"
                 };
-                format!(
-                    "{name} file {}: {why}",
-                    version.as_str().unwrap_or_default()
-                )
+                format!("{name} file {}: {why}", super::run::shown_version(version))
             })
             .collect::<Vec<_>>()
             .join("; ");

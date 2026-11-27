@@ -1096,9 +1096,7 @@ fn too_bad(bad: u64, lines: u64) -> bool {
 }
 /// A refused version as a message names it.
 fn shown(version: &serde_json::Value) -> String {
-    version
-        .as_str()
-        .map_or_else(|| version.to_string(), str::to_owned)
+    super::run::shown_version(version)
 }
 /// The day a dump's file name names (`wikidata-20261123-all.json.bz2`), as a time.
 fn named_date(name: &str) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
