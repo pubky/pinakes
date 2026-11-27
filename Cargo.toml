@@ -37,3 +37,10 @@ debug = "line-tables-only"
 
 [profile.test]
 debug = "line-tables-only"
+
+# The bzip2 decoder the Wikidata importer and its tests run (pure Rust) is optimized in
+# development and test builds too: unoptimized, it decodes about ten times slower.
+[profile.dev.package.libbz2-rs-sys]
+opt-level = 3
+[profile.test.package.libbz2-rs-sys]
+opt-level = 3

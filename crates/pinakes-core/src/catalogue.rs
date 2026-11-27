@@ -31,6 +31,7 @@ pub mod osm;
 pub mod run;
 pub mod spill;
 pub mod store;
+pub mod wikidata;
 
 /// One catalogue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

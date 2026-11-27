@@ -1,0 +1,351 @@
+#!/usr/bin/env -S python3 -I
+"""catalogue-sample-wikidata: import the first records of Wikidata's real dump into a throwaway
+database with `pinakesd`, and check what the catalogue gives.
+
+    PINAKESD=target/release/pinakesd DATABASE_URL=postgresql:///postgres?host=/run/postgresql \
+    PINAKES__HTTP__CONTACT=ops@example.org scripts/catalogue-sample-wikidata [--limit N] \
+      [--window MINUTES] [--db NAME] [--dir DIR] [--report FILE] [--keep]
+
+It runs the code the daemon runs:
+1. creates the database NAME (default `catalogue_sample_wikidata`; refused when it exists) on
+   DATABASE_URL's server, `pinakesd --migrate`;
+2. `pinakesd catalogue import wikidata --limit N` (default 20,000 cards): the newest dump read as
+   a stream, stopped at the limit (a few hundred megabytes);
+3. counts the cards, keys, labels and canonical links, and the table's size;
+4. starts `pinakesd` on private ports and checks that `/v1/search` finds a card by its name and
+   that a shared Wikipedia link (another edition of a card's article) gets its card from the
+   catalogue (`POST /v1/resolve`);
+5. `pinakesd catalogue import wikidata --update --since <WINDOW minutes ago>` (default 20): the real recent
+   changes, with a configured limit of twice N (so the items the catalogue doesn't hold are asked
+   too, sitelinks first, and new ones with an article join); checks that only the items they name
+   changed;
+6. starts `pinakesd` again with the catalogue switched off and checks that search no longer finds
+   the card;
+7. drops the database and the work directory (unless `--keep`; with `--dir` the directory stays,
+   without its `pinakes.toml`, which names the database).
+
+Needs `psql`, `createdb`, `dropdb` (PostgreSQL with PostGIS and pg_trgm) and the operator's
+contact in PINAKES__HTTP__CONTACT (also read from ~/.config/pinakes/contact.env when unset),
+which is never printed. Prints a JSON report.
+"""
+import argparse, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
+import urllib.parse, urllib.request
+
+API = "https://www.wikidata.org/w/api.php"
+
+
+def fail(message):
+    print(f"catalogue-sample-wikidata: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def contact():
+    value = os.environ.get("PINAKES__HTTP__CONTACT", "").strip()
+    path = os.path.expanduser("~/.config/pinakes/contact.env")
+    if not value and os.path.exists(path):
+        for line in open(path):
+            m = re.match(r"\s*(?:export\s+)?PINAKES__HTTP__CONTACT=(.*)", line)
+            if m:
+                value = m.group(1).strip().strip("'\"")
+    if not value:
+        fail("set PINAKES__HTTP__CONTACT (the operator's contact Wikimedia asks for)")
+    return value
+
+
+def server_env(url):
+    """libpq variables for the server of DATABASE_URL, so no URL (or password) is on a command line."""
+    u = urllib.parse.urlsplit(url)
+    q = urllib.parse.parse_qs(u.query)
+    env = dict(os.environ)
+    for var in ("DATABASE_URL",):
+        env.pop(var, None)
+    host = q.get("host", [u.hostname or ""])[0]
+    if host:
+        env["PGHOST"] = host
+    port = q.get("port", [str(u.port or "")])[0]
+    if port:
+        env["PGPORT"] = port
+    if u.username:
+        env["PGUSER"] = urllib.parse.unquote(u.username)
+    if u.password:
+        env["PGPASSWORD"] = urllib.parse.unquote(u.password)
+    # The URL's TLS settings hold for psql, createdb and dropdb too.
+    for key, var in (("sslmode", "PGSSLMODE"), ("sslrootcert", "PGSSLROOTCERT"), ("sslcert", "PGSSLCERT"), ("sslkey", "PGSSLKEY")):
+        if key in q:
+            env[var] = q[key][0]
+    return env
+
+
+def db_url(url, name):
+    u = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((u.scheme, u.netloc, "/" + name, u.query, ""))
+
+
+def psql(env, db, sql, *args):
+    """One value per line of the query's first column (arguments as psql variables :'v1'...)."""
+    cmd = ["psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-d", db]
+    for i, a in enumerate(args, 1):
+        cmd += ["-v", f"v{i}={a}"]
+    out = subprocess.run(cmd, input=sql, env=env, capture_output=True, text=True)
+    if out.returncode != 0:
+        fail("a query failed")
+    return out.stdout.strip()
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def get_json(url, headers=None, timeout=60):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read(64 << 20))
+
+
+def post_json(url, body, timeout=60):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, json.loads(r.read(16 << 20))
+
+
+def write_config(path, url, work, index, listen, admin, enabled, limit):
+    # It holds the database URL (a password, if any): readable by its owner only.
+    # Never through a link put in its place.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"database_url = {json.dumps(url)}\nlisten = \"127.0.0.1:{listen}\"\nadmin_listen = \"127.0.0.1:{admin}\"\n")
+        f.write("nexus_url = \"http://127.0.0.1:9\"\n\n[search]\nindex_dir = " + json.dumps(index) + "\n\n")
+        f.write("[catalogues]\ndir = " + json.dumps(work) + "\n")
+        for name in ("musicbrainz", "osm", "openalex", "podcastindex", "tranco", "software"):
+            f.write(f"[catalogues.{name}]\nenabled = false\n")
+        # The limit also binds the daemon's own importer task, so it never starts a full download.
+        f.write(f"[catalogues.wikidata]\nenabled = {'true' if enabled else 'false'}\nlimit = {int(limit)}\n")
+
+
+def run(pinakesd, config, args, env, log):
+    """`pinakesd --config CONFIG ARGS` in a child of its own; its seconds and peak RSS (kB)."""
+    import resource
+    t0 = time.time()
+    # Each run in a child of its own, so its peak memory is the child's alone.
+    rfd, wfd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        # The child only runs pinakesd and reports; it never unwinds into the cleanup below.
+        code = 1
+        try:
+            os.close(rfd)
+            with open(log, "w") as out:
+                p = subprocess.run([pinakesd, "--config", config] + args, env=env, stdout=out, stderr=subprocess.STDOUT)
+            peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+            os.write(wfd, f"{p.returncode} {peak}".encode())
+            code = 0
+        finally:
+            os._exit(code)
+    os.close(wfd)
+    answer = os.read(rfd, 64).decode().split()
+    if len(answer) != 2:
+        fail(f"pinakesd {' '.join(args)} could not be run (log {log})")
+    code, peak = answer
+    os.close(rfd)
+    os.waitpid(pid, 0)
+    text = open(log, errors="replace").read()
+    if code != "0":
+        fail(f"pinakesd {' '.join(args)} failed (log {log})")
+    return round(time.time() - t0, 1), int(peak), text
+
+
+def serve(pinakesd, config, env, log, listen, admin):
+    out = open(log, "w")
+    p = subprocess.Popen([pinakesd, "--config", config], env=env, stdout=out, stderr=subprocess.STDOUT)
+    for _ in range(600):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{admin}/healthz", timeout=2)
+            return p
+        except Exception:
+            if p.poll() is not None:
+                fail(f"pinakesd stopped (log {log})")
+            time.sleep(0.5)
+    p.terminate()
+    fail("pinakesd did not answer")
+
+
+def stop(p):
+    p.send_signal(signal.SIGTERM)
+    try:
+        p.wait(60)
+    except subprocess.TimeoutExpired:
+        p.kill()
+
+
+def search(listen, q):
+    url = f"http://127.0.0.1:{listen}/v1/search?" + urllib.parse.urlencode({"q": q, "limit": 20})
+    return get_json(url)
+
+
+def recent_titles(ua, since, until):
+    """The items the recent changes name from `since` to `until`, read as the importer reads them."""
+    titles, cont = set(), None
+    for _ in range(1000):
+        q = {"action": "query", "list": "recentchanges", "rcnamespace": "0", "rctype": "edit|new|log",
+             "rcprop": "title|timestamp", "rcdir": "newer", "rclimit": "500", "rcstart": since,
+             "rcend": until, "format": "json", "formatversion": "2", "maxlag": "5"}
+        if cont:
+            q["rccontinue"] = cont
+        v = get_json(API + "?" + urllib.parse.urlencode(q), {"User-Agent": ua})
+        titles.update(c["title"] for c in v.get("query", {}).get("recentchanges", []))
+        cont = v.get("continue", {}).get("rccontinue")
+        if not cont:
+            return titles
+        time.sleep(0.3)
+    fail("the recent changes did not end in 1000 pages")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--limit", type=int, default=20000)
+    ap.add_argument("--window", type=int, default=20)
+    ap.add_argument("--db", default="catalogue_sample_wikidata")
+    ap.add_argument("--dir")
+    ap.add_argument("--report")
+    ap.add_argument("--keep", action="store_true")
+    a = ap.parse_args()
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", a.db):
+        fail("--db must be a plain database name")
+    pinakesd = os.environ.get("PINAKESD", "target/release/pinakesd")
+    if not os.access(pinakesd, os.X_OK):
+        fail(f"no pinakesd at {pinakesd} (set PINAKESD)")
+    server = os.environ.get("DATABASE_URL") or fail("set DATABASE_URL (any database on the server to use)")
+    who = contact()
+    env = server_env(server)
+    if psql(env, "postgres", "SELECT count(*) FROM pg_database WHERE datname = :'v1';", a.db) != "0":
+        fail(f"database {a.db} exists; drop it or name another with --db")
+    work = a.dir or tempfile.mkdtemp(prefix="catalogue-sample-wikidata-")
+    os.makedirs(work, exist_ok=True)
+    url = db_url(server, a.db)
+    run_env = dict(os.environ, DATABASE_URL=url, PINAKES__HTTP__CONTACT=who)
+    report = {"limit": a.limit}
+    created = False
+    try:
+        if subprocess.run(["createdb", a.db], env=env).returncode != 0:
+            fail("createdb failed")
+        created = True
+        listen, admin = free_port(), free_port()
+        config = os.path.join(work, "pinakes.toml")
+        write_config(config, url, os.path.join(work, "catalogues"), os.path.join(work, "index"), listen, admin, True, a.limit)
+        run(pinakesd, config, ["--migrate"], run_env, os.path.join(work, "migrate.log"))
+        size0 = int(psql(env, a.db, "SELECT pg_total_relation_size('catalogue_card');"))
+        # 2. The import, as the daemon's task runs it.
+        secs, rss, log = run(pinakesd, config, ["catalogue", "import", "wikidata", "--limit", str(a.limit)], run_env, os.path.join(work, "import.log"))
+        def logged(message):
+            found = [json.loads(l) for l in log.splitlines() if l.startswith("{") and f'"{message}"' in l]
+            return found[-1].get("fields", found[-1]) if found else {}
+        fields = dict(logged("wikidata cards get the labels read after them"), **logged("wikidata dump read"))
+        report["import"] = {"seconds": secs, "peak_rss_kb": rss, "dump": psql(env, a.db, "SELECT upstream_version FROM catalogue_state WHERE catalogue='wikidata';"),
+                            **{k: fields.get(k) for k in ("lines", "kept", "no_article", "wikimedia_pages", "unusable", "other", "bad", "oversized", "compressed_bytes", "pending", "labels_unknown", "labels_asked")}}
+        # The stream is read up to where the read stopped, and a few chunks beyond.
+        report["import"]["downloaded_bytes_about"] = fields.get("compressed_bytes")
+        lines = fields.get("lines") or 0
+        report["import"]["records_per_second"] = round(lines / secs) if secs else None
+        # 3. What the cards hold.
+        q = lambda sql: psql(env, a.db, sql)
+        report["cards"] = int(q("SELECT count(*) FROM catalogue_card WHERE catalogue='wikidata';"))
+        report["state_cards"] = int(q("SELECT cards FROM catalogue_state WHERE catalogue='wikidata';"))
+        report["db_bytes"] = int(q("SELECT pg_total_relation_size('catalogue_card');")) - size0
+        report["bytes_per_card"] = round(report["db_bytes"] / max(report["cards"], 1))
+        report["keys_index_bytes"] = int(q("SELECT pg_relation_size('catalogue_card_keys_idx');"))
+        report["wikipedia_links"] = int(q("SELECT count(*) FROM catalogue_card WHERE uri ~ '^https://[a-z0-9-]+\\.wikipedia\\.org/wiki/.+';"))
+        report["english_links"] = int(q("SELECT count(*) FROM catalogue_card WHERE uri LIKE 'https://en.wikipedia.org/wiki/%';"))
+        report["with_labels"] = int(q("SELECT count(*) FROM catalogue_card WHERE cardinality(labels)>0;"))
+        report["with_point"] = int(q("SELECT count(*) FROM catalogue_card WHERE point IS NOT NULL;"))
+        report["keys_per_card"] = float(q("SELECT round(avg(cardinality(keys)),2) FROM catalogue_card;") or 0)
+        report["with_key"] = {kind: int(q(f"SELECT count(*) FROM catalogue_card WHERE EXISTS (SELECT 1 FROM unnest(keys) k WHERE k LIKE '{kind}:%');"))
+                              for kind in ("wikidata", "mb", "osm", "imdb", "isbn", "doi", "android", "url")}
+        report["with_related"] = int(q("SELECT count(*) FROM catalogue_card WHERE cardinality(related_uris)>0;"))
+        report["types"] = dict(l.split("|") for l in q("SELECT type, count(*) FROM catalogue_card GROUP BY 1 ORDER BY 2 DESC LIMIT 12;").splitlines())
+        report["top_labels"] = q("SELECT l||':'||count(*) FROM catalogue_card, unnest(labels) l GROUP BY l ORDER BY count(*) DESC LIMIT 10;").splitlines()
+        if report["cards"] != report["state_cards"] or report["wikipedia_links"] != report["cards"]:
+            fail("cards, state count or canonical links disagree")
+        if report["with_key"]["wikidata"] != report["cards"] or report["with_labels"] == 0 or report["with_key"]["url"] != report["cards"]:
+            fail("a card without its wikidata or url key, or no labels at all")
+        # A card with an English and another edition's article, and a name a search can find.
+        pick = q("SELECT source_id||'|'||name||'|'||uri FROM catalogue_card WHERE uri LIKE 'https://en.wikipedia.org/%' AND fame > 0.5 AND name ~ '^[A-Za-z ]{6,40}$' ORDER BY fame DESC, source_id LIMIT 1;")
+        qid, name, uri = pick.split("|", 2)
+        # 4. The daemon: search and a shared link.
+        # Without the contact the daemon starts no Wikidata importer (it waits for one), so this
+        # script's update below is the only one.
+        quiet_env = {k: v for k, v in run_env.items() if k != "PINAKES__HTTP__CONTACT"}
+        daemon = serve(pinakesd, config, quiet_env, os.path.join(work, "serve-1.log"), listen, admin)
+        try:
+            found = False
+            for _ in range(240):
+                rows = search(listen, name).get("items") or []
+                if any(r.get("uri") == uri for r in rows):
+                    found = True
+                    break
+                time.sleep(1)
+            report["search"] = {"q": name, "uri": uri, "found": found}
+            # Another edition of the same article: a link people share for the item.
+            v = get_json(API + "?" + urllib.parse.urlencode({"action": "wbgetentities", "ids": qid, "props": "sitelinks/urls", "format": "json", "maxlag": "5"}), {"User-Agent": f"pinakes-catalogue-sample (+https://pubky.app; {who})"})
+            links = [s["url"] for k, s in v["entities"][qid]["sitelinks"].items() if k in ("dewiki", "frwiki", "eswiki", "itwiki") and "url" in s]
+            joined = None
+            if links:
+                status, card = post_json(f"http://127.0.0.1:{listen}/v1/resolve", {"uri": links[0]})
+                backed = q(f"SELECT count(*) FROM resource WHERE catalogue_card IS NOT NULL;")
+                joined = {"link": links[0], "status": status, "name": card.get("name"), "labels": card.get("labels"), "backed_rows": int(backed)}
+            report["join"] = joined
+        finally:
+            stop(daemon)
+        # 5. The update from the real recent changes, with room under the limit (twice the
+        # import's, configured): the items it doesn't hold are asked too, sitelinks first, and new
+        # items with an article join (a catalogue at its limit would ask only its own).
+        write_config(config, url, os.path.join(work, "catalogues"), os.path.join(work, "index"), listen, admin, True, a.limit * 2)
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - a.window * 60))
+        t0 = q("SELECT now();")
+        cards_before = int(q("SELECT count(*) FROM catalogue_card;"))
+        secs, rss, _ = run(pinakesd, config, ["catalogue", "import", "wikidata", "--update", "--since", since], run_env, os.path.join(work, "update.log"))
+        until = q("SELECT (position->>'time') FROM catalogue_state WHERE catalogue='wikidata';")
+        named = recent_titles(f"pinakes-catalogue-sample (+https://pubky.app; {who})", since, until)
+        changed = set(q(f"SELECT source_id FROM catalogue_card WHERE updated_at > '{t0}';").split())
+        held_named = sorted(named & set(q("SELECT source_id FROM catalogue_card;").split()))
+        report["update"] = {"seconds": secs, "peak_rss_kb": rss, "since": since, "until": until, "items_named": len(named),
+                            "rows_changed": len(changed), "held_and_named": len(held_named), "changed_not_named": sorted(changed - named)[:10],
+                            "update_limit": a.limit * 2, "cards_before": cards_before,
+                            "cards_after": int(q("SELECT count(*) FROM catalogue_card;"))}
+        if changed - named:
+            fail("the update changed rows the recent changes did not name")
+        if not until or until <= since:
+            fail("the update did not move its position past --since")
+        if not held_named:
+            print("catalogue-sample-wikidata: no sample card was named in the window; widen --window to test changed rows", file=sys.stderr)
+        # 6. Switched off: gone from search at once.
+        write_config(config, url, os.path.join(work, "catalogues"), os.path.join(work, "index"), listen, admin, False, a.limit)
+        daemon = serve(pinakesd, config, quiet_env, os.path.join(work, "serve-2.log"), listen, admin)
+        try:
+            rows = search(listen, name).get("items") or []
+            # Nobody referenced the card's link here, so with the catalogue off nothing lists it.
+            report["switched_off_hidden"] = not any(r.get("uri") == uri for r in rows)
+        finally:
+            stop(daemon)
+    finally:
+        if created and not a.keep:
+            subprocess.run(["dropdb", a.db], env=env)
+        if not a.keep and not a.dir:
+            shutil.rmtree(work, ignore_errors=True)
+        elif not a.keep:
+            try:
+                os.remove(os.path.join(work, "pinakes.toml"))
+            except FileNotFoundError:
+                pass
+    out = json.dumps(report, indent=1, ensure_ascii=False)
+    if a.report:
+        open(a.report, "w").write(out + "\n")
+    print(out)
+    ok = report["search"]["found"] and report["switched_off_hidden"] and (report["join"] or {}).get("backed_rows", 0) > 0
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

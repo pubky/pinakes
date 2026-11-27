@@ -187,6 +187,30 @@ pub async fn upsert_rows(
     rejected: u64,
     cursor: Option<&serde_json::Value>,
 ) -> Result<WriteReport> {
+    write_rows(pool, catalogue, generation, rows, rejected, cursor, true).await
+}
+/// [`upsert`] of cards a full import already read in this generation, written again with more
+/// of their data (Wikidata's labels read after the cards): they don't count again toward the
+/// cards the generation read (`generation_cards`, which the shrink floor compares).
+pub async fn rewrite(
+    pool: &PgPool,
+    catalogue: Catalogue,
+    generation: i64,
+    cards: &[Card],
+    cursor: Option<&serde_json::Value>,
+) -> Result<WriteReport> {
+    let (rows, rejected) = rows(catalogue, cards);
+    write_rows(pool, catalogue, generation, &rows, rejected, cursor, false).await
+}
+async fn write_rows(
+    pool: &PgPool,
+    catalogue: Catalogue,
+    generation: i64,
+    rows: &[Row],
+    rejected: u64,
+    cursor: Option<&serde_json::Value>,
+    read: bool,
+) -> Result<WriteReport> {
     ensure_state(pool, catalogue).await?;
     let mut report = WriteReport {
         rejected,
@@ -208,7 +232,7 @@ pub async fn upsert_rows(
     }
     for (n, part) in rows.chunks(BATCH_ROWS).enumerate() {
         let mut tx = pool.begin().await?;
-        let written = write_part(&mut tx, catalogue, generation, part).await?;
+        let written = write_part_counted(&mut tx, catalogue, generation, part, read).await?;
         report += written;
         if n + 1 == parts {
             if let Some(cursor) = cursor {
@@ -240,11 +264,23 @@ async fn save_cursor(
 }
 /// One part: the upsert that writes only changed content, then the stamp of the unchanged rows,
 /// then the state row's count.
+#[cfg(test)]
 async fn write_part(
     tx: &mut Transaction<'_, Postgres>,
     catalogue: Catalogue,
     generation: i64,
     part: &[Row],
+) -> Result<WriteReport> {
+    write_part_counted(tx, catalogue, generation, part, true).await
+}
+/// [`write_part`]; `read` false for a rewrite of cards the generation has read already (they
+/// don't count again toward `generation_cards`, which the shrink floor compares).
+async fn write_part_counted(
+    tx: &mut Transaction<'_, Postgres>,
+    catalogue: Catalogue,
+    generation: i64,
+    part: &[Row],
+    read: bool,
 ) -> Result<WriteReport> {
     let input: Vec<serde_json::Value> = part
         .iter()
@@ -296,11 +332,12 @@ async fn write_part(
         .await?
         .rows_affected() as i64;
     // The cards this generation has read: new ones, changed ones and stamped ones (a resumed run
-    // writing a part again counts its changed cards twice, never its unchanged ones).
+    // writing a part again counts its changed cards twice, never its unchanged ones). A rewrite
+    // of cards already read counts only a card it adds.
     sqlx::query("UPDATE catalogue_state SET cards=cards+$2,generation_cards=generation_cards+$3,updated_at=now() WHERE catalogue=$1")
         .bind(catalogue.name())
         .bind(inserted)
-        .bind(inserted + changed + stamped)
+        .bind(if read { inserted + changed + stamped } else { inserted })
         .execute(&mut **tx)
         .await?;
     Ok(WriteReport {
@@ -387,6 +424,68 @@ pub enum Allowance {
     /// The catalogue has no state row: it never ran.
     NoState,
 }
+/// The stored cards of `catalogue` with these source IDs, as cards again (an importer that
+/// rewrites part of a stored card, such as its labels, reads it back with this). At most
+/// [`BATCH_ROWS`] per call; IDs with no card are left out.
+pub async fn cards(
+    pool: &PgPool,
+    catalogue: Catalogue,
+    source_ids: &[String],
+) -> Result<Vec<Card>> {
+    anyhow::ensure!(
+        source_ids.len() <= BATCH_ROWS,
+        "at most {BATCH_ROWS} cards per read"
+    );
+    type Stored = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Vec<String>,
+        Option<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Option<f64>,
+        Option<f64>,
+        f32,
+        serde_json::Value,
+    );
+    let rows: Vec<Stored> = sqlx::query_as(
+        "SELECT source,source_id,uri,type,name,other_names,description,labels,keys,related_uris,ST_X(point),ST_Y(point),fame,details \
+         FROM catalogue_card WHERE catalogue=$1 AND source_id=ANY($2) ORDER BY source_id",
+    )
+    .bind(catalogue.name())
+    .bind(source_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Card {
+            source: r.0,
+            source_id: r.1,
+            uri: r.2,
+            r#type: r.3,
+            name: r.4,
+            other_names: r.5,
+            description: r.6,
+            labels: r.7,
+            keys: r.8,
+            related_uris: r.9,
+            point: r
+                .10
+                .zip(r.11)
+                .map(|(lon, lat)| crate::model::Point { lat, lon }),
+            fame: r.12,
+            details: match r.13 {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            },
+        })
+        .collect())
+}
+
 /// The end of a full import of `generation`: remove the cards of `catalogue` it did not read
 /// (`seen_generation` below it), so an item removed upstream leaves with the import that no
 /// longer finds it. Reads the catalogue's rows in `source_id` order, [`SWEEP_ROWS`] per

@@ -299,7 +299,9 @@ enabled = true
 dir = "catalogues"
 [catalogues.wikidata]
 enabled = true
-# limit = 100000 # Import at most this many items (a small instance); unset imports all.
+# Import at most this many items (a small instance): the dump is then read as a stream up to the
+# limit, nothing downloaded. Unset imports all (a 104 GB download into catalogues.dir).
+# limit = 100000
 [catalogues.musicbrainz]
 # Every artist, release group and recording of MusicBrainz's JSON dumps
 # (docs/sources/musicbrainz_catalogue.md).

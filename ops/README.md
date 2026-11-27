@@ -71,11 +71,13 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_catalogue_join_errors_total{stage}` | Failed catalogue joins and extras reads, by where they ran (`referenced`, `before_fetch`, `drain`, `extras`, which also counts a summary Wikipedia didn't answer); each series at 0 from the start. Each is tried again: a fetch, a later check. Alert `CatalogueJoinErrors` past ten joins an hour for an hour |
 | `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Catalogue join checks (`joins`, `catalogue_join_due`) and extras reads (`extras`, `catalogue_extras`) due now, and how long the oldest has been due. Alert `CatalogueJoinsBehind` past six hours of joins; extras follow Wikipedia's pace and lag after a first import by design |
 | `pinakes_catalogue_enabled{catalogue}` | Whether the catalogue is on (1) or off (0) in the configuration the daemon started with |
+| `pinakes_catalogue_catching_up{catalogue}` | Whether the catalogue's updates catch up after a full import whose data was already behind (1) or not (0): `import: true` in its state row's position (Wikidata after a dump import, until it is less than an hour behind). `CatalogueUpdateLag` holds back meanwhile, up to five days past the allowed lag |
 | `pinakes_catalogue_refused{catalogue}` | Whether the catalogue's importer refused the newest dump it read and waits for another (1) or not (0): `refused` in its state row's position, newer than the dump applied (or before any), until a dump is applied; a refused trial of an older dump by hand is not counted. Alert `CatalogueDumpRefused` after an hour |
-| `pinakes_catalogue_needs_contact{catalogue}` | Whether the catalogue is on but its importer does not start for want of `http.contact` (1; MusicBrainz and OpenStreetMap) or not (0) |
+| `pinakes_catalogue_items_skipped_total{catalogue,reason}` | Items or labels an importer left out of the catalogue (each also in the log; Wikidata, each series at 0 from the start): `over_cap` (a changed item whose answer alone is over the API cap: its card stays as it was until it changes again), `bad_line` and `oversized_line` (dump lines that are no entity or over 32 MB), `label_dropped` and `pending_dropped` (past the import's label caps). Alert `CatalogueItemsSkipped` on `over_cap`: see the runbook "A Wikidata import that keeps failing" |
+| `pinakes_catalogue_needs_contact{catalogue}` | Whether the catalogue is on but its importer does not start for want of `http.contact` (1; MusicBrainz, OpenStreetMap and Wikidata) or not (0) |
 | `pinakes_catalogue_last_import_timestamp_seconds{catalogue}` | When its last full import finished; 0 before the first |
 | `pinakes_catalogue_last_update_timestamp_seconds{catalogue}` | When its last update finished; 0 before the first |
-| `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds its cards are behind upstream: since `current_as_of`, the upstream time of the data its last finished run left (a dump's date, the last change applied); 0 before its first full import has finished. An update that finds nothing new doesn't lower it |
+| `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds its cards are behind upstream: since `current_as_of`, the upstream time of the data its last finished run left (a dump's date, the last change applied); 0 before its first full import has finished. An update that finds nothing new doesn't lower it (Wikidata's does: it reads the changes by time, and logs a warning for a window of ten minutes or more without one) |
 | `pinakes_catalogue_max_update_lag_seconds{catalogue}` | How far behind upstream its cards may fall before `CatalogueUpdateLag` fires: its source's publication rhythm with a margin (2 days for Wikidata, OpenStreetMap, Tranco and the package registries; 5 for MusicBrainz; 9 for Podcast Index; 100 for OpenAlex) |
 | `pinakes_catalogue_waiting_for_turn{catalogue}` | 1 while its full import waits for another large catalogue's full import (one runs at a time), else 0 |
 | `pinakes_catalogue_import_errors_total{catalogue}` | Failed import and update runs; kept in the database (`catalogue_state.error_count`), so a restart does not reset it |
@@ -147,10 +149,10 @@ catalogue that is off raises neither. `CatalogueImportFailed` also fires for a f
 fails or is refused; `CatalogueUpdateLag` waits for a first finished import. `CatalogueDumpRefused`
 (warning) fires once a refusal has stood for an hour and holds until a dump is applied, so a
 refused first import, which no lag alert covers, keeps alerting. A catalogue that is on
-but whose importer can't start (MusicBrainz or OpenStreetMap without `http.contact`) raises
+but whose importer can't start (MusicBrainz, OpenStreetMap or Wikidata without `http.contact`) raises
 neither: its `waiting` in `catalogue status` and `pinakes_catalogue_needs_contact` say so, and
 `CatalogueNeedsContact` (warning) fires after an hour of it. `CatalogueFirstImportStalled`
-(warning) fires when a catalogue with an importer (`musicbrainz`, `osm`) has been on for two days
+(warning) fires when a catalogue with an importer (`musicbrainz`, `osm`, `wikidata`) has been on for two days
 without a finished import: a wait for free disk or the large-import turn counts no error. Its
 list names the catalogues that have an importer (a catalogue without one never finishes an
 import); a step that adds an importer adds its name. On a new host with every large catalogue on,
@@ -161,6 +163,9 @@ stall that leaves: a large catalogue's full import that keeps failing keeps the 
 so another large catalogue waits for it. It fires when a catalogue has waited six hours for the
 turn while a large catalogue's runs keep failing; fix the failing import's cause, switch it off
 (its cut-off import then no longer holds the turn) or `pinakesd catalogue drop` it.
+`CatalogueItemsSkipped` (warning) fires for a day after an update left a changed item as it was
+because its answer alone was over the API cap (`pinakes_catalogue_items_skipped_total`,
+`over_cap`): that card misses the change until the item changes again or a full import reads it.
 
 The catalogue rules match their series per `instance` and `job`, so a Prometheus that scrapes
 several instances alerts for each on its own: `ops/alerts.test.yml` runs them with two scraped

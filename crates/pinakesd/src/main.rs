@@ -330,6 +330,8 @@ async fn start(
     });
     // One Egress for the resolvers and the also-on sources: the per-host budgets are shared.
     let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
+    // The Wikidata importer's API requests take the egress's turn for www.wikidata.org.
+    pinakes_core::catalogue::wikidata::net::share_egress_pace(egress.clone());
     let workers = queue::spawn_with_egress(
         pool.clone(),
         config.clone(),
@@ -660,16 +662,20 @@ async fn catalogue_command(
             limit,
             update,
             force,
+            since,
             ..
         } => {
             import(
                 pool,
                 config,
                 catalogue,
-                from.as_deref(),
-                limit,
-                update,
-                force,
+                ImportOptions {
+                    from: from.as_deref(),
+                    limit,
+                    update,
+                    force,
+                    since,
+                },
                 out,
             )
             .await?;
@@ -683,21 +689,37 @@ async fn catalogue_command(
 /// mirror or `--from` (a local directory holding one dump's files, or a mirror URL), with
 /// `--limit` in place of the configured limit (below the cards stored only with `--force`). It
 /// prints why it waits, then the cards before and after and the catalogue's state.
-#[allow(clippy::too_many_arguments)]
+/// What `catalogue import` was given.
+struct ImportOptions<'a> {
+    from: Option<&'a str>,
+    limit: Option<u64>,
+    update: bool,
+    force: bool,
+    /// Wikidata: where the update reads the changes from (`--since`, with `--update`).
+    since: Option<chrono::DateTime<chrono::Utc>>,
+}
 async fn import(
     pool: &sqlx::PgPool,
     config: &Config,
     catalogue: Catalogue,
-    from: Option<&str>,
-    limit: Option<u64>,
-    update: bool,
-    force: bool,
+    options: ImportOptions<'_>,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    use pinakes_core::catalogue::{musicbrainz, osm, run, store};
+    use pinakes_core::catalogue::{musicbrainz, osm, run, store, wikidata};
+    let ImportOptions {
+        from,
+        limit,
+        update,
+        force,
+        since,
+    } = options;
     let mut config = config.clone();
     if limit.is_some() {
-        config.catalogues.musicbrainz.limit = limit;
+        match catalogue {
+            Catalogue::Musicbrainz => config.catalogues.musicbrainz.limit = limit,
+            Catalogue::Wikidata => config.catalogues.wikidata.limit = limit,
+            _ => {}
+        }
     }
     let importer: std::sync::Arc<dyn run::Importer> = match catalogue {
         Catalogue::Osm => {
@@ -713,7 +735,7 @@ async fn import(
                 ..Default::default()
             })
         }
-        _ => {
+        Catalogue::Musicbrainz => {
             let source = match from {
                 Some(from) => musicbrainz::Source::parse(from)?,
                 None => musicbrainz::Source::official(),
@@ -726,6 +748,16 @@ async fn import(
                 musicbrainz::MusicBrainz::new(source, &config.egress.contact)?.configured(&config),
             )
         }
+        Catalogue::Wikidata => {
+            if config.egress.contact.is_empty() {
+                bail!("set http.contact (or PINAKES__HTTP__CONTACT): Wikimedia is asked with the operator's contact");
+            }
+            let mut importer = wikidata::Wikidata::for_config(&config);
+            importer.from = from.map(wikidata::From::parse).transpose()?;
+            importer.cli_limit = limit;
+            std::sync::Arc::new(importer)
+        }
+        other => bail!("catalogue {other} has no importer in this build"),
     };
     let before = store::state(pool, catalogue).await?;
     let cards = before.as_ref().map_or(0, |s| s.cards);
@@ -736,10 +768,15 @@ async fn import(
         .and_then(|l| l.as_u64());
     if let Some(limit) = config.catalogues.limit(catalogue) {
         // A limit other than the one the cards were read with makes a full import of the new
-        // subset (an update hands over to one), which removes the others.
+        // subset (an update hands over to one: Wikidata's past the five-day gap, or one already
+        // asked for), which removes the others.
         if stored_limit != Some(limit) && i64::try_from(limit).is_ok_and(|l| l < cards) && !force {
             bail!("catalogue {catalogue} holds {cards} cards: a full import with --limit {limit} removes all but at most {limit} of them; add --force to do so");
         }
+    }
+    // After the command's own refusals, so a refused command changes nothing.
+    if let Some(since) = since {
+        move_position(pool, catalogue, since).await?;
     }
     if !config.catalogues.enabled(catalogue) {
         writeln!(
@@ -789,6 +826,46 @@ async fn import(
     Ok(())
 }
 
+/// `catalogue import NAME --update --since T`: the position moves to `T`, under the catalogue's lock (a
+/// daemon's run is never changed under it). What else the position holds (a limit) stays; an
+/// update cut off earlier is set aside (it would read from the old position), and a full import
+/// an update asked for is no longer asked for. Refused while one asked for with `--request`
+/// waits (it runs first). Refused before a first full import has finished
+/// (the catalogue must be imported first) and while a full import is under way.
+async fn move_position(
+    pool: &sqlx::PgPool,
+    catalogue: Catalogue,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    use pinakes_core::catalogue::{run::SessionLock, store};
+    let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
+        bail!("another process imports catalogue {catalogue} (its lock is held): stop it, or switch the catalogue off and restart that daemon, first");
+    };
+    let moved = async {
+        let state = store::ensure_state(pool, catalogue).await?;
+        if state.last_import_at.is_none() {
+            bail!("catalogue {catalogue} has no finished full import: run catalogue import {catalogue} first");
+        }
+        // The asked-for import runs first (the runner's next step), and its end sets the position.
+        if state.import_requested.as_deref() == Some(pinakes_core::catalogue::musicbrainz::REQUESTED) {
+            bail!("catalogue {catalogue}: a full import is asked for (catalogue import {catalogue} --request); --since waits until it has run");
+        }
+        let moved = sqlx::query("UPDATE catalogue_state SET position=coalesce(position,'{}'::jsonb)||jsonb_build_object('time',$2::text,'import',false),import_requested=CASE WHEN import_requested=$3 THEN import_requested END,run=CASE WHEN run='update' THEN NULL ELSE run END,cursor=CASE WHEN run='update' THEN NULL ELSE cursor END,updated_at=now() WHERE catalogue=$1 AND (run IS NULL OR run='update')")
+            .bind(catalogue.name())
+            .bind(since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .bind(pinakes_core::catalogue::musicbrainz::REQUESTED)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        if moved == 0 {
+            bail!("catalogue {catalogue}: a full import is under way; --since waits until it has finished");
+        }
+        Ok(())
+    }
+    .await;
+    lock.release().await;
+    moved
+}
 /// The drop, under the catalogue's lock: its cards and state row, then its directory of
 /// downloads and temporary files (`catalogues.dir/<name>`).
 async fn drop_held(
@@ -924,7 +1001,7 @@ enum Command {
 enum CatalogueCommand {
     Status,
     Drop(Catalogue),
-    /// `catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | --request`.
+    /// `catalogue import NAME [--from DIR|FILE|URL] [--limit N] [--update [--since TIME]] [--force] | --request`.
     Import {
         catalogue: Catalogue,
         from: Option<String>,
@@ -934,6 +1011,8 @@ enum CatalogueCommand {
         request: bool,
         /// A `--limit` below the cards stored (`--force`).
         force: bool,
+        /// Where an update reads the changes from (Wikidata, with `--update`).
+        since: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// `catalogue allow-shrink NAME`: the next full import may remove what it did not read.
     AllowShrink(Catalogue),
@@ -1035,11 +1114,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             )
                         })?;
                         anyhow::ensure!(
-                            matches!(catalogue, Catalogue::Musicbrainz | Catalogue::Osm),
+                            matches!(catalogue, Catalogue::Musicbrainz | Catalogue::Osm | Catalogue::Wikidata),
                             "catalogue {catalogue} has no importer in this build"
                         );
                         let (mut from, mut limit, mut update, mut request, mut force) =
                             (None, None, false, false, false);
+                        let mut since = None;
                         while let Some(option) = args.next() {
                             match option.as_str() {
                                 "--from" => from = Some(args.next().context("--from requires a directory or URL")?),
@@ -1054,6 +1134,19 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                                 "--update" => update = true,
                                 "--request" => request = true,
                                 "--force" => force = true,
+                                "--since" => {
+                                    let at = args
+                                        .next()
+                                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+                                        .context("--since requires a time (RFC 3339, such as 2026-11-25T10:00:00Z)")?;
+                                    let at = at.with_timezone(&chrono::Utc);
+                                    // A time to come would hold every update until then.
+                                    anyhow::ensure!(
+                                        at <= chrono::Utc::now(),
+                                        "--since takes a time that has passed"
+                                    );
+                                    since = Some(at);
+                                }
                                 "--config" => {
                                     config = Some(PathBuf::from(
                                         args.next().context("--config requires a TOML path")?,
@@ -1071,6 +1164,20 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             catalogue != Catalogue::Osm || (limit.is_none() && !(update && from.is_some())),
                             "catalogue import osm takes --from FILE (a .osm.pbf) for a full import; --update reads the region's change files and takes no --from; there is no --limit (use catalogues.osm.region)"
                         );
+                        anyhow::ensure!(
+                            since.is_none() || (update && catalogue == Catalogue::Wikidata),
+                            "--since goes with catalogue import wikidata --update"
+                        );
+                        // A Wikidata update reads the recent changes, never a file, and a new
+                        // limit is a full import of its own (it removes the cards past it).
+                        anyhow::ensure!(
+                            !(update && from.is_some() && catalogue == Catalogue::Wikidata),
+                            "catalogue import wikidata --update reads the recent changes: --from goes with a full import"
+                        );
+                        anyhow::ensure!(
+                            !(update && limit.is_some() && catalogue == Catalogue::Wikidata),
+                            "catalogue import wikidata --update keeps the catalogue's limit: --limit goes with a full import"
+                        );
                         CatalogueCommand::Import {
                             catalogue,
                             from,
@@ -1078,6 +1185,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             update,
                             request,
                             force,
+                            since,
                         }
                     }
                     _ => bail!("catalogue takes status, drop NAME, import NAME or allow-shrink NAME"),
@@ -1106,7 +1214,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                 return Ok((
                     config,
                     Command::Print(
-                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue import NAME [--from DIR|URL] [--limit N] [--update] [--force] | catalogue import NAME --request | parse-worker SECS]"
+                        "pinakesd [--config PATH] [--migrate | --openapi | healthcheck | reindex | reextract ROUTE…|all|also-on | catalogue status | catalogue drop NAME | catalogue allow-shrink NAME | catalogue import NAME [--from DIR|FILE|URL] [--limit N] [--update [--since TIME]] [--force] | catalogue import NAME --request | parse-worker SECS]"
                             .into(),
                     ),
                 ))
@@ -1208,6 +1316,7 @@ mod tests {
                 update: true,
                 request: false,
                 force: false,
+                since: None,
             }
         );
         let (_, command) = parse(&["catalogue", "import", "osm", "--from", "a.osm.pbf"]).unwrap();
@@ -1279,6 +1388,52 @@ mod tests {
             &["catalogue", "import", "atlas"],
             &["catalogue", "import", "osm", "--from"],
             &["catalogue", "update", "osm"],
+            &["catalogue", "import", "nope"],
+            &["catalogue", "import", "wikidata", "--limit", "0"],
+            &["catalogue", "import", "wikidata", "--limit", "x"],
+            &[
+                "catalogue",
+                "import",
+                "musicbrainz",
+                "--update",
+                "--since",
+                "2026-11-25T10:00:00Z",
+            ],
+            &[
+                "catalogue",
+                "import",
+                "wikidata",
+                "--since",
+                "2026-11-25T10:00:00Z",
+            ],
+            &["catalogue", "update", "wikidata", "--from", "x.json.bz2"],
+            &["catalogue", "update", "wikidata", "--since", "yesterday"],
+            &[
+                "catalogue",
+                "import",
+                "wikidata",
+                "--update",
+                "--since",
+                "2999-01-01T00:00:00Z",
+            ],
+            &[
+                "catalogue",
+                "import",
+                "wikidata",
+                "--update",
+                "--from",
+                "/tmp/x.json.bz2",
+            ],
+            &[
+                "catalogue",
+                "import",
+                "wikidata",
+                "--update",
+                "--limit",
+                "5",
+            ],
+            &["catalogue", "status", "--from", "x"],
+            &["--limit", "3", "catalogue", "import", "wikidata"],
             &["catalogue", "status", "--migrate"],
             &["catalogue", "status", "reextract", "all"],
             &["reextract", "all", "catalogue", "status"],
@@ -1286,6 +1441,46 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+    /// `catalogue import wikidata [--from F] [--limit N]` and `--update --since T`.
+    #[test]
+    fn catalogue_import_takes_wikidata_s_options() {
+        let parse = |a: &[&str]| super::parse_args(a.iter().map(|s| s.to_string()));
+        let (config, command) = parse(&[
+            "catalogue",
+            "import",
+            "wikidata",
+            "--from",
+            "x.json.bz2",
+            "--limit",
+            "50",
+            "--config",
+            "c.toml",
+        ])
+        .unwrap();
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("c.toml")));
+        assert!(matches!(
+            command,
+            super::Command::Catalogue(super::CatalogueCommand::Import { catalogue: super::Catalogue::Wikidata, from: Some(ref f), limit: Some(50), update: false, since: None, .. }) if f == "x.json.bz2"
+        ));
+        let (_, command) = parse(&[
+            "catalogue",
+            "import",
+            "wikidata",
+            "--update",
+            "--since",
+            "2026-11-25T10:00:00Z",
+        ])
+        .unwrap();
+        let super::Command::Catalogue(super::CatalogueCommand::Import {
+            update: true,
+            since: Some(at),
+            ..
+        }) = command
+        else {
+            panic!()
+        };
+        assert_eq!(at.to_rfc3339(), "2026-11-25T10:00:00+00:00");
     }
     use super::*;
     use std::{
@@ -1555,6 +1750,7 @@ mod tests {
                 update,
                 request: false,
                 force,
+                since: None,
             };
         // A limit below the cards would remove the others: refused without --force, also as an
         // update (which hands over to a full import of the new subset). Nothing is read.
@@ -1598,6 +1794,7 @@ mod tests {
                 update: false,
                 request: true,
                 force: false,
+                since: None,
             },
             &mut out,
         )
@@ -1708,6 +1905,7 @@ mod tests {
             update: false,
             request: false,
             force,
+            since: None,
         };
         // Forced, the whole catalogue: the floor holds.
         let mut out = Vec::new();
@@ -1741,6 +1939,122 @@ mod tests {
         assert_eq!(olds().await, 0, "{}", String::from_utf8_lossy(&out));
     }
 
+    /// A Wikidata update with a configured limit below the cards stored is refused without
+    /// `--force`: past the five-day gap (or with an import already asked for) it hands over to a
+    /// full import with that limit, whose end removes the cards past it. The refused command's
+    /// `--since` moves nothing.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_wikidata_update_that_may_hand_over_to_a_lower_limit_needs_force(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::store;
+        store::ensure_state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE catalogue_state SET last_import_at=now(),cards=20,position='{\"time\":\"2026-11-23T00:00:00Z\"}' WHERE catalogue='wikidata'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut config = Config::default();
+        config.egress.contact = "ops@example.org".into();
+        config.catalogues.wikidata.limit = Some(5);
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut out = Vec::new();
+        let err = catalogue_command(
+            &pool,
+            &config,
+            CatalogueCommand::Import {
+                catalogue: Catalogue::Wikidata,
+                from: None,
+                limit: None,
+                update: true,
+                request: false,
+                force: false,
+                since: Some(at),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--force"), "{err}");
+        let state = store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.position,
+            Some(serde_json::json!({"time": "2026-11-23T00:00:00Z"}))
+        );
+    }
+    /// `update --since`: refused before a first full import, while a full import is under way
+    /// and while another process holds the lock; else the position moves to the time and keeps
+    /// its limit, an update cut off is set aside and an asked-for import is no longer asked for.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn since_moves_the_position_only_when_it_may(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{run::SessionLock, store};
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let err = move_position(&pool, Catalogue::Wikidata, at)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no finished full import"), "{err}");
+        sqlx::query("UPDATE catalogue_state SET last_import_at=now(),position='{\"time\":\"2026-11-23T00:00:00Z\",\"import\":true,\"limit\":5}',import_requested='a newer dump',run='update',cursor='{\"end\":\"2026-11-26T00:00:00Z\"}' WHERE catalogue='wikidata'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let held = SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(move_position(&pool, Catalogue::Wikidata, at).await.is_err());
+        held.release().await;
+        move_position(&pool, Catalogue::Wikidata, at).await.unwrap();
+        let state = store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.position,
+            Some(serde_json::json!({"time": "2026-11-25T10:00:00Z", "import": false, "limit": 5}))
+        );
+        assert_eq!(
+            (state.run, state.cursor, state.import_requested),
+            (None, None, None)
+        );
+        // While an import the operator asked for (`--request`) waits, --since is refused (that
+        // import runs first) and the request stays.
+        let requested = pinakes_core::catalogue::musicbrainz::REQUESTED;
+        sqlx::query("UPDATE catalogue_state SET import_requested=$1 WHERE catalogue='wikidata'")
+            .bind(requested)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let err = move_position(&pool, Catalogue::Wikidata, at)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("--request"), "{err}");
+        let state = store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.import_requested.as_deref(), Some(requested));
+        sqlx::query("UPDATE catalogue_state SET import_requested=NULL WHERE catalogue='wikidata'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE catalogue_state SET run='import' WHERE catalogue='wikidata'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let err = move_position(&pool, Catalogue::Wikidata, at)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("full import is under way"),
+            "{err}"
+        );
+    }
     /// `catalogue drop` refuses while an importer holds the catalogue's lock; otherwise it
     /// deletes the catalogue's cards, its state row and its directory, and says so. `status`
     /// prints the table.
