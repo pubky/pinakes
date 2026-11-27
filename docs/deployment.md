@@ -393,7 +393,7 @@ for all of them (estimate).
 
 ### Notes per catalogue
 
-- **Wikidata** ([catalogue page](sources/catalogue_wikidata.md)). Catalogues are on by default: a
+- **Wikidata** ([catalogue page](sources/wikidata_catalogue.md)). Catalogues are on by default: a
   daemon whose configuration has no `[catalogues]` section and sets `http.contact` starts the
   Wikidata importer, which downloads the 104 GB dump once the disk is free. An instance that
   should import nothing sets `[catalogues] enabled = false`; one that should import other

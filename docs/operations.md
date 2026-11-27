@@ -171,7 +171,7 @@ A catalogue is on when both `catalogues.enabled` and its own `enabled` are true
 | `catalogues.enabled` | `true` | All catalogues. Off, Pinakes indexes only referenced links. |
 | `catalogues.dir` | `"catalogues"` | Downloads and temporary files of imports, one directory per catalogue (`catalogues/wikidata`), relative to the working directory. The container image sets `/var/lib/pinakes/catalogues`. |
 | `catalogues.<name>.enabled` | `true` | One catalogue: `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` or `software`. |
-| `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. Wikidata reads its dump as a stream up to the limit instead of downloading it, and its updates add new items only below the limit ([a part of Wikidata](sources/catalogue_wikidata.md#a-part-of-wikidata)). |
+| `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. Wikidata reads its dump as a stream up to the limit instead of downloading it, and its updates add new items only below the limit ([a part of Wikidata](sources/wikidata_catalogue.md#a-part-of-wikidata)). |
 | `catalogues.osm.region` | `"planet"` | `planet`, or a region of Geofabrik's OpenStreetMap extracts by its path (`europe/switzerland`). A change makes the next update a full import of the new region. |
 | `catalogues.openalex.min_citations` | `50` | Import works cited more than this many times, 0–1000000. |
 
@@ -1785,7 +1785,7 @@ A catalogue card is one item of an open catalogue, stored in `catalogue_card`. T
 F-Droid and Flathub). An importer is the only writer of a catalogue's cards; they don't go
 through the fetch queue, the refresh tiers or the change journal. Each catalogue has its page:
 [`musicbrainz`](sources/musicbrainz_catalogue.md), [`osm`](sources/osm_catalogue.md),
-[`wikidata`](sources/catalogue_wikidata.md), [`openalex`](sources/openalex_catalogue.md),
+[`wikidata`](sources/wikidata_catalogue.md), [`openalex`](sources/openalex_catalogue.md),
 [`podcastindex`](sources/podcastindex_catalogue.md), [`software`](sources/software_catalogue.md)
 and [`tranco`](sources/tranco_catalogue.md). Catalogues are
 on by default, so a daemon whose configuration has no `[catalogues]` section runs their importers:
@@ -1963,7 +1963,7 @@ it waits, and stops (the lock lost) once its session has ended (the cards each r
 rejected as invalid, removed). A full import takes up one that was cut off, else begins a
 new one, and clears an update refused for removing too much. `--from`, `--limit`, `--reads`, `--since` and
 `--force` are the importer's own ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand),
-[Wikidata](sources/catalogue_wikidata.md#commands); the others [below](#run-an-import)). A failure is recorded as the
+[Wikidata](sources/wikidata_catalogue.md#run-it-by-hand); the others [below](#run-an-import)). A failure is recorded as the
 task records it, unless the lock's database session has ended by then: the command then says the
 lock was lost and records nothing. `catalogue import <name> --request` needs no lock: it records that a full import
 is asked for (`import_requested`). The process running the importer starts it after an update
@@ -2154,7 +2154,7 @@ An importer that waits says why in `waiting` (`pinakesd catalogue status`), and
 
 An import that never starts shows `waiting` in `pinakesd catalogue status`: `needs http.contact`
 (set it and restart), short disk, or the large-import turn. One that fails shows the class in
-`last_error` ([the Wikidata catalogue](sources/catalogue_wikidata.md#import)):
+`last_error` ([the Wikidata catalogue](sources/wikidata_catalogue.md#what-it-reads)):
 
 | `last_error` | What happened | What to do |
 | --- | --- | --- |

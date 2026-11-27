@@ -1,31 +1,69 @@
-# The Wikidata catalogue
+# `wikidata` catalogue: every Wikidata item with a Wikipedia article
 
-The Wikidata catalogue holds one [catalogue card](../operations.md#catalogues) for each Wikidata
-item that has a Wikipedia article, imported from Wikidata's weekly JSON dump and kept current from
-Wikidata's recent changes. A link someone shares for such an item (its Wikipedia article in one of
-its 16 biggest editions, its IMDb, TMDB, Google Maps or Steam page, …) gets its card from the
-catalogue without being fetched ([shared links](../operations.md#shared-links-a-catalogue-holds)). No key is needed.
+This catalogue imports Wikidata's weekly JSON dump: one [catalogue card](../operations.md#catalogues)
+for each item that has a Wikipedia article (about 21.4 million), kept current from Wikidata's
+recent changes. The cards are searchable whether or not anyone shared them, and a shared link
+of such an item (its Wikipedia article in one of its 16 biggest editions, its IMDb, TMDB, Google
+Maps or Steam page, …) gets its card from the catalogue without a fetch
+([shared links](../operations.md#shared-links-a-catalogue-holds)).
 
 | | |
 | --- | --- |
 | Catalogue | `wikidata`, a large catalogue (one large full import at a time) |
 | Reads | The dumps directory `https://dumps.wikimedia.org/wikidatawiki/entities/` and its newest dump `<date>/wikidata-<date>-all.json.bz2` (about 104 GB) with its `wikidata-<date>-sha1sums.txt`; Wikidata's API `https://www.wikidata.org/w/api.php` (`list=recentchanges`, `wbgetentities`) |
-| Credentials | None. The operator's contact (`http.contact`) is required: without it the daemon does not start the importer (`catalogue status` shows it `waiting` for `http.contact`, and `pinakes_catalogue_needs_contact` is 1) and `catalogue import wikidata` refuses |
+| Credentials | None |
 | Rate | The dump on two connections (Wikimedia's limit); the API one request at a time and at least 0.3 s apart, with `maxlag=5`, waiting as long as a `Retry-After` or a `maxlag` refusal asks (up to 5 minutes; longer, or `maxlag` refusals past the tries, fails the run with `rate_limited`, and nothing more is asked of that host until the time it asked for has passed, a day at most). A dump read (a download round or a stream) that brings under 8 MB in ten minutes of waiting for the server fails `download` and is taken up again from its cursor. In the daemon each API request also takes the egress's turn for `www.wikidata.org`, so the importer's and the resolver's requests to it go one at a time, at the egress's 200 a minute for the host. HTTPS only, no redirects |
-| Cards | About 21.4 million at full size (items with a Wikipedia article, without Wikimedia's own pages) |
-| Updates | Every 15 minutes from the recent changes, at once while more than an hour behind; a daemon down for over 5 days waits for the next weekly dump |
+| Refresh | Every 15 minutes from the recent changes, at once while more than an hour behind; a daemon down for over 5 days waits for the next weekly dump |
+| Needs | `http.contact`: without it the daemon does not start the importer (`catalogue status` shows it `waiting` for `http.contact`, and `pinakes_catalogue_needs_contact` is 1) and `catalogue import wikidata` refuses; 129 GB free under `catalogues.dir/wikidata` for a new whole import (the dump and the label files; a download cut off, what it still lacks), 1 GB for an update or an import read as a stream ([a part](#a-part-of-wikidata)) |
 | Card types | Schema.org types by the item's class, else `Place` (with a point) or `Thing` ([type](#type)) |
-| Keys | `wikidata:Q…`, MusicBrainz, OpenStreetMap, `imdb:`, `isbn:`, `doi:`, and `url:` keys of the item's pages ([keys](#keys-and-links)) |
-| Credit | Wikidata (CC0) |
+| Keys | `wikidata:Q…`, MusicBrainz, OpenStreetMap, `imdb:`, `isbn:`, `doi:`, and `url:` keys of the item's pages ([keys](#keys-and-groups)) |
+| Credit | `from: "wikidata"` (Wikidata, CC0); the card's link is its Wikipedia article |
 | Switch | `[catalogues.wikidata] enabled`, on by default; `limit` for a part |
 
-## What it imports
+## What it reads
 
 An item becomes a card when it has an article in at least one Wikipedia edition and is not one of
 Wikimedia's own pages: an item whose class (`P31`) is a Wikimedia category, disambiguation page,
 template, list, module, project page, redirect or another of the 20 internal classes gets none.
 Every edition counts: a site `<code>wiki` that is not one of Wikimedia's other wikis (Commons,
 Wikispecies, Meta, Wikidata, …). Properties, lexemes and items without an article are skipped.
+
+A full import (a first one, or one an update asked for):
+
+1. finds the newest dated directory that lists the full JSON dump (`<date>/`);
+2. downloads it to `catalogues.dir/wikidata` on two connections, each its half of the file, in
+   rounds of 512 MB whose progress is saved: a cut-off download resumes where each connection
+   stopped (`If-Range`, so a file replaced meanwhile fails the run with `dump_changed`);
+3. checks its SHA-1 against `wikidata-<date>-sha1sums.txt` (`checksum` when it differs);
+4. reads it on half the machine's cores: the bzip2 blocks are found and decoded in parallel, the
+   lines parsed in parallel, and the cards written in dump order, 1,000 per transaction; the read
+   resumes at the block of the last batch written;
+5. writes the cards that wait for labels again ([labels](#labels)), deletes the dump, and removes
+   the cards of an earlier import that this one didn't read.
+
+A read that gives no card is refused (`empty`), and one with more than one in a thousand of its lines
+(and over 100) that are not JSON or too large fails (`bad_dump`), without removing any card. A failure that makes
+the files useless (`checksum`, `dump_changed`, `dump_gone`, `dump_missing`, `label_files`, a
+`bz2_…` block that doesn't decode, `bad_dump`) deletes the work files, and the next try starts over
+from the newest dump (a local `--from` file is never deleted: the import fails until the catalogue is dropped and the
+fixed file imported); the third such failure of one dump refuses it (`refused`): the run is
+cleared, the large-import turn is free, and the import waits for a newer dump
+([a refused dump or file](../operations.md#a-refused-dump-or-file)). A first import (or an update
+handing over to one) that finds the refused dump still the newest ends at once. A whole import that read under half the cards the
+catalogue holds meets the catalogue's shrink floor: it fails with `shrunk`, removes no card and is
+tried again, until `pinakesd catalogue allow-shrink wikidata` lets it remove the rest
+([a full import that shrinks the catalogue](../operations.md#a-full-import-that-shrinks-the-catalogue)).
+Any other failure resumes from the cursor. What to do about each: [a Wikidata import that keeps failing](../operations.md#a-wikidata-import-that-keeps-failing). The read logs its progress
+about once a minute (`wikidata dump download`, `wikidata dump read so far`, `wikidata changes read
+so far`).
+
+The cards are current as of the dump's date, and the updates read the changes from that date on.
+An entity line larger than 32 MB is skipped and counted (`oversized`), as is a line that is not
+JSON (`bad`); a bzip2 block that doesn't decode fails the run (`bz2_block`), as does a file cut
+short (`bz2_truncated`). The import's summary line in the log (`wikidata dump read`) gives the
+lines read, the cards kept, the items without an article, Wikimedia's pages and the lines skipped.
+
+## Cards
 
 | Field | From the item |
 | --- | --- |
@@ -35,13 +73,16 @@ Wikispecies, Meta, Wikidata, …). Properties, lexemes and items without an arti
 | `description` | The description in English, else `mul`, German, French or Spanish |
 | `type` | See [type](#type) |
 | `labels` | The English labels of its genres (`P136`), then of its classes (`P31`, without "human"), as tag labels; at most 16 |
-| `keys` | See [keys](#keys-and-links) |
+| `keys` | See [keys](#keys-and-groups) |
 | `related_uris` | Its official websites (`P856`), at most 3 |
 | `point` | Its coordinate on Earth (`P625`), the first at the best rank |
 | `fame` | The number of Wikipedia editions with an article, on a log scale: `ln(1 + editions) / ln(301)`, at most 1 |
 
 Only best-rank statements count: preferred ones if the property has any, else normal ones, never
 deprecated ones.
+
+A card built from a Wikidata card takes its Wikipedia article's summary with Wikipedia's credit
+([extras](../operations.md#shared-links-a-catalogue-holds)).
 
 ### Type
 
@@ -71,7 +112,7 @@ until that last step (hours at full size) search's tag filters and suggested tag
 labels. Those rewrites count once toward the cards the import read, which the catalogue's shrink
 floor compares with the cards it holds.
 
-## Keys and links
+## Keys and groups
 
 A key comes from a property only when the item has exactly one valid best-rank value for it:
 two values mean the item spans two things, and a key that names two objects would join their
@@ -125,44 +166,7 @@ While the updates catch up after an import, `pinakes_catalogue_catching_up{catal
 is 1 and `CatalogueUpdateLag` holds back (up to five days past the allowed two), since the
 dump's data was already days old ([allowed update lag](../operations.md#allowed-update-lag)).
 
-## Import
-
-A first import (or one an update asked for):
-
-1. finds the newest dated directory that lists the full JSON dump (`<date>/`);
-2. downloads it to `catalogues.dir/wikidata` on two connections, each its half of the file, in
-   rounds of 512 MB whose progress is saved: a cut-off download resumes where each connection
-   stopped (`If-Range`, so a file replaced meanwhile fails the run with `dump_changed`);
-3. checks its SHA-1 against `wikidata-<date>-sha1sums.txt` (`checksum` when it differs);
-4. reads it on half the machine's cores: the bzip2 blocks are found and decoded in parallel, the
-   lines parsed in parallel, and the cards written in dump order, 1,000 per transaction; the read
-   resumes at the block of the last batch written;
-5. writes the cards that wait for labels again ([labels](#labels)), deletes the dump, and removes
-   the cards of an earlier import that this one didn't read.
-
-A read that gives no card is refused (`empty`), and one with more than one in a thousand of its lines
-(and over 100) that are not JSON or too large fails (`bad_dump`), without removing any card. A failure that makes
-the files useless (`checksum`, `dump_changed`, `dump_gone`, `dump_missing`, `label_files`, a
-`bz2_…` block that doesn't decode, `bad_dump`) deletes the work files, and the next try starts over
-from the newest dump (a local `--from` file is never deleted: the import fails until the catalogue is dropped and the
-fixed file imported); the third such failure of one dump refuses it (`refused`): the run is
-cleared, the large-import turn is free, and the import waits for a newer dump
-([a refused dump or file](../operations.md#a-refused-dump-or-file)). A first import (or an update
-handing over to one) that finds the refused dump still the newest ends at once. A whole import that read under half the cards the
-catalogue holds meets the catalogue's shrink floor: it fails with `shrunk`, removes no card and is
-tried again, until `pinakesd catalogue allow-shrink wikidata` lets it remove the rest
-([a full import that shrinks the catalogue](../operations.md#a-full-import-that-shrinks-the-catalogue)).
-Any other failure resumes from the cursor. What to do about each: [a Wikidata import that keeps failing](../operations.md#a-wikidata-import-that-keeps-failing). The read logs its progress
-about once a minute (`wikidata dump download`, `wikidata dump read so far`, `wikidata changes read
-so far`).
-
-The cards are current as of the dump's date, and the updates read the changes from that date on.
-An entity line larger than 32 MB is skipped and counted (`oversized`), as is a line that is not
-JSON (`bad`); a bzip2 block that doesn't decode fails the run (`bz2_block`), as does a file cut
-short (`bz2_truncated`). The import's summary line in the log (`wikidata dump read`) gives the
-lines read, the cards kept, the items without an article, Wikimedia's pages and the lines skipped.
-
-### A part of Wikidata
+## A part of Wikidata
 
 `[catalogues.wikidata] limit = N` imports the first N items with an article in dump order (the
 oldest, mostly well-known ones). The dump is then read as a stream over HTTP, from the start, and
@@ -176,7 +180,7 @@ An import under way keeps the limit it started with. A limit given on the comman
 wikidata --request`, or `catalogue import wikidata` with the daemon's Wikidata off (unless an
 update has asked for an import already, after a long gap: that import keeps the limit too).
 
-## Commands
+## Run it by hand
 
 ```sh
 pinakesd --config <path> catalogue import wikidata [--from FILE|URL] [--limit N] [--force]
@@ -208,6 +212,8 @@ position: it waits for a newer dump, then a full import is asked for (a download
 the catalogue has a limit). Each refuses while a daemon runs the importer, and a failure is recorded
 and resumes as the task's would. `--request` asks the daemon for a full import instead.
 
+## Sample run
+
 `scripts/catalogue-sample wikidata` checks the importer on a sample of the real dump: it imports
 the first records into a new database, counts the cards, keys and labels, checks that
 `/v1/search` finds a card and that a shared Wikipedia link gets its card, runs an update from the
@@ -215,12 +221,6 @@ real recent changes, and checks that switching the catalogue off hides it; then 
 database. `--limit`, `--window` and `--report` change what it reads and writes; the server, the
 binary and the contact come from the environment every sample run takes
 ([sample runs](../operations.md#catalogue-sample-runs)).
-
-## Credit
-
-Wikidata's data is CC0; a card names Wikidata as its catalogue (`from`), and a card built from
-it takes its Wikipedia article's summary with Wikipedia's credit
-([extras](../operations.md#shared-links-a-catalogue-holds)).
 
 ## Turn it off
 
