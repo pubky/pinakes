@@ -1456,6 +1456,39 @@ async fn the_join_holds_to_its_bounds(pool: PgPool) {
     assert_eq!(card["id"], first_episode, "{card}");
 }
 
+/// A Podcast Index page never joins an episode, though Podcast Index hosts feeds too
+/// (`feeds.podcastindex.org`, beside its pages on `podcastindex.org`): a feed it hosts whose item
+/// links the directory's episode page leaves that page answering for itself.
+#[sqlx::test(migrations = "../../migrations")]
+async fn no_podcast_index_page_joins_an_episode(pool: PgPool) {
+    let app = api::router(AppState::new(pool.clone(), Config::default()).unwrap());
+    let feed_uri = "https://feeds.podcastindex.org/pc20.xml";
+    let page = "https://podcastindex.org/podcast/920666?episode=1234";
+    assert!(pinakes_core::podcast_index_api::index_page(page).is_some());
+    let body = format!(
+        r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Podcasting 2.0</title><item><title>Episode 1</title><guid isPermaLink="false">pc20-1</guid><link>{page}</link><pubDate>Tue, 10 Nov 2026 10:00:00 +0000</pubDate><enclosure url="https://cdn.example/pc20-1.mp3" type="audio/mpeg"/></item></channel></rss>"#
+    );
+    let episodes = pinakes_core::episodes::from_feed(&fetched_at(feed_uri, body.clone())).unwrap();
+    show(&pool, feed_uri, Some(episodes)).await;
+    let page_id = store::ensure_resource(&pool, page).await.unwrap();
+    let mut d = ResourceMeta::new(page, "web", 86_400);
+    d.set_type("WebPage");
+    store::save_document(&pool, &page_id, 0, &d).await.unwrap();
+    let episode = read_with(&pool, &format!("{feed_uri}?guid=pc20-1"), body).await;
+    let (_, card) = request(&app, &by_uri(page)).await;
+    assert_eq!(
+        card["id"], page_id,
+        "the directory's page answers for itself: {card}"
+    );
+    assert_ne!(card["id"], episode);
+    let aliases: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_alias WHERE alias_id=$1")
+        .bind(&page_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(aliases, 0);
+}
+
 /// A page already read as an episode joins an item's card only when it names the same feed.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_episode_page_joins_only_its_own_feeds_item(pool: PgPool) {

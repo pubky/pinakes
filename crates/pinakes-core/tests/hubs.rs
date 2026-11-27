@@ -102,6 +102,24 @@ impl Transport for Recorded {
         _: &[SocketAddr],
         options: &FetchOptions,
     ) -> anyhow::Result<Fetched> {
+        // The original-album read of recording …71 (a read besides the subject's own record) is
+        // over MusicBrainz's cap.
+        if url.host_str() == Some("musicbrainz.org")
+            && url.path() == "/ws/2/release"
+            && url
+                .query_pairs()
+                .any(|(k, v)| k == "recording" && v == "00000000-0000-4000-8000-000000000071")
+        {
+            self.seen.lock().unwrap().push(format!(
+                "musicbrainz.org{}?{}",
+                url.path(),
+                url.query().unwrap_or("")
+            ));
+            return Err(pinakes_core::resolver::egress::BodyTooLarge {
+                cap: pinakes_core::hubs::DEFAULT_BODY_CAP,
+            }
+            .into());
+        }
         // An artist whose record is over MusicBrainz's cap, and its page (the card's fallback).
         if url.host_str() == Some("musicbrainz.org")
             && (url.path().ends_with(BIG_BAND) || url.path().ends_with(BIG_RECORDING))
@@ -3991,9 +4009,10 @@ async fn disagreeing_recording_keys_are_kept_and_counted(pool: sqlx::PgPool) {
     assert_eq!(group, ["-"]);
 }
 
-/// A read the duplicate walk makes besides the subject's own, over MusicBrainz's cap, settles
-/// nothing and empties no run: a track MusicBrainz relates to a recording whose ISRC it shares
-/// with a recording over the cap keeps its own MBID and that recording's links; a
+/// A read a run makes besides the subject's own, over MusicBrainz's cap, settles nothing and
+/// empties no run: a track MusicBrainz relates to a recording whose ISRC it shares with a
+/// recording over the cap, and whose original-album read is over the cap too, keeps its own MBID
+/// and that recording's links (no album fact); a
 /// track whose Wikidata item names a recording over the cap keeps Wikidata's own key (the raw
 /// P4404 MBID).
 #[sqlx::test(migrations = "../../migrations")]
@@ -4051,6 +4070,17 @@ async fn a_secondary_read_over_the_cap_settles_nothing(pool: sqlx::PgPool) {
         )
         .await,
         [format!("https://www.deezer.com/track/7100071 {own}")]
+    );
+    assert!(t.seen.lock().unwrap().iter().any(|u| u.starts_with(
+        "musicbrainz.org/ws/2/release?recording=00000000-0000-4000-8000-000000000071"
+    )));
+    assert_eq!(
+        rows(
+            "SELECT name FROM resource_fact WHERE resource_id=$1 AND source='musicbrainz' AND name='original_album'",
+            ids[related].clone()
+        )
+        .await,
+        Vec::<String>::new()
     );
     assert_eq!(
         rows(

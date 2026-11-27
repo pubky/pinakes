@@ -46,25 +46,20 @@ const VALUE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~')
     .remove(b'/');
 
-/// The links an item has for these properties: one per property whose best-rank values are
-/// exactly one value, and a valid one (several are ambiguous and add nothing, even when only one
-/// of them is well-formed), and one per service (the first property in the table wins). A value
-/// with a `.` or `..` path segment is refused: it would name another page.
+/// The links an item has for these properties: one per property whose valid best-rank values are
+/// exactly one value (`hubs::wikidata::single`: several are ambiguous and add nothing; a value
+/// that is not valid, or has a `.` or `..` path segment, which would name another page, is left
+/// out first), and one per service (the first property in the table wins).
 pub fn links(item: &Item, table: &[Property]) -> Vec<Link> {
     let mut out: Vec<Link> = Vec::new();
     for p in table {
         if out.iter().any(|l| l.site == p.site) {
             continue;
         }
-        let mut values: Vec<&String> = item.id(p.pid).iter().collect();
-        values.dedup();
-        let values: Vec<&String> = match values.as_slice() {
-            [one] if (p.valid)(one) && !one.split('/').any(|seg| seg == "." || seg == "..") => {
-                vec![*one]
-            }
-            _ => Vec::new(),
-        };
-        if let [value] = values.as_slice() {
+        let value = crate::hubs::wikidata::single(item.id(p.pid), |v| {
+            (p.valid)(v) && !v.split('/').any(|seg| seg == "." || seg == "..")
+        });
+        if let Some(value) = value {
             let uri = p
                 .template
                 .replace("$1", &utf8_percent_encode(value, VALUE).to_string());
@@ -812,6 +807,9 @@ mod tests {
         assert_eq!(title_type(&fixture::item("Q172241")), Some("Movie"));
         assert_eq!(title_type(&fixture::item("Q1079")), Some("TVSeries"));
     }
+    /// One link per property whose valid best-rank values are exactly one (`hubs::wikidata::single`:
+    /// a malformed value beside it is left out, two valid ones are a tie), one per site, the
+    /// first property of a site winning.
     #[test]
     fn one_value_one_link_one_per_site() {
         const TABLE: &[Property] = &[
@@ -827,7 +825,7 @@ mod tests {
                 ("P2", &["34"]),
                 ("P3", &["x y"]),
                 ("P4", &["1", "x"]),
-                ("P5", &["movies/the film"]),
+                ("P5", &["movies/the film", "movies/the film"]),
             ]),
             TABLE,
         );
@@ -839,10 +837,13 @@ mod tests {
             got,
             [
                 ("A", "https://a.example/12"),
+                ("C", "https://c.example/1"),
                 ("D", "https://d.example/movies/the%20film/")
             ]
         );
         assert!(links.iter().all(|l| l.via == "wikidata"));
+        // Two valid values are a tie: no link.
+        assert!(super::links(&item(&[("P4", &["1", "2"])]), TABLE).is_empty());
         // A value that walks out of its path names another page.
         const SLUGS: &[Property] = &[property("P1", "A", "https://a.example/film/$1/", |v| {
             v.bytes()

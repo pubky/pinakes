@@ -1,6 +1,7 @@
 Responses from external APIs, recorded once on 2026-10-19 with the Pinakes user agent and the
-contact `info@synonym.to`, at each service's published pace. They are parser regression
-fixtures for `pinakes_core::lookups`; test runs make no public requests.
+contact `info@synonym.to`, at each service's published pace (a later one says when and how in its
+`provenance.json` entry). They are parser regression fixtures for `pinakes_core::lookups` and the
+DOI card (`papers/crossref-csl-*`); test runs make no public requests.
 
 `provenance.json` lists, for each fixture, the request URL, the HTTP status, the content type,
 the time of recording, the size and SHA-256 of the body as served, and the file that holds it.

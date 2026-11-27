@@ -507,71 +507,11 @@ pub fn float(v: &Value) -> Option<f64> {
     .filter(|f: &f64| f.is_finite())
 }
 /// Plain text of an HTML fragment: tags dropped, entities decoded, scripts and styles skipped,
-/// one line per block (`p`, `div`, `li`, `br`, …), white space collapsed. `None` when nothing
-/// is left.
+/// one line per block (`p`, `div`, `li`, `br`, `jats:p`, …), inline tags splitting no word,
+/// white space collapsed, a text's own line breaks kept inside `<pre>` and in text without
+/// blocks (`html::text_lines`, the one reading). `None` when nothing is left.
 pub fn html_text(html: &str) -> Option<String> {
-    use scraper::Node;
-    const BLOCKS: &[&str] = &[
-        "address",
-        "blockquote",
-        "br",
-        "dd",
-        "div",
-        "dl",
-        "dt",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "hr",
-        "li",
-        "ol",
-        "p",
-        "pre",
-        "table",
-        "td",
-        "th",
-        "tr",
-        "ul",
-    ];
-    // Iterative: a fragment's depth is the input's to decide, never the stack's. Each element
-    // is entered (a block opens its line) and left (a block closes it).
-    enum Step<N> {
-        Enter(N),
-        Leave,
-    }
-    let html = crate::resolver::html::fragment(html).ok()?;
-    let mut out = String::new();
-    let mut steps: Vec<Step<_>> = html
-        .root_element()
-        .children()
-        .rev()
-        .map(Step::Enter)
-        .collect();
-    while let Some(step) = steps.pop() {
-        match step {
-            Step::Leave => out.push('\n'),
-            Step::Enter(node) => match node.value() {
-                Node::Text(t) => out.push_str(t),
-                Node::Element(e) if !matches!(e.name(), "script" | "style") => {
-                    if BLOCKS.contains(&e.name()) {
-                        out.push('\n');
-                        steps.push(Step::Leave);
-                    }
-                    steps.extend(node.children().rev().map(Step::Enter));
-                }
-                _ => {}
-            },
-        }
-    }
-    let lines: Vec<String> = out
-        .lines()
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|l| !l.is_empty())
-        .collect();
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    crate::resolver::html::text_lines(html)
 }
 
 /// A time from Unix seconds.

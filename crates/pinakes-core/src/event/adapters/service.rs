@@ -1243,26 +1243,19 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
     };
     doc.name = label("labels");
     doc.description = label("descriptions");
-    let claim = |p: &str| claim(entity, p);
     // A creative work (a series, a film, a book, an album, a game, a podcast: by what the item
     // is an instance of, P31, else by what only a work carries: a publication date, an author,
     // a director, a composer, a publisher, an episode count; not a broadcaster, which a
     // broadcast event has too) is never an event, whatever dates it carries: a series' run
     // (P580, P582) is not an occurrence.
-    let instances: Vec<&str> = entity["claims"]["P31"]
-        .as_array()
+    let instances: Vec<&str> = crate::hubs::wikidata::best(&entity["claims"]["P31"])
         .into_iter()
-        .flatten()
-        .filter(|v| v["rank"] != "deprecated")
-        .filter_map(|v| {
-            v.pointer("/mainsnak/datavalue/value/id")
-                .and_then(Value::as_str)
-        })
+        .filter_map(|s| s.pointer("/datavalue/value/id").and_then(Value::as_str))
         .collect();
     let work = instances.iter().find_map(|q| work_class(q)).or_else(|| {
         ["P577", "P50", "P57", "P86", "P123", "P1113"]
             .iter()
-            .any(|p| claim(p).is_some())
+            .any(|p| !crate::hubs::wikidata::best(&entity["claims"][p]).is_empty())
             .then_some("CreativeWork")
     });
     if let Some(kind) = work {
@@ -1273,31 +1266,39 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
         if work.is_some() || (!end && doc.start.is_some()) {
             continue;
         }
-        if let Some(v) = claim(p) {
-            if let Some(s) = v["time"].as_str().map(|s| s.trim_start_matches('+')) {
-                let fixed = s.replace("-00-00T", "-01-01T").replace("-00T", "-01T");
-                if end {
-                    doc.end = crate::event::time::parse(&fixed, None);
-                } else {
-                    doc.start = crate::event::time::parse(&fixed, None);
-                }
-                doc.event.all_day = Some(true);
-                doc.event.warnings.push(format!(
-                    "wikidata_date_precision_{}",
-                    v["precision"].as_i64().unwrap_or(0)
-                ));
+        // The first date that reads, of the best-rank ones (a tie keeps its first).
+        let date = shown(entity, p, |v| {
+            let s = v["time"].as_str()?.trim_start_matches('+');
+            let fixed = s.replace("-00-00T", "-01-01T").replace("-00T", "-01T");
+            Some((
+                crate::event::time::parse(&fixed, None)?,
+                v["precision"].as_i64().unwrap_or(0),
+            ))
+        });
+        if let Some((time, precision)) = date {
+            if end {
+                doc.end = Some(time);
+            } else {
+                doc.start = Some(time);
             }
+            doc.event.all_day = Some(true);
+            doc.event
+                .warnings
+                .push(format!("wikidata_date_precision_{precision}"));
         }
     }
     if doc.start.is_some() {
         doc.set_type("Event");
-    } else if claim("P31").is_some_and(|v| v["id"] == "Q5") {
+    } else if instances.contains(&"Q5") {
         doc.set_type("Person");
     }
-    if let Some(p) = claim("P625")
-        .filter(|v| v["globe"].as_str().is_none_or(|s| s.ends_with("/Q2")))
-        .and_then(page::point)
-    {
+    if let Some(p) = shown(entity, "P625", |v| {
+        v["globe"]
+            .as_str()
+            .is_none_or(|s| s.ends_with("/Q2"))
+            .then(|| page::point(v))
+            .flatten()
+    }) {
         doc.location = Some(p);
         doc.location_source = Some(crate::model::LocationSource::Page);
         if doc.start.is_none() && work.is_none() && !doc.type_path.contains(&"Person".into()) {
@@ -1308,31 +1309,41 @@ pub fn wiki_value(uri: &str, v: &Value) -> Result<ResourceMeta> {
         doc.aliases
             .push(format!("https://www.wikidata.org/entity/{qid}"));
     }
-    if let Some(site) = claim("P856").and_then(Value::as_str) {
+    if let Some(site) = claim(entity, "P856").and_then(Value::as_str) {
         doc.aliases.push(site.into());
     }
     // The image (`P18`) is shown only once Commons says the file is free ([`credit_image`]).
     Ok(doc)
 }
-/// The value of `entity`'s claim for property `p`: of its statements that are not deprecated, a
-/// preferred one when there is one (of several equal ones, the last).
+/// The value of `entity`'s claim for property `p` that names something (the official website,
+/// an alias of the card): its one best-rank value (`hubs::wikidata::single`); none when it has
+/// several, which would be a guess.
 fn claim<'a>(entity: &'a Value, p: &str) -> Option<&'a Value> {
-    entity["claims"][p]
-        .as_array()
-        .and_then(|a| {
-            a.iter()
-                .filter(|v| v["rank"] != "deprecated")
-                .max_by_key(|v| v["rank"] == "preferred")
-        })
-        .and_then(|v| v.pointer("/mainsnak/datavalue/value"))
+    crate::hubs::wikidata::single(
+        crate::hubs::wikidata::best(&entity["claims"][p])
+            .into_iter()
+            .filter_map(|s| s.pointer("/datavalue/value")),
+        |_| true,
+    )
 }
-/// The ID and image file (`P18`, the claim [`claim`] picks, in normal form,
+/// What a claim the card shows or is typed by (an image, a place, a date) reads as: the first of
+/// its best-rank values that `read` reads (`hubs::wikidata::first`), in statement order; a tie
+/// keeps its first value rather than dropping them all.
+fn shown<'a, T>(entity: &'a Value, p: &str, read: impl FnMut(&'a Value) -> Option<T>) -> Option<T> {
+    crate::hubs::wikidata::first(
+        crate::hubs::wikidata::best(&entity["claims"][p])
+            .into_iter()
+            .filter_map(|s| s.pointer("/datavalue/value")),
+        read,
+    )
+}
+/// The ID and image file (`P18`, the claim [`shown`] picks, in normal form,
 /// `wikimedia::file_name`) of the Wikidata item an entity's JSON holds.
 fn image_file(v: &Value) -> Option<(String, String)> {
     let entity = v["entities"].as_object()?.values().next()?;
     let qid = entity["id"].as_str()?;
-    let file = claim(entity, "P18")?.as_str()?;
-    Some((qid.to_owned(), crate::wikimedia::file_name(file)?))
+    let file = shown(entity, "P18", |v| crate::wikimedia::file_name(v.as_str()?))?;
+    Some((qid.to_owned(), file))
 }
 
 /// The schema.org type of a Wikidata class a creative work is an instance of (P31).
@@ -1491,9 +1502,81 @@ mod tests {
         let doc = wiki_value("https://www.wikidata.org/wiki/Q4", &human).unwrap();
         assert_eq!(doc.type_name, "Person");
     }
-    /// The image file is the P18 statement the card's other claims are picked by (a preferred
-    /// one, never a deprecated one), in MediaWiki's normal form; the card itself carries no image
-    /// until Commons verifies the file.
+    /// An item's claims are read by the one best-rank rule (`hubs::wikidata`): a class among
+    /// several of P31 types it (Q5, a person, whichever comes first); a claim that links with two
+    /// values gives none of them (two official websites: no alias), where a preferred one gives
+    /// that one; a claim shown or typed by keeps the first of a tie (two images, two places, two
+    /// dates).
+    #[test]
+    fn claims_follow_the_one_best_rank_rule() {
+        let two = |p: &str, a: Value, b: Value| {
+            json!({p: [
+                {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": a}}},
+                {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": b}}}
+            ]})
+        };
+        let person = item(
+            "Q8",
+            "Someone",
+            two("P31", json!({"id": "Q5"}), json!({"id": "Q15632617"})),
+        );
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q8", &person).unwrap();
+        assert_eq!(doc.type_name, "Person");
+        let sites = item(
+            "Q9",
+            "Org",
+            two(
+                "P856",
+                json!("https://a.example"),
+                json!("https://b.example"),
+            ),
+        );
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q9", &sites).unwrap();
+        assert_eq!(doc.aliases, ["https://www.wikidata.org/entity/Q9"]);
+        let mut preferred = sites.clone();
+        preferred["entities"]["Q9"]["claims"]["P856"][1]["rank"] = json!("preferred");
+        let doc = wiki_value("https://www.wikidata.org/wiki/Q9", &preferred).unwrap();
+        assert_eq!(
+            doc.aliases,
+            ["https://www.wikidata.org/entity/Q9", "https://b.example"]
+        );
+        // Ties of what is shown keep their first value: the image, the place, the date.
+        let images = item(
+            "Q10",
+            "Bridge",
+            two("P18", json!("first view.jpg"), json!("second view.jpg")),
+        );
+        assert_eq!(
+            image_file(&images),
+            Some(("Q10".into(), "First_view.jpg".into()))
+        );
+        let mut places = two(
+            "P625",
+            json!({"latitude": 46.0, "longitude": 8.95, "globe": "http://www.wikidata.org/entity/Q2"}),
+            json!({"latitude": 47.0, "longitude": 9.0, "globe": "http://www.wikidata.org/entity/Q2"}),
+        );
+        places["P585"] = two(
+            "P585",
+            json!({"time": "+2026-05-01T00:00:00Z", "precision": 11}),
+            json!({"time": "+2027-05-01T00:00:00Z", "precision": 11}),
+        )["P585"]
+            .clone();
+        let event = wiki_value(
+            "https://www.wikidata.org/wiki/Q11",
+            &item("Q11", "Fair", places),
+        )
+        .unwrap();
+        assert_eq!(event.type_name, "Event");
+        assert_eq!(
+            event.start.map(|t| t.to_rfc3339()).as_deref(),
+            Some("2026-05-01T00:00:00+00:00")
+        );
+        let point = event.location.unwrap();
+        assert_eq!((point.lat, point.lon), (46.0, 8.95));
+    }
+    /// The image file is the P18 statement the card's other claims are picked by (its one
+    /// best-rank value: a preferred one, never a deprecated one), in MediaWiki's normal form; the
+    /// card itself carries no image until Commons verifies the file.
     #[test]
     fn the_image_file_is_the_picked_claim_in_normal_form() {
         let file =

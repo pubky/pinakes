@@ -70,6 +70,11 @@ came from a news sitemap. An item without a title makes no card.
 - `image` is the item's image, when it is an `https` URL.
 - `from` is `feed`.
 
+An RSS title, an Atom text of `type="text"` (the default) and a news sitemap title are plain text:
+what looks like markup in them stays as written (`Using <title> in HTML`). An RSS description and
+an Atom text of `type="html"` or `type="xhtml"` are HTML: their tags are taken out, an inline tag
+splitting no word (`H<sub>2</sub>O` is `H2O`). Both are read on one line.
+
 An RSS item's image is the first of its child elements that is one of these:
 
 - a `media:thumbnail`, unless its `medium` names something other than `image`;
@@ -82,7 +87,7 @@ An Atom entry's image is its `media:thumbnail`. A news sitemap item's image is i
 | Fact | Meaning |
 | --- | --- |
 | `author` | The item's authors (RSS `dc:creator`, Atom `author`) |
-| `published` | The item's date (RSS `pubDate`, Atom `published` or `updated`, the sitemap's publication date) |
+| `published` | The item's date (RSS `pubDate`, Atom `published` or `updated`, the sitemap's publication date) in RFC 3339, read as podcast feeds' dates are: RFC 2822 or RFC 3339 with the item's own offset (`+0200` stays `+02:00`), a zone name RFC 2822 does not list counting as `UTC` for `UTC` and as no offset for any other (`CEST`) and stored in UTC, and only within years 1 to 9999 |
 | `feed` | The address of the feed or sitemap the item came from |
 
 ## Keys and groups

@@ -1100,6 +1100,57 @@ pub mod wikidata {
         Ambiguous(usize),
     }
 
+    /// The value snaks of one property's statements (`claims`, its list) at their best rank, as
+    /// Wikidata's own "truthy" reading has them: the preferred statements when any is, else the
+    /// normal ones; never a deprecated one. A statement without a rank counts as normal. Of
+    /// those, the main snaks that hold a value (`snaktype` `value`, the default; no `somevalue`
+    /// or `novalue`), in order. Every reader of Wikidata statements takes them from here.
+    pub fn best(claims: &Value) -> Vec<&Value> {
+        let claims = claims.as_array().map_or(&[][..], Vec::as_slice);
+        let preferred = claims.iter().any(|c| c["rank"] == "preferred");
+        claims
+            .iter()
+            .filter(|c| match c["rank"].as_str().unwrap_or("normal") {
+                "preferred" => true,
+                "normal" => !preferred,
+                _ => false,
+            })
+            .map(|c| &c["mainsnak"])
+            .filter(|s| s["snaktype"].as_str().unwrap_or("value") == "value")
+            .collect()
+    }
+    /// The one value of a property that identifies or links (an external ID, an official
+    /// website), from its best-rank values ([`best`]): of the `valid` ones, each distinct value
+    /// counted once, there must be exactly one. Two valid values are a tie, which nothing breaks,
+    /// so they give nothing (a wrong link would join or link the wrong cards); an invalid one
+    /// (another format's spelling of the same ID, kept beside the current one) is left out first.
+    /// A value only shown or typed by takes [`first`].
+    pub fn single<T: PartialEq>(
+        values: impl IntoIterator<Item = T>,
+        valid: impl Fn(&T) -> bool,
+    ) -> Option<T> {
+        let mut one: Option<T> = None;
+        for value in values.into_iter().filter(|v| valid(v)) {
+            match &one {
+                Some(seen) if *seen == value => {}
+                Some(_) => return None,
+                None => one = Some(value),
+            }
+        }
+        one
+    }
+
+    /// The value a claim shows or types a card by (an image, a place, a date): the first of its
+    /// best-rank values ([`best`]) that `read` reads, in statement order. A tie keeps its first
+    /// value: a picture or a date shown is a choice no card joins by. Identifiers and links take
+    /// [`single`] instead, as a wrong one would join or link the wrong thing.
+    pub fn first<T, U>(
+        values: impl IntoIterator<Item = T>,
+        read: impl FnMut(T) -> Option<U>,
+    ) -> Option<U> {
+        values.into_iter().find_map(read)
+    }
+
     /// `wbgetentities` with `props=claims|sitelinks/urls`.
     pub fn parse_entities(v: &Value) -> Vec<Item> {
         let mut items: Vec<Item> = v["entities"]
@@ -1113,19 +1164,10 @@ pub mod wikidata {
                 let qid = qid(e["id"].as_str().unwrap_or(id))?;
                 let mut ids = BTreeMap::new();
                 for (property, claims) in e["claims"].as_object().into_iter().flatten() {
-                    let claims = claims.as_array().map_or(&[][..], Vec::as_slice);
-                    let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
-                        "preferred"
-                    } else {
-                        "normal"
-                    };
-                    let values: Vec<String> = claims
-                        .iter()
-                        .filter(|c| c["rank"] == rank)
-                        .map(|c| &c["mainsnak"])
+                    let values: Vec<String> = best(claims)
+                        .into_iter()
                         .filter(|s| {
-                            s["snaktype"] == "value"
-                                && matches!(s["datatype"].as_str(), Some("external-id" | "string"))
+                            matches!(s["datatype"].as_str(), Some("external-id" | "string"))
                         })
                         .filter_map(|s| s["datavalue"]["value"].as_str())
                         .map(str::to_owned)
@@ -1157,16 +1199,9 @@ pub mod wikidata {
     /// The items an item-valued property names, at its best rank (preferred if any, else
     /// normal; deprecated never).
     fn item_values(claims: &Value) -> Vec<String> {
-        let claims = claims.as_array().map_or(&[][..], Vec::as_slice);
-        let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
-            "preferred"
-        } else {
-            "normal"
-        };
-        claims
-            .iter()
-            .filter(|c| c["rank"] == rank && c["mainsnak"]["snaktype"] == "value")
-            .filter_map(|c| qid(c["mainsnak"]["datavalue"]["value"]["id"].as_str()?))
+        best(claims)
+            .into_iter()
+            .filter_map(|s| qid(s["datavalue"]["value"]["id"].as_str()?))
             .collect()
     }
     /// The item a Wikidata item link names, with the link's canonical form
@@ -1379,23 +1414,10 @@ pub mod wikidata {
     /// The Commons file names a `claims_lookup` answer holds for `property`, at its best rank
     /// (preferred if any, else normal; deprecated never), in order.
     pub fn parse_files(v: &Value, property: &str) -> Vec<String> {
-        let claims = v["claims"][property]
-            .as_array()
-            .map_or(&[][..], Vec::as_slice);
-        let rank = if claims.iter().any(|c| c["rank"] == "preferred") {
-            "preferred"
-        } else {
-            "normal"
-        };
-        claims
-            .iter()
-            .filter(|c| {
-                // A claim without a rank is a normal one.
-                c["rank"].as_str().unwrap_or("normal") == rank
-                    && c["mainsnak"]["snaktype"] == "value"
-                    && c["mainsnak"]["datatype"] == "commonsMedia"
-            })
-            .filter_map(|c| c["mainsnak"]["datavalue"]["value"].as_str())
+        best(&v["claims"][property])
+            .into_iter()
+            .filter(|s| s["datatype"] == "commonsMedia")
+            .filter_map(|s| s["datavalue"]["value"].as_str())
             .map(str::to_owned)
             .collect()
     }
@@ -2282,5 +2304,72 @@ mod tests {
         assert_eq!(items[0].id("P1"), ["n"]);
         assert_eq!(items[0].id("P2"), ["best"]);
         assert!(items[0].id("P3").is_empty());
+    }
+
+    /// One best-rank rule for every Wikidata reader: preferred statements when any is, else
+    /// normal ones (a statement without a rank is normal), never deprecated; value snaks only.
+    /// And one "the value" rule: of the valid values, exactly one distinct; two valid values are
+    /// a tie, which nothing breaks.
+    #[test]
+    fn one_best_rank_and_one_single_value_rule() {
+        let claim = |rank: Option<&str>, snak: &str, value: &str| {
+            let mut c =
+                serde_json::json!({"mainsnak": {"snaktype": snak, "datavalue": {"value": value}}});
+            if let Some(rank) = rank {
+                c["rank"] = rank.into();
+            }
+            c
+        };
+        let values = |claims: Vec<Value>| -> Vec<String> {
+            wikidata::best(&Value::Array(claims))
+                .into_iter()
+                .filter_map(|s| s["datavalue"]["value"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let (p, n, d) = (Some("preferred"), Some("normal"), Some("deprecated"));
+        // Preferred over normal, whatever the order.
+        assert_eq!(
+            values(vec![
+                claim(n, "value", "a"),
+                claim(p, "value", "b"),
+                claim(n, "value", "c")
+            ]),
+            ["b"]
+        );
+        // No preferred: every normal one, in order; a statement without a rank is normal.
+        assert_eq!(
+            values(vec![
+                claim(n, "value", "a"),
+                claim(None, "value", "b"),
+                claim(d, "value", "c")
+            ]),
+            ["a", "b"]
+        );
+        // Deprecated alone counts for nothing, nor does a preferred `novalue` or `somevalue`
+        // give way to the normal ones.
+        assert!(values(vec![claim(d, "value", "old")]).is_empty());
+        assert!(values(vec![claim(p, "novalue", ""), claim(n, "value", "a")]).is_empty());
+        assert!(wikidata::best(&Value::Null).is_empty());
+        // The single value: one, the same value twice (one), a tie of two (none), a valid one
+        // beside an invalid one (the valid one), and one invalid (none).
+        let digits = |v: &&str| v.bytes().all(|b| b.is_ascii_digit());
+        assert_eq!(wikidata::single(["1"], digits), Some("1"));
+        assert_eq!(wikidata::single(["1", "1"], digits), Some("1"));
+        assert_eq!(wikidata::single(["1", "2"], digits), None);
+        assert_eq!(wikidata::single(["x", "1"], digits), Some("1"));
+        assert_eq!(wikidata::single(["x"], digits), None);
+        assert_eq!(wikidata::single(Vec::<&str>::new(), digits), None);
+        // Every reader follows it: the files of a claim list, the classes of an item.
+        let files = serde_json::json!({"claims": {"P18": [
+            {"mainsnak": {"snaktype": "value", "datatype": "commonsMedia", "datavalue": {"value": "a.jpg"}}},
+            {"rank": "deprecated", "mainsnak": {"snaktype": "value", "datatype": "commonsMedia", "datavalue": {"value": "b.jpg"}}}
+        ]}});
+        assert_eq!(wikidata::parse_files(&files, "P18"), ["a.jpg"]);
+        let item = serde_json::json!({"entities": {"Q1": {"type": "item", "id": "Q1", "claims": {"P31": [
+            {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": {"id": "Q5"}}}},
+            {"rank": "normal", "mainsnak": {"snaktype": "value", "datavalue": {"value": {"id": "Q2"}}}},
+            {"rank": "deprecated", "mainsnak": {"snaktype": "value", "datavalue": {"value": {"id": "Q3"}}}}
+        ]}}}});
+        assert_eq!(wikidata::parse_entities(&item)[0].instance_of, ["Q5", "Q2"]);
     }
 }

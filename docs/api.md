@@ -326,7 +326,10 @@ A Wikidata item that is a creative work is that work (`TVSeries`, `Movie`, `Book
 `Event`, whatever dates it carries: a series' run is not an occurrence. An item is a creative
 work when it is an instance of (P31) a series, a film, a book, an album, a song, a game, a
 podcast or a periodical; else when it has a publication date, an author, a director, a composer,
-a publisher or an episode count. A page that is a podcast episode by its feed
+a publisher or an episode count. Its claims count at their best rank (preferred if any, else
+normal; never deprecated). A claim the card links by (the official website) gives nothing when it
+has several values; a claim it shows or is typed by (a date, a place, the image) takes the first
+of them. A page that is a podcast episode by its feed
 ([Also on](#also-on)) is a `PodcastEpisode` from its next refresh.
 
 Such a card is named after its object, not its page. Where a TMDB, Trakt, Netflix, Goodreads,
@@ -2592,7 +2595,7 @@ Each entry is `{id?, uri, refs?, site, derived?, via?, kind?, at?, embed}`:
 | `site` | The service: a member's site as its card names it, a derived link's service name |
 | `derived` | `true` on a link nobody tagged, found by a source; absent otherwise |
 | `via` | For a derived link: the hub or service it came through (`musicbrainz`, `wikidata`) |
-| `kind` | For a derived link, a qualifier its source's page names: `maybe` (a match by metadata, not an exact ID: [Exact links and matches](#exact-links-and-matches)), `archived` (a Wayback Machine copy), `work`, `source`, `submitted`, `published` or `pdf` |
+| `kind` | For a derived link, a qualifier its source's page names: `maybe` (possibly the same: a match by metadata or another publisher's record naming it, not an exact ID: [Exact links and matches](#exact-links-and-matches)), `archived` (a Wayback Machine copy), `work`, `source`, `submitted`, `published` or `pdf` |
 | `at` | For a derived link, a time that belongs to it, such as an archived copy's capture time |
 | `embed` | The frame that shows this link ([Embed](#embed)), or `null` |
 
@@ -2730,8 +2733,8 @@ relation, a Wikidata claim, or a service's own answer to a lookup by ISRC or bar
 `spotify_isrc`, `tidal_isrc`). It carries that key, so a tagged resource that is the link joins
 the group; its entry is a plain derived link.
 
-Three sources match by metadata, or by an answer they cannot read back, instead. Their links are
-maybes, marked `kind: "maybe"` (possibly the same thing). They are still listed, so a client can
+Four sources match by metadata, by an answer they cannot read back, or by another publisher's
+record, instead. Their links are maybes, marked `kind: "maybe"` (possibly the same thing). They are still listed, so a client can
 show or play them, but they are never keyed, never join a group and never make a key of the card
 they are on.
 
@@ -2740,6 +2743,7 @@ they are on.
 | `itunes` (albums) | The one Apple Music album iTunes answers for the album's barcode; its answer carries no barcode to compare |
 | `itunes_song` | Apple Music's song at the same disc and track number on the album with the track's barcode, with the same title and within 3 s of its length; iTunes answers carry no ISRC |
 | `youtube_match` | For a label's YouTube upload (a Topic channel, "Provided to YouTube by"): the one Deezer and the one TIDAL track with the same artist and title within 2 s of its length |
+| `federal_register` | For an SEC rule-change release PDF: the one Federal Register document whose docket IDs name the release and the filing its address names ([Federal Register](sources/federal_register.md#an-sec-release)); joins never cross publishers |
 
 ### Wikipedia and MusicBrainz cards
 

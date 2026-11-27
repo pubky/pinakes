@@ -233,9 +233,12 @@ Each source has a page in [docs/sources](sources/README.md#also-on); the client 
 ## Maybe same
 
 Some matches rest on metadata, not an exact identifier: the same title, artist and length, or the
-same start time and a similar name. Pinakes returns them, but never as a key or a group:
+same start time and a similar name. Others rest on another publisher's record naming the thing
+(a Federal Register document naming an SEC release): joins never cross publishers. Pinakes
+returns them, but never as a key or a group:
 
-- a derived link matched by metadata has `kind: "maybe"` in `also_on`;
+- a derived link matched by metadata or by another publisher's record has `kind: "maybe"` in
+  `also_on`;
 - event cards list events that are possibly the same one in `maybe_same`
   ([Possibly the same event](api.md#possibly-the-same-event));
 - recording cards list possibly the same recordings

@@ -107,11 +107,22 @@ pub fn govinfo_copy(uri: &str) -> Option<(String, String)> {
     Some((number, pkg.strip_prefix("FR-")?.to_owned()))
 }
 
-/// The release number of an SEC copy of a self-regulatory organization's rule change,
-/// `https://www.sec.gov/files/rules/sro/{org}/{year}/{release}.pdf`, e.g. `34-106268`: the
-/// Federal Register publishes the release as a document whose docket ids name `Release No.
-/// {release}`. An exhibit (`{release}-{exhibit}.pdf`) is part of the filing, not a copy of it.
-pub fn from_sec_release_uri(uri: &str) -> Option<String> {
+/// The SEC's PDF of a self-regulatory organization's rule-change release,
+/// `https://www.sec.gov/files/rules/sro/{org}/{year}/{release}.pdf`: the organization and the
+/// filing's year as the address names them (lower case, as the SEC spells its folders), and the
+/// release number, e.g. `nasdaqtx`, `2026`, `34-106268`. The Federal Register publishes the
+/// release as a document whose docket ids name `Release No. {release}` and the filing
+/// `File No. SR-{org}-{year}-{n}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecRelease {
+    pub org: String,
+    pub year: String,
+    pub release: String,
+}
+
+/// The SEC release an address names ([`SecRelease`]). An exhibit (`{release}-{exhibit}.pdf`) is
+/// part of the filing, not the release.
+pub fn sec_release(uri: &str) -> Option<SecRelease> {
     let url = super::kit::web_url(uri)?;
     if !matches!(url.host_str()?, "www.sec.gov" | "sec.gov") {
         return None;
@@ -128,42 +139,79 @@ pub fn from_sec_release_uri(uri: &str) -> Option<String> {
         && act.bytes().all(|b| b.is_ascii_digit())
         && (4..=7).contains(&n.len())
         && n.bytes().all(|b| b.is_ascii_digit());
-    (ok_org && ok_year && ok_release).then(|| release.to_owned())
+    (ok_org && ok_year && ok_release).then(|| SecRelease {
+        org: org.to_ascii_lowercase(),
+        year: (*year).to_owned(),
+        release: release.to_owned(),
+    })
 }
 
 /// The API's documents filed under a docket, by an SEC release number.
 pub fn docket_url(release: &str) -> String {
     format!(
         "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bdocket_id%5D={release}\
-         &fields%5B%5D=document_number&fields%5B%5D=docket_ids&per_page=20"
+         &fields%5B%5D=document_number&fields%5B%5D=docket_ids&fields%5B%5D=publication_date&per_page=20"
     )
 }
 
-/// The one document whose docket ids name `Release No. {release}` exactly. The search matches
-/// loosely, so every result is checked; a release number is unique.
-pub fn docket_document(body: &[u8], release: &str) -> Result<Option<String>> {
+/// The one document whose docket ids name `Release No. {release}` exactly, and the address's
+/// filing: its docket ids name a file of the address's organization, `SR-{org}-{year}-{n}`
+/// (`File No.` or one of `File Nos.`, any case), and the address's year is that file's year or
+/// the document's publication year (an order can come a year after its filing). An address with
+/// another organization or year names no document. The search matches loosely, so every result
+/// is checked; a release number is unique.
+pub fn docket_document(body: &[u8], sec: &SecRelease) -> Result<Option<String>> {
     let v: Value = serde_json::from_slice(body)?;
-    let wanted = format!("release no. {release}");
-    let named = |d: &Value| {
-        d["docket_ids"].as_array().is_some_and(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .any(|id| id.trim().eq_ignore_ascii_case(&wanted))
-        })
+    let wanted = format!("release no. {}", sec.release);
+    let ids = |d: &Value| -> Vec<String> {
+        d["docket_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|id| id.trim().to_ascii_lowercase())
+            .collect()
     };
-    let mut numbers: Vec<String> = v["results"]
+    let named = |d: &&Value| ids(d).contains(&wanted);
+    let mut documents: Vec<(String, Vec<String>, String)> = v["results"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|d| named(d))
-        .filter_map(|d| document_number(d["document_number"].as_str()?))
+        .filter(named)
+        .filter_map(|d| {
+            let published = d["publication_date"].as_str().unwrap_or_default();
+            Some((
+                document_number(d["document_number"].as_str()?)?,
+                ids(d),
+                published.get(..4).unwrap_or_default().to_owned(),
+            ))
+        })
         .collect();
-    numbers.sort();
-    numbers.dedup();
-    Ok(match numbers.as_slice() {
-        [one] => Some(one.clone()),
-        _ => None,
-    })
+    documents.sort();
+    documents.dedup_by(|a, b| a.0 == b.0);
+    let [(number, ids, published)] = documents.as_slice() else {
+        return Ok(None);
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let organization = format!("sr-{}-", sec.org);
+    let filed = ids.iter().any(|id| {
+        id.strip_prefix("file nos.")
+            .or_else(|| id.strip_prefix("file no."))
+            .is_some_and(|files| {
+                files.split(',').any(|file| {
+                    file.trim()
+                        .strip_prefix(&organization)
+                        .and_then(|rest| rest.split_once('-'))
+                        .is_some_and(|(year, n)| {
+                            year.len() == 4
+                                && digits(year)
+                                && digits(n)
+                                && (year == sec.year || *published == sec.year)
+                        })
+                })
+            })
+    });
+    Ok(filed.then(|| number.clone()))
 }
 
 /// The API record of one document.
@@ -448,9 +496,10 @@ pub mod also_on {
     use async_trait::async_trait;
 
     /// A Federal Register document: its GovInfo copies, regulations.gov document and
-    /// public-inspection PDF from the API record, and `fr:{number}`, which two other copies
-    /// someone tags share: a GovInfo copy whose package day is the record's publication date, and
-    /// the SEC's PDF of a rule-change release whose number the document's docket ids name.
+    /// public-inspection PDF from the API record, and `fr:{number}`, which a GovInfo copy someone
+    /// tags shares when its package day is the record's publication date. The SEC's PDF of a
+    /// rule-change release whose number and filing the document's docket ids name is another
+    /// publisher's: possibly the same document (a `maybe` link and a fact), never its key.
     pub struct FederalRegister;
 
     #[async_trait]
@@ -471,7 +520,7 @@ pub mod also_on {
             use crate::sources::federal_register as fr;
             fr::number(&subject.uri).is_some()
                 || fr::govinfo_copy(&subject.uri).is_some()
-                || fr::from_sec_release_uri(&subject.uri).is_some()
+                || fr::sec_release(&subject.uri).is_some()
         }
         async fn lookup(&self, cx: &Context, subject: &Subject) -> Result<also_on::Found> {
             use crate::sources::federal_register as fr;
@@ -509,29 +558,37 @@ pub mod also_on {
                     retry,
                 ));
             }
-            // The SEC's PDF of a release is one more copy of the document whose docket ids name
-            // the release (an exact match).
-            if let Some(release) = fr::from_sec_release_uri(&subject.uri) {
+            // The SEC's PDF of a release and the document whose docket ids name the release and
+            // its filing (exact matches) are two publishers' copies: the record names another
+            // service's ID, so the document is possibly the same (a `maybe` link, no key) and its
+            // number a fact; joins never cross publishers.
+            if let Some(sec) = fr::sec_release(&subject.uri) {
                 let mut retry = None;
                 let answer = secondary(
                     "federalregister",
                     &mut retry,
                     async {
                         let (status, body) =
-                            get(cx, &fr::docket_url(&release), "federalregister_busy").await?;
+                            get(cx, &fr::docket_url(&sec.release), "federalregister_busy").await?;
                         anyhow::ensure!(status == 200, "Federal Register answered {status}");
-                        fr::docket_document(&body, &release)
+                        fr::docket_document(&body, &sec)
                     }
                     .await,
                 );
-                let keys = answer.flatten().map(|n| vec![key(&n)]).unwrap_or_default();
-                return Ok(with_retry(
-                    also_on::Found {
-                        keys,
+                let found = match answer.flatten() {
+                    Some(number) => also_on::Found {
+                        links: vec![also_on::Link::new(
+                            format!("https://www.federalregister.gov/d/{number}"),
+                            "Federal Register",
+                            "federalregister",
+                        )
+                        .maybe()],
+                        facts: vec![also_on::Fact::new("fr_document", number)],
                         ..Default::default()
                     },
-                    retry,
-                ));
+                    None => also_on::Found::default(),
+                };
+                return Ok(with_retry(found, retry));
             }
             let Some(number) = fr::number(&subject.uri) else {
                 return Ok(also_on::Found::default());
@@ -659,10 +716,12 @@ pub mod also_on {
             }
         }
 
-        /// The SEC's PDF of a rule-change release gets the key of the document
-        /// whose docket ids name the release exactly; a release no document names gets none.
+        /// The SEC's PDF of a rule-change release is another publisher's copy: the document
+        /// whose docket ids name the release and its filing is a `maybe` link and a fact, never
+        /// its key; an address whose organization or year the filing does not name, or a release
+        /// no document names, gets nothing.
         #[tokio::test(start_paused = true)]
-        async fn an_sec_release_pdf_is_one_more_copy_of_its_document() {
+        async fn an_sec_release_pdf_is_possibly_its_document_never_its_key() {
             let docket = |release: &str| {
                 url::Url::parse(&super::super::docket_url(release))
                     .unwrap()
@@ -691,19 +750,44 @@ pub mod also_on {
             let copy = at(pdf);
             assert!(FederalRegister.applies(&copy), "{pdf}");
             let found = FederalRegister.lookup(&cx, &copy).await.unwrap();
-            assert_eq!(keys(&found), ["fr:2026-18291"], "{pdf}");
+            assert!(found.keys.is_empty(), "{pdf}: {:?}", found.keys);
+            let links: Vec<(&str, &str, Option<&str>, Option<&str>)> = found
+                .links
+                .iter()
+                .map(|l| {
+                    (
+                        l.uri.as_str(),
+                        l.site.as_str(),
+                        l.kind.as_deref(),
+                        l.key.as_deref(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                links,
+                [(
+                    "https://www.federalregister.gov/d/2026-18291",
+                    "Federal Register",
+                    Some(also_on::MAYBE),
+                    None
+                )]
+            );
+            assert_eq!(
+                found.facts,
+                [also_on::Fact::new("fr_document", "2026-18291")]
+            );
             // An exhibit is part of the filing, not a copy of the document.
             assert!(!FederalRegister.applies(&at(
                 "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268-ex5.pdf"
             )));
-            let found = FederalRegister
-                .lookup(
-                    &cx,
-                    &at("https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-999999.pdf"),
-                )
-                .await
-                .unwrap();
-            assert!(found.keys.is_empty());
+            for nothing in [
+                "https://www.sec.gov/files/rules/sro/invented/1901/34-106268.pdf",
+                "https://www.sec.gov/files/rules/sro/nasdaqtx/1901/34-106268.pdf",
+                "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-999999.pdf",
+            ] {
+                let found = FederalRegister.lookup(&cx, &at(nothing)).await.unwrap();
+                assert_eq!(found, also_on::Found::default(), "{nothing}");
+            }
         }
 
         /// Its key namespace, as searches name it.
@@ -734,10 +818,16 @@ mod tests {
 
     #[test]
     fn sec_release_copies_and_their_docket() {
+        let release = |uri: &str| sec_release(uri).map(|s| s.release);
+        let nasdaqtx =
+            sec_release("https://www.sec.gov/files/rules/sro/NasdaqTX/2026/34-106268.pdf").unwrap();
         assert_eq!(
-            from_sec_release_uri("https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268.pdf")
-                .as_deref(),
-            Some("34-106268")
+            (
+                nasdaqtx.org.as_str(),
+                nasdaqtx.year.as_str(),
+                nasdaqtx.release.as_str()
+            ),
+            ("nasdaqtx", "2026", "34-106268")
         );
         for bad in [
             "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/notice.pdf",
@@ -745,17 +835,77 @@ mod tests {
             "https://www.sec.gov/files/rules/sro/nasdaqtx/2026/34-106268-.pdf",
             "https://example.org/files/rules/sro/nasdaqtx/2026/34-106268.pdf",
         ] {
-            assert_eq!(from_sec_release_uri(bad), None, "{bad}");
+            assert_eq!(release(bad), None, "{bad}");
         }
+        let at = |org: &str, year: &str, release: &str| SecRelease {
+            org: org.into(),
+            year: year.into(),
+            release: release.into(),
+        };
         let found = fixture("fr-docket-34-106268.json");
         assert_eq!(
-            docket_document(&found, "34-106268").unwrap().as_deref(),
+            docket_document(&found, &nasdaqtx).unwrap().as_deref(),
             Some("2026-18291")
         );
         // The search matches loosely; only an exact `Release No.` docket id counts.
-        assert_eq!(docket_document(&found, "34-10626").unwrap(), None);
+        assert_eq!(
+            docket_document(&found, &at("nasdaqtx", "2026", "34-10626")).unwrap(),
+            None
+        );
+        // The address's organization and year are the filing's (`File No. SR-NasdaqTX-2026-039`):
+        // an invented one names no document.
+        for (org, year) in [
+            ("invented", "2026"),
+            ("nasdaqtx", "1901"),
+            ("nasdaq", "2026"),
+        ] {
+            assert_eq!(
+                docket_document(&found, &at(org, year, "34-106268")).unwrap(),
+                None,
+                "{org}/{year}"
+            );
+        }
+        let filed = |ids: &str| {
+            let body =
+                format!(r#"{{"results":[{{"document_number":"2026-18291","docket_ids":{ids}}}]}}"#);
+            docket_document(body.as_bytes(), &nasdaqtx).unwrap()
+        };
+        assert_eq!(
+            filed(
+                r#"["Release No. 34-106268", "File Nos. SR-NYSE-2026-01, SR-NasdaqTX-2026-039"]"#
+            )
+            .as_deref(),
+            Some("2026-18291")
+        );
+        assert_eq!(
+            filed(
+                r#"["Release No. 34-106268", "File Nos. SR-NasdaqTX-2026-039, SR-NYSE-2026-01"]"#
+            )
+            .as_deref(),
+            Some("2026-18291")
+        );
+        assert_eq!(filed(r#"["Release No. 34-106268"]"#), None);
+        // The address's year may be the document's publication year instead of the filing's:
+        // an order a year after its filing. Neither year: nothing.
+        let ordered = |year: &str, published: &str| {
+            let body = format!(
+                r#"{{"results":[{{"document_number":"2027-00012","publication_date":"{published}","docket_ids":["Release No. 34-106268","File No. SR-NasdaqTX-2026-039"]}}]}}"#
+            );
+            docket_document(body.as_bytes(), &at("nasdaqtx", year, "34-106268")).unwrap()
+        };
+        assert_eq!(ordered("2027", "2027-01-08").as_deref(), Some("2027-00012"));
+        assert_eq!(ordered("2026", "2027-01-08").as_deref(), Some("2027-00012"));
+        assert_eq!(ordered("2028", "2027-01-08"), None);
+        assert_eq!(ordered("2027", ""), None);
+        assert_eq!(
+            filed(r#"["Release No. 34-106268", "File No. SR-NasdaqTX-2026-"]"#),
+            None
+        );
         let none = fixture("fr-docket-34-999999.json");
-        assert_eq!(docket_document(&none, "34-999999").unwrap(), None);
+        assert_eq!(
+            docket_document(&none, &at("nasdaqtx", "2026", "34-999999")).unwrap(),
+            None
+        );
         assert_eq!(
             govinfo_copy("https://www.govinfo.gov/app/details/FR-2026-09-09/2026-18291"),
             Some(("2026-18291".into(), "2026-09-09".into()))

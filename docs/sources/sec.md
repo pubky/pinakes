@@ -159,10 +159,12 @@ A release is a `Report` named "Release No. {release}", with `site` "www.sec.gov"
 
 The card emits no keys. CIKs, accession numbers, file numbers and LEIs are facts and join nothing.
 
-A release PDF gets a key from another source: the
-`federal_register` also-on source gives it the `fr:{number}` key of
-the Federal Register document whose docket IDs name `Release No. {release}`. The release then joins
-that document's [group](../api.md#groups). An exhibit gets no key.
+A release PDF gets no key from another source either. The `federal_register` also-on source links
+it to the Federal Register document whose docket IDs name `Release No. {release}` and the
+release's filing (`File No. SR-{org}-…`, the organization the PDF's address names, in the
+address's year or published in it) as possibly the same document: a `maybe` link to `https://www.federalregister.gov/d/{number}` and the fact
+`fr_document` ([Federal Register](federal_register.md#an-sec-release)). The two stay in their own
+[groups](../api.md#groups). An exhibit gets nothing.
 
 ## Credit
 

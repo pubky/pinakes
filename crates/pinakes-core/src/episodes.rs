@@ -514,7 +514,7 @@ fn episode(item: roxmltree::Node<'_, '_>, feed: &Url) -> Option<Episode> {
 /// A date as feeds write it (RFC 2822, some RFC 3339), within the stored range. A zone name
 /// RFC 2822 does not list (`UTC`, `CEST`, `BST`) still dates the episode: `UTC` is `+0000`,
 /// any other says nothing of its offset and is read as `-0000` (RFC 2822 4.3).
-fn date(s: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn date(s: &str) -> Option<DateTime<Utc>> {
     let s = s.trim();
     DateTime::parse_from_rfc2822(s)
         .or_else(|_| DateTime::parse_from_rfc3339(s))
@@ -1046,8 +1046,9 @@ const JOINABLE: &[&str] = &[
 /// Makes an episode's page an alias of the episode's card, read from its feed item (`uri`, the
 /// card `id`, its job's `generation`) that a stored show list names: the feed names the page as
 /// the item's own link (`ResourceMeta::episode_page`, [`own_page`]), and the feed's own publisher
-/// publishes the page: one registrable domain, or one tenant of a shared host
-/// (`group_keys::same_origin`), on one host or a subdomain of the other. So a page that reads as
+/// publishes the page ([`publisher_page`]: one registrable domain, or one tenant of a shared host
+/// (`group_keys::same_origin`), on one host or a subdomain of the other; no Podcast Index page,
+/// though Podcast Index hosts feeds too). So a page that reads as
 /// an article (a blog post's markup that names no feed) answers as the episode, and its tracking
 /// spellings, already its aliases, follow it. Only a page Pinakes has read joins, and only while
 /// it is a plain page of its own: no group, no aliases but its own tracking and canonical
@@ -1065,22 +1066,12 @@ pub(crate) async fn join_page(
     uri: &str,
     page: &str,
 ) -> Result<()> {
-    let (Ok((page_id, page_uri, scheme)), Ok(feed)) =
-        (crate::model::identity(page), Url::parse(uri))
+    let (Ok((page_id, page_uri, _)), Ok(feed)) = (crate::model::identity(page), Url::parse(uri))
     else {
         return Ok(());
     };
-    if page_id == id
-        || !matches!(scheme.as_str(), "http" | "https")
-        || page_uri.len() > 2048
-        || crate::capability::is_capability(&page_uri)
-        || crate::capability::is_capability(uri)
-        || !crate::group_keys::same_origin(&page_uri, uri)
-        || !related_hosts(&page_uri, uri)
-        || site_root(&page_uri)
-        || a_feed(&page_uri, &feed)
-        || crate::alias::root(&page_uri).is_some()
-    {
+    // The publisher's own page by the rules an entry's page keeps, so the two never drift.
+    if page_id == id || !publisher_page(&page_uri, uri) || crate::alias::root(&page_uri).is_some() {
         return Ok(());
     }
     let feed_id = crate::model::identity(show_feed(&feed).as_str())

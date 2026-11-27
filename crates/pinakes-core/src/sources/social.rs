@@ -269,31 +269,6 @@ pub fn post_text(doc: &mut ResourceMeta, text: &str, by: Option<&str>) {
 /// shows it (but inside `<pre>`). Normalise it with [`lines`].
 pub fn html_lines(element: scraper::ElementRef<'_>) -> String {
     use scraper::Node;
-    // The elements that start and end a line, as `kit::html_text` reads them (`br` apart).
-    const BLOCKS: &[&str] = &[
-        "address",
-        "blockquote",
-        "dd",
-        "div",
-        "dl",
-        "dt",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "hr",
-        "li",
-        "ol",
-        "p",
-        "pre",
-        "table",
-        "td",
-        "th",
-        "tr",
-        "ul",
-    ];
     // Iterative: a fragment's depth is the input's to decide, never the stack's. A block opens
     // its line when it is entered and ends it when it is left (a paragraph with a blank line).
     enum Step<N> {
@@ -325,7 +300,9 @@ pub fn html_lines(element: scraper::ElementRef<'_>) -> String {
                 }
                 Node::Element(e) if e.name() == "br" => out.push('\n'),
                 Node::Element(e) if !matches!(e.name(), "script" | "style") => {
-                    if BLOCKS.contains(&e.name()) {
+                    // The elements that start and end a line, as every HTML-to-text reading has
+                    // them (`html::block`; `br` above).
+                    if crate::resolver::html::block(e.name()) {
                         end(&mut out, false);
                         pre += usize::from(e.name() == "pre");
                         steps.push(Step::Leave(e.name() == "p", e.name() == "pre"));

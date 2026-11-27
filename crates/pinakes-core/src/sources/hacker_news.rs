@@ -38,10 +38,7 @@ pub fn root(id: u64) -> String {
 
 /// HN's HTML-ish comment text as plain text.
 fn plain(html: &str) -> String {
-    super::excerpt(
-        &crate::resolver::cards::plain(&html.replace("<p>", "\n")),
-        200,
-    )
+    super::excerpt(&crate::resolver::cards::plain(html), 200)
 }
 
 /// The card of an item, or `None` when there is no such item or it was deleted.

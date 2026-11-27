@@ -283,14 +283,23 @@ mod tests {
             "https://podcast.darknetdiaries.com"
         );
         assert!(card.image.is_some());
-        assert!(card
-            .description
-            .as_deref()
-            .is_some_and(|d| d.starts_with("Explore true stories")));
+        // A plain-text description keeps its own line breaks (blank lines dropped).
+        let lines = |d: Option<&str>| d.unwrap().lines().map(str::to_owned).collect::<Vec<_>>();
+        let darknet = lines(card.description.as_deref());
+        assert_eq!(darknet.len(), 2, "{darknet:?}");
+        assert!(darknet[0].starts_with("Explore true stories"));
+        assert!(darknet[1].starts_with("¿Hablas español?"));
         let acquired = parse_show(200, &read("feed-48166.json"), 48166)
             .unwrap()
             .unwrap();
         assert_eq!(acquired.name.as_deref(), Some("Acquired"));
+        assert_eq!(
+            lines(acquired.description.as_deref()),
+            [
+                "Every company has a story.",
+                "Learn the playbooks that built the world’s greatest companies — and how you can apply them."
+            ]
+        );
         // An id that names no feed: an empty list.
         assert!(parse_show(200, &read("feed-missing.json"), 999_999_999)
             .unwrap()

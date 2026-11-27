@@ -36,21 +36,44 @@ pub struct Entry {
     pub news: bool,
 }
 
-fn one_line(value: &str) -> String {
-    crate::resolver::cards::plain(value)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+/// A field's text on one line, as the web reader reads the same formats (`web::feed_words`):
+/// markup taken out only where the format makes the field HTML (`html`: an RSS description, an
+/// Atom `type="html"` text); anywhere else what looks like markup is the literal text it is
+/// (`Using <title> in HTML`).
+fn one_line(value: &str, html: bool) -> String {
+    crate::resolver::web::feed_words(value, html)
 }
 fn some(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.is_empty())
 }
+/// A feed's date as podcast feeds' are read (`episodes::date`: RFC 2822, RFC 3339, a zone name
+/// RFC 2822 does not list, within the stored range), in RFC 3339: with the item's own offset when
+/// it gives one (`+0200` stays `+02:00`), in UTC when it names a zone RFC 2822 does not list.
 fn date(value: &str) -> Option<String> {
+    let instant = crate::episodes::date(value)?;
     let value = value.trim();
-    chrono::DateTime::parse_from_rfc2822(value)
-        .or_else(|_| chrono::DateTime::parse_from_rfc3339(value))
-        .ok()
-        .map(|d| d.to_rfc3339())
+    Some(
+        chrono::DateTime::parse_from_rfc2822(value)
+            .or_else(|_| chrono::DateTime::parse_from_rfc3339(value))
+            .map_or_else(|_| instant.to_rfc3339(), |d| d.to_rfc3339()),
+    )
+}
+/// An Atom text construct (`title`, `summary`, `content`) on one line, by its `type`: `text`
+/// (the default) is plain, `html` (or a content's `text/html`) is HTML escaped as text, and
+/// `xhtml` (or `application/xhtml+xml`) is the XHTML it holds, all of it from its first child to
+/// its last, read as HTML.
+fn atom_text(node: roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
+    let field = named(node, name)?;
+    let text = match field.attribute("type") {
+        Some("html" | "text/html") => one_line(field.text()?, true),
+        Some("xhtml" | "application/xhtml+xml") => {
+            let (first, last) = (field.first_child()?, field.last_child()?);
+            let source = field.document().input_text();
+            one_line(&source[first.range().start..last.range().end], true)
+        }
+        _ => one_line(field.text()?, false),
+    };
+    some(Some(text))
 }
 
 /// A child element by local name (namespaces aside: `news:title`, `dc:creator`).
@@ -128,13 +151,13 @@ pub fn entries(body: &[u8]) -> Vec<Entry> {
                     .children()
                     .filter(|c| c.is_element() && c.tag_name().name() == "creator")
                     .filter_map(|c| c.text())
-                    .map(one_line)
+                    .map(|a| one_line(a, false))
                     .filter(|a| !a.is_empty())
                     .collect();
                 out.push(Entry {
                     link,
-                    title: some(text_of(node, "title").map(|t| one_line(&t))),
-                    description: some(text_of(node, "description").map(|d| one_line(&d))),
+                    title: some(text_of(node, "title").map(|t| one_line(&t, false))),
+                    description: some(text_of(node, "description").map(|d| one_line(&d, true))),
                     image,
                     authors,
                     published: text_of(node, "pubDate").and_then(|d| date(&d)),
@@ -159,12 +182,8 @@ pub fn entries(body: &[u8]) -> Vec<Entry> {
                     .collect();
                 out.push(Entry {
                     link,
-                    title: some(text_of(node, "title").map(|t| one_line(&t))),
-                    description: some(
-                        text_of(node, "summary")
-                            .or_else(|| text_of(node, "content"))
-                            .map(|d| one_line(&d)),
-                    ),
+                    title: atom_text(node, "title"),
+                    description: atom_text(node, "summary").or_else(|| atom_text(node, "content")),
                     image: node
                         .children()
                         .find(|c| c.is_element() && c.tag_name().name() == "thumbnail")
@@ -185,7 +204,7 @@ pub fn entries(body: &[u8]) -> Vec<Entry> {
                 let news = named(node, "news").expect("checked");
                 out.push(Entry {
                     link,
-                    title: some(text_of(news, "title").map(|t| one_line(&t))),
+                    title: some(text_of(news, "title").map(|t| one_line(&t, false))),
                     description: None,
                     image: named(node, "image").and_then(|i| text_of(i, "loc")),
                     authors: vec![],
@@ -412,6 +431,92 @@ mod tests {
         fixture::read("feed", file)
     }
 
+    /// An RSS title, an Atom `text` title (the default) and a news sitemap's title are plain
+    /// text: what looks like markup is the literal text. An RSS description and an Atom `html` or
+    /// `xhtml` text are HTML: their markup goes, their words stay whole.
+    #[test]
+    fn a_plain_feed_title_keeps_text_that_looks_like_markup() {
+        let rss = br#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><item><title>Using &lt;title&gt; in HTML</title><link>https://example.org/a</link><description>&lt;p&gt;Why H&lt;sub&gt;2&lt;/sub&gt;O &lt;b&gt;boils&lt;/b&gt;&lt;/p&gt;</description></item></channel></rss>"#;
+        let atom = br#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>T</title><entry><title type="text">Using &lt;title&gt; in HTML</title><link href="https://example.org/b"/><summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Why H<sub>2</sub>O</p><p>boils</p></div></summary></entry><entry><title>Using &lt;title&gt; in HTML</title><link href="https://example.org/c"/><content type="html">&lt;p&gt;An &amp;amp; B&lt;/p&gt;</content></entry></feed>"#;
+        let news = br#"<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"><url><loc>https://example.org/d</loc><news:news><news:title>Using &lt;title&gt; in HTML</news:title></news:news></url></urlset>"#;
+        let read = |body: &[u8]| -> Vec<(Option<String>, Option<String>)> {
+            entries(body)
+                .into_iter()
+                .map(|e| (e.title, e.description))
+                .collect()
+        };
+        let title = Some("Using <title> in HTML".to_owned());
+        assert_eq!(
+            read(rss),
+            [(title.clone(), Some("Why H2O boils".to_owned()))]
+        );
+        assert_eq!(
+            read(atom),
+            [
+                (title.clone(), Some("Why H2O boils".to_owned())),
+                (title.clone(), Some("An & B".to_owned()))
+            ]
+        );
+        assert_eq!(read(news), [(title, None)]);
+        // XHTML without the one wrapping `div` is read whole; MIME types name the same kinds.
+        let kinds = br#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>A</title><link href="https://example.org/e"/><content type="xhtml"><p xmlns="http://www.w3.org/1999/xhtml">a</p><p xmlns="http://www.w3.org/1999/xhtml">b &amp; c</p></content></entry><entry><title>B</title><link href="https://example.org/f"/><content type="text/html">&lt;p&gt;H&lt;sub&gt;2&lt;/sub&gt;O&lt;/p&gt;</content></entry><entry><title>C</title><link href="https://example.org/g"/><content type="application/xhtml+xml"><div xmlns="http://www.w3.org/1999/xhtml"><b>bold</b> text</div></content></entry></feed>"#;
+        assert_eq!(
+            read(kinds),
+            [
+                (Some("A".to_owned()), Some("a b & c".to_owned())),
+                (Some("B".to_owned()), Some("H2O".to_owned())),
+                (Some("C".to_owned()), Some("bold text".to_owned()))
+            ]
+        );
+    }
+
+    /// An item dated with a zone name RFC 2822 does not list is dated all the same, as podcast
+    /// episodes are (`episodes::date`): `UTC` is `+0000`, any other name `-0000`, stored in UTC;
+    /// GMT and EST are RFC 2822's own. A date with its own offset keeps it. A date past the stored
+    /// range dates nothing.
+    #[test]
+    fn a_date_with_a_zone_name_is_read() {
+        let published = |date: &str| {
+            let rss = format!(
+                r#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title><item><title>A</title><link>https://example.org/a</link><pubDate>{date}</pubDate></item></channel></rss>"#
+            );
+            entries(rss.as_bytes())
+                .first()
+                .and_then(|e| e.published.clone())
+        };
+        for (date, read) in [
+            (
+                "Tue, 10 Nov 2026 10:00:00 UTC",
+                Some("2026-11-10T10:00:00+00:00"),
+            ),
+            (
+                "Tue, 20 Oct 2026 10:00:00 CEST",
+                Some("2026-10-20T10:00:00+00:00"),
+            ),
+            (
+                "Tue, 20 Oct 2026 10:00:00 GMT",
+                Some("2026-10-20T10:00:00+00:00"),
+            ),
+            (
+                "Tue, 20 Oct 2026 12:00:00 +0200",
+                Some("2026-10-20T12:00:00+02:00"),
+            ),
+            (
+                "2026-10-20T12:00:00+02:00",
+                Some("2026-10-20T12:00:00+02:00"),
+            ),
+            (
+                "Tue, 20 Oct 2026 10:00:00 EST",
+                Some("2026-10-20T10:00:00-05:00"),
+            ),
+            ("2026-10-20T10:00:00Z", Some("2026-10-20T10:00:00+00:00")),
+            ("Tue, 20 Oct 2026 10:00:00 PM", None),
+            ("Fri, 31 Dec 9999 23:59:60 +0000", None),
+        ] {
+            assert_eq!(published(date).as_deref(), read, "{date}");
+        }
+    }
+
     #[test]
     fn rss_atom_and_news_sitemaps() {
         let rss = entries(&read("theblock-rss.xml"));
@@ -445,7 +550,7 @@ mod tests {
             Some("https://www.tbstat.com/wp/uploads/2026/10/visa.png")
         );
 
-        let atom = br#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>An &lt;b&gt;entry&lt;/b&gt;</title>
+        let atom = br#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title type="html">An &lt;b&gt;entry&lt;/b&gt;</title>
             <link rel="self" href="https://a.example/self"/><link href="https://a.example/post/1"/>
             <author><name>Ann</name></author><summary>Short.</summary><published>2026-01-02T03:04:05Z</published></entry></feed>"#;
         let atom = entries(atom);

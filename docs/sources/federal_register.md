@@ -35,7 +35,8 @@ digits, then parts of one to six digits each, for example `2026-18291`, `E9-1234
 
 Not read here: search pages, agency pages, dated addresses without a day
 (`/documents/{yyyy}/{mm}/{number}`), and other hosts. GovInfo and SEC copies of a document are
-other resources; the [also-on half](#also-on) gives them the document's key.
+other resources: the [also-on half](#also-on) gives a GovInfo copy the document's key, and links
+an SEC release to the document as possibly the same.
 
 ## What it fetches
 
@@ -110,17 +111,29 @@ the API record. An address with another day gets no key.
 ### An SEC release
 
 The SEC's PDF of a self-regulatory organization's rule-change release,
-`https://www.sec.gov/files/rules/sro/{org}/{year}/{release}.pdf` (for example `34-106268.pdf`),
-gets the key of the one Federal Register document whose docket IDs name `Release No. {release}`
-exactly:
+`https://www.sec.gov/files/rules/sro/{org}/{year}/{release}.pdf` (for example
+`nasdaqtx/2026/34-106268.pdf`), is another publisher's copy, so it gets no key. Pinakes asks for
+the documents filed under the release:
 
 ```
-GET https://www.federalregister.gov/api/v1/documents.json?conditions[docket_id]={release}&fields[]=document_number&fields[]=docket_ids&per_page=20
+GET https://www.federalregister.gov/api/v1/documents.json?conditions[docket_id]={release}&fields[]=document_number&fields[]=docket_ids&fields[]=publication_date&per_page=20
 ```
 
-The search matches loosely, so Pinakes checks each result. When no document, or more than one,
-names the release exactly, the PDF gets no key. An exhibit (`{release}-{exhibit}.pdf`) is part of
-the filing, not a copy of the document, and is not read.
+The search matches loosely, so Pinakes checks each result. When exactly one document's docket
+IDs name `Release No. {release}`, and they name a filing of the address's organization as `File
+No. SR-{org}-{yyyy}-{n}` (any case; one of `File Nos.` counts), and the address's `{year}` is that
+filing's year or the document's publication year (an order can come a year after its filing),
+the PDF gets:
+
+- the link `https://www.federalregister.gov/d/{number}` (site "Federal Register") with `kind`
+  `maybe`: possibly the same document, never a key, so the PDF and the document stay in their own
+  [groups](../api.md#groups);
+- the fact `fr_document`, the document's number.
+
+When no document, or more than one, names the release, or the document names no filing of the
+address's organization, or the address's year is neither the filing's nor the publication's, the
+PDF gets nothing. An exhibit
+(`{release}-{exhibit}.pdf`) is part of the filing, not a copy of the document, and is not read.
 
 ## Credit
 
@@ -138,8 +151,8 @@ enabled = false
 
 The two switches are independent. With the first off, federalregister.gov links get ordinary web
 cards, and `fr:` roots wait until the source is on again. With the second off, cards list no
-GovInfo, regulations.gov or public-inspection links and carry no `fr:` key: after the restart the
-stored rows stop showing.
+GovInfo, regulations.gov, public-inspection or possibly-same Federal Register links and carry no
+`fr:` key or `fr_document` fact: after the restart the stored rows stop showing.
 
 ## Examples
 

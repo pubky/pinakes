@@ -526,55 +526,125 @@ pub fn bounded(text: &str) -> &str {
 /// markup (a `<` opening a tag, a comment or a declaration), else as it is. `None` when markup
 /// leaves no text.
 pub fn plain_text(text: String) -> Option<String> {
-    let markup = text
-        .as_bytes()
-        .windows(2)
-        .any(|w| w[0] == b'<' && (w[1].is_ascii_alphabetic() || matches!(w[1], b'/' | b'!')));
-    if markup {
+    if markup(&text) {
         scan_text(&text)
     } else {
         Some(text)
     }
 }
+/// Whether this thread may read `text` as a card's text: outside a parse job always; in one,
+/// when the job passes its checks, as every parse of it does (a job whose caller left, or that
+/// is over, reads no more text).
+pub fn admitted(text: &str) -> bool {
+    JOB.with(|j| j.borrow_mut().as_mut().map(|job| job.admit(text)))
+        .is_none_or(|r| r.is_ok())
+}
+/// Whether `text` holds markup: a `<` opening a tag, a comment or a declaration.
+pub fn markup(text: &str) -> bool {
+    text.as_bytes()
+        .windows(2)
+        .any(|w| w[0] == b'<' && (w[1].is_ascii_alphabetic() || matches!(w[1], b'/' | b'!')))
+}
+/// The HTML elements that start a line of their own ([`block`]).
+const BLOCKS: &[&str] = &[
+    "address",
+    "blockquote",
+    "br",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "td",
+    "th",
+    "tr",
+    "ul",
+];
+/// The JATS elements (a paper's abstract as Crossref and publishers send it, `jats:p`) that
+/// start a line of their own besides [`BLOCKS`]: sections, titles, lists, figures, quotes.
+const JATS_BLOCKS: &[&str] = &[
+    "abstract",
+    "ack",
+    "boxed-text",
+    "caption",
+    "def-item",
+    "def-list",
+    "disp-formula",
+    "disp-quote",
+    "fig",
+    "list",
+    "list-item",
+    "sec",
+    "statement",
+    "table-wrap",
+    "title",
+    "trans-abstract",
+];
+/// Whether the element `name` (lower case) starts a line of its own: an HTML block ([`BLOCKS`])
+/// under any namespace prefix (`p`, `xhtml:p`, `jats:p`), or, in the `jats:` namespace, a JATS
+/// block ([`JATS_BLOCKS`]). Any other element is inline: `H<sub>2</sub>O` and
+/// `H<jats:sub>2</jats:sub>O` are one word.
+pub fn block(name: &str) -> bool {
+    let (prefix, local) = name.rsplit_once(':').unwrap_or(("", name));
+    BLOCKS.contains(&local) || (prefix == "jats" && JATS_BLOCKS.contains(&local))
+}
 /// The text of an HTML fragment, read in one pass without a parser, so in time linear in
-/// its length whatever its nesting: tags and comments are dropped, a block tag (`p`, `br`,
-/// `li`, …) starts a new line, `script` and `style` contents are skipped, character
-/// references are decoded and white space is collapsed. `None` when no text is left.
+/// its length whatever its nesting: tags and comments are dropped, a block element ([`block`]:
+/// `p`, `br`, `li`, `jats:p`, …) starts a new line and an inline one (`sub`, `em`, `a`) none,
+/// `script` and `style` contents are skipped, character references are decoded and white space
+/// is collapsed; a line break in the text itself is white space, as a browser shows it. Empty
+/// lines are dropped. `None` when no text is left, or when it runs in a parse job that is over
+/// (its caller gone, its deadline passed), as every parse of the job is refused then. The one
+/// HTML-to-text reading: [`text_lines`] reads the same way and keeps a text's own lines.
 pub fn scan_text(html: &str) -> Option<String> {
-    const BLOCKS: &[&str] = &[
-        "address",
-        "blockquote",
-        "br",
-        "dd",
-        "div",
-        "dl",
-        "dt",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "hr",
-        "li",
-        "ol",
-        "p",
-        "pre",
-        "section",
-        "table",
-        "tr",
-        "ul",
-    ];
+    scan(html, false)
+}
+/// [`scan_text`] for a field of several lines (a description, a summary: `cards::plain`,
+/// `kit::html_text`): a line break in the text itself is a line too inside `<pre>`, and anywhere
+/// when the text has no block element (plain text, or text with inline tags only: its writer
+/// broke its lines by hand). Beside block elements, outside `<pre>`, it is the source's layout,
+/// white space as a browser shows it.
+pub fn text_lines(html: &str) -> Option<String> {
+    scan(html, true)
+}
+/// A line break inside `<pre>`, kept apart from the text's other line breaks ([`text_lines`]).
+const PRE_BREAK: char = '\u{1}';
+fn scan(html: &str, own_lines: bool) -> Option<String> {
+    if !admitted(html) {
+        return None;
+    }
     // ASCII lower-casing keeps every byte offset, so `lower` locates what `html` holds.
     let lower = html.to_ascii_lowercase();
     let mut lines = vec![String::new()];
-    let mut at = 0;
+    let (mut at, mut unclosed, mut blocks, mut pre) = (0, false, false, 0usize);
+    // Text, its line breaks inside `<pre>` marked when the text's own lines are kept.
+    let push = |lines: &mut Vec<String>, text: &str, pre: usize| -> Option<()> {
+        let line = lines.last_mut()?;
+        if own_lines && pre > 0 {
+            line.extend(text.chars().map(|c| if c == '\n' { PRE_BREAK } else { c }));
+        } else {
+            line.push_str(text);
+        }
+        Some(())
+    };
     while at < html.len() {
         let Some(open) = html[at..].find('<').map(|i| at + i) else {
-            lines.last_mut()?.push_str(&html[at..]);
+            push(&mut lines, &html[at..], pre)?;
             break;
         };
-        lines.last_mut()?.push_str(&html[at..open]);
+        push(&mut lines, &html[at..open], pre)?;
         if lower[open..].starts_with("<!--") {
             // A comment, to its end (or the end of the text).
             at = lower[open + 4..]
@@ -589,18 +659,27 @@ pub fn scan_text(html: &str) -> Option<String> {
             at = open + 1;
             continue;
         }
-        let Some(close) = html[open..].find('>').map(|i| open + i) else {
+        let Some(close) = tag_end(html, open, &mut unclosed) else {
             break;
         };
         let inner = &lower[open + 1..close];
         let end_tag = inner.starts_with('/');
+        // A name with its namespace prefix (`jats:p`) and its dashes (`list-item`).
         let name: String = inner
             .trim_start_matches('/')
             .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.'))
             .collect();
-        if BLOCKS.contains(&name.as_str()) {
+        if block(&name) {
+            blocks = true;
             lines.push(String::new());
+        }
+        if name.rsplit(':').next() == Some("pre") {
+            pre = if end_tag {
+                pre.saturating_sub(1)
+            } else {
+                pre + 1
+            };
         }
         at = close + 1;
         if !end_tag && (name == "script" || name == "style") {
@@ -609,6 +688,21 @@ pub fn scan_text(html: &str) -> Option<String> {
             at = lower[at..].find(&end).map_or(html.len(), |i| at + i);
         }
     }
+    // The text's own line breaks are its lines: inside `<pre>`, and anywhere without block
+    // elements (when they are kept).
+    let lines: Vec<&str> = if !own_lines {
+        lines.iter().map(String::as_str).collect()
+    } else if blocks {
+        lines
+            .iter()
+            .flat_map(|line| line.split(PRE_BREAK))
+            .collect()
+    } else {
+        lines
+            .iter()
+            .flat_map(|line| line.split(['\n', PRE_BREAK]))
+            .collect()
+    };
     let text: Vec<String> = lines
         .iter()
         .map(|line| {
@@ -620,6 +714,35 @@ pub fn scan_text(html: &str) -> Option<String> {
         .filter(|line| !line.is_empty())
         .collect();
     (!text.is_empty()).then(|| text.join("\n"))
+}
+/// The `>` that ends the tag opening at `open`: the first outside a quoted attribute value
+/// (`<a title="1 > 0">`; a quote opens a value only after `=`), else the first at all. Once a
+/// quote is left open to the end of the text (`unclosed`), every later tag ends at its first
+/// `>`, so the whole read stays linear.
+fn tag_end(html: &str, open: usize, unclosed: &mut bool) -> Option<usize> {
+    let first = || html[open..].find('>').map(|i| open + i);
+    if *unclosed {
+        return first();
+    }
+    // `after_equals`: a value may start (only white space since an `=`); `unquoted`: inside a
+    // value without quotes, where a quote is a character of the value.
+    let (mut quote, mut after_equals, mut unquoted) = (None, false, false);
+    for (i, &b) in html.as_bytes()[open..].iter().enumerate() {
+        match quote {
+            Some(q) if q == b => quote = None,
+            Some(_) => {}
+            None if b == b'>' => return Some(open + i),
+            None if b.is_ascii_whitespace() => unquoted = false,
+            None if after_equals && matches!(b, b'"' | b'\'') => quote = Some(b),
+            None if after_equals => unquoted = true,
+            None => {}
+        }
+        if !b.is_ascii_whitespace() {
+            after_equals = quote.is_none() && !unquoted && b == b'=';
+        }
+    }
+    *unclosed = true;
+    first()
 }
 
 /// Parse in this thread's job, or in a job of its own with `budget` outside one.
@@ -738,13 +861,10 @@ impl Job {
         self.parse_with(kind, text, worker())
     }
 
-    /// `parse`, with `worker` as the program (`None`: parse in this process).
-    fn parse_with(
-        &mut self,
-        kind: Kind,
-        text: &str,
-        worker: Option<&Worker>,
-    ) -> anyhow::Result<scraper::Html> {
+    /// The job's checks every read of text in it passes first, a parse or a scan
+    /// ([`scan_text`]): a job that is over, whose caller is gone or whose wall deadline has
+    /// passed reads nothing more.
+    fn admit(&mut self, text: &str) -> anyhow::Result<()> {
         if let Some(reason) = self.over {
             return Err(TooComplex { reason }.into());
         }
@@ -754,6 +874,17 @@ impl Job {
         if Instant::now() >= self.deadline {
             return Err(self.end_with(WALL_DEADLINE, text));
         }
+        Ok(())
+    }
+
+    /// `parse`, with `worker` as the program (`None`: parse in this process).
+    fn parse_with(
+        &mut self,
+        kind: Kind,
+        text: &str,
+        worker: Option<&Worker>,
+    ) -> anyhow::Result<scraper::Html> {
+        self.admit(text)?;
         // Text without a `<` holds no markup: the tokenizer reads it in linear time and there is
         // no tree to build, so it is parsed here (a calendar's plain descriptions). It counts
         // against the job's budget of this thread's CPU time, as every parse without a worker
@@ -1948,6 +2079,98 @@ impl Scan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// One HTML-to-text reading: an inline tag splits no word, a block (HTML, or JATS in its
+    /// namespace) starts a line, a `>` inside a quoted attribute value ends no tag.
+    #[test]
+    fn html_text_keeps_words_whole_and_blocks_apart() {
+        let text = |html: &str| scan_text(html);
+        assert_eq!(text("H<sub>2</sub>O").as_deref(), Some("H2O"));
+        assert_eq!(
+            text("<jats:p>Water is H<jats:sub>2</jats:sub>O.</jats:p>").as_deref(),
+            Some("Water is H2O.")
+        );
+        assert_eq!(
+            text(
+                "<jats:title>Abstract</jats:title><jats:p>First.</jats:p><jats:p>Second.</jats:p>"
+            )
+            .as_deref(),
+            Some("Abstract\nFirst.\nSecond.")
+        );
+        assert_eq!(
+            text("<jats:sec><jats:title>Methods</jats:title><jats:list><jats:list-item>a</jats:list-item><jats:list-item>b</jats:list-item></jats:list></jats:sec>")
+                .as_deref(),
+            Some("Methods\na\nb")
+        );
+        assert_eq!(
+            text("<table><tr><td>a</td><td>b</td></tr><tr><td>x</td><td>y</td></tr></table>")
+                .as_deref(),
+            Some("a\nb\nx\ny")
+        );
+        assert_eq!(
+            text(r#"<a title="1 > 0" href='x>y'>link</a> text"#).as_deref(),
+            Some("link text")
+        );
+        // A quote in an unquoted value opens nothing; a `<` that opens no tag is text.
+        assert_eq!(
+            text("<img alt=it's>ok, 3 < 4").as_deref(),
+            Some("ok, 3 < 4")
+        );
+        assert_eq!(
+            text("<a href=/s?q='x>Link</a> isn't").as_deref(),
+            Some("Link isn't")
+        );
+        // An HTML block under another prefix is a block too (Atom's `xhtml:p`).
+        assert_eq!(
+            text("<xhtml:div><xhtml:p>a</xhtml:p><xhtml:p>b</xhtml:p></xhtml:div>").as_deref(),
+            Some("a\nb")
+        );
+        // Only in the JATS namespace are JATS names blocks; another prefix is inline.
+        assert_eq!(
+            text("a<mml:mi>x</mml:mi>b<sec>c</sec>").as_deref(),
+            Some("axbc")
+        );
+        assert!(block("jats:p") && block("jats:sec") && block("p") && !block("jats:sub"));
+        assert!(!block("sub") && !block("title") && !block("mml:sec") && block("xhtml:p"));
+        assert_eq!(text("<p> </p><!-- x --><script>y</script>"), None);
+        // A field of one line keeps it: a text's own line breaks are white space.
+        assert_eq!(
+            text("Growth of <i>E. coli</i>\n at pH").as_deref(),
+            Some("Growth of E. coli at pH")
+        );
+        // A field of several lines (`text_lines`): without block elements the text's own line
+        // breaks are lines (blank ones dropped); beside block elements they are layout, but
+        // inside `<pre>`.
+        let lines = |html: &str| text_lines(html);
+        assert_eq!(
+            lines("Every company has a story.\n\nLearn  the playbooks").as_deref(),
+            Some("Every company has a story.\nLearn the playbooks")
+        );
+        assert_eq!(
+            lines("H<sub>2</sub>O\r\nnext &amp; last").as_deref(),
+            Some("H2O\nnext & last")
+        );
+        assert_eq!(lines("<p>a\nb</p>\n<p>c</p>").as_deref(), Some("a b\nc"));
+        assert_eq!(
+            lines("<p>Run:</p><pre>cargo build\ncargo test</pre><p>then\nship</p>").as_deref(),
+            Some("Run:\ncargo build\ncargo test\nthen ship")
+        );
+        assert_eq!(
+            text("<pre>cargo build\ncargo test</pre>").as_deref(),
+            Some("cargo build cargo test")
+        );
+    }
+
+    /// A quote left open to the end of the text (an attribute cut off, a stray `="`): its tag
+    /// ends at its first `>`, every later tag too, and the read stays linear in the text.
+    #[test]
+    fn an_unclosed_quote_keeps_the_html_text_linear() {
+        let html = format!(
+            "<p>Kept</p><a title=\"x>y{}",
+            "<b c=d>z</b><i>w</i>".repeat(100_000)
+        );
+        let text = timed(|| scan_text(&html)).unwrap();
+        assert!(text.starts_with("Kept\nyzw"), "{}", &text[..20]);
+    }
 
     fn cut(text: &str) -> &str {
         bounded(text)
@@ -2419,14 +2642,15 @@ mod tests {
             )
         };
         let url: url::Url = "https://hostile.example.org/p".parse().unwrap();
-        // 10,000 nested spans in an Internet Archive description: plain text, no overflow.
+        // 10,000 nested spans in an Internet Archive description: plain text, no overflow, and
+        // all of it (the one-pass reader keeps no stack, so depth cuts nothing).
         let nested = format!(
             "<p>Kept</p>{}deep{}",
             "<span>".repeat(10_000),
             "</span>".repeat(10_000)
         );
         let text = timed(|| crate::sources::kit::html_text(&nested));
-        assert_eq!(text.as_deref(), Some("Kept"));
+        assert_eq!(text.as_deref(), Some("Kept\ndeep"));
         // 20,000 unclosed divs; a tag with 60,000 attributes separated by `/`.
         let unclosed = format!("<title>Kept</title>{}", "<div>".repeat(20_000));
         let mut slashed = String::from("<title>Kept</title><div");
