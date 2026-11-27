@@ -843,10 +843,18 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    // Two homepages due, one for an hour.
+    sqlx::query("INSERT INTO catalogue_site(host,rank,listed_on,due_at) VALUES ('a.example',1,current_date,now()-interval '1 hour'),('b.example',2,current_date,now()),('c.example',3,current_date,now()+interval '1 day')")
+        .execute(&pool)
+        .await
+        .unwrap();
     let metrics4 = Metrics::new().unwrap();
     metrics4.refresh(&pool).await.unwrap();
     assert_eq!(get(&metrics4.catalogue_refused, "podcastindex"), 1);
     assert_eq!(get(&metrics4.catalogue_refused, "software"), 0);
+    assert_eq!(get(&metrics4.catalogue_backlog, "homepages"), 2);
+    let age = get(&metrics4.catalogue_backlog_age, "homepages");
+    assert!((3600..3700).contains(&age), "{age}");
     // The lag counts from how current the data is, not from the update that finished an hour
     // ago.
     let lag = get(&metrics2.catalogue_lag, "wikidata");
@@ -1420,7 +1428,7 @@ async fn jsonb_text_len_is_postgresql_s_length(pool: PgPool) {
 async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let mut config = pinakes_core::config::Config::default();
     assert!(config.egress.contact.is_empty());
-    assert!(run::importers(&config).is_empty());
+    assert!(run::importers(&config, &common::offline_egress(Default::default())).is_empty());
     run::note_unstarted(&pool, &config).await.unwrap();
     let notes = run::contact_needs(&config);
     let note = |c: Catalogue| notes.iter().find(|n| n.0 == c).map(|n| n.2);

@@ -529,6 +529,12 @@ pub async fn drop_catalogue(
         sqlx::query("DELETE FROM osm_rename").execute(pool).await?;
         sqlx::query("DELETE FROM osm_removed").execute(pool).await?;
     }
+    // Tranco's list goes with its cards.
+    if catalogue == Catalogue::Tranco {
+        sqlx::query("DELETE FROM catalogue_site")
+            .execute(pool)
+            .await?;
+    }
     sqlx::query("DELETE FROM catalogue_state WHERE catalogue=$1")
         .bind(catalogue.name())
         .execute(pool)
@@ -592,6 +598,17 @@ fn waiting_cell(state: Option<&State>) -> String {
                 m.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
             )),
             _ => None,
+        })
+        // Tranco's homepage reads that wait for a large catalogue's full import (its last run).
+        .or_else(|| {
+            let p = position?;
+            (p.get("next")?.as_str()? == "large_import").then(|| {
+                let waits = p
+                    .get("waits_for")
+                    .and_then(|w| w.as_str())
+                    .unwrap_or("a large catalogue");
+                format!("homepage reads wait for {waits}'s full import")
+            })
         });
     let waiting = state.and_then(|s| s.waiting.as_deref());
     let waiting = match (refused, waiting) {

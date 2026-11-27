@@ -10,7 +10,7 @@ use pinakes_core::{
         fetch::Input,
         join, openalex, podcastindex,
         run::{self, Context, Pace, Run},
-        software, store, Catalogue,
+        software, store, tranco, Catalogue,
     },
     config::Config,
 };
@@ -24,11 +24,12 @@ use std::{
 
 /// Each path's body and ETag.
 type Served = HashMap<String, (Vec<u8>, String)>;
-/// A local HTTP server of files: each path's body and ETag; it counts GETs per path.
+/// A local HTTP server of files: each path's body and ETag; it counts GETs and HEADs per path.
 #[derive(Clone, Default)]
 struct Files {
     files: Arc<Mutex<Served>>,
     gets: Arc<Mutex<HashMap<String, usize>>>,
+    heads: Arc<Mutex<HashMap<String, usize>>>,
 }
 impl Files {
     fn put(&self, path: &str, body: Vec<u8>, etag: &str) {
@@ -39,6 +40,9 @@ impl Files {
     }
     fn gets(&self, path: &str) -> usize {
         *self.gets.lock().unwrap().get(path).unwrap_or(&0)
+    }
+    fn heads(&self, path: &str) -> usize {
+        *self.heads.lock().unwrap().get(path).unwrap_or(&0)
     }
     async fn serve(&self) -> String {
         use axum::{http::StatusCode, response::IntoResponse};
@@ -54,6 +58,8 @@ impl Files {
                     };
                     if method == axum::http::Method::GET {
                         *files.gets.lock().unwrap().entry(path).or_default() += 1;
+                    } else if method == axum::http::Method::HEAD {
+                        *files.heads.lock().unwrap().entry(path).or_default() += 1;
                     }
                     let body = if method == axum::http::Method::HEAD {
                         vec![]
@@ -1145,4 +1151,844 @@ async fn one_openalex_card_holds_a_shared_doi(pool: PgPool) {
         .await
         .unwrap();
     assert!(reindexed >= 1);
+}
+
+// --- Tranco --------------------------------------------------------------------------------------
+
+/// What one URL answers.
+#[derive(Clone)]
+struct Answer {
+    status: u16,
+    kind: &'static str,
+    body: Vec<u8>,
+    location: Option<String>,
+    retry_after: u64,
+}
+/// Homepages and robots.txt files as the egress' transport answers them (changed between runs);
+/// a URL not named answers 404, any URL of `gone.example` nothing at all. It counts the requests.
+#[derive(Clone, Default)]
+struct Sites {
+    answers: Arc<Mutex<HashMap<String, Answer>>>,
+    asked: Arc<Mutex<Vec<String>>>,
+}
+impl Sites {
+    fn set(&self, url: &str, status: u16, kind: &'static str, body: Vec<u8>) {
+        self.answers.lock().unwrap().insert(
+            url.to_owned(),
+            Answer {
+                status,
+                kind,
+                body,
+                location: None,
+                retry_after: 0,
+            },
+        );
+    }
+    fn page(&self, url: &str, title: &str) {
+        self.set(url, 200, "text/html; charset=utf-8", page(title));
+    }
+    fn redirect(&self, url: &str, to: &str) {
+        self.answers.lock().unwrap().insert(
+            url.to_owned(),
+            Answer {
+                status: 301,
+                kind: "text/html",
+                body: vec![],
+                location: Some(to.to_owned()),
+                retry_after: 0,
+            },
+        );
+    }
+    /// A busy answer (a 429, a 5xx) with its `Retry-After`.
+    fn busy(&self, url: &str, status: u16, retry_after: u64) {
+        self.answers.lock().unwrap().insert(
+            url.to_owned(),
+            Answer {
+                status,
+                kind: "text/plain",
+                body: b"slow down".to_vec(),
+                location: None,
+                retry_after,
+            },
+        );
+    }
+    fn asked(&self, url: &str) -> usize {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|u| *u == url)
+            .count()
+    }
+}
+#[async_trait::async_trait]
+impl pinakes_core::resolver::egress::Transport for Sites {
+    async fn get(
+        &self,
+        u: &url::Url,
+        addrs: &[std::net::SocketAddr],
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        self.get_with(u, addrs, &Default::default()).await
+    }
+    async fn get_with(
+        &self,
+        u: &url::Url,
+        _: &[std::net::SocketAddr],
+        _: &pinakes_core::resolver::egress::FetchOptions,
+    ) -> anyhow::Result<pinakes_core::resolver::egress::Fetched> {
+        self.asked.lock().unwrap().push(u.to_string());
+        let answer = self.answers.lock().unwrap().get(u.as_str()).cloned();
+        match answer {
+            Some(a) => {
+                let mut f = common::fetched(u.clone(), a.status, a.kind.to_owned(), a.body);
+                f.location = a.location;
+                f.retry_after_secs = a.retry_after;
+                Ok(f)
+            }
+            None if u.host_str() == Some("gone.example") => {
+                anyhow::bail!(pinakes_core::resolver::Unreached)
+            }
+            None => Ok(common::fetched(u.clone(), 404, "text/plain".into(), vec![])),
+        }
+    }
+}
+fn page(title: &str) -> Vec<u8> {
+    format!("<!doctype html><html><head><title>{title}</title><meta name=\"description\" content=\"About {title}\"></head><body><p>{title}</p></body></html>").into_bytes()
+}
+/// A Tranco importer over `list` whose homepage reads go to `sites`; `slow` hosts get their pace
+/// at the egress (requests a second).
+fn tranco_over(list: &std::path::Path, sites: &Sites, slow: &[(&str, f64)]) -> tranco::Tranco {
+    let mut cfg = common::unpaced_egress_config();
+    for (host, rate) in slow {
+        cfg.host_rates.insert((*host).to_owned(), *rate);
+    }
+    let egress = pinakes_core::resolver::egress::Egress::with_backends(
+        cfg,
+        Arc::new(common::PublicDns),
+        Arc::new(sites.clone()),
+    );
+    tranco::Tranco::new(
+        tranco::ListSource::Given(Input::File(list.to_owned())),
+        egress,
+        "test@example.org",
+    )
+    .unwrap()
+}
+/// The test configuration with the large catalogues (MusicBrainz, OpenStreetMap, Wikidata,
+/// OpenAlex: all have an importer) off, so homepage reads do not wait for their first imports.
+fn without_large(config: &mut Config) {
+    config.catalogues.musicbrainz.enabled = false;
+    config.catalogues.osm.enabled = false;
+    config.catalogues.wikidata.enabled = false;
+    config.catalogues.openalex.enabled = false;
+}
+async fn outcomes(pool: &PgPool) -> HashMap<String, Option<String>> {
+    sqlx::query_as::<_, (String, Option<String>)>("SELECT host,outcome FROM catalogue_site")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+/// Each site's wait until it is due (seconds) and its failures in a row.
+async fn due(pool: &PgPool) -> HashMap<String, (f64, i32)> {
+    sqlx::query_as::<_, (String, f64, i32)>(
+        "SELECT host,extract(epoch FROM due_at-now())::float8,failures FROM catalogue_site",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|(h, d, f)| (h, (d, f)))
+    .collect()
+}
+/// A day passed since Tranco last looked its list up: the next update looks again.
+async fn a_day_passed(pool: &PgPool) {
+    sqlx::query("UPDATE catalogue_state SET position=position-'checked' WHERE catalogue='tranco'")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+async fn make_due(pool: &PgPool, host: &str) {
+    sqlx::query("UPDATE catalogue_site SET due_at=now() WHERE host=$1")
+        .bind(host)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+/// An Anubis challenge page, answered with 200 (the egress's wall check knows it).
+const WALL: &str = "<html><head><title>Making sure you&#39;re not a bot!</title><script id=\"anubis_challenge\" type=\"application/json\">{}</script></head><body><h1>Making sure you&#39;re not a bot!</h1><p>Loading...</p><p>Protected by <a href=\"https://github.com/TecharoHQ/anubis\">Anubis</a></p><script src=\"/.within.website/x/cmd/anubis/static/js/main.mjs\"></script></body></html>";
+
+/// Tranco: the list fills `catalogue_site`; a homepage that answers with a page becomes a card
+/// (its title, the homepage link, the homepage key, fame from the rank), also through a redirect
+/// on the site; a robots.txt that says no, a wall, another type, a 404, no answer, a redirect off
+/// the site and a page without a name make none; a 429 waits for its `Retry-After`; a read the
+/// egress gives no turn is deferred, not counted; reads are counted by result.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_reads_homepages_by_the_rules(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,example.org\n2,closed.example\n3,walled.example\n4,api.example\n5,missing.example\n6,gone.example\n7,moved.example\n8,away.example\n9,nameless.example\n10,busy.example\n11,slow.example\n12,down.example\n13,self.example\n14,lazy.example\n").unwrap();
+    let sites = Sites::default();
+    sites.set(
+        "https://example.org/robots.txt",
+        200,
+        "text/plain",
+        b"User-agent: *\nDisallow: /private\n".to_vec(),
+    );
+    sites.page("https://example.org/", "Example");
+    sites.set(
+        "https://closed.example/robots.txt",
+        200,
+        "text/plain",
+        b"User-agent: pinakes\nDisallow: /\n".to_vec(),
+    );
+    sites.page("https://closed.example/", "Closed");
+    sites.set(
+        "https://walled.example/",
+        200,
+        "text/html; charset=utf-8",
+        WALL.as_bytes().to_vec(),
+    );
+    sites.set(
+        "https://api.example/",
+        200,
+        "application/json",
+        b"{}".to_vec(),
+    );
+    // A redirect on the site: followed, the new host's robots.txt asked first.
+    sites.redirect("https://moved.example/", "https://www.moved.example/home");
+    sites.page("https://www.moved.example/home", "Moved");
+    // A redirect off the site: no card.
+    sites.redirect("https://away.example/", "https://elsewhere.example/");
+    sites.page("https://elsewhere.example/", "Elsewhere");
+    sites.set(
+        "https://nameless.example/",
+        200,
+        "text/html",
+        b"<!doctype html><html><head></head><body></body></html>".to_vec(),
+    );
+    // A page whose answer names its own address in a `Location` (no redirect).
+    sites.page("https://self.example/", "Self");
+    sites
+        .answers
+        .lock()
+        .unwrap()
+        .get_mut("https://self.example/")
+        .unwrap()
+        .location = Some("https://self.example/".into());
+    // A 429 that asks for two hours (the egress holds a wait to an hour).
+    sites.busy("https://busy.example/", 429, 7200);
+    // A 503 that asks for three days: not read before then.
+    sites.busy("https://down.example/", 503, 3 * 86400);
+    sites.page("https://slow.example/", "Slow");
+    sites.page("https://lazy.example/", "Lazy");
+    // slow.example: one request in 10,000 s; lazy.example: one in 4 s (its page waits a turn).
+    let importer = Arc::new(tranco_over(
+        &list,
+        &sites,
+        &[("slow.example", 0.0001), ("lazy.example", 0.25)],
+    ));
+    let reads = |r| pinakes_core::telemetry::homepage_reads(r);
+    let before: Vec<u64> = ["ok", "robots", "wall", "busy", "deferred", "other"]
+        .into_iter()
+        .map(reads)
+        .collect();
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let listed: i64 = sqlx::query_scalar("SELECT count(*) FROM catalogue_site")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(listed, 14);
+    let mut cards: Vec<String> = versions(&pool, "tranco").await.into_keys().collect();
+    cards.sort();
+    assert_eq!(cards, ["example.org", "moved.example", "self.example"]);
+    let (uri, name, keys, _, _, fame) = row(&pool, "tranco", "example.org").await;
+    assert_eq!(
+        (uri.as_str(), name.as_str()),
+        ("https://example.org/", "Example")
+    );
+    assert!(keys.contains(&"homepage:example.org".to_owned()));
+    assert_eq!(fame, 1.0);
+    let (uri, name, _, _, _, _) = row(&pool, "tranco", "moved.example").await;
+    assert_eq!(
+        (uri.as_str(), name.as_str()),
+        ("https://moved.example/", "Moved")
+    );
+    assert_eq!(sites.asked("https://www.moved.example/robots.txt"), 1);
+    assert_eq!(sites.asked("https://elsewhere.example/"), 0);
+    let outcomes = outcomes(&pool).await;
+    let outcome = |h: &str| outcomes[h].clone();
+    assert_eq!(outcome("example.org").as_deref(), Some("ok"));
+    assert_eq!(outcome("moved.example").as_deref(), Some("ok"));
+    assert_eq!(outcome("closed.example").as_deref(), Some("robots"));
+    assert_eq!(outcome("walled.example").as_deref(), Some("wall"));
+    assert_eq!(outcome("api.example").as_deref(), Some("not_html"));
+    assert_eq!(outcome("missing.example").as_deref(), Some("status"));
+    assert_eq!(outcome("gone.example").as_deref(), Some("unreached"));
+    assert_eq!(outcome("away.example").as_deref(), Some("other"));
+    assert_eq!(outcome("nameless.example").as_deref(), Some("other"));
+    assert_eq!(outcome("busy.example").as_deref(), Some("busy"));
+    // No turn at the egress (its robots.txt took the host's one request): no read at all.
+    assert_eq!(outcome("slow.example"), None);
+    // Counted by result: exactly this test's reads for the results only it makes (the counters
+    // are the process's, and other tests read homepages at the same time), at least for the rest.
+    let delta = |n: usize, r| reads(r) - before[n];
+    assert_eq!(
+        (delta(1, "robots"), delta(4, "deferred"), delta(5, "other")),
+        (1, 2, 2)
+    );
+    assert!(delta(0, "ok") >= 3 && delta(2, "wall") >= 1 && delta(3, "busy") >= 2);
+    let due = due(&pool).await;
+    // Read again in 90 days; no answer: tomorrow, counted.
+    assert!(due["example.org"].0 > 89.0 * 86400.0);
+    assert!(due["walled.example"].0 > 89.0 * 86400.0);
+    let (wait, failures) = due["gone.example"];
+    assert!(wait < 86400.0 + 60.0 && wait > 86400.0 - 60.0, "{wait}");
+    assert_eq!(failures, 1);
+    // The 429: the next day (later than its Retry-After), counted as a failure.
+    let (wait, failures) = due["busy.example"];
+    assert!(wait > 86400.0 - 60.0 && wait < 86400.0 + 60.0, "{wait}");
+    assert_eq!(failures, 1);
+    // The 503: after its three days, counted as a failure.
+    assert_eq!(outcome("down.example").as_deref(), Some("busy"));
+    let (wait, failures) = due["down.example"];
+    assert!(
+        wait > 3.0 * 86400.0 - 60.0 && wait < 3.0 * 86400.0 + 60.0,
+        "{wait}"
+    );
+    assert_eq!(failures, 1);
+    // Deferred: when the egress's wait for the host ends (about 10,000 s: later than the hour),
+    // nothing counted.
+    let (wait, failures) = due["slow.example"];
+    assert!(wait > 9000.0 && wait < 10_100.0, "{wait}");
+    assert_eq!(failures, 0);
+    // lazy.example's page waited for its turn after its robots.txt: tried again once its host's
+    // pace allows one request, it reads the page with the rules kept (asking robots.txt again
+    // would take that one request).
+    assert_eq!(outcome("lazy.example"), None);
+    tokio::time::sleep(Duration::from_millis(4500)).await;
+    make_due(&pool, "lazy.example").await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(sites.asked("https://lazy.example/robots.txt"), 1);
+    let lazy: Option<String> =
+        sqlx::query_scalar("SELECT outcome FROM catalogue_site WHERE host='lazy.example'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(lazy.as_deref(), Some("ok"));
+    // A shared homepage joins the card, under any spelling.
+    for link in ["https://example.org/", "http://www.example.org/"] {
+        let found = join::find(&pool, &["tranco"], link).await.unwrap();
+        assert_eq!(
+            found.card.map(|c| c.source_id).as_deref(),
+            Some("example.org"),
+            "{link}"
+        );
+    }
+}
+
+/// A card stays through two transient failures in a row (no answer, a server error) and goes
+/// with the third; a page read between them starts the count again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tranco_card_goes_after_three_transient_failures(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,flaky.example\n").unwrap();
+    let sites = Sites::default();
+    sites.page("https://flaky.example/", "Flaky");
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 1);
+    let round = |status: u16| {
+        let sites = sites.clone();
+        let pool = pool.clone();
+        let ctx = &ctx;
+        let importer = importer.clone();
+        async move {
+            sites.set(
+                "https://flaky.example/",
+                status,
+                "text/plain",
+                b"down".to_vec(),
+            );
+            make_due(&pool, "flaky.example").await;
+            run::run_once(importer, ctx, Run::Update, |_| {})
+                .await
+                .unwrap();
+            (
+                count(&pool, "tranco", None).await,
+                due(&pool).await["flaky.example"].1,
+            )
+        }
+    };
+    assert_eq!(round(503).await, (1, 1));
+    // The run leaves when the next site falls due (the plan wakes then): this one's retry.
+    let position = state_of(&pool, Catalogue::Tranco).await.position.unwrap();
+    let next_due = chrono::DateTime::parse_from_rfc3339(position["next_due"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let wait = (next_due - chrono::Utc::now()).num_seconds();
+    assert!((86_000..86_500).contains(&wait), "{wait}");
+    assert_eq!(round(503).await, (1, 2));
+    // A page again: the count starts over.
+    sites.page("https://flaky.example/", "Flaky");
+    make_due(&pool, "flaky.example").await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(due(&pool).await["flaky.example"].1, 0);
+    assert_eq!(round(503).await, (1, 1));
+    assert_eq!(round(503).await, (1, 2));
+    assert_eq!(round(503).await, (0, 3));
+    assert!(due(&pool).await["flaky.example"].0 > 89.0 * 86400.0);
+    // A page again, then a wall in front of it three times: a site with a card keeps it through
+    // two walls (a challenge may pass), and loses it with the third.
+    sites.page("https://flaky.example/", "Flaky");
+    make_due(&pool, "flaky.example").await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 1);
+    for (n, cards) in [(1, 1), (2, 1), (3, 0)] {
+        sites.set(
+            "https://flaky.example/",
+            200,
+            "text/html; charset=utf-8",
+            WALL.as_bytes().to_vec(),
+        );
+        make_due(&pool, "flaky.example").await;
+        run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                count(&pool, "tranco", None).await,
+                due(&pool).await["flaky.example"].1
+            ),
+            (cards, n),
+            "wall {n}"
+        );
+    }
+    assert_eq!(
+        outcomes(&pool).await["flaky.example"].as_deref(),
+        Some("wall")
+    );
+}
+
+/// Homepage reads wait for the bulk imports: while a large catalogue that is on and has an
+/// importer has not finished its first full import, the list loads but nothing is read, and the
+/// list is not looked for again within the day; once that import has finished, they run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_reads_wait_for_the_large_imports(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    // The other large catalogues off; OpenAlex on (its first import not finished).
+    let ctx = context(&pool, dir.path(), |c| {
+        c.catalogues.musicbrainz.enabled = false;
+        c.catalogues.osm.enabled = false;
+        c.catalogues.wikidata.enabled = false;
+    });
+    let files = Files::default();
+    files.put("/list.csv", b"1,example.org\n".to_vec(), "l1");
+    let base = files.serve().await;
+    let sites = Sites::default();
+    sites.page("https://example.org/", "Example");
+    let cfg = common::unpaced_egress_config();
+    let egress = pinakes_core::resolver::egress::Egress::with_backends(
+        cfg,
+        Arc::new(common::PublicDns),
+        Arc::new(sites.clone()),
+    );
+    let input = Input::Url(url::Url::parse(&format!("{base}/list.csv")).unwrap());
+    let importer = Arc::new(
+        tranco::Tranco::new(tranco::ListSource::Given(input), egress, "test@example.org").unwrap(),
+    );
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.position.as_ref().unwrap()["next"], "large_import");
+    assert_eq!(state.position.as_ref().unwrap()["waits_for"], "openalex");
+    assert_eq!(sites.asked("https://example.org/"), 0);
+    // `catalogue status` says why.
+    let table = store::status_table(&ctx.config.catalogues, std::slice::from_ref(&state));
+    assert!(
+        table.contains("homepage reads wait for openalex's full import"),
+        "{table}"
+    );
+    let gets = files.gets("/list.csv");
+    let heads = files.heads("/list.csv");
+    // The next run within the day: the list is not asked for, nothing is read.
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.position.as_ref().unwrap()["next"], "large_import");
+    assert_eq!(
+        (files.gets("/list.csv"), files.heads("/list.csv")),
+        (gets, heads)
+    );
+    assert_eq!(sites.asked("https://example.org/"), 0);
+    // A large full import under way (MusicBrainz's, though it is off here) holds them too.
+    store::ensure_state(&pool, Catalogue::Openalex)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET last_import_at=now() WHERE catalogue='openalex'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::ensure_state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE catalogue_state SET run='import',phase='import' WHERE catalogue='musicbrainz'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tranco::reads_wait(&ctx.config, &pool)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("musicbrainz")
+    );
+    sqlx::query("UPDATE catalogue_state SET run=NULL,phase='idle' WHERE catalogue='musicbrainz'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tranco::reads_wait(&ctx.config, &pool).await.unwrap(), None);
+    // OpenAlex's first import has finished: the reads run.
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.position.as_ref().unwrap()["next"], "list");
+    assert_eq!(count(&pool, "tranco", None).await, 1);
+    // The list can't be looked up any more (its server answers 404): the update still reads the
+    // homepages due on the list loaded, and fails nothing.
+    files.files.lock().unwrap().remove("/list.csv");
+    a_day_passed(&pool).await;
+    make_due(&pool, "example.org").await;
+    let asked = sites.asked("https://example.org/");
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(sites.asked("https://example.org/"), asked + 1);
+    assert_eq!(state.error_count, 0);
+    // With no contact, a large catalogue's importer does not start: it holds no reads.
+    let mut config = (*ctx.config).clone();
+    config.egress.contact = String::new();
+    sqlx::query("DELETE FROM catalogue_state WHERE catalogue='openalex'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tranco::reads_wait(&config, &pool).await.unwrap(), None);
+}
+
+/// The list: a known site's row (its rank, its last listed day) is written at most weekly; a
+/// list dated ahead is read as of now; a site off the list for a month loses its card and row;
+/// a full import again keeps the cards of homepages read; `--limit` caps the reads of a run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_lists_move_rows_weekly_and_drop_sites_off_the_list(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(
+        &list,
+        "1,example.org\n2,closed.example\n3,third.example\n4,fourth.example\n",
+    )
+    .unwrap();
+    let sites = Sites::default();
+    for host in [
+        "example.org",
+        "closed.example",
+        "third.example",
+        "fourth.example",
+    ] {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    // At most two reads a run.
+    let importer = Arc::new(tranco_over(&list, &sites, &[]).reads(2));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 2);
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 4);
+    assert_eq!(state.position.as_ref().unwrap()["next"], "reads");
+    let rows = || async {
+        sqlx::query_as::<_, (String, i32, String, String)>(
+            "SELECT host,rank,listed_on::text,xmin::text FROM catalogue_site ORDER BY host",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    // A new list the next day with other ranks: no row is written.
+    let before = rows().await;
+    std::fs::write(
+        &list,
+        "1,closed.example\n2,example.org\n3,fourth.example\n4,third.example\n",
+    )
+    .unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&list)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    // Within the day the list is not looked up again: a run that reads what fell due keeps the
+    // list it has.
+    let listed = |s: &store::State| s.position.as_ref().unwrap()["list"].clone();
+    let had = listed(&state_of(&pool, Catalogue::Tranco).await);
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(listed(&state), had);
+    // The next day it is: the new list loads, and no row is written.
+    a_day_passed(&pool).await;
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_ne!(listed(&state), had);
+    assert_eq!(rows().await, before);
+    // A week on, the ranks and days move.
+    sqlx::query("UPDATE catalogue_site SET listed_on=listed_on-8")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(
+        &list,
+        "1,closed.example\n2,example.org\n3,fourth.example\n4,third.example\n\n",
+    )
+    .unwrap();
+    a_day_passed(&pool).await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    let ranks: HashMap<String, i32> = rows()
+        .await
+        .into_iter()
+        .map(|(h, r, _, _)| (h, r))
+        .collect();
+    assert_eq!((ranks["closed.example"], ranks["example.org"]), (1, 2));
+    // A full import again keeps the cards of the homepages read.
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 4);
+    // A list dated 40 days ahead, without example.org: read as of now, nothing drops off.
+    std::fs::write(&list, "1,closed.example\n").unwrap();
+    let ahead = std::time::SystemTime::now() + Duration::from_secs(40 * 86400);
+    std::fs::File::options()
+        .write(true)
+        .open(&list)
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    a_day_passed(&pool).await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 4);
+    // Every site last listed 40 days ago, and a list without example.org: the sites off it go
+    // with their cards; the one on it stays.
+    sqlx::query("UPDATE catalogue_site SET listed_on=current_date-40")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(&list, "1,closed.example\n\n").unwrap();
+    a_day_passed(&pool).await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    let left: Vec<String> = rows().await.into_iter().map(|(h, ..)| h).collect();
+    assert_eq!(left, ["closed.example"]);
+    assert_eq!(count(&pool, "tranco", None).await, 1);
+}
+
+/// A full import asked for (`--request`) while an update is under way: the update hands over at
+/// once without reading anything, and the next step runs the full import (for each importer).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_requested_import_takes_over_an_update_under_way(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    // Software.
+    let files = Files::default();
+    let sources = software_server(&files, 0).await;
+    let software = Arc::new(software::Software::new(sources, "test@example.org").unwrap());
+    // Podcast Index.
+    let podcasts = Files::default();
+    podcasts.put(
+        "/podcastindex_feeds.db.tgz",
+        podcast_archive(&fixture("podcastindex", "podcastindex_feeds.db")),
+        "p1",
+    );
+    let base = podcasts.serve().await;
+    let input = Input::Url(url::Url::parse(&format!("{base}/podcastindex_feeds.db.tgz")).unwrap());
+    let podcast = Arc::new(podcastindex::PodcastIndex::new(input, "test@example.org").unwrap());
+    // OpenAlex.
+    let snap = tempfile::tempdir().unwrap();
+    snapshot(snap.path(), "2026-10-14", &[("2026-10-14", works())]);
+    let alex = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    // Tranco.
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,example.org\n").unwrap();
+    let sites = Sites::default();
+    sites.page("https://example.org/", "Example");
+    let tranco = Arc::new(tranco_over(&list, &sites, &[]));
+    let importers: [Arc<dyn run::Importer>; 4] = [software, podcast, alex, tranco];
+    for importer in importers {
+        let catalogue = importer.catalogue();
+        run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+            .await
+            .unwrap();
+        let imported = state_of(&pool, catalogue).await.last_import_at.unwrap();
+        // An update under way (cut off), and a request.
+        sqlx::query("UPDATE catalogue_state SET run='update',phase='update',cursor='{}',last_update_at=NULL WHERE catalogue=$1")
+            .bind(catalogue.name())
+            .execute(&pool)
+            .await
+            .unwrap();
+        run::request_import(
+            &pool,
+            catalogue,
+            pinakes_core::catalogue::musicbrainz::REQUESTED,
+        )
+        .await
+        .unwrap();
+        let gets = (
+            files.gets("/db-dump.tar.gz"),
+            podcasts.gets("/podcastindex_feeds.db.tgz"),
+        );
+        run::step(&*importer, &ctx).await.unwrap();
+        let state = state_of(&pool, catalogue).await;
+        assert_eq!(
+            state.last_update_at, None,
+            "{catalogue}: the update did not run"
+        );
+        assert_eq!(state.run, None, "{catalogue}");
+        assert!(state.import_requested.is_some(), "{catalogue}");
+        assert_eq!(
+            (
+                files.gets("/db-dump.tar.gz"),
+                podcasts.gets("/podcastindex_feeds.db.tgz")
+            ),
+            gets,
+            "{catalogue}: nothing read"
+        );
+        run::step(&*importer, &ctx).await.unwrap();
+        let state = state_of(&pool, catalogue).await;
+        assert!(state.last_import_at.unwrap() > imported, "{catalogue}");
+        assert!(state.import_requested.is_none(), "{catalogue}");
+    }
+}
+
+/// The importers the daemon registers: one per catalogue with an importer, in their order, and
+/// none without the operator's contact.
+#[test]
+fn the_daemon_registers_these_importers_only_with_a_contact() {
+    let egress = common::offline_egress(Default::default());
+    let mut config = Config::default();
+    assert!(run::importers(&config, &egress).is_empty());
+    config.egress.contact = "ops@example.org".into();
+    let names: Vec<&str> = run::importers(&config, &egress)
+        .iter()
+        .map(|i| i.catalogue().name())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "musicbrainz",
+            "osm",
+            "wikidata",
+            "openalex",
+            "podcastindex",
+            "tranco",
+            "software"
+        ]
+    );
+}
+
+/// Tranco's plan reads what the last run stored in its position: the next site due
+/// (`next_due`) and when the day's list was looked up (`checked`), both RFC 3339 times. With the
+/// last run an hour ago (past the ten-minute floor), a site due in 20 minutes wakes it then; the
+/// list looked up 25 hours ago wakes it now, whatever the next site; an unreadable time counts
+/// as none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_plans_from_its_stored_position(pool: PgPool) {
+    use pinakes_core::catalogue::run::{Importer, Plan};
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,example.org\n").unwrap();
+    let importer = tranco_over(&list, &Sites::default(), &[]);
+    store::ensure_state(&pool, Catalogue::Tranco).await.unwrap();
+    let now = chrono::Utc::now();
+    let plan_with = |position: serde_json::Value| {
+        let pool = pool.clone();
+        let importer = &importer;
+        async move {
+            sqlx::query("UPDATE catalogue_state SET position=$1,last_update_at=now()-interval '1 hour' WHERE catalogue='tranco'")
+                .bind(position)
+                .execute(&pool)
+                .await
+                .unwrap();
+            importer
+                .plan(&state_of(&pool, Catalogue::Tranco).await)
+                .await
+                .unwrap()
+        }
+    };
+    let minutes = |plan: Plan| match plan {
+        Plan::Wait(wait) => wait.as_secs_f64() / 60.0,
+        Plan::Run(_) => 0.0,
+    };
+    let at = |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339();
+
+    // The next site due in 20 minutes, the list looked up just now: wait about 20 minutes.
+    let plan = plan_with(serde_json::json!({
+        "next": "list",
+        "next_due": at(now + chrono::Duration::minutes(20)),
+        "checked": at(now),
+    }))
+    .await;
+    assert!((19.0..=20.1).contains(&minutes(plan)), "{plan:?}");
+    // Stored in another offset, the same instant.
+    let plan = plan_with(serde_json::json!({
+        "next": "list",
+        "next_due": (now + chrono::Duration::minutes(20))
+            .with_timezone(&chrono::FixedOffset::east_opt(5 * 3600).unwrap())
+            .to_rfc3339(),
+        "checked": at(now),
+    }))
+    .await;
+    assert!((19.0..=20.1).contains(&minutes(plan)), "{plan:?}");
+    // The list looked up 25 hours ago: the day's lookup is due now, before the next site.
+    let plan = plan_with(serde_json::json!({
+        "next": "list",
+        "next_due": at(now + chrono::Duration::hours(5)),
+        "checked": at(now - chrono::Duration::hours(25)),
+    }))
+    .await;
+    assert!(matches!(plan, Plan::Run(_)), "{plan:?}");
+    // An unreadable `next_due`: no site counts as due, so the plan waits its longest (an hour,
+    // then asks again), not the 20 minutes above.
+    let plan = plan_with(serde_json::json!({
+        "next": "list",
+        "next_due": "in twenty minutes",
+        "checked": at(now),
+    }))
+    .await;
+    assert!(minutes(plan) > 59.0, "{plan:?}");
 }

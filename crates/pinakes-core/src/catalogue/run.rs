@@ -160,14 +160,19 @@ pub trait Importer: Send + Sync + 'static {
 }
 
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
-/// ([`to_start`]).
-pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
+/// ([`to_start`]). `egress` is the daemon's own: the Tranco importer reads homepages through it,
+/// under the same rules and per-host pace as every fetch.
+pub fn importers(
+    config: &Config,
+    egress: &crate::resolver::egress::Egress,
+) -> Vec<Arc<dyn Importer>> {
     let mut importers: Vec<Arc<dyn Importer>> = Vec::new();
     importers.extend(super::musicbrainz::importer(config));
     importers.extend(super::osm::importer(config));
     importers.extend(super::wikidata::importer(config));
     importers.extend(super::openalex::importer(config));
     importers.extend(super::podcastindex::importer(config));
+    importers.extend(super::tranco::importer(config, egress));
     importers.extend(super::software::importer(config));
     importers
 }
@@ -601,12 +606,13 @@ pub enum Next {
 
 /// The catalogues with an importer in this build, in the order they start; each starts only
 /// with `http.contact` set.
-pub const WITH_IMPORTER: [Catalogue; 6] = [
+pub const WITH_IMPORTER: [Catalogue; 7] = [
     Catalogue::Musicbrainz,
     Catalogue::Osm,
     Catalogue::Wikidata,
     Catalogue::Openalex,
     Catalogue::Podcastindex,
+    Catalogue::Tranco,
     Catalogue::Software,
 ];
 /// What `catalogue status` shows as the `waiting` of a file catalogue (OpenAlex, Podcast Index,

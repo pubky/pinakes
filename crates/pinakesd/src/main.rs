@@ -329,6 +329,8 @@ async fn start(
     });
     // One Egress for the resolvers and the also-on sources: the per-host budgets are shared.
     let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
+    // The Tranco catalogue reads homepages through the same egress.
+    let importer_egress = egress.clone();
     // The Wikidata importer's API requests take the egress's turn for www.wikidata.org.
     pinakes_core::catalogue::wikidata::net::share_egress_pace(egress.clone());
     let workers = queue::spawn_with_egress(
@@ -534,7 +536,7 @@ async fn start(
         pool.clone(),
         std::sync::Arc::new(config.clone()),
     );
-    let importers = pinakes_core::catalogue::run::importers(&config);
+    let importers = pinakes_core::catalogue::run::importers(&config, &importer_egress);
     for importer in pinakes_core::catalogue::run::to_start(importers, &config) {
         tasks.spawn(
             importer.catalogue().task_name(),
@@ -854,7 +856,9 @@ async fn import_files(
     args: &ImportArgs,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    use pinakes_core::catalogue::{fetch::Input, openalex, podcastindex, run, software, store};
+    use pinakes_core::catalogue::{
+        fetch::Input, openalex, podcastindex, run, software, store, tranco,
+    };
     let catalogue = args.catalogue;
     let contact = &config.egress.contact;
     let from = |n: usize| args.from.get(n).map(String::as_str);
@@ -862,16 +866,18 @@ async fn import_files(
         args.from.len() <= 1 || catalogue == Catalogue::Software,
         "--from is given once (software: once per registry)"
     );
+    // Tranco reads homepages over the network whatever its list.
     if contact.is_empty()
-        && (args.from.is_empty()
+        && (catalogue == Catalogue::Tranco
+            || args.from.is_empty()
             || args.from.iter().any(|f| f.contains("://"))
             || catalogue == Catalogue::Software && args.from.len() < 3)
     {
         bail!("set http.contact (or PINAKES__HTTP__CONTACT): catalogue files are asked for with the operator's contact");
     }
     anyhow::ensure!(
-        args.limit.is_none(),
-        "--limit is MusicBrainz's; the other catalogues read their whole file"
+        args.limit.is_none() || catalogue == Catalogue::Tranco,
+        "--limit is Tranco's (homepages read); the other catalogues read their whole file"
     );
     let importer: std::sync::Arc<dyn run::Importer> = match catalogue {
         Catalogue::Openalex => {
@@ -901,6 +907,18 @@ async fn import_files(
                 }
             }
             std::sync::Arc::new(software::Software::new(sources, contact)?)
+        }
+        Catalogue::Tranco => {
+            let list = match from(0) {
+                Some(from) => tranco::ListSource::Given(Input::parse(from)?),
+                None => tranco::ListSource::Official,
+            };
+            let egress = pinakes_core::resolver::egress::Egress::new(config.egress.clone());
+            let importer = tranco::Tranco::new(list, egress, contact)?;
+            std::sync::Arc::new(match args.limit {
+                Some(n) => importer.reads(n),
+                None => importer,
+            })
         }
         other => bail!("catalogue {other} has no importer in this build"),
     };
@@ -1247,6 +1265,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                                     | Catalogue::Openalex
                                     | Catalogue::Podcastindex
                                     | Catalogue::Software
+                                    | Catalogue::Tranco
                             ),
                             "catalogue {catalogue} has no importer in this build"
                         );
@@ -1554,6 +1573,14 @@ mod tests {
                 since: None,
             }
         );
+        let (_, command) = parse(&["catalogue", "import", "tranco", "--limit", "50"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::Import {
+                limit: Some(50),
+                ..
+            })
+        ));
         for bad in [
             &["catalogue", "import"][..],
             &["catalogue", "import", "nope"],

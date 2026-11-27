@@ -2246,13 +2246,14 @@ async fn search_finds_the_cards_until_the_catalogue_is_off(pool: PgPool) {
 /// on by default, start with the same contact.
 #[test]
 fn the_daemon_runs_the_importer_while_the_catalogue_is_on() {
+    let egress = common::offline_egress(Default::default());
     let mut config = Config::default();
     // OpenStreetMap off: its importer has its own test.
     config.catalogues.osm.enabled = false;
-    assert!(run::importers(&config).is_empty());
+    assert!(run::importers(&config, &egress).is_empty());
     config.egress.contact = "ops@example.org".into();
     let started = |config: &Config| -> Vec<Catalogue> {
-        run::to_start(run::importers(config), config)
+        run::to_start(run::importers(config, &egress), config)
             .iter()
             .map(|i| i.catalogue())
             .collect()

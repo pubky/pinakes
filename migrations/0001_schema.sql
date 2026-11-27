@@ -1657,6 +1657,21 @@ CREATE TABLE catalogue_extras (
 );
 CREATE INDEX catalogue_extras_due_idx ON catalogue_extras USING btree (due_at, resource_id) WHERE due_at IS NOT NULL;
 
+-- The sites of Tranco's daily top-million list (`catalogue::tranco`): each site's rank, the day of
+-- the last list that named it (moved at most weekly), when its homepage is read next, and the
+-- last read's outcome (`ok`, `robots`, `wall`, `not_html`, `status`, `busy`, `unreached`, `other`) with the
+-- transient failures in a row. A site off the list for a month leaves with its card.
+CREATE TABLE catalogue_site (
+    host text PRIMARY KEY CONSTRAINT catalogue_site_host_check CHECK (octet_length(host) BETWEEN 1 AND 253),
+    rank integer NOT NULL CONSTRAINT catalogue_site_rank_check CHECK (rank > 0),
+    listed_on date NOT NULL,
+    due_at timestamp with time zone NOT NULL DEFAULT now(),
+    read_at timestamp with time zone,
+    outcome text CONSTRAINT catalogue_site_outcome_check CHECK (outcome IN ('ok','robots','wall','not_html','status','busy','unreached','other')),
+    failures integer NOT NULL DEFAULT 0 CONSTRAINT catalogue_site_failures_check CHECK (failures >= 0)
+);
+CREATE INDEX catalogue_site_due_idx ON catalogue_site USING btree (due_at, rank);
+CREATE INDEX catalogue_site_listed_idx ON catalogue_site USING btree (listed_on);
 -- The OpenAlex cards that gave up a DOI another work holds (`catalogue::openalex::share_dois`),
 -- by that DOI: an update looks at the DOIs it read only.
 CREATE INDEX catalogue_card_shared_doi_idx ON catalogue_card USING btree (((details->'shared_doi'->>'key'))) WHERE catalogue = 'openalex' AND details ? 'shared_doi';

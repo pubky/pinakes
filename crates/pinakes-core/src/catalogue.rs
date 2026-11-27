@@ -33,10 +33,12 @@ pub mod musicbrainz;
 pub mod openalex;
 pub mod osm;
 pub mod podcastindex;
+pub mod robots;
 pub mod run;
 pub mod software;
 pub mod spill;
 pub mod store;
+pub mod tranco;
 pub mod wikidata;
 
 /// One catalogue.
