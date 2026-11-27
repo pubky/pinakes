@@ -590,10 +590,35 @@ pub const PRIVATE_FEED_HOSTS: &[&str] = &[
     "memberful.com",
     "steadyhq.com",
 ];
-/// Whether a feed URL is a private feed: on a host of [`PRIVATE_FEED_HOSTS`], or with a query
-/// key that carries a credential (`token`, `key`, `auth`, `access`, `secret`, `sig`,
-/// `signature`, `password`, and names ending in one, such as `access_token` or `api_key`; or a
-/// `uid` with a `hash`). A subscriber's token in a public index still opens their subscription.
+/// Whether a feed path segment marks a private feed: `private` (in any case, with or without a
+/// file extension, as in a subscriber's `/private/<token>.rss`), or an opaque token
+/// ([`token_segment`]).
+fn private_segment(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or_default();
+    stem.eq_ignore_ascii_case("private") || token_segment(segment)
+}
+/// Whether a path segment holds an opaque token: a run of letters and digits (no `-`, `_` or
+/// `.` between them) of at least 32 characters with both a letter and a digit, or of at least 20
+/// with a lower-case letter, an upper-case letter and a digit. A slug's words, a number, a UUID
+/// (runs of 12 at most) and the short IDs feed hosts use stay public.
+fn token_segment(segment: &str) -> bool {
+    segment
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|run| {
+            let (lower, upper, digit) = (
+                run.bytes().any(|b| b.is_ascii_lowercase()),
+                run.bytes().any(|b| b.is_ascii_uppercase()),
+                run.bytes().any(|b| b.is_ascii_digit()),
+            );
+            (run.len() >= 32 && (lower || upper) && digit)
+                || (run.len() >= 20 && lower && upper && digit)
+        })
+}
+/// Whether a feed URL is a private feed: on a host of [`PRIVATE_FEED_HOSTS`], with a path
+/// segment `private` or an opaque token ([`private_segment`]), or with a query key that carries
+/// a credential (`token`, `key`, `auth`, `access`, `secret`, `sig`, `signature`, `password`, and
+/// names ending in one, such as `access_token` or `api_key`; or a `uid` with a `hash`). A
+/// subscriber's token in a public index still opens their subscription.
 pub fn private_feed(link: &str) -> bool {
     let Ok(url) = url::Url::parse(link.trim()) else {
         return false;
@@ -606,6 +631,14 @@ pub fn private_feed(link: &str) -> bool {
     if PRIVATE_FEED_HOSTS
         .iter()
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+    {
+        return true;
+    }
+    if url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .any(private_segment)
     {
         return true;
     }
@@ -893,6 +926,15 @@ mod tests {
             "https://example.org/feed.xml?password=x",
             "https://example.org/feed.xml?authkey=x",
             "https://example.org/feed.xml?Authorization=x",
+            // A subscriber's feed whose token is in its path, on a host that also serves public
+            // feeds.
+            "https://api.substack.com/feed/podcast/1234/s/5678/private/8f1c2d3e-4b5a-6789-abcd-ef0123456789.rss",
+            "https://example.org/feed/private/abc.rss",
+            "https://example.org/PRIVATE/feed.xml",
+            "https://example.org/feeds/private.rss",
+            "https://feeds.example.org/subscriber/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c.rss",
+            "https://example.org/rss/aB3dE5fG7hJ9kL1mN3pQ",
+            "https://example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
         ] {
             assert!(private_feed(private), "{private}");
             assert!(card(&feed(private), |_| false).is_none(), "{private}");
@@ -903,6 +945,14 @@ mod tests {
             "https://example.org/feed.xml?uid=12",
             "https://example.org/?feed=podcast&author=3",
             "https://anchor.fm/s/abc/podcast/rss",
+            "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/a91018a4-ea4f-4130-bf55-ae270180c327/44710ecc-10bb-48d1-93c7-ae270180c33e/podcast.rss",
+            "https://feeds.megaphone.fm/ADL9840290619",
+            "https://feeds.simplecast.com/54nAGcIl",
+            "https://feeds.acast.com/public/shows/5e7b7a1f2f4e8b0012345678",
+            "https://feeds.soundcloud.com/users/soundcloud:users:123456789/sounds.rss",
+            "https://feeds.example.org/the-very-long-history-of-rome-podcast-2024-edition.xml",
+            "https://example.org/privateer/feed.xml",
+            "https://example.org/shows/private-eye.rss",
         ] {
             assert!(!private_feed(public), "{public}");
             assert!(card(&feed(public), |_| false).is_some(), "{public}");
@@ -987,6 +1037,36 @@ mod tests {
                 prop_assert!(row.labels.iter().all(|l| super::super::label(l).as_deref() == Some(l.as_str())));
                 prop_assert!(row.keys.iter().all(|k| super::super::valid_key(k)));
             }
+        }
+        /// Property: a feed URL of public shapes (slugs, numbers, UUIDs, short IDs) on a host
+        /// that is not listed is public; the same URL with a `private` segment or an opaque
+        /// token segment put anywhere in its path is private and makes no card.
+        #[test]
+        fn a_private_or_token_segment_makes_any_feed_private(
+            host in "[a-z]{3,10}\\.example\\.(org|com|fm)",
+            segments in proptest::collection::vec(prop_oneof![
+                "[a-z]{1,12}(-[a-z0-9]{1,12}){0,8}",
+                "[0-9]{1,19}",
+                "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                "[A-Za-z0-9]{1,12}",
+            ], 0..6),
+            ext in "(\\.rss|\\.xml)?",
+            secret in prop_oneof![
+                "(private|Private|PRIVATE)(\\.rss|\\.xml)?",
+                "[a-z][A-Z][0-9][A-Za-z0-9]{17,60}(\\.rss)?",
+                "[0-9][a-f][0-9a-f]{30,62}(\\.rss)?",
+            ],
+            at in any::<proptest::sample::Index>(),
+        ) {
+            let url = |segments: &[String]| format!("https://{host}/{}{ext}", segments.join("/"));
+            let public = url(&segments);
+            prop_assert!(!private_feed(&public), "{}", public);
+            let mut with = segments.clone();
+            with.insert(at.index(segments.len() + 1), secret);
+            let private = url(&with);
+            prop_assert!(private_feed(&private), "{}", private);
+            let feed = Feed { id: 7, url: private, title: "A show".into(), ..Feed::default() };
+            prop_assert!(card(&feed, |_| false).is_none());
         }
         /// Fuzz: any bytes as an archive unpack to nothing or fail, never panic.
         #[test]
