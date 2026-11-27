@@ -342,6 +342,8 @@ fn main() -> Result<()> {
         let secs = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
         std::process::exit(pinakes_core::resolver::html::worker_main(secs));
     }
+    // Every TLS connection's rustls provider, as the daemon installs it.
+    pinakes_core::resolver::egress::install_crypto_provider();
     pinakes_core::resolver::html::set_worker(std::env::current_exe()?, ["parse-worker"]);
     pinakes_core::resolver::html::check_worker()?;
     tokio::runtime::Runtime::new()?.block_on(stack(args))

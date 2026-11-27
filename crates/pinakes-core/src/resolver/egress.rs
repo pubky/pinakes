@@ -956,7 +956,6 @@ impl Egress {
         filter: serde_json::Value,
         deadline_ms: u64,
     ) -> Result<Vec<serde_json::Value>> {
-        use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
         tokio::time::timeout(Duration::from_millis(deadline_ms), async {
             let url = Url::parse(uri)?;
             if url.scheme() != "wss" || !url.username().is_empty() || url.password().is_some() {
@@ -984,18 +983,25 @@ impl Egress {
                 self.network_relays,
                 "relay network disabled for injected transports"
             );
-            let stream = tokio::net::TcpStream::connect(addresses.as_slice()).await?;
-            let config = WebSocketConfig::default()
-                .max_message_size(Some(BODY_CAP))
-                .max_frame_size(Some(BODY_CAP));
-            let mut observation = crate::telemetry::FetchGuard::start();
-            let (mut socket, _) =
-                tokio_tungstenite::client_async_tls_with_config(uri, stream, Some(config), None)
-                    .await?;
-            observation.status(101);
-            nostr_subscription(&mut socket, filter).await
+            self.relay_session(uri, &addresses, filter, relay_tls())
+                .await
         })
         .await?
+    }
+    /// One subscription with the relay at `uri`, connected to `addresses` (those the policy
+    /// checked and the caller holds the pacing permits of), over TLS with `tls`.
+    async fn relay_session(
+        &self,
+        uri: &str,
+        addresses: &[SocketAddr],
+        filter: serde_json::Value,
+        tls: Arc<rustls::ClientConfig>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let stream = tokio::net::TcpStream::connect(addresses).await?;
+        let mut observation = crate::telemetry::FetchGuard::start();
+        let mut socket = relay_handshake(uri, stream, tls).await?;
+        observation.status(101);
+        nostr_subscription(&mut socket, filter).await
     }
     pub fn allows(&self, uri: &str) -> bool {
         Url::parse(uri)
@@ -1854,6 +1860,67 @@ fn host_matches(host: &str, rule: &str) -> bool {
     } else {
         host == rule.trim_end_matches('.')
     }
+}
+
+/// The rustls provider every TLS connection of this process uses (ring). The build links a
+/// second one (aws-lc-rs, through other crates' features), so rustls cannot pick one by itself:
+/// `pinakesd` and the examples install this one first ([`install_crypto_provider`]), and the
+/// relay connection names it in its own configuration ([`relay_tls_with`]).
+fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
+/// Installs ring as the process's rustls provider, for the TLS a library builds with the process
+/// default. Call it first thing in a program; a second call changes nothing.
+pub fn install_crypto_provider() {
+    // An error says a provider is installed already, which is all this wants.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// The relay connections' TLS configuration: ring, the Mozilla root certificates
+/// (`webpki-roots`), no client certificate. Built once.
+fn relay_tls() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            relay_tls_with(roots).expect("ring supports the default protocol versions")
+        })
+        .clone()
+}
+
+/// A relay TLS configuration trusting `roots`, with its provider named, so it never depends on
+/// the process default.
+fn relay_tls_with(roots: rustls::RootCertStore) -> Result<Arc<rustls::ClientConfig>> {
+    Ok(Arc::new(
+        rustls::ClientConfig::builder_with_provider(crypto_provider())
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
+/// The WebSocket handshake with a relay over `stream` (TLS for a `wss:` URI, with `tls`), its
+/// messages and frames capped at the page cap.
+async fn relay_handshake(
+    uri: &str,
+    stream: tokio::net::TcpStream,
+    tls: Arc<rustls::ClientConfig>,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(BODY_CAP))
+        .max_frame_size(Some(BODY_CAP));
+    let (socket, _) = tokio_tungstenite::client_async_tls_with_config(
+        uri,
+        stream,
+        Some(config),
+        Some(tokio_tungstenite::Connector::Rustls(tls)),
+    )
+    .await?;
+    Ok(socket)
 }
 
 async fn nostr_subscription<S>(
@@ -3864,7 +3931,7 @@ mod tests {
             assert!(public_ip(ip.parse().unwrap()), "{ip}");
         }
     }
-    struct FakeDns;
+    pub(super) struct FakeDns;
     #[async_trait]
     impl Dns for FakeDns {
         async fn lookup(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
@@ -4729,5 +4796,74 @@ mod relay_protocol_tests {
         )
         .await
         .is_err());
+    }
+
+    /// A relay over TLS: the relay session `nostr_request` runs once its policy checks pass
+    /// (connection, handshake, subscription) completes against a loopback relay with a
+    /// test certificate, in a process with no rustls provider installed and two linked (ring and
+    /// aws-lc-rs). A TLS configuration taken from the process default panics here ("Could not
+    /// automatically determine the process-level CryptoProvider").
+    #[tokio::test]
+    async fn a_tls_relay_answers_without_a_process_provider() {
+        use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_none(),
+            "no test installs a process provider"
+        );
+        // The production configuration builds too.
+        relay_tls();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls");
+        let ca = CertificateDer::from_pem_file(dir.join("ca.pem")).unwrap();
+        let chain = vec![
+            CertificateDer::from_pem_file(dir.join("relay.pem")).unwrap(),
+            ca.clone(),
+        ];
+        let key = PrivateKeyDer::from_pem_file(dir.join("relay.key")).unwrap();
+        let server_tls = rustls::ServerConfig::builder_with_provider(crypto_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_tls));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let relay = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.unwrap();
+            let mut server = tokio_tungstenite::accept_async(tls).await.unwrap();
+            let req = server.next().await.unwrap().unwrap().into_text().unwrap();
+            let req: serde_json::Value = serde_json::from_str(&req).unwrap();
+            assert_eq!(req[0], "REQ");
+            for message in [
+                r#"["EVENT","pinakes",{"id":"over-tls"}]"#,
+                r#"["EOSE","pinakes"]"#,
+            ] {
+                server.send(Message::Text(message.into())).await.unwrap();
+            }
+            let close = server.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(close, r#"["CLOSE","pinakes"]"#);
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca).unwrap();
+        let egress = Egress::with_backends(
+            EgressConfig::default(),
+            Arc::new(super::tests::FakeDns),
+            Arc::new(PinnedTransport),
+        );
+        let events = tokio::time::timeout(
+            Duration::from_secs(10),
+            egress.relay_session(
+                "wss://relay.test/",
+                &[addr],
+                serde_json::json!({"kinds":[31923]}),
+                relay_tls_with(roots).unwrap(),
+            ),
+        )
+        .await
+        .expect("the relay answers within 10 s")
+        .unwrap();
+        assert_eq!(events, [serde_json::json!({"id":"over-tls"})]);
+        relay.await.unwrap();
     }
 }

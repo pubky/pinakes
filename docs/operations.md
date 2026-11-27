@@ -903,6 +903,9 @@ next poll waits `limits.poll_secs`, and the cards stay through the grace period.
 ### Cleanup
 
 The hourly cleanup deletes orphans in batches of 100, until it has caught up or for two minutes at most.
+It takes turns with the same-recording and same-event passes (one advisory lock per hint), so a batch
+waits for a hint read in progress. An orphan whose hint rows another transaction holds, and the rest of a
+run whose batch hit a database deadlock twice (logged), are left for the next run.
 
 | Resource | Kept for |
 | --- | --- |

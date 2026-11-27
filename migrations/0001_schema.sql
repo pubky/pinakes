@@ -717,7 +717,9 @@ UNION ALL
 
 -- A change grouping reads marks the resource dirty and bumps its `group_revision`; grouping's
 -- fence (groups::fence) relies on the bump. A catalogue card's labels and version are no change
--- to what grouping reads.
+-- to what grouping reads. A child row's change locks the resource's row FOR NO KEY UPDATE before
+-- it marks it (the bump after it takes that lock anyway): it waits for a save holding the row,
+-- which marks the resource itself, instead of marking it first and then waiting for the save.
 CREATE FUNCTION mark_group_dirty() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
@@ -725,7 +727,7 @@ CREATE FUNCTION mark_group_dirty() RETURNS trigger
   IF TG_OP='UPDATE' AND (NEW.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') IS NOT DISTINCT FROM (OLD.doc-'fetched_at'-'ttl_secs'-'warnings'-'catalogue'-'labels') THEN RETURN NULL; END IF;
   INSERT INTO group_dirty(resource_id) VALUES(NEW.id) ON CONFLICT DO NOTHING;
  ELSE
-  PERFORM 1 FROM resource WHERE id=CASE WHEN TG_OP='DELETE' THEN OLD.resource_id ELSE NEW.resource_id END FOR KEY SHARE;
+  PERFORM 1 FROM resource WHERE id=CASE WHEN TG_OP='DELETE' THEN OLD.resource_id ELSE NEW.resource_id END FOR NO KEY UPDATE;
   INSERT INTO group_dirty(resource_id) SELECT id FROM resource WHERE id=CASE WHEN TG_OP='DELETE' THEN OLD.resource_id ELSE NEW.resource_id END ON CONFLICT DO NOTHING;
  END IF;
  RETURN NULL;
@@ -744,11 +746,12 @@ CREATE FUNCTION bump_group_child_revision() RETURNS trigger
  RETURN NULL;
 END $$;
 -- Removing a unit from a group marks every member dirty, so it locks the members' rows first (in
--- ID order): a save of a member holds its row, then marks it dirty.
+-- ID order) FOR NO KEY UPDATE: it waits for a save of a member (its row, then its mark) before it
+-- marks, never after.
 CREATE FUNCTION group_member_deleted() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
- PERFORM 1 FROM resource WHERE id IN(SELECT resource_id FROM group_unit WHERE group_id=OLD.group_id) ORDER BY id FOR KEY SHARE;
+ PERFORM 1 FROM resource WHERE id IN(SELECT resource_id FROM group_unit WHERE group_id=OLD.group_id) ORDER BY id FOR NO KEY UPDATE;
  DELETE FROM group_input WHERE resource_id IN(SELECT resource_id FROM group_unit WHERE group_id=OLD.group_id);
  INSERT INTO group_dirty(resource_id) SELECT resource_id FROM group_unit WHERE group_id=OLD.group_id ON CONFLICT DO NOTHING;
  DELETE FROM "group" g WHERE id=OLD.group_id AND NOT curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id);
@@ -937,7 +940,9 @@ CREATE TRIGGER resource_fact_revision BEFORE INSERT OR DELETE OR UPDATE ON resou
 CREATE TRIGGER derived_link_revision BEFORE INSERT OR DELETE OR UPDATE ON derived_link FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 CREATE TRIGGER link_release_revision BEFORE INSERT OR DELETE OR UPDATE ON link_release FOR EACH STATEMENT EXECUTE FUNCTION bump_search_revision();
 
--- A keyed derived link is evidence for the tagged resource it names: a change regroups it.
+-- A keyed derived link is evidence for the tagged resource it names: a change regroups it. The
+-- named rows are locked first (in ID order), so a save holding one is waited for before the mark,
+-- as `mark_group_dirty` does.
 CREATE FUNCTION mark_named_group_dirty() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ DECLARE named text[];
@@ -945,6 +950,7 @@ BEGIN
  IF TG_OP='UPDATE' AND OLD.key IS NOT DISTINCT FROM NEW.key AND OLD.link_id=NEW.link_id THEN RETURN NULL; END IF;
  named := ARRAY[CASE WHEN TG_OP<>'INSERT' AND OLD.key IS NOT NULL THEN OLD.link_id END,
                 CASE WHEN TG_OP<>'DELETE' AND NEW.key IS NOT NULL THEN NEW.link_id END];
+ PERFORM 1 FROM resource WHERE id=ANY(named) ORDER BY id FOR NO KEY UPDATE;
  INSERT INTO group_dirty(resource_id) SELECT id FROM resource WHERE id=ANY(named) ON CONFLICT DO NOTHING;
  UPDATE resource SET group_revision=group_revision+1 WHERE id=ANY(named);
  RETURN NULL;
@@ -1110,6 +1116,13 @@ CREATE TABLE same_event_dirty (
 );
 CREATE INDEX same_event_dirty_due_idx ON same_event_dirty USING btree (next_attempt_at, resource_id);
 
+-- Units a refill passed over because another transaction held them (`same_event::refill`): read
+-- again as a refill whatever their fingerprint. A read takes the marks made before it began.
+CREATE TABLE same_event_refill (
+    unit_id text PRIMARY KEY,
+    marked_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
+);
+
 -- Changes that can move a pair: an event resource's start, place, name or document (a former
 -- event too), and a feed's occurrences. The pass unmarks a resource only once no save holding
 -- its row is in flight (the conflict arm locks the row).
@@ -1242,6 +1255,14 @@ CREATE TABLE same_recording_dirty (
     next_attempt_at timestamp with time zone DEFAULT now() NOT NULL
 );
 CREATE INDEX same_recording_dirty_due_idx ON same_recording_dirty USING btree (next_attempt_at, resource_id);
+
+-- Recordings a refill passed over because another transaction held their unit
+-- (`same_recording::refill`): read again as a refill whatever their fingerprint. A read takes the
+-- marks made before it began.
+CREATE TABLE same_recording_refill (
+    resource_id text PRIMARY KEY,
+    marked_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
+);
 
 -- Changes that can move a pair: a recording's (or a former recording's) name, type, status,
 -- page artist or duration, and an artist or duration fact of a recording: added, deleted, its

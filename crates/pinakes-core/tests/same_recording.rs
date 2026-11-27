@@ -1066,10 +1066,11 @@ async fn deleted_orphans_leave_their_neighbours_to_refill(pool: PgPool) {
     assert_eq!(left, 0, "the refills settled");
 }
 
-/// A pass that pairs with an orphan's recording while the orphan is being deleted: the delete
-/// locks the orphan's unit before it collects the namers, so the pass's pair (committed while the
-/// delete waits for it) is seen and its owner marked; without the lock the cascade would take the
-/// pair unseen and the owner would keep an empty list for good.
+/// A pass that pairs with an orphan's recording while the cleanup runs: the cleanup finds the unit
+/// held and leaves the orphan for its next run, without waiting; that run locks the orphan's unit
+/// before it collects the namers, so the pass's pair (committed by then) is seen and its owner
+/// marked. Without the lock the cascade could take a pair unseen and the owner would keep an
+/// empty list for good.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refill(pool: PgPool) {
     let config = Config::default();
@@ -1118,14 +1119,17 @@ async fn an_orphan_deleted_while_a_pass_pairs_with_it_leaves_the_partner_to_refi
     .execute(&mut *pairing)
     .await
     .unwrap();
-    let deleting = {
-        let pool = pool.clone();
-        tokio::spawn(async move { changes::delete_orphans(&pool, 7).await.unwrap() })
-    };
-    common::lock_waiters_reach(&pool, 1, "the orphan delete").await;
-    assert!(!deleting.is_finished(), "the delete waits for the pass");
+    // The cleanup leaves the orphan the pass is pairing with for its next run, without waiting.
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        changes::delete_orphans(&pool, 7),
+    )
+    .await
+    .expect("the cleanup never waits for the pass")
+    .unwrap();
+    assert_eq!(first, 0);
     pairing.commit().await.unwrap();
-    assert_eq!(deleting.await.unwrap(), 1);
+    assert_eq!(changes::delete_orphans(&pool, 7).await.unwrap(), 1);
     let (fingerprint, queued): (String, bool) = sqlx::query_as(
         "SELECT fingerprint,EXISTS(SELECT 1 FROM same_recording_dirty d WHERE d.resource_id=u.resource_id) FROM same_recording_unit u WHERE resource_id=$1",
     )
@@ -1315,13 +1319,259 @@ async fn a_pair_kept_from_before_takes_no_place_from_a_resumed_read(pool: PgPool
     let _ = full;
 }
 
-/// A pass reading one recording (holding its unit) and an orphan delete taking the other
-/// recording of a pair (holding that unit, then marking the first to refill) never wait for each
-/// other: the pass takes its candidates with `SKIP LOCKED`, so the orphan's unit is passed over,
-/// the pass commits, and the delete goes on and marks the first recording, which is read again
-/// without the orphan. (Waiting for the orphan's unit, the two would deadlock, and one would fail.)
+/// A resumed read whose kept pair's unit another transaction holds (an orphan delete takes it
+/// `FOR UPDATE`, and may be taking the pair with it) neither waits for it nor keeps the pair: it
+/// reads its list anew, passing the held unit over. (Kept unlocked, the pair could go with the
+/// orphan and leave the list a pair short; waited for, the read could deadlock with a cleanup
+/// batch that holds the orphans in another order.)
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(pool: PgPool) {
+async fn a_resumed_read_keeps_no_pair_whose_unit_is_being_deleted(pool: PgPool) {
+    let _full = full_crowd(&pool, "Take Five", Some("PT1M41S"), 120).await;
+    let me = recording(
+        &pool,
+        "https://tidal.com/track/999999",
+        "Take Five",
+        Some("The Dave Brubeck Quartet"),
+        None,
+    )
+    .await;
+    same_recording::read(&pool, &me).await.unwrap();
+    let later = arrivals(&pool, "PT1M42S", 21).await;
+    for id in &later {
+        same_recording::read(&pool, id).await.unwrap();
+    }
+    let friend = &later[7];
+    sqlx::query(
+        "INSERT INTO same_recording(resource_id,other_id,score) VALUES($1,$2,0.7),($2,$1,0.7)",
+    )
+    .bind(friend)
+    .bind(&me)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // An orphan delete holds the friend's unit.
+    let mut deleting = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM same_recording_unit WHERE resource_id=$1 FOR UPDATE")
+        .bind(friend)
+        .execute(&mut *deleting)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), same_recording::read(&pool, &me))
+        .await
+        .expect("the resumed read does not wait for the held unit")
+        .unwrap();
+    deleting.rollback().await.unwrap();
+    let now = pairs_of(&pool, &me).await;
+    assert!(!now.contains(friend), "{now:?}");
+}
+
+/// A pass reading a recording whose values changed drops its own pairs, then those naming it,
+/// and refills the recordings those named; the orphan cleanup deleting one of its partners drops
+/// the orphan's pairs, then those naming it, and refills the recordings that named it. They
+/// never deadlock: the cleanup takes the hint's write lock, so it waits for the pass's
+/// transaction and then goes on.
+/// (Waiting for the pass's pair rows while the pass waited for the cleanup's, or for marks the
+/// cleanup made first, one of the two failed with a deadlock.) The pass is held right after it
+/// dropped its own pairs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_changed_recording_and_the_orphan_cleanup_never_deadlock_over_its_pairs(pool: PgPool) {
+    const PAUSE: i64 = 23168;
+    let config = Config::default();
+    // Four alike: each names the three others.
+    let crowd = crowd(&pool, "Take Five", Some("PT5M24S"), 4).await;
+    pass(&pool, &config).await;
+    let (me, orphan) = (&crowd[0], &crowd[1]);
+    assert_eq!(pairs_of(&pool, me).await.len(), 3);
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Its values changed, as a new length would change them.
+    sqlx::query("UPDATE same_recording_unit SET fingerprint='before' WHERE resource_id=$1")
+        .bind(me)
+        .execute(&pool)
+        .await
+        .unwrap();
+    common::pause_deletes(&pool, "same_recording", "b1-pass", PAUSE).await;
+    let reader = common::named_connection(&pool, "b1-pass").await;
+    let mut held = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(PAUSE)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let reading = {
+        let me = me.clone();
+        tokio::spawn(async move { same_recording::read(&reader, &me).await })
+    };
+    common::lock_waiters_reach(&pool, 1, "the pass").await;
+    // The cleanup waits for the pass's transaction (the hint's write lock), then goes on.
+    let deleting = {
+        let pool = pool.clone();
+        tokio::spawn(async move { changes::delete_orphans(&pool, 7).await })
+    };
+    common::lock_waiters_reach(&pool, 2, "the cleanup").await;
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(PAUSE)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let read = tokio::time::timeout(Duration::from_secs(20), reading)
+        .await
+        .expect("the pass ends")
+        .unwrap()
+        .unwrap();
+    assert!(read.changed);
+    let deleted = tokio::time::timeout(Duration::from_secs(20), deleting)
+        .await
+        .expect("the cleanup ends")
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted, 1);
+    pass(&pool, &config).await;
+    let now = pairs_of(&pool, me).await;
+    assert_eq!(now.len(), 2, "{now:?}");
+    assert!(!now.contains(orphan));
+}
+
+/// The orphan cleanup marks the recordings that named its orphans only once the orphans are
+/// deleted: a writer it waits for in the delete (here one holding the orphan's artist fact) can
+/// mark them meanwhile, as a pass's refill does. (Marking first, the cleanup held the marks that
+/// writer then waited for: a deadlock.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_orphan_cleanup_marks_the_namers_after_its_deletes(pool: PgPool) {
+    let config = Config::default();
+    let crowd = crowd(&pool, "Take Five", Some("PT5M24S"), 3).await;
+    pass(&pool, &config).await;
+    let (me, orphan) = (&crowd[0], &crowd[1]);
+    sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,seen_at,expires_at) VALUES($1,'artist','The Dave Brubeck Quartet','musicbrainz',now(),now()+interval '1 day')")
+        .bind(orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pass(&pool, &config).await;
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A writer holds the orphan's fact.
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM resource_fact WHERE resource_id=$1 FOR UPDATE")
+        .bind(orphan)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let deleting = {
+        let pool = pool.clone();
+        tokio::spawn(async move { changes::delete_orphans(&pool, 7).await })
+    };
+    common::lock_waiters_reach(&pool, 1, "the cleanup").await;
+    // The writer marks a recording that named the orphan, as a refill does, and waits for no one:
+    // it gives up after half a second, before the deadlock detector's first check (a second),
+    // whose retry would hide the wait.
+    sqlx::query("SET LOCAL lock_timeout='500ms'")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        sqlx::query("INSERT INTO same_recording_dirty(resource_id) VALUES($1) ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at")
+            .bind(me)
+            .execute(&mut *writer),
+    )
+    .await
+    .expect("the cleanup holds no mark while it waits")
+    .unwrap();
+    writer.commit().await.unwrap();
+    let deleted = tokio::time::timeout(Duration::from_secs(20), deleting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted, 1);
+    let fingerprint: String =
+        sqlx::query_scalar("SELECT fingerprint FROM same_recording_unit WHERE resource_id=$1")
+            .bind(me)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(fingerprint.starts_with("refill:"), "{fingerprint}");
+}
+
+/// A refill that finds its unit held passes it over and leaves a mark in its place, which
+/// outlives the holder: here another refill holds the unit and rolls back. The recording is read
+/// again as a refill and fills the place the orphan left. (Without the mark, its fingerprint read
+/// as current and its list stayed a pair short.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refill_mark_outlives_a_holder_that_rolls_back(pool: PgPool) {
+    let config = Config::default();
+    // 22 alike: each names 20 of the other 21.
+    let crowd = crowd(&pool, "Take Five", Some("PT5M24S"), 22).await;
+    pass(&pool, &config).await;
+    let me = &crowd[0];
+    let named = pairs_of(&pool, me).await;
+    assert_eq!(named.len(), 20);
+    let orphan = &named[0];
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Another refill holds the recording's unit (it marked it) and will roll back.
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE same_recording_unit SET fingerprint='refill:'||fingerprint WHERE resource_id=$1",
+    )
+    .bind(me)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    let deleted = tokio::time::timeout(Duration::from_secs(10), changes::delete_orphans(&pool, 7))
+        .await
+        .expect("the cleanup never waits for the held unit")
+        .unwrap();
+    assert_eq!(deleted, 1);
+    holder.rollback().await.unwrap();
+    assert_eq!(
+        pairs_of(&pool, me).await.len(),
+        19,
+        "the orphan's pair went"
+    );
+    // Its own read, alone (the pass's reads of the others could mark it again).
+    same_recording::read(&pool, me).await.unwrap();
+    let now = pairs_of(&pool, me).await;
+    assert_eq!(now.len(), 20, "the place is filled again: {now:?}");
+    let marks: i64 = sqlx::query_scalar("SELECT count(*) FROM same_recording_refill")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(marks, 0, "the read took the mark");
+}
+
+/// A pass whose recording's values changed (it holds its unit, written anew) and the orphan
+/// cleanup deleting the recording it was paired with both ways (holding that unit) never
+/// deadlock through their refills: the cleanup's refill of the pass's recording passes over the
+/// unit the pass holds, so the delete goes through, and the pass's own refill finds the orphan
+/// gone. (Each refill waiting for the other's unit, one of the two failed with a deadlock.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_changed_recording_and_the_orphan_cleanup_never_deadlock_through_refill(pool: PgPool) {
     let config = Config::default();
     let a = recording(
         &pool,
@@ -1331,7 +1581,7 @@ async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(poo
         Some("PT5M24S"),
     )
     .await;
-    let b = recording(
+    let orphan = recording(
         &pool,
         "https://tidal.com/track/2",
         "Take Five",
@@ -1340,61 +1590,54 @@ async fn a_pass_and_an_orphan_delete_holding_each_others_unit_never_deadlock(poo
     )
     .await;
     pass(&pool, &config).await;
-    assert_eq!(pairs_of(&pool, &a).await, vec![b.clone()]);
-    // The pass: it holds A's unit (marked to refill, as a lost pair marks it) and has not taken
-    // its candidates yet.
+    assert_eq!(pairs_of(&pool, &a).await, vec![orphan.clone()]);
+    assert_eq!(pairs_of(&pool, &orphan).await, vec![a.clone()]);
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(&orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(&orphan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The pass: it has written A's unit with other values (as its upsert does) and not dropped
+    // the pairs naming A yet.
     let mut reading = pool.begin().await.unwrap();
-    sqlx::query(
-        "UPDATE same_recording_unit SET fingerprint='refill:'||fingerprint WHERE resource_id=$1",
-    )
-    .bind(&a)
-    .execute(&mut *reading)
-    .await
-    .unwrap();
-    // The delete of B: it holds B's unit and waits to mark A.
+    sqlx::query("UPDATE same_recording_unit SET fingerprint='before' WHERE resource_id=$1")
+        .bind(&a)
+        .execute(&mut *reading)
+        .await
+        .unwrap();
+    // The cleanup: it locks the orphan's unit, then refills A, which named it.
     let deleting = {
         let pool = pool.clone();
-        let b = b.clone();
-        tokio::spawn(async move {
-            let mut tx = pool.begin().await.unwrap();
-            same_recording::before_delete(&mut tx, &b).await.unwrap();
-            sqlx::query("DELETE FROM resource WHERE id=$1")
-                .bind(&b)
-                .execute(&mut *tx)
-                .await
-                .unwrap();
-            tx.commit().await.unwrap();
-        })
+        tokio::spawn(async move { changes::delete_orphans(&pool, 7).await })
     };
-    common::lock_waiters_reach(&pool, 1, "the delete of B").await;
-    assert!(!deleting.is_finished(), "the delete waits for A");
-    // The pass takes its candidates: B is held, so it is passed over, and the pass commits.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !deleting.is_finished() && common::lock_waiters(&pool).await < 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the cleanup neither ends nor waits");
+    // The pass goes on: its values changed, so the pairs naming A go and their recordings refill.
     let read = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        Duration::from_secs(20),
         same_recording::read_in(&mut reading, &a),
     )
     .await
-    .expect("the pass never waits for the delete")
+    .expect("the pass ends")
     .unwrap();
     assert!(read.changed);
     reading.commit().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), deleting)
+    let deleted = tokio::time::timeout(Duration::from_secs(20), deleting)
         .await
-        .expect("the delete goes on once the pass committed")
+        .expect("the cleanup ends")
+        .unwrap()
         .unwrap();
-    let (fingerprint, queued, units): (String, bool, i64) = sqlx::query_as(
-        "SELECT fingerprint,EXISTS(SELECT 1 FROM same_recording_dirty d WHERE d.resource_id=u.resource_id),(SELECT count(*) FROM same_recording_unit) FROM same_recording_unit u WHERE resource_id=$1",
-    )
-    .bind(&a)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(
-        fingerprint.starts_with("refill:"),
-        "A is marked by the delete: {fingerprint}"
-    );
-    assert!(queued);
-    assert_eq!(units, 1, "B's unit went with it");
+    assert_eq!(deleted, 1);
     assert!(pairs_of(&pool, &a).await.is_empty());
     pass(&pool, &config).await;
     assert!(
@@ -1531,4 +1774,205 @@ async fn a_recording_without_a_title_is_read_once(pool: PgPool) {
         assert_eq!(named(&card(&config, &pool, id).await), Vec::<&str>::new());
     }
     assert_eq!(same_recording::sweep(&pool).await.unwrap(), 0);
+}
+
+/// A save holding its recording's row, and a dirty mark written beside it without that row's
+/// lock: the sweep marking a recording never read, `also_on::prune` deleting its expired fact.
+/// Neither waits for the other, and both marks land. The save is held between its row lock and
+/// its update (a test trigger waits on an advisory lock), the mark goes in, then the save goes
+/// on and its own trigger marks the recording too. (A save locking its row `FOR UPDATE` makes
+/// the mark's foreign-key check wait for the save while holding the mark's new index entry, which
+/// the save's trigger then waits for: a deadlock, and one of the two fails.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_save_and_a_dirty_mark_beside_it_never_deadlock(pool: PgPool) {
+    const PAUSE: i64 = 23166;
+    sqlx::query(&format!(
+        "CREATE FUNCTION test_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared({PAUSE}); RETURN NEW; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_pause BEFORE UPDATE ON resource FOR EACH ROW WHEN (NEW.name='Take Five (held)') EXECUTE FUNCTION test_pause()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (n, mark) in ["sweep", "prune"].into_iter().enumerate() {
+        let uri = format!("https://tidal.com/track/{}", 100 + n);
+        let id = recording(
+            &pool,
+            &uri,
+            "Take Five",
+            Some("The Dave Brubeck Quartet"),
+            Some("PT5M24S"),
+        )
+        .await;
+        if mark == "prune" {
+            // An expired artist fact (its insert marks the recording; that mark is cleared
+            // below), and a unit, so the sweep has nothing to mark.
+            sqlx::query("INSERT INTO resource_fact(resource_id,name,value,source,seen_at,expires_at) VALUES($1,'artist','Dave Brubeck','musicbrainz',now()-interval '2 days',now()-interval '1 day')")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            same_recording::read(&pool, &id).await.unwrap();
+        }
+        // Read once or never, nothing marked.
+        sqlx::query("DELETE FROM same_recording_dirty")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut held = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(PAUSE)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let saving = {
+            let pool = pool.clone();
+            let mut doc = ResourceMeta::new(&uri, "jsonld", 86400);
+            doc.set_type("MusicRecording");
+            doc.name = Some("Take Five (held)".into());
+            doc.attributes
+                .insert("artist".into(), "The Dave Brubeck Quartet".into());
+            let id = id.clone();
+            tokio::spawn(async move { store::save_document(&pool, &id, 0, &doc).await })
+        };
+        common::lock_waiters_reach(&pool, 1, "the save").await;
+        let marking = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                if mark == "sweep" {
+                    same_recording::sweep(&pool).await
+                } else {
+                    also_on::prune(&pool).await
+                }
+            })
+        };
+        // The mark is written, or waits for the save's row.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !marking.is_finished() && common::lock_waiters(&pool).await < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the mark neither ends nor waits");
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(PAUSE)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let marked = tokio::time::timeout(Duration::from_secs(20), marking)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            marked.unwrap_or_else(|e| panic!("{mark}: {e:#}")) >= 1,
+            "{mark}"
+        );
+        tokio::time::timeout(Duration::from_secs(20), saving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_or_else(|e| panic!("the save beside {mark}: {e:#}"));
+        let due: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM same_recording_dirty WHERE resource_id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(due, 1, "{mark}");
+    }
+}
+
+/// Makes `id` an orphan the cleanup deletes: no reference, orphaned long ago.
+async fn orphan(pool: &PgPool, id: &str) {
+    sqlx::query("DELETE FROM reference WHERE resource_id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A recording that stops being one (its page no longer ok) drops its unit and refills the
+/// recordings that named it, while the orphan cleanup deletes a recording paired with both (held
+/// just before its deletes, past its hint lock). They never deadlock: the pass takes the hint's
+/// write lock, so it waits for the cleanup's transaction. (Without it, the pass marked a namer,
+/// then waited for the orphan's row in that mark's foreign key, while the cleanup's refill waited
+/// for the pass's mark: a deadlock, the pass failing.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_recording_that_drops_its_unit_beside_the_orphan_cleanup_never_deadlocks(pool: PgPool) {
+    let config = Config::default();
+    // Three alike: each names the two others.
+    let crowd = crowd(&pool, "Take Five", Some("PT5M24S"), 3).await;
+    pass(&pool, &config).await;
+    let (dropped, gone, namer) = (crowd[0].clone(), crowd[1].clone(), crowd[2].clone());
+    orphan(&pool, &gone).await;
+    sqlx::query("UPDATE resource SET status='error' WHERE id=$1")
+        .bind(&dropped)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let reading = {
+        let (pool, dropped) = (pool.clone(), dropped.clone());
+        async move {
+            let mut tx = pool.begin().await?;
+            let read = same_recording::read_in(&mut tx, &dropped).await?;
+            tx.commit().await?;
+            anyhow::Ok(read)
+        }
+    };
+    let (cleaned, read) = common::beside_a_held_cleanup(&pool, 23170, reading).await;
+    assert_eq!(cleaned.unwrap(), 1);
+    assert!(read.unwrap().changed);
+    let units: Vec<String> =
+        sqlx::query_scalar("SELECT resource_id FROM same_recording_unit ORDER BY 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(units, std::slice::from_ref(&namer));
+    pass(&pool, &config).await;
+    assert!(pairs_of(&pool, &namer).await.is_empty());
+}
+
+/// A pass whose values changed, in a crowd where each names twenty others (its trim drops pairs
+/// of the recordings it names), beside the orphan cleanup held just before its deletes: they never
+/// deadlock, as the pass waits for the cleanup's hint lock.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_trimming_pass_beside_the_orphan_cleanup_never_deadlocks(pool: PgPool) {
+    let config = Config::default();
+    let crowd = crowd(&pool, "Take Five", Some("PT5M24S"), 22).await;
+    pass(&pool, &config).await;
+    let (me, gone) = (
+        crowd[0].clone(),
+        pairs_of(&pool, &crowd[0]).await[0].clone(),
+    );
+    orphan(&pool, &gone).await;
+    sqlx::query("UPDATE same_recording_unit SET fingerprint='before' WHERE resource_id=$1")
+        .bind(&me)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let reading = {
+        let (pool, me) = (pool.clone(), me.clone());
+        async move {
+            let mut tx = pool.begin().await?;
+            let read = same_recording::read_in(&mut tx, &me).await?;
+            tx.commit().await?;
+            anyhow::Ok(read)
+        }
+    };
+    let (cleaned, read) = common::beside_a_held_cleanup(&pool, 23171, reading).await;
+    assert_eq!(cleaned.unwrap(), 1);
+    assert!(read.unwrap().changed);
+    pass(&pool, &config).await;
+    let now = pairs_of(&pool, &me).await;
+    assert_eq!(now.len(), 20, "{now:?}");
+    assert!(!now.contains(&gone));
 }

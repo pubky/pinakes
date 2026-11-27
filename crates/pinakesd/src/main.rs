@@ -16,6 +16,8 @@ fn main() -> Result<()> {
     if let Command::ParseWorker(secs) = command {
         std::process::exit(pinakes_core::resolver::html::worker_main(secs));
     }
+    // Every TLS connection's rustls provider (the build links two, so rustls picks none).
+    pinakes_core::resolver::egress::install_crypto_provider();
     let runtime = tokio::runtime::Runtime::new()?;
     let result = runtime.block_on(serve(config, command));
     // Whatever still runs on a blocking thread (a dump write, a parse) is left: the process

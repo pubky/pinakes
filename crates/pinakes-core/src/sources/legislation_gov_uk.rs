@@ -198,7 +198,7 @@ pub fn card(
         s => anyhow::bail!("legislation.gov.uk answered {s}"),
     }
     let text = std::str::from_utf8(body)?;
-    let xml = roxmltree::Document::parse(text)?;
+    let xml = crate::resolver::xml::parse(text)?;
     let root = xml.root_element();
     anyhow::ensure!(
         root.has_tag_name((LEG, "Legislation")),
@@ -364,6 +364,26 @@ mod tests {
     }
     fn base(item: &Item) -> ResourceMeta {
         ResourceMeta::new(&item.root(), "legislation_gov_uk", 3600)
+    }
+
+    /// A body nested 5,000 levels deep is refused by the XML guard (`resolver::xml`), on a
+    /// worker's 2 MiB stack: parsed without it, the recursion overflows the stack and aborts the
+    /// process.
+    #[test]
+    fn deeply_nested_xml_is_refused_not_a_stack_overflow() {
+        let body = format!("{}{}", "<a>".repeat(5_000), "</a>".repeat(5_000)).into_bytes();
+        let item = item("ukpga", 2020, 1);
+        let error = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                card(base(&item), &item, 200, &body)
+                    .unwrap_err()
+                    .to_string()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(error, "XML: elements nest deeper than 64");
     }
 
     /// A provision over the page cap takes its card from the introduction: the read sets a cap

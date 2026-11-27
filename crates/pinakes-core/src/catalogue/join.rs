@@ -703,7 +703,7 @@ async fn build(
 async fn release(pool: &PgPool, id: &str, within: Option<i64>) -> Result<bool> {
     let mut tx = pool.begin().await?;
     let catalogue: Option<Option<String>> = sqlx::query_scalar(
-        "WITH old AS (SELECT id,doc#>>'{catalogue,catalogue}' AS catalogue FROM resource WHERE id=$1 AND catalogue_card IS NOT NULL FOR UPDATE),
+        "WITH old AS (SELECT id,doc#>>'{catalogue,catalogue}' AS catalogue FROM resource WHERE id=$1 AND catalogue_card IS NOT NULL FOR NO KEY UPDATE),
          due AS (SELECT CASE WHEN $2::bigint IS NULL THEN now() ELSE now()+(('x'||substr($1,1,8))::bit(32)::bigint%$2::bigint)*interval '1 second' END AS at)
          UPDATE resource r SET catalogue_card=NULL,final=false,dead_letter=false,attempts=0,timeout_streak=0,refresh_at=due.at,next_attempt_at=due.at,priority_at=NULL,generation=r.generation+1
          FROM old,due WHERE r.id=old.id RETURNING old.catalogue",
@@ -965,7 +965,7 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
         let mut tx = pool.begin().await?;
         let ids: Vec<(String, Option<String>, i64)> = sqlx::query_as(&format!(
             "WITH old AS (SELECT r.id,r.catalogue_card AS card,r.doc#>>'{{catalogue,catalogue}}' AS catalogue FROM resource r JOIN catalogue_card c ON c.id=r.catalogue_card
-               WHERE r.catalogue_card IS NOT NULL AND (r.catalogue_card,r.id)>($3,$4) AND c.catalogue=ANY($1) ORDER BY r.catalogue_card,r.id LIMIT $2 FOR UPDATE OF r)
+               WHERE r.catalogue_card IS NOT NULL AND (r.catalogue_card,r.id)>($3,$4) AND c.catalogue=ANY($1) ORDER BY r.catalogue_card,r.id LIMIT $2 FOR NO KEY UPDATE OF r)
              UPDATE resource r SET catalogue_card=NULL,final=false,dead_letter=false,attempts=0,timeout_streak=0,priority_at=NULL,generation=r.generation+1,
                refresh_at={SPREAD},next_attempt_at={SPREAD}
              FROM old WHERE r.id=old.id RETURNING r.id,old.catalogue,old.card",

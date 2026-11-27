@@ -188,8 +188,10 @@ async fn cursor_resets_head_clock_missing_and_title_fallback(pool: PgPool) {
     }
 }
 
-/// A derived link takes its parent's row before the adapter lock, as a feed apply does: the two
-/// never deadlock, though neither waits for the other to start.
+/// A derived link takes its parent's row (`FOR KEY SHARE`) before the adapter lock, as a feed apply
+/// does (`FOR NO KEY UPDATE`, a save's lock): the row locks do not conflict, so the link goes
+/// through while the apply holds the row, and the apply then takes the adapter lock. The two
+/// never deadlock.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
     let parent = store::ensure_resource(&pool, "https://example.org/parent")
@@ -202,7 +204,7 @@ async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
         .execute(&mut *apply)
         .await
         .unwrap();
-    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
         .bind(&parent)
         .execute(&mut *apply)
         .await
@@ -220,14 +222,17 @@ async fn a_derived_link_and_a_feed_apply_take_locks_in_one_order(pool: PgPool) {
             .await
         }
     });
-    // The derivation has reached the parent's row and waits for it, holding no adapter lock.
-    common::lock_waiters_reach(&pool, 1, "the derivation").await;
+    let linked = tokio::time::timeout(std::time::Duration::from_secs(10), link)
+        .await
+        .expect("the derivation does not wait for the apply's row")
+        .unwrap()
+        .unwrap();
+    assert!(linked.is_some());
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('btcmap',17614))")
         .execute(&mut *apply)
         .await
         .unwrap();
     apply.commit().await.unwrap();
-    assert!(link.await.unwrap().unwrap().is_some());
 }
 
 #[sqlx::test(migrations = "../../migrations")]

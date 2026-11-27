@@ -180,7 +180,7 @@ pub async fn derive_resource_within(
     };
     lock_writers(&mut tx, order).await?;
     // Lock order: the parent's row, then the adapter, then the parent, as a feed apply takes them
-    // (its parent row `FOR UPDATE`, then `LOCK_PARENT_ADAPTER`). The row lock (the one the link's
+    // (its parent row `FOR NO KEY UPDATE`, then `LOCK_PARENT_ADAPTER`). The row lock (the one the link's
     // foreign key takes anyway) also keeps the parent until the link commits. A resolver probe
     // or a removed parent must never create background work.
     let exists = sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR KEY SHARE")
@@ -438,7 +438,13 @@ pub(crate) enum WriteOrder {
     /// order: the resource row, its event fetch and occurrences, its adapters, its derived links,
     /// the change sequence (`changes::append`, always last). One that locks several resources'
     /// rows in an order of its own also takes the alias lock (`alias::lock`), or checks without
-    /// waiting (a group run's fence).
+    /// waiting (a group run's fence). Its resource row it locks `FOR NO KEY UPDATE` (no save
+    /// changes a row's `id` or `uri`): a foreign key's check of a row that names the resource
+    /// (`FOR KEY SHARE`, the hint sweeps' and `also_on::prune`'s dirty marks) never waits for the
+    /// save, which would deadlock when the save's own trigger then writes the same mark. A mark
+    /// followed by an update of the resource's row (the group triggers `mark_group_dirty` and
+    /// `mark_named_group_dirty`) locks the row `FOR NO KEY UPDATE` before marking, so it waits
+    /// for the save first. The orphan cleanup, which deletes rows, locks them `FOR UPDATE`.
     Shared,
     /// The transaction locks several resources' rows in an order a shared writer may meet the
     /// other way round (orphans and what deleting them reaches, a reset of every reference, a

@@ -15,7 +15,7 @@
 //! sweep drops units that left the window and marks those that entered it, changed unseen or
 //! became an alias. A unit that changes or goes (out of the window, or with its resource) takes
 //! its pairs from the units that named it, and those are read again to refill their lists (see
-//! `refill` and `units_going`), as is a unit whose pair a cap pushed out. A read visits a bounded
+//! `refill` and `namers`), as is a unit whose pair a cap pushed out. A read visits a bounded
 //! number of units (`WALK`) and examines a bounded number of candidates among them (`SCAN`); one
 //! that stops with room left goes on from where it stopped in a later pass.
 //! Cards only read the stored pairs (`same_event_hint`).
@@ -126,22 +126,30 @@ pub async fn run(pool: PgPool, config: Config, mut shutdown: watch::Receiver<boo
 /// Returns the resources marked.
 pub async fn sweep(pool: &PgPool, config: &Config) -> Result<u64> {
     drop_expired(pool, Caps::of(config).drop_batch).await?;
+    let mut tx = pool.begin().await?;
+    crate::hints::lock(&mut tx, crate::locks::SAME_EVENT).await?;
     let entered = sqlx::query(&format!(
         "INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT s.id FROM search_unit s \
          WHERE {EVENT} AND {WINDOW} AND NOT EXISTS(SELECT 1 FROM same_event_unit x WHERE x.unit_id=s.unit_id AND x.fingerprint={FINGERPRINT}) \
          ON CONFLICT DO NOTHING"
     ))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     let stale = sqlx::query(
         "INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT x.resource_id FROM same_event_unit x JOIN resource r ON r.id=x.resource_id \
          WHERE EXISTS(SELECT 1 FROM resource_alias a WHERE a.alias_id=x.resource_id) \
          OR (x.uid IS NULL AND NOT coalesce(r.type_path @> ARRAY['Event'],false)) \
          OR (x.uid IS NOT NULL AND (r.status='missing' OR NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.resource_id=x.resource_id AND o.uid=x.uid AND o.recurrence_id=x.recurrence_id AND o.status<>'superseded'))) \
+         OR EXISTS(SELECT 1 FROM same_event_refill f WHERE f.unit_id=x.unit_id) \
          ON CONFLICT DO NOTHING",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    // A refill mark whose unit went.
+    sqlx::query("DELETE FROM same_event_refill f WHERE NOT EXISTS(SELECT 1 FROM same_event_unit x WHERE x.unit_id=f.unit_id)")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(entered.rows_affected() + stale.rows_affected())
 }
 
@@ -180,7 +188,13 @@ pub async fn drain(pool: &PgPool, config: &Config, budget: i64) -> Result<usize>
             release(pool, id, claimed, 0).await?;
             continue;
         }
-        match resource(pool, id, budget - read as i64, caps).await {
+        // A deadlock (a cycle with a writer outside the hint's lock) is read once more; a second
+        // leaves the entry for a later pass.
+        match crate::hints::once_more_if_deadlocked("same_event", || {
+            resource(pool, id, budget - read as i64, caps)
+        })
+        .await
+        {
             Ok((n, more, _)) => {
                 read += n;
                 if more {
@@ -221,16 +235,25 @@ async fn release(
 /// Units whose lists lost a pair are read again: their fingerprint is marked `refill:` (so the
 /// read recomputes their list instead of finding it current, and still knows their values) and
 /// their resources are due now. The sweep marks a unit still marked, as one whose fingerprint
-/// differs.
+/// differs. The units are taken in id order, passing over those another transaction holds
+/// (`SKIP LOCKED`): waiting for them, a pass and the orphan cleanup that each hold the other's
+/// unit would deadlock. A unit passed over (a pass is writing it, an orphan delete, a drop or
+/// another refill holds it, any of which may still roll back) is marked in `same_event_refill`
+/// instead, which its next read takes as the same mark. A unit held only by a candidate read or
+/// a pair's foreign key (`FOR KEY SHARE`) is marked itself.
 async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, units: &[String]) -> Result<()> {
     if units.is_empty() {
         return Ok(());
     }
-    sqlx::query("UPDATE same_event_unit SET fingerprint='refill:'||fingerprint WHERE unit_id=ANY($1) AND fingerprint NOT LIKE 'refill:%'")
+    sqlx::query("WITH locked AS (SELECT unit_id,fingerprint FROM same_event_unit WHERE unit_id=ANY($1) ORDER BY unit_id FOR NO KEY UPDATE SKIP LOCKED), \
+        marked AS (UPDATE same_event_unit u SET fingerprint='refill:'||u.fingerprint FROM locked l WHERE u.unit_id=l.unit_id AND l.fingerprint NOT LIKE 'refill:%') \
+        INSERT INTO same_event_refill(unit_id) SELECT DISTINCT x FROM unnest($1::text[]) AS t(x) \
+        WHERE x NOT IN (SELECT unit_id FROM locked) AND EXISTS(SELECT 1 FROM same_event_unit u WHERE u.unit_id=x) ORDER BY 1 \
+        ON CONFLICT(unit_id) DO UPDATE SET marked_at=excluded.marked_at")
         .bind(units)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit WHERE unit_id=ANY($1) \
+    sqlx::query("INSERT INTO same_event_dirty(resource_id) SELECT DISTINCT resource_id FROM same_event_unit WHERE unit_id=ANY($1) ORDER BY 1 \
         ON CONFLICT(resource_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at WHERE same_event_dirty.next_attempt_at>excluded.next_attempt_at")
         .bind(units)
         .execute(&mut **tx)
@@ -238,50 +261,103 @@ async fn refill(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, units: &[String]
     Ok(())
 }
 
-/// Marks the units that name `units`, other than those among them, to refill: their pairs go
-/// with the units when these are deleted. Done in the code before the delete, never by a trigger
-/// on it: a trigger that updated a row the same statement deletes aborted a batch dropping two
-/// paired units (PostgreSQL: "tuple to be updated was already modified by an operation triggered
-/// by the current command").
-async fn units_going(
+/// The units that name `units`, other than those among them, in id order: their pairs go with
+/// the units when these are deleted, so they refill. Collected before the delete (with `units`
+/// locked, so no pair joins them meanwhile) and marked after it (`refill`), so a transaction that
+/// waits in the delete holds none of their marks; never by a trigger on the delete: a trigger
+/// that updated a row the same statement deletes aborted a batch dropping two paired units
+/// (PostgreSQL: "tuple to be updated was already modified by an operation triggered by the
+/// current command").
+async fn namers(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     units: &[String],
-) -> Result<()> {
+) -> Result<Vec<String>> {
     if units.is_empty() {
-        return Ok(());
+        return Ok(vec![]);
     }
-    let owners: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT unit_id FROM same_event WHERE other_id=ANY($1) AND NOT unit_id=ANY($1)",
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT unit_id FROM same_event WHERE other_id=ANY($1) AND NOT unit_id=ANY($1) ORDER BY 1",
     )
     .bind(units)
     .fetch_all(&mut **tx)
-    .await?;
-    refill(tx, &owners).await
+    .await?)
 }
 
-/// Before a resource's row is deleted (an orphan, `changes::delete_orphans`): its units go with
-/// it (the cascade), so the units that named them are marked to refill. The units are locked
-/// first (FOR UPDATE, in id order, as `drop_units` locks its batch), so a pass that would pair
-/// with them meanwhile skips them (its candidates are taken FOR KEY SHARE … SKIP LOCKED) or waits
-/// for the delete: a pair added between the namers' collection and the cascade would go unmarked.
-/// Nothing happens for a resource without units.
-pub async fn before_delete(
+/// Before resources' rows are deleted (orphans, `changes::delete_orphans`, under the hint's write
+/// lock): which of them another transaction holds (one of its units, or one of the units' pairs),
+/// taken without waiting (`SKIP LOCKED`, in id order). The others' units and pairs stay locked
+/// until the delete, so no pair joins them meanwhile (a pair's foreign key waits). A held
+/// resource waits for the next cleanup, so the cleanup never waits for a hint row: a writer
+/// outside the lock could be waiting for a row the cleanup already deleted.
+pub(crate) async fn held(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    resource_id: &str,
-) -> Result<()> {
-    let units: Vec<String> = sqlx::query_scalar(
-        "SELECT unit_id FROM same_event_unit WHERE resource_id=$1 ORDER BY unit_id FOR UPDATE",
+    resources: &[String],
+) -> Result<Vec<String>> {
+    let units: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT u.unit_id,u.resource_id,l.unit_id IS NOT NULL FROM same_event_unit u \
+         LEFT JOIN LATERAL (SELECT x.unit_id FROM same_event_unit x WHERE x.unit_id=u.unit_id FOR UPDATE SKIP LOCKED) l ON true \
+         WHERE u.resource_id=ANY($1) ORDER BY u.unit_id",
     )
-    .bind(resource_id)
+    .bind(resources)
     .fetch_all(&mut **tx)
     .await?;
-    units_going(tx, &units).await
+    let mut held: Vec<String> = units
+        .iter()
+        .filter(|(_, _, locked)| !locked)
+        .map(|(_, r, _)| r.clone())
+        .collect();
+    let ids: Vec<&String> = units.iter().map(|(u, _, _)| u).collect();
+    let pairs: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT p.unit_id,p.other_id,l.ok IS NOT NULL FROM same_event p \
+         LEFT JOIN LATERAL (SELECT true AS ok FROM same_event x WHERE x.unit_id=p.unit_id AND x.other_id=p.other_id FOR UPDATE SKIP LOCKED) l ON true \
+         WHERE p.unit_id=ANY($1) OR p.other_id=ANY($1) ORDER BY p.unit_id,p.other_id",
+    )
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (a, b, locked) in pairs {
+        if !locked {
+            held.extend(
+                units
+                    .iter()
+                    .filter(|(u, _, _)| *u == a || *u == b)
+                    .map(|(_, r, _)| r.clone()),
+            );
+        }
+    }
+    held.sort_unstable();
+    held.dedup();
+    Ok(held)
+}
+
+/// The units that name the units of `resources` (other than those), whose rows are about to be
+/// deleted (`changes::delete_orphans`, after `held`); they refill once the rows are gone
+/// (`refill_namers`).
+pub(crate) async fn namers_of(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    resources: &[String],
+) -> Result<Vec<String>> {
+    let units: Vec<String> = sqlx::query_scalar(
+        "SELECT unit_id FROM same_event_unit WHERE resource_id=ANY($1) ORDER BY 1",
+    )
+    .bind(resources)
+    .fetch_all(&mut **tx)
+    .await?;
+    namers(tx, &units).await
+}
+
+/// Marks `units` to refill (`refill`), after the rows their pairs named were deleted.
+pub(crate) async fn refill_namers(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    units: &[String],
+) -> Result<()> {
+    refill(tx, units).await
 }
 
 /// Drops the units `which` selects (SQL over `$1`, the resource, when given), `batch` to a
 /// transaction until none is left, so a long backlog (the sweep after a long stop) is never
-/// read or locked whole: their pairs go with them, and the units that named them refill
-/// (`units_going`). Returns how many were dropped.
+/// read or locked whole: their pairs go with them, and the units that named them refill after the
+/// delete (`namers`). Returns how many were dropped.
 async fn drop_units(pool: &PgPool, which: &str, resource: Option<&str>, batch: i64) -> Result<u64> {
     let limit = if resource.is_some() { "$2" } else { "$1" };
     let select = format!(
@@ -290,17 +366,19 @@ async fn drop_units(pool: &PgPool, which: &str, resource: Option<&str>, batch: i
     let mut dropped = 0;
     loop {
         let mut tx = pool.begin().await?;
+        crate::hints::lock(&mut tx, crate::locks::SAME_EVENT).await?;
         let mut query = sqlx::query_scalar::<_, String>(&select);
         if let Some(resource) = resource {
             query = query.bind(resource);
         }
         let units = query.bind(batch).fetch_all(&mut *tx).await?;
         if !units.is_empty() {
-            units_going(&mut tx, &units).await?;
+            let namers = namers(&mut tx, &units).await?;
             sqlx::query("DELETE FROM same_event_unit WHERE unit_id=ANY($1)")
                 .bind(&units)
                 .execute(&mut *tx)
                 .await?;
+            refill(&mut tx, &namers).await?;
             commit_changed(tx).await?;
         }
         dropped += units.len() as u64;
@@ -351,8 +429,9 @@ async fn resource(
          ,(SELECT x.fingerprint FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stored \
          ,(SELECT x.scan_after FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stopped_at \
          ,(SELECT x.scan_after_start FROM same_event_unit x WHERE x.unit_id=s.unit_id) AS stopped_at_start \
+         ,EXISTS(SELECT 1 FROM same_event_refill f WHERE f.unit_id=s.unit_id) AS refill_marked \
          FROM search_unit s WHERE s.id=$1 AND {EVENT} AND {WINDOW}) u \
-         WHERE stored IS DISTINCT FROM fingerprint ORDER BY start_at,unit_id LIMIT $2"
+         WHERE stored IS DISTINCT FROM fingerprint OR refill_marked ORDER BY start_at,unit_id LIMIT $2"
     ))
     .bind(id)
     .bind(budget + 1)
@@ -369,6 +448,16 @@ async fn resource(
         // refill's too) drops the pairs naming it.
         let fingerprint: String = u.try_get("fingerprint")?;
         let stored: Option<String> = u.try_get("stored")?;
+        // A refill mark a refill left in `same_event_refill` (it could not mark the unit) reads
+        // as a `refill:` fingerprint.
+        let refill_marked: bool = u.try_get("refill_marked")?;
+        let stored = stored.map(|f| {
+            if refill_marked && !f.starts_with("refill:") {
+                format!("refill:{f}")
+            } else {
+                f
+            }
+        });
         let values_changed = stored
             .as_deref()
             .is_some_and(|f| f.strip_prefix("refill:").unwrap_or(f) != fingerprint);
@@ -393,8 +482,11 @@ async fn resource(
             (Some(id), Some(start)) => Some(Pos { start, id }),
             _ => None,
         };
-        let resumed = !values_changed && stopped_at.is_some_and(|at| ring.resume_after(at));
+        let mut resumed = !values_changed && stopped_at.is_some_and(|at| ring.resume_after(at));
         let mut tx = pool.begin().await?;
+        // The hint's write lock first (`hints::lock`): the orphan cleanup and the sweep never
+        // write the hint's rows at the same time.
+        crate::hints::lock(&mut tx, crate::locks::SAME_EVENT).await?;
         // Each step of a ring's cursor reads a hundred rows of a range the planner takes for
         // large: compiling its plan would cost far more than running it.
         sqlx::query("SET LOCAL jit=off").execute(&mut *tx).await?;
@@ -408,14 +500,30 @@ async fn resource(
             .execute(&mut *tx)
             .await?;
         // The pairs a resumed read keeps (left out of the candidates, so they take no place
-        // among those a read may still take); any other read starts from none.
+        // among those a read may still take); any other read starts from none. Their units are
+        // taken `FOR KEY SHARE … SKIP LOCKED`: one another transaction holds (an orphan delete or
+        // a drop, which passed this unit over in its `refill`) may be going with its pair, so the
+        // read starts over instead, and its list is never left a pair short. It waits for none
+        // of them.
         let mut existing: Vec<String> = vec![];
         if resumed {
-            existing = sqlx::query_scalar("SELECT other_id FROM same_event WHERE unit_id=$1")
+            // One statement, one snapshot: a pair whose unit is held or gone has no `u`.
+            let kept: Vec<Option<String>> = sqlx::query_scalar("SELECT u.unit_id FROM same_event p LEFT JOIN LATERAL (SELECT x.unit_id FROM same_event_unit x WHERE x.unit_id=p.other_id FOR KEY SHARE SKIP LOCKED) u ON true WHERE p.unit_id=$1 ORDER BY p.other_id")
                 .bind(&unit)
                 .fetch_all(&mut *tx)
                 .await?;
-        } else {
+            if let Some(kept) = kept.into_iter().collect::<Option<Vec<String>>>() {
+                existing = kept;
+            } else {
+                resumed = false;
+                ring = if u.try_get::<bool, _>("all_day")? {
+                    Ring::of(&unit, start)
+                } else {
+                    Ring::timed(&unit, start)
+                };
+            }
+        }
+        if !resumed {
             sqlx::query("DELETE FROM same_event WHERE unit_id=$1")
                 .bind(&unit)
                 .execute(&mut *tx)
@@ -583,6 +691,15 @@ async fn resource(
         let trimmed = !pushed_out.is_empty();
         let pushed_out: Vec<String> = pushed_out.into_iter().filter(|u| *u != unit).collect();
         refill(&mut tx, &pushed_out).await?;
+        if refill_marked {
+            // Last, so nothing after it waits: the marks made before this read began are taken;
+            // one another transaction is making now stays (`SKIP LOCKED`), and the unit is read
+            // again.
+            sqlx::query("DELETE FROM same_event_refill WHERE unit_id IN (SELECT unit_id FROM same_event_refill WHERE unit_id=$1 AND marked_at<now() FOR UPDATE SKIP LOCKED)")
+                .bind(&unit)
+                .execute(&mut *tx)
+                .await?;
+        }
         // A read that went on from a position and took no pair changed none: the search
         // revision stays where it is.
         if resumed && !took && !trimmed {

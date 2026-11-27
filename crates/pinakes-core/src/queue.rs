@@ -377,7 +377,7 @@ async fn failed_as(
 /// and is still read again.
 async fn unreached(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='connect' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='connect' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE")
         .bind(&job.id)
         .bind(job.generation)
         .fetch_optional(&mut *tx)
@@ -402,7 +402,7 @@ async fn unreached(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
 /// other answer (a read the platform answers, any failure) starts it over.
 async fn off_origin(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='off_origin' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='off_origin' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE")
         .bind(&job.id)
         .bind(job.generation)
         .fetch_optional(&mut *tx)
@@ -447,7 +447,7 @@ pub fn wall_backoff(streak: u32) -> u64 {
 /// `last_error` is `wall`; a saved `blocked` card continues it, `changes::save`).
 async fn refused(pool: &PgPool, job: &Job) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='wall' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error='wall' THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE")
         .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
     if let Some(streak) = streak {
         let streak = streak.saturating_add(1);
@@ -499,7 +499,7 @@ async fn upstream_wait(
     retry: &crate::resolver::RetryLater,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error=ANY($3) THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+    let streak: Option<i32> = sqlx::query_scalar("SELECT CASE WHEN last_error=ANY($3) THEN timeout_streak ELSE 0 END FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE")
         .bind(&job.id).bind(job.generation).bind(&UPSTREAM_WAITS[..]).fetch_optional(&mut *tx).await?;
     if let Some(streak) = streak {
         let streak = streak.saturating_add(1);
@@ -513,7 +513,7 @@ async fn upstream_wait(
 }
 async fn timed_out(pool: &PgPool, job: &Job, cfg: &QueueConfig, seconds: u64) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+    let row: Option<(i32, i32)> = sqlx::query_as("SELECT CASE WHEN last_error='timeout' THEN timeout_streak ELSE 0 END,attempts FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE")
         .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
     if let Some((streak, attempts)) = row {
         let streak = streak.saturating_add(1);
@@ -539,7 +539,7 @@ async fn denied(
     retry: &crate::resolver::RetryLater,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let row: Option<(i32,i32,bool)> = sqlx::query_as("SELECT denial_streak,attempts,coalesce(denied_since<=now()-interval '3 days',false) FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE")
+    let row: Option<(i32,i32,bool)> = sqlx::query_as("SELECT denial_streak,attempts,coalesce(denied_since<=now()-interval '3 days',false) FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE")
         .bind(&job.id).bind(job.generation).fetch_optional(&mut *tx).await?;
     if let Some((streak, attempts, expired)) = row {
         let attempts = attempts.saturating_add(i32::from(expired));
@@ -1058,7 +1058,7 @@ async fn after_save(pool: &PgPool, job: &Job, doc: &crate::model::ResourceMeta) 
             crate::alias::lock(&mut tx).await?;
             // The generation fence covers the alias too: a stale job writes nothing.
             let current: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR UPDATE",
+                "SELECT id FROM resource WHERE id=$1 AND generation=$2 FOR NO KEY UPDATE",
             )
             .bind(&job.id)
             .bind(job.generation)

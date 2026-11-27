@@ -449,6 +449,10 @@ pub async fn assign(
             .bind(id)
             .fetch_optional(&mut **tx)
             .await?;
+    // The alias's row first, then the root's and the previous root's (in ID order), before any
+    // of them is marked dirty below: a save holding one (`FOR NO KEY UPDATE`) is waited for
+    // first, never after a mark its own trigger would then wait for.
+    lock_rows(tx, id, [Some(root_id.clone()), previous.clone()]).await?;
     sqlx::query("INSERT INTO resource_alias(alias_id,root_id,basis) VALUES($1,$2,$3) ON CONFLICT(alias_id) DO UPDATE SET root_id=excluded.root_id,basis=excluded.basis")
         .bind(id).bind(&root_id).bind(alias.basis).execute(&mut **tx).await?;
     let line = if previous.as_deref() != Some(root_id.as_str()) {
@@ -549,13 +553,19 @@ pub async fn assign(
 pub async fn release(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<Option<Line>> {
     lock(tx).await?;
     let root: Option<String> =
-        sqlx::query_scalar("DELETE FROM resource_alias WHERE alias_id=$1 RETURNING root_id")
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
             .bind(id)
             .fetch_optional(&mut **tx)
             .await?;
     let Some(root) = root else {
         return Ok(None);
     };
+    // Both rows before they are marked dirty, as `assign` locks them.
+    lock_rows(tx, id, [Some(root.clone())]).await?;
+    sqlx::query("DELETE FROM resource_alias WHERE alias_id=$1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
     let both = vec![id.to_owned(), root];
     sqlx::query(
         "INSERT INTO group_dirty(resource_id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING",
@@ -574,6 +584,25 @@ pub async fn release(tx: &mut Transaction<'_, Postgres>, id: &str) -> Result<Opt
         root: id.to_owned(),
         type_path,
     }))
+}
+/// Locks an alias's row, then its roots' (in ID order), `FOR NO KEY UPDATE`, as a save locks its
+/// own: an assignment or a release marks them dirty and then rescores them (an update of each
+/// row), so it waits for a save holding one before the marks.
+async fn lock_rows<const N: usize>(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+    roots: [Option<String>; N],
+) -> Result<()> {
+    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    let roots: Vec<String> = roots.into_iter().flatten().filter(|r| r != id).collect();
+    sqlx::query("SELECT 1 FROM resource WHERE id=ANY($1) ORDER BY id FOR NO KEY UPDATE")
+        .bind(roots)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 /// The root of a resource ID, or the ID itself.
 pub async fn resolve_id(pool: &PgPool, id: &str) -> Result<String> {

@@ -52,7 +52,7 @@ query="SELECT 'sample '||count(*) FILTER (WHERE wait_event_type='Lock') FROM pg_
 WITH locks AS MATERIALIZED (SELECT * FROM pg_locks),
   db AS (SELECT oid FROM pg_database WHERE datname=current_database())
 SELECT 'lock '||CASE
-  WHEN l.locktype='advisory' THEN CASE l.objid WHEN 73822920 THEN 'write order' WHEN 73822917 THEN 'instance' WHEN 73822919 THEN 'alias' WHEN 73822918 THEN 'change sequence' WHEN 73491620 THEN 'group' WHEN 73822916 THEN 'ingest' WHEN 73822921 THEN 'large catalogue import' WHEN 73822930 THEN 'catalogue wikidata' WHEN 73822931 THEN 'catalogue musicbrainz' WHEN 73822932 THEN 'catalogue osm' WHEN 73822933 THEN 'catalogue openalex' WHEN 73822934 THEN 'catalogue podcastindex' WHEN 73822935 THEN 'catalogue tranco' WHEN 73822936 THEN 'catalogue software' ELSE 'advisory (adapter or parent)' END
+  WHEN l.locktype='advisory' THEN CASE l.objid WHEN 73822920 THEN 'write order' WHEN 73822917 THEN 'instance' WHEN 73822919 THEN 'alias' WHEN 73822918 THEN 'change sequence' WHEN 73491620 THEN 'group' WHEN 73822922 THEN 'same-recording writes' WHEN 73822923 THEN 'same-event writes' WHEN 73822916 THEN 'ingest' WHEN 73822921 THEN 'large catalogue import' WHEN 73822930 THEN 'catalogue wikidata' WHEN 73822931 THEN 'catalogue musicbrainz' WHEN 73822932 THEN 'catalogue osm' WHEN 73822933 THEN 'catalogue openalex' WHEN 73822934 THEN 'catalogue podcastindex' WHEN 73822935 THEN 'catalogue tranco' WHEN 73822936 THEN 'catalogue software' ELSE 'advisory (adapter or parent)' END
   WHEN (l.locktype IN ('relation','page','tuple') AND l.database=(SELECT oid FROM db)
         AND l.relation IN (to_regclass('search_write'), to_regclass('search_write_id_seq')))
     OR EXISTS(SELECT 1 FROM locks t WHERE t.pid=l.pid AND t.granted AND t.locktype='tuple'

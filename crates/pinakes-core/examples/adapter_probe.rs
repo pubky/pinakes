@@ -101,6 +101,8 @@ impl Dns for ProbeDns {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Every TLS connection's rustls provider, as the daemon installs it.
+    pinakes_core::resolver::egress::install_crypto_provider();
     let args: Vec<_> = std::env::args().collect();
     ensure!(
         args.len() == 4,

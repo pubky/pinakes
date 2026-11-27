@@ -294,7 +294,7 @@ async fn concurrent_writers_never_wait_on_the_search_revision(pool: PgPool) {
             for r in 0..rounds {
                 for (id, _) in &feeds {
                     let mut tx = pool.begin().await.unwrap();
-                    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+                    sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
                         .bind(id)
                         .execute(&mut *tx)
                         .await

@@ -294,7 +294,7 @@ pub(crate) async fn rewrite<T, F: std::future::Future<Output = Result<T>>>(
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
-    let row = sqlx::query("SELECT coalesce(r.resolver,r.doc->>'source','') AS source,r.doc FROM resource r WHERE r.id=$1 AND r.osm_id IS NULL AND r.doc IS NOT NULL FOR UPDATE OF r")
+    let row = sqlx::query("SELECT coalesce(r.resolver,r.doc->>'source','') AS source,r.doc FROM resource r WHERE r.id=$1 AND r.osm_id IS NULL AND r.doc IS NOT NULL FOR NO KEY UPDATE OF r")
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -335,7 +335,7 @@ pub async fn clear(pool: &PgPool, id: &str, generation: i64, last_error: &str) -
     hold_venues(pool, &[id.to_owned()], &[]).await?;
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
-    let row = sqlx::query("SELECT r.uri,r.resolver,r.doc AS accepted FROM resource r WHERE r.id=$1 AND r.generation=$2 AND r.osm_id IS NULL FOR UPDATE OF r")
+    let row = sqlx::query("SELECT r.uri,r.resolver,r.doc AS accepted FROM resource r WHERE r.id=$1 AND r.generation=$2 AND r.osm_id IS NULL FOR NO KEY UPDATE OF r")
         .bind(id)
         .bind(generation)
         .fetch_optional(&mut *tx)
@@ -434,7 +434,7 @@ pub async fn save(
         // clears its aliases' rows, after its own.
         crate::alias::lock(&mut tx).await?;
     }
-    let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR UPDATE OF r")
+    let row=sqlx::query("SELECT r.*,CASE WHEN r.osm_id IS NULL THEN r.doc ELSE o.versions->r.osm_version END AS accepted FROM resource r LEFT JOIN osm_place o ON r.osm_type=o.osm_type AND r.osm_id=o.osm_id WHERE r.id=$1 AND r.generation=$2 FOR NO KEY UPDATE OF r")
         .bind(id).bind(generation).fetch_optional(&mut *tx).await?;
     let Some(row) = row else { return Ok(()) };
     let own: String = row.try_get("uri")?;
@@ -802,7 +802,7 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
             crate::alias::lock(&mut tx).await?;
             // Read again under its lock: a save may have revived it since.
             let doc: Option<Value> =
-                sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1 FOR UPDATE")
+                sqlx::query_scalar("SELECT doc FROM resource WHERE id=$1 FOR NO KEY UPDATE")
                     .bind(&id)
                     .fetch_optional(&mut *tx)
                     .await?;
@@ -880,7 +880,9 @@ const CLEANUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 const CLEANUP_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
 /// Delete resources orphaned for `grace_days`. A derived child's grace counts from its link's
 /// expiry, not from its creation: a lapsed link (a calendar that failed for a day, an event link
-/// past its cap) keeps its child, and its row for a later revival, through the same grace.
+/// past its cap) keeps its child, and its row for a later revival, through the same grace. An
+/// orphan a hint pass is reading or pairing (`same_recording::held`) is left for the next run, and
+/// so is the rest of a run whose batch deadlocked twice.
 /// For tests: the daemon's maintenance runs `delete_orphans_within`.
 pub async fn delete_orphans(pool: &PgPool, grace_days: u32) -> Result<u64> {
     delete_orphans_within(pool, grace_days, grace_days.saturating_mul(24), || false).await
@@ -900,9 +902,21 @@ pub async fn delete_orphans_within(
     let started = std::time::Instant::now();
     let mut deleted = 0;
     loop {
-        let batch = delete_orphan_batch(pool, grace_days, preview_grace_hours, 100).await?;
+        // A batch that ends in a deadlock (a cycle the hints' locks do not cover, such as one
+        // with a save) runs once more; a second leaves the rest for the next run.
+        let batch = crate::hints::once_more_if_deadlocked("cleanup", || {
+            delete_orphan_batch(pool, grace_days, preview_grace_hours, 100)
+        })
+        .await;
+        let (batch, taken) = match batch {
+            Err(error) if crate::hints::deadlocked(&error) => {
+                tracing::warn!(error = %crate::resolver::log_error(&error), "orphan cleanup deadlocked twice; the rest waits for the next run");
+                break;
+            }
+            batch => batch?,
+        };
         deleted += batch;
-        if batch < 100 || started.elapsed() >= CLEANUP_BUDGET || stop() {
+        if taken < 100 || started.elapsed() >= CLEANUP_BUDGET || stop() {
             break;
         }
         tokio::time::sleep(CLEANUP_PAUSE).await;
@@ -914,13 +928,36 @@ async fn delete_orphan_batch(
     grace_days: u32,
     preview_grace_hours: u32,
     limit: i64,
-) -> Result<u64> {
+) -> Result<(u64, u64)> {
     let mut tx = pool.begin().await?;
+    // The hints' write locks first (`hints::lock`, in this order, before the write order, so
+    // saves are not held while the cleanup waits for a pass): no hint pass or sweep writes the
+    // units, pairs and marks the batch deletes and refills meanwhile.
+    crate::hints::lock(&mut tx, crate::locks::SAME_RECORDING).await?;
+    crate::hints::lock(&mut tx, crate::locks::SAME_EVENT).await?;
     // Orphans are many resources' rows, and deleting them reaches their references, aliases and
     // links.
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
     let rows=sqlx::query("SELECT r.id,r.resolver,r.ever_existed,d.doc FROM resource r JOIN resource_document d ON d.id=r.id WHERE r.orphaned_at<now()-least($1*24,$3)*interval '1 hour' AND (r.orphaned_at=r.created_at OR r.orphaned_at<now()-$1*interval '1 day') AND NOT EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource_derivation d JOIN resource p ON p.id=d.parent_id WHERE (d.child_id=r.id OR d.child_id IN(SELECT alias_id FROM resource_alias WHERE root_id=r.id)) AND (d.expires_at IS NULL OR d.expires_at>now()-$1*interval '1 day') AND (p.orphaned_at IS NULL OR p.orphaned_at>=now()-$1*interval '1 day' OR EXISTS(SELECT 1 FROM effective_reference f WHERE f.resource_id=p.id))) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id) AND (r.lease_until IS NULL OR r.lease_until<now()) FOR UPDATE OF r SKIP LOCKED LIMIT $2")
         .bind(grace_days as f64).bind(limit).bind(preview_grace_hours as f64).fetch_all(&mut *tx).await?;
+    // Their hint pairs cascade away with them. The hint rows are taken without waiting: an orphan
+    // whose unit or pairs a hint pass holds is left for the next run (`same_recording::held`,
+    // `same_event::held`). The recordings and units that named the others refill once the rows
+    // are gone, in id order, so while the cleanup waits in a delete it holds none of their marks.
+    let taken = rows.len() as u64;
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|row| row.try_get("id"))
+        .collect::<Result<_, _>>()?;
+    let mut held = crate::same_recording::held(&mut tx, &ids).await?;
+    held.extend(crate::same_event::held(&mut tx, &ids).await?);
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|row| !held.contains(&row.get::<String, _>("id")))
+        .collect();
+    let going: Vec<String> = rows.iter().map(|row| row.get("id")).collect();
+    let recordings = crate::same_recording::namers_of(&mut tx, &going).await?;
+    let units = crate::same_event::namers_of(&mut tx, &going).await?;
     for row in &rows {
         let id: String = row.try_get("id")?;
         let source: Option<String> = row.try_get("resolver")?;
@@ -952,16 +989,15 @@ async fn delete_orphan_batch(
             .bind(&id)
             .execute(&mut *tx)
             .await?;
-        // Its hint pairs cascade away with it: the recordings and units that named them refill.
-        crate::same_recording::before_delete(&mut tx, &id).await?;
-        crate::same_event::before_delete(&mut tx, &id).await?;
         sqlx::query("DELETE FROM resource WHERE id=$1")
             .bind(id)
             .execute(&mut *tx)
             .await?;
     }
+    crate::same_recording::refill_namers(&mut tx, &recordings).await?;
+    crate::same_event::refill_namers(&mut tx, &units).await?;
     tx.commit().await?;
-    Ok(rows.len() as u64)
+    Ok((rows.len() as u64, taken))
 }
 /// The change lines one retention transaction deletes. Fixed: it bounds how long the sequence
 /// lock is held, whatever the backlog.
@@ -1035,7 +1071,7 @@ async fn retain_occurrences(pool: &PgPool) -> Result<u64> {
     for id in owners {
         let mut tx = pool.begin().await?;
         crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
-        let found = sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR UPDATE")
+        let found = sqlx::query("SELECT 1 FROM resource WHERE id=$1 FOR NO KEY UPDATE")
             .bind(&id)
             .fetch_optional(&mut *tx)
             .await?;

@@ -2942,6 +2942,7 @@ dependencies = [
  "rmcp",
  "roxmltree",
  "rrule",
+ "rustls",
  "scraper",
  "secp256k1",
  "serde",
@@ -2953,6 +2954,7 @@ dependencies = [
  "tantivy",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "toml",
  "tower",
@@ -2963,6 +2965,7 @@ dependencies = [
  "url",
  "utoipa",
  "utoipa-swagger-ui",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

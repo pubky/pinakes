@@ -2444,12 +2444,13 @@ Members must exist and have been grouped once.
 
 Curation pins its members away from automatic groups, and overrides the distance and evidence
 rules. Removing a member lets its automatic evidence count again. Invalid curation gets 400; a
-busy group writer gets 503 (retry).
+busy group writer, or a writer that holds every save off for a while (the hourly orphan cleanup,
+a re-extraction), gets 503 with `Retry-After`.
 
 `DELETE /v1/groups/{id}` undoes a curation: its members are no longer pinned and the group is no
 longer curated, so each member groups again by what its keys say. The group goes when no member
 joins it again. It answers 204; 404 when the ID is no curated group; 400 for an invalid ID; 503
-while the group writer is busy.
+with `Retry-After` while the group writer is busy, as for a curation.
 
 ## Possibly the same event
 
@@ -3311,7 +3312,7 @@ text instead: the 405 of `GET /mcp`, and on the admin listener the 401, the 421 
 | 500 | An internal error, without database details. A handler panic is answered 500 by a backstop layer (logged with its path, counted in `pinakes_api_panics_total`), never a dropped connection. |
 | 501 | `wot_2` on an instance whose Nexus serves no reach set |
 | 502 | Nexus failed while a search read a `reach` or `boost` set |
-| 503 | The hour's new previews are taken, or the OSM dump is not written yet, with `Retry-After`; on the admin listener, the group writer is busy ([Curation](#curation)) |
+| 503 | The hour's new previews are taken, or the OSM dump is not written yet, with `Retry-After`; on the admin listener, the group writer or the write order is busy ([Curation](#curation)) |
 | 504 | The request took longer than `limits.request_timeout_secs` (30 s) |
 
 ### Timeouts and database
