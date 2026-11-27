@@ -2044,11 +2044,12 @@ async fn the_file_catalogues_ask_disk_for_their_own_files_only(pool: PgPool) {
     let podcasts = podcastindex::PodcastIndex::new(url(podcastindex::DATABASE), "test@example.org")
         .unwrap()
         .configured(&ctx.config);
-    assert_eq!(podcasts.disk_need(Run::Import, &state), 8 << 30);
+    // Room for the database at its cap (12 GiB).
+    assert_eq!(podcasts.disk_need(Run::Import, &state), 12 << 30);
     let work = ctx.config.catalogues.work_dir(Catalogue::Podcastindex);
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("podcastindex_feeds.db"), vec![0u8; 4096]).unwrap();
-    assert_eq!(podcasts.disk_need(Run::Update, &state), (8 << 30) - 4096);
+    assert_eq!(podcasts.disk_need(Run::Update, &state), (12 << 30) - 4096);
     let local = podcastindex::PodcastIndex::new(
         Input::File(dir.path().join("feeds.db")),
         "test@example.org",

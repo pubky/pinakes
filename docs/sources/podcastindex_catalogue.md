@@ -12,7 +12,7 @@ Podcasts, Podcast Index or site link of a podcast joins the card's group.
 | Credentials | None |
 | Rate | The archive's version (`HEAD`) once a day; the archive once a week, when it is new |
 | Refresh | Weekly, as Podcast Index publishes it |
-| Needs | `http.contact`; 8 GiB free under `catalogues.dir/podcastindex` for the unpacked database (5 GB today, and room for it to grow; a resumed run counts what its kept database holds; a local `.db` file needs none) |
+| Needs | `http.contact`; 12 GiB free under `catalogues.dir/podcastindex` for the unpacked database (its cap; 5 GB today; a resumed run counts what its kept database holds; a local `.db` file needs none) |
 | Card type | `PodcastSeries` |
 | Keys | `podcast:guid:…`, `podcast:apple:…`, `url:…` |
 | Credit | `from: "podcastindex"`; the card's link is the feed |

@@ -1977,8 +1977,35 @@ async fn redirects_and_oversized_dumps_are_refused(pool: PgPool) {
     m.index_redirects.store(false, Ordering::SeqCst);
     *m.head_size.lock().unwrap() = Some(600_000_000_000);
     assert!(import(&pool, &ctx, &base).await.is_err());
-    assert_eq!(last_error(&pool).await.as_deref(), Some("size (127.0.0.1)"));
+    let shown = last_error(&pool).await.unwrap();
+    assert!(
+        shown.starts_with("size (dump ") && shown.contains("600000000000 bytes"),
+        "{shown}"
+    );
     assert!(m.ranges.lock().unwrap().is_empty());
+    // Refused: the run is cleared (the large-import turn is free), and the task's next try ends
+    // at once, recording nothing.
+    let state = store::state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.run.as_deref(), state.error_count), (None, 2));
+    assert!(state.position.unwrap()["refused"].is_string());
+    let mut w = Wikidata::for_config(&ctx.config);
+    let base_importer = importer(&base);
+    w.endpoints = base_importer.endpoints.clone();
+    w.threads = base_importer.threads;
+    w.http = true;
+    let again = run::step(&w, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    assert_eq!(
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap()
+            .error_count,
+        2
+    );
 }
 
 /// A dump of mostly broken lines is no dump: the run fails (`bad_dump`) and removes nothing.

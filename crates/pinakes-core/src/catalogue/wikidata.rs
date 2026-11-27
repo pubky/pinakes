@@ -1137,8 +1137,14 @@ impl Wikidata {
         }
         let step = match &source {
             Source::Download { dump } => {
+                // A dump over the cap is refused, not tried again every ten minutes: the import
+                // waits for the next one.
                 if dump.size > DUMP_SIZE_MAX {
-                    return Err(Failure::new("size").at(net::host(&dump.url)).into());
+                    let note = format!(
+                        "dump {} of {} bytes, over the {DUMP_SIZE_MAX} a dump may take",
+                        dump.date, dump.size
+                    );
+                    return Err(job.refuse(source.version(), "size", note));
                 }
                 room(job, dump.size + dump.size / 25)?;
                 preallocate(&job.dir().join(dump.file_name()), dump.size)?;

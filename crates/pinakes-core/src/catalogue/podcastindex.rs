@@ -46,10 +46,10 @@ const FILE: &str = "podcastindex_feeds.db";
 /// The most bytes read of the archive (1.85 GB today) and of the database in it (5.1 GB).
 const ARCHIVE_MAX: u64 = 8 << 30;
 const DATABASE_MAX: u64 = 12 << 30;
-/// What a run needs free in the catalogue's directory: the unpacked database (5.1 GB today) and
-/// room for it to grow. The cards' share of the database is sized apart (it may be on another
-/// disk).
-const DISK_NEED: u64 = 8 << 30;
+/// What a run needs free in the catalogue's directory: room for the unpacked database at its cap
+/// ([`DATABASE_MAX`]; 5.1 GB today). The cards' share of the database is sized apart (it may be
+/// on another disk).
+const DISK_NEED: u64 = DATABASE_MAX;
 /// The most feeds read (4.8M today).
 pub const FEEDS_CAP: u64 = 50_000_000;
 /// The most distinct site links counted while reading (4.7M feeds name one today); past it,
