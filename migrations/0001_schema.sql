@@ -40,7 +40,9 @@ CREATE TABLE resource (
     venue_id text,
     doc jsonb NOT NULL DEFAULT '{}' CONSTRAINT resource_doc_check CHECK (octet_length(doc::text) <= 8192),
     search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(doc->>'description', ''))) STORED,
-    resolver text,
+    -- The route that reads it: one of `resolver::ROUTES` or `cards::KINDS` (a test holds the list
+    -- equal to them); NULL for a row no route reads (an alias).
+    resolver text CONSTRAINT resource_resolver_check CHECK (resolver IN ('web', 'pubky', 'geo', 'osm', 'event', 'event_platform', 'media', 'isbn', 'doi', 'nostr', 'activitypub', 'official')),
     resolved_at timestamp with time zone,
     refresh_at timestamp with time zone,
     status text NOT NULL DEFAULT 'pending' CONSTRAINT resource_status_check CHECK (status IN ('ok', 'pending', 'missing', 'unreachable', 'error')),
@@ -53,6 +55,8 @@ CREATE TABLE resource (
     lease_until timestamp with time zone,
     generation bigint NOT NULL DEFAULT 0,
     dead_letter boolean NOT NULL DEFAULT false,
+    -- The class of the last failure (`resolver::error_class`, a `RetryLater` class): a short name,
+    -- never the error's text. Each resolver and source names its own, so the set is open.
     last_error text,
     osm_type text,
     osm_id bigint,
@@ -99,7 +103,8 @@ CREATE INDEX resource_type_path_idx ON resource USING gin (type_path);
 CREATE INDEX resource_venue_idx ON resource USING btree (venue_id);
 CREATE INDEX resource_venue_version_idx ON resource USING btree ((doc #>> '{venue,osm_id}'), (doc #>> '{venue,osm_version}'));
 
--- A resource whose last error is not a denial starts its denial streak over.
+-- A resource whose last error is not a denial starts its denial streak over. The denials are
+-- `queue::DENIAL_CLASSES` (a test holds the two lists equal).
 CREATE FUNCTION reset_denial_streak() RETURNS trigger
     LANGUAGE plpgsql
     AS $$ BEGIN
@@ -205,6 +210,8 @@ CREATE VIEW effective_reference AS
 CREATE TABLE resource_derivation (
     parent_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
     child_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
+    -- The event adapter that derived it: an `id` of `data/event-adapters.json` (a registry, so no
+    -- list here).
     adapter text NOT NULL,
     expires_at timestamp with time zone,
     until timestamp with time zone,
@@ -448,6 +455,8 @@ CREATE TABLE resource_change (
     fields text[] NOT NULL,
     before jsonb,
     after jsonb,
+    -- Who wrote the change: the resource's route, an event adapter, a source's name (`sources`),
+    -- `alias`, or '' when none is known. Drawn from registries, so no list here.
     source text NOT NULL,
     osm_type text,
     osm_id bigint,
@@ -710,7 +719,8 @@ CREATE TABLE group_input (
 CREATE TABLE group_dirty (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     attempts integer NOT NULL DEFAULT 0,
-    last_error text,
+    -- Why the last run was deferred (`groups`; a test holds the list equal to what the code writes).
+    last_error text CONSTRAINT group_dirty_last_error_check CHECK (last_error IN ('work_budget', 'lock_busy', 'snapshot_changed', 'group_failed')),
     next_attempt_at timestamp with time zone NOT NULL DEFAULT now(),
     fence_attempts integer NOT NULL DEFAULT 0,
     resume_key text,
@@ -954,6 +964,7 @@ CREATE TABLE also_on_dirty (
     resource_id text PRIMARY KEY REFERENCES resource(id) ON DELETE CASCADE,
     next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
     attempts integer DEFAULT 0 NOT NULL,
+    -- The class of the last failed run (`resolver::error_class`), as `resource.last_error`.
     last_error text
 );
 CREATE INDEX also_on_dirty_due_idx ON also_on_dirty USING btree (next_attempt_at, resource_id);
@@ -1361,6 +1372,12 @@ $$;
 
 -- ── Catalogues ───────────────────────────────────────────────────────────────────────────────
 
+-- The catalogues: `Catalogue::ALL`'s names (a test holds the two lists equal). Every table with a
+-- `catalogue` column checks it with this.
+CREATE FUNCTION is_catalogue(name text) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT name IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software') $$;
+
 -- One item a catalogue import holds (`catalogue`): Wikidata, MusicBrainz, OpenStreetMap, OpenAlex,
 -- Podcast Index, Tranco or software packages. The catalogue's importer is its only writer; the
 -- fetch queue, the refresh times and the change journal never touch these rows. `source` is the
@@ -1375,7 +1392,7 @@ $$;
 -- row triggers below (a stamp fires none).
 CREATE TABLE catalogue_card (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    catalogue text NOT NULL CONSTRAINT catalogue_card_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
+    catalogue text NOT NULL CONSTRAINT catalogue_card_catalogue_check CHECK (is_catalogue(catalogue)),
     source text NOT NULL CONSTRAINT catalogue_card_source_check CHECK (source ~ '^[a-z0-9][a-z0-9._-]{0,31}$'),
     source_id text NOT NULL CONSTRAINT catalogue_card_source_id_check CHECK (octet_length(source_id) BETWEEN 1 AND 512),
     uri text NOT NULL CONSTRAINT catalogue_card_uri_check CHECK (octet_length(uri) BETWEEN 1 AND 2048),
@@ -1433,7 +1450,7 @@ CREATE INDEX catalogue_card_uri_idx ON catalogue_card USING btree (uri);
 -- allow-shrink`).
 -- `pinakesd catalogue drop` deletes the row with the cards.
 CREATE TABLE catalogue_state (
-    catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (catalogue IN ('wikidata', 'musicbrainz', 'osm', 'openalex', 'podcastindex', 'tranco', 'software')),
+    catalogue text PRIMARY KEY CONSTRAINT catalogue_state_catalogue_check CHECK (is_catalogue(catalogue)),
     phase text NOT NULL DEFAULT 'idle' CONSTRAINT catalogue_state_phase_check CHECK (phase IN ('idle', 'import', 'update', 'failed', 'disabled')),
     run text CONSTRAINT catalogue_state_run_check CHECK (run IN ('import', 'update')),
     generation bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_generation_check CHECK (generation >= 0),
@@ -1444,9 +1461,11 @@ CREATE TABLE catalogue_state (
     last_import_at timestamp with time zone,
     last_update_at timestamp with time zone,
     current_as_of timestamp with time zone,
-    import_requested text,
-    waiting text,
-    last_error text,
+    -- These three are text for the operator (`pinakesd catalogue status`), each cut to 1 KiB by its
+    -- writer.
+    import_requested text CONSTRAINT catalogue_state_import_requested_check CHECK (octet_length(import_requested) <= 1024),
+    waiting text CONSTRAINT catalogue_state_waiting_check CHECK (octet_length(waiting) <= 1024),
+    last_error text CONSTRAINT catalogue_state_last_error_check CHECK (octet_length(last_error) <= 1024),
     error_count bigint NOT NULL DEFAULT 0 CONSTRAINT catalogue_state_error_count_check CHECK (error_count >= 0),
     updated_at timestamp with time zone NOT NULL DEFAULT now(),
     scope jsonb,
@@ -1528,7 +1547,7 @@ CREATE TABLE catalogue_map_cell (
     level smallint NOT NULL CONSTRAINT catalogue_map_cell_level_check CHECK (level IN (4, 6, 8, 10, 12)),
     cx integer NOT NULL,
     cy integer NOT NULL,
-    catalogue text NOT NULL,
+    catalogue text NOT NULL CONSTRAINT catalogue_map_cell_catalogue_check CHECK (is_catalogue(catalogue)),
     type text NOT NULL,
     cards bigint NOT NULL,
     sum_lon double precision NOT NULL,

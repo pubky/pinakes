@@ -1068,6 +1068,8 @@ pub async fn run_once_with(
 /// that holds the catalogue (a daemon's task) starts it as any full import asked for, after the
 /// run under way, or at its next step. Needs no lock.
 pub async fn request_import(pool: &PgPool, catalogue: Catalogue, reason: &str) -> Result<()> {
+    let mut reason = reason.to_owned();
+    crate::model::truncate(&mut reason, 1024);
     store::ensure_state(pool, catalogue).await?;
     sqlx::query(
         "UPDATE catalogue_state SET import_requested=$2,updated_at=now() WHERE catalogue=$1",
@@ -1118,6 +1120,9 @@ fn gigabytes(bytes: u64) -> String {
 }
 /// Say why the importer waits, logged once when the reason changes.
 async fn set_waiting(pool: &PgPool, catalogue: Catalogue, why: &str) -> Result<()> {
+    let mut why = why.to_owned();
+    crate::model::truncate(&mut why, 1024);
+    let why = why.as_str();
     store::ensure_state(pool, catalogue).await?;
     let changed = sqlx::query("UPDATE catalogue_state SET waiting=$2,updated_at=now() WHERE catalogue=$1 AND waiting IS DISTINCT FROM $2")
         .bind(catalogue.name())

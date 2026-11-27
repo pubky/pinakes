@@ -423,6 +423,11 @@ async fn off_origin(pool: &PgPool, job: &Job, cfg: &QueueConfig) -> Result<()> {
 /// (`sources::retry`, `event::adapters::service::upstream_status`, the egress's 429, a card
 /// reader's or Nominatim's). The daemon's own waits (`OWN_WAITS`) are not among them.
 const UPSTREAM_WAITS: [&str; 3] = ["upstream", "http_4xx", "http_5xx"];
+/// The classes of a service refusing to serve a link it still has (`denied`): its denial streak
+/// grows, and a link denied for three days turns `unreachable`. Any other stored class starts the
+/// streak over (the schema's `reset_denial_streak` trigger names the same classes; a test holds
+/// the two lists equal).
+pub const DENIAL_CLASSES: [&str; 2] = ["upstream_denied", "graphql"];
 /// The first wait after a social site refused a link (its sign-in wall, a challenge, a 401, 403
 /// or 451: the `blocked` card, or a stored card kept through a refusal): a day, doubling with each
 /// refusal in a row up to `WALL_BACKOFF_MAX_SECS` ([`wall_backoff`]). Asking a site that refuses
@@ -978,7 +983,7 @@ async fn finish_job(
         } else if let Some(retry) = error.downcast_ref::<crate::resolver::RetryLater>() {
             if retry.class == "timeout" {
                 timed_out(pool, job, cfg, retry.seconds).await?;
-            } else if matches!(retry.class, "upstream_denied" | "graphql") {
+            } else if DENIAL_CLASSES.contains(&retry.class) {
                 denied(pool, job, cfg, retry).await?;
             } else if retry.class == "off_origin" {
                 off_origin(pool, job, cfg).await?;
