@@ -1605,6 +1605,70 @@ async fn a_tranco_site_that_is_a_public_suffix_reads_on_its_own_host(pool: PgPoo
     assert_eq!(outcomes["blogspot.com"].as_deref(), Some("other"));
 }
 
+/// `catalogue status` shows the list's sites and how many have been read: counted when a list
+/// is loaded, and between loads carried from the last run with each run's first reads (a run
+/// does not count the table).
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_counts_its_sites_when_a_list_loads(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,a.example\n2,b.example\n3,c.example\n").unwrap();
+    let sites = Sites::default();
+    for host in ["a", "b", "c", "d"] {
+        sites.page(&format!("https://{host}.example/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    let shown = || async {
+        let version: String = sqlx::query_scalar(
+            "SELECT upstream_version FROM catalogue_state WHERE catalogue='tranco'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        version
+            .rsplit_once(", ")
+            .map_or(String::new(), |(head, read)| {
+                format!("{}, {read}", head.rsplit_once(", ").unwrap().1)
+            })
+    };
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(shown().await, "3 sites, 3 read)");
+    // Between loads the stored count is carried, not the table counted.
+    sqlx::query("UPDATE catalogue_state SET position=position||'{\"sites\":100,\"read\":40}' WHERE catalogue='tranco'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    make_due(&pool, "a.example").await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(sites.asked("https://a.example/"), 2);
+    assert_eq!(shown().await, "100 sites, 40 read)");
+    // A site read for the first time counts.
+    sqlx::query("UPDATE catalogue_site SET read_at=NULL,due_at=now() WHERE host='b.example'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(shown().await, "100 sites, 41 read)");
+    // A new list is counted again.
+    std::fs::write(
+        &list,
+        "1,a.example\n2,b.example\n3,c.example\n4,d.example\n",
+    )
+    .unwrap();
+    a_day_passed(&pool).await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(shown().await, "4 sites, 4 read)");
+}
+
 /// A card stays through two transient failures in a row (no answer, a server error) and goes
 /// with the third; a page read between them starts the count again.
 #[sqlx::test(migrations = "../../migrations")]

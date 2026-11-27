@@ -201,9 +201,10 @@ impl Tranco {
         Ok(removed)
     }
     /// Read due homepages until none is due, the budget is spent, or a large import starts;
-    /// what is next ([`Next`]), and the catalogue reads wait for. [`READS`] reads stay in flight:
-    /// sites are claimed [`CLAIM`] at a time as the reads need more, and written as they end.
-    async fn read_due(&self, job: &mut Job<'_>, list: &str) -> Result<(Next, Option<String>)> {
+    /// what is next ([`Next`]), what the catalogue reads wait for, and how many sites were read
+    /// for the first time. [`READS`] reads stay in flight: sites are claimed [`CLAIM`] at a time
+    /// as the reads need more, and written as they end.
+    async fn read_due(&self, job: &mut Job<'_>, list: &str) -> Result<(Next, Option<String>, u64)> {
         let started = std::time::Instant::now();
         let pool = job.pool().clone();
         let config = job.config().clone();
@@ -231,8 +232,9 @@ impl Tranco {
                 let claim = limit.map_or(CLAIM, |n| CLAIM.min((n - claimed) as i64));
                 // A claim holds its sites for an hour, so another daemon (or a cut-off run)
                 // passes them over meanwhile.
-                let sites: Result<Vec<(String, i32)>, sqlx::Error> = sqlx::query_as(
-                    "UPDATE catalogue_site s SET due_at=now()+interval '1 hour' FROM (SELECT host FROM catalogue_site WHERE due_at<=now() ORDER BY due_at,rank LIMIT $1 FOR UPDATE SKIP LOCKED) d WHERE s.host=d.host RETURNING s.host,s.rank",
+                // With whether the site was never read (the claim leaves `read_at` as it was).
+                let sites: Result<Vec<(String, i32, bool)>, sqlx::Error> = sqlx::query_as(
+                    "UPDATE catalogue_site s SET due_at=now()+interval '1 hour' FROM (SELECT host FROM catalogue_site WHERE due_at<=now() ORDER BY due_at,rank LIMIT $1 FOR UPDATE SKIP LOCKED) d WHERE s.host=d.host RETURNING s.host,s.rank,s.read_at IS NULL",
                 )
                 .bind(claim)
                 .fetch_all(&pool)
@@ -256,19 +258,27 @@ impl Tranco {
                     })
                 })
                 .map(|site| async move {
-                    let (host, rank) = site?;
+                    let (host, rank, first) = site?;
                     let read = homepage(&self.egress, &host, &self.robots).await;
-                    Ok::<_, anyhow::Error>((host, rank, read))
+                    Ok::<_, anyhow::Error>((host, rank, first, read))
                 })
                 .buffer_unordered(READS)
                 .ready_chunks(CLAIM as usize),
         );
+        let mut first_reads = 0u64;
         while let Some(chunk) = reads.next().await {
-            let chunk: Vec<(String, i32, Homepage)> = chunk.into_iter().collect::<Result<_>>()?;
+            let chunk: Vec<(String, i32, bool, Homepage)> =
+                chunk.into_iter().collect::<Result<_>>()?;
+            // A deferred read is no read: the site's `read_at` stays empty.
+            first_reads += chunk
+                .iter()
+                .filter(|(_, _, first, read)| *first && !matches!(read, Homepage::Deferred(_)))
+                .count() as u64;
+            let chunk = chunk.into_iter().map(|(h, r, _, o)| (h, r, o)).collect();
             self.record(job, chunk, list).await?;
         }
-        let stopped = stopped.lock().expect("the stop").clone();
-        Ok(stopped)
+        let (next, waits) = stopped.lock().expect("the stop").clone();
+        Ok((next, waits, first_reads))
     }
     /// Keep what a round of reads found: the cards, the sites' outcomes and when each is due. A
     /// round whose removals take the run's past a tenth of the catalogue's cards (and past ten,
@@ -518,7 +528,7 @@ impl Tranco {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let (next, waits) = self.read_due(job, &on_list).await?;
+        let (next, waits, first_reads) = self.read_due(job, &on_list).await?;
         crate::telemetry::homepage_reads_waiting(next == Next::Large);
         position["next"] = json!(next.name());
         // When the next site falls due: the plan wakes then ([`plan_after`]).
@@ -542,11 +552,27 @@ impl Tranco {
                 }
             }
         }
-        // `catalogue status` shows the reads so far.
-        let (sites, read): (i64, i64) =
-            sqlx::query_as("SELECT count(*),count(read_at) FROM catalogue_site")
-                .fetch_one(job.pool())
-                .await?;
+        // `catalogue status` shows the reads so far: counted when a list was loaded (a new
+        // position holds no count), else the last count and this run's first reads, so a run
+        // does not scan the million sites.
+        let counted = position
+            .get("sites")
+            .and_then(Value::as_i64)
+            .zip(position.get("read").and_then(Value::as_i64));
+        let (sites, read): (i64, i64) = match counted {
+            Some((sites, read)) => (
+                sites,
+                read.saturating_add(i64::try_from(first_reads).unwrap_or(i64::MAX))
+                    .min(sites),
+            ),
+            None => {
+                sqlx::query_as("SELECT count(*),count(read_at) FROM catalogue_site")
+                    .fetch_one(job.pool())
+                    .await?
+            }
+        };
+        position["sites"] = json!(sites);
+        position["read"] = json!(read);
         let list = position
             .get("list")
             .and_then(Value::as_str)

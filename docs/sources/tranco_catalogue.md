@@ -70,7 +70,10 @@ without a fetch.
 backlog that only grows: reads waiting for a large import, or every read deferred; the count
 stops at 100,000). Alert `CatalogueHomepageReadsStalled` fires when no read has found a page for
 six hours while sites are due and the reads do not wait for a large import.
-`catalogue status` shows the list and how many sites have been read (`upstream_version`).
+`catalogue status` shows the list and how many sites have been read (`upstream_version`): counted
+when a list is loaded, and in between carried from run to run with each run's first reads. An
+update's start and end (`catalogue run starts`, `catalogue run finished`) are debug log lines, since
+updates run each time homepages fall due.
 
 ## Cards
 

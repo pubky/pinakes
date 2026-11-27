@@ -40,6 +40,17 @@ use sqlx::{Connection, PgConnection, PgPool};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
+/// A `tracing` info line, or a debug line when `$quiet` holds.
+macro_rules! info_or_debug {
+    ($quiet:expr, $($arg:tt)+) => {
+        if $quiet {
+            tracing::debug!($($arg)+)
+        } else {
+            tracing::info!($($arg)+)
+        }
+    };
+}
+
 /// A run of an importer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Run {
@@ -1052,7 +1063,11 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
             .await?;
         (generation, None)
     };
-    tracing::info!(
+    // Tranco's updates run each time homepages fall due (often every few minutes): their start
+    // and end are debug lines.
+    let quiet = catalogue == Catalogue::Tranco && run == Run::Update;
+    info_or_debug!(
+        quiet,
         catalogue = catalogue.name(),
         run = run.name(),
         generation,
@@ -1186,7 +1201,8 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     if let Some(lock) = large {
         lock.release().await;
     }
-    tracing::info!(
+    info_or_debug!(
+        quiet,
         catalogue = catalogue.name(),
         run = run.name(),
         inserted = report.inserted,
