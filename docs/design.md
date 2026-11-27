@@ -353,9 +353,11 @@ resource table, and an OpenStreetMap link's OSM route reads the card into `osm_p
 - **Pubky's own social data.** `pubky://` objects under `/pub/pubky.app/` and `/pub/social/` are
   never fetched and get no card: posts, profiles, files, events and RSVPs there are Nexus's to
   describe. Other apps' objects get a card when someone references them ([Pubky apps](pubky-apps.md)).
-- **Links nobody referenced.** Pinakes does not crawl and does not watch any homeserver. A card
-  exists only for a link someone referenced or previewed, or a resource such a link derives (a
-  calendar's dates, an event page's organiser calendar). Reading a card fetches what that card
+- **Links nobody referenced.** Pinakes does not crawl and does not watch any homeserver. A stored
+  card exists only for a link someone referenced or previewed, or a resource such a link derives (a
+  calendar's dates, an event page's organiser calendar). The cards of open catalogues (read from
+  their dumps, each with an off switch) are listed in search beside them, referenced or not
+  ([catalogues](operations.md#catalogues)). Reading a card fetches what that card
   needs: the link, its service's API record, documents the page names for itself (its calendar
   file, its podcast feed, its oEmbed answer), the lookups of its sources, and for a walled page the
   same site's feeds at their usual paths.
