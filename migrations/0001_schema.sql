@@ -261,7 +261,9 @@ CREATE TABLE source_state (
 -- ── Events and places ────────────────────────────────────────────────────────────────────────
 
 -- An OpenStreetMap object as Pinakes read it, with each version a resource or event refers to
--- (`versions`). The only table that holds OSM-derived values.
+-- (`versions`). OSM-derived values live only here, in the OSM catalogue's cards
+-- (`catalogue_card` rows of catalogue `osm`), `osm_rename`, `osm_removed` and `osm_successor`:
+-- the ODbL dump holds them all.
 CREATE TABLE osm_place (
     osm_type text NOT NULL CONSTRAINT osm_place_osm_type_check CHECK (osm_type IN ('node', 'way', 'relation')),
     osm_id bigint NOT NULL CONSTRAINT osm_place_osm_id_check CHECK (osm_id > 0),
@@ -291,6 +293,47 @@ CREATE INDEX osm_place_name_idx ON osm_place USING gin (name gin_trgm_ops);
 CREATE INDEX osm_place_point_idx ON osm_place USING gist (point);
 CREATE INDEX osm_place_search_idx ON osm_place USING gin (search_text);
 CREATE INDEX osm_place_type_path_idx ON osm_place USING gin (type_path);
+
+-- A deleted OSM object's successor, found by the OSM catalogue's update on evidence: the same
+-- Wikidata item (`wikidata`), or a delete and a create in one changeset with the same name within
+-- 50 m (`changeset`). Shared links of the old object become aliases of the new one's link.
+CREATE TABLE osm_successor (
+    old_type text NOT NULL CONSTRAINT osm_successor_old_type_check CHECK (old_type IN ('node', 'way', 'relation')),
+    old_id bigint NOT NULL CONSTRAINT osm_successor_old_id_check CHECK (old_id > 0),
+    new_type text NOT NULL CONSTRAINT osm_successor_new_type_check CHECK (new_type IN ('node', 'way', 'relation')),
+    new_id bigint NOT NULL CONSTRAINT osm_successor_new_id_check CHECK (new_id > 0),
+    basis text NOT NULL CONSTRAINT osm_successor_basis_check CHECK (basis IN ('wikidata', 'changeset')),
+    found_at timestamp with time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY (old_type, old_id)
+);
+
+-- An imported OSM object whose name changed to an unrelated one (another business moved in), as
+-- the OSM catalogue's update saw it: references made before `changed_at` belong to the place it
+-- was. Derivative database, as `osm_place` (in the ODbL dump).
+CREATE TABLE osm_rename (
+    osm_type text NOT NULL CONSTRAINT osm_rename_osm_type_check CHECK (osm_type IN ('node', 'way', 'relation')),
+    osm_id bigint NOT NULL CONSTRAINT osm_rename_osm_id_check CHECK (osm_id > 0),
+    changed_at timestamp with time zone NOT NULL,
+    old_name text NOT NULL CONSTRAINT osm_rename_old_name_check CHECK (octet_length(old_name) BETWEEN 1 AND 2048),
+    old_category text CONSTRAINT osm_rename_old_category_check CHECK (octet_length(old_category) <= 512),
+    new_name text NOT NULL CONSTRAINT osm_rename_new_name_check CHECK (octet_length(new_name) BETWEEN 1 AND 2048),
+    PRIMARY KEY (osm_type, osm_id, changed_at)
+);
+COMMENT ON TABLE osm_rename IS 'Derivative database © OpenStreetMap contributors, licensed under ODbL 1.0: https://opendatacommons.org/licenses/odbl/1-0/';
+
+-- A named OSM object an update of the OSM catalogue removed (deleted upstream): its card's last
+-- name, category and point, which the deleted-place rule compares once the card is gone. Gone
+-- again when the object comes back. Derivative database, as `osm_place` (in the ODbL dump).
+CREATE TABLE osm_removed (
+    osm_type text NOT NULL CONSTRAINT osm_removed_osm_type_check CHECK (osm_type IN ('node', 'way', 'relation')),
+    osm_id bigint NOT NULL CONSTRAINT osm_removed_osm_id_check CHECK (osm_id > 0),
+    name text NOT NULL CONSTRAINT osm_removed_name_check CHECK (octet_length(name) BETWEEN 1 AND 2048),
+    category text CONSTRAINT osm_removed_category_check CHECK (octet_length(category) <= 512),
+    point geometry(Point,4326) NOT NULL,
+    removed_at timestamp with time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY (osm_type, osm_id)
+);
+COMMENT ON TABLE osm_removed IS 'Derivative database © OpenStreetMap contributors, licensed under ODbL 1.0: https://opendatacommons.org/licenses/odbl/1-0/';
 
 -- An event document with its OSM venue's location filled in from `osm_place`, at read time.
 CREATE FUNCTION event_document(d jsonb) RETURNS jsonb
@@ -1478,6 +1521,87 @@ CREATE INDEX catalogue_card_geography_podcastindex_idx ON catalogue_card USING g
 CREATE INDEX catalogue_card_geography_tranco_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'tranco';
 CREATE INDEX catalogue_card_geography_software_idx ON catalogue_card USING gist ((point::geography)) WHERE catalogue = 'software';
 CREATE INDEX catalogue_card_host_idx ON catalogue_card USING btree (catalogue, catalogue_card_host(uri), fame DESC, id);
+-- Catalogue cards with a point, counted per map cell and type at five levels (cells of
+-- 360/2^(level+2) degrees: zooms 4, 6, 8, 10 and 12 of `GET /v1/map/clusters`), with the sums of their
+-- coordinates: a map view at zoom 12 or less adds up the cells of the coarsest level that fits
+-- its own cells instead of reading each card. Kept by the card table's triggers: a statement
+-- whose cards have points takes one transaction-wide lock first, so two importers' transactions
+-- touch the cells one after the other and never deadlock on them (and each touches them in key
+-- order).
+CREATE TABLE catalogue_map_cell (
+    level smallint NOT NULL CONSTRAINT catalogue_map_cell_level_check CHECK (level IN (4, 6, 8, 10, 12)),
+    cx integer NOT NULL,
+    cy integer NOT NULL,
+    catalogue text NOT NULL,
+    type text NOT NULL,
+    cards bigint NOT NULL,
+    sum_lon double precision NOT NULL,
+    sum_lat double precision NOT NULL,
+    PRIMARY KEY (level, cx, cy, catalogue, type)
+);
+
+-- The cells' counts follow the cards: a statement's removed and moved cards leave their old cells,
+-- its new and moved cards join theirs. A point is compared as bytes (a dump restores the trigger
+-- under an empty search path, where `geometry = geometry` does not resolve).
+CREATE FUNCTION count_catalogue_cells() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF EXISTS (SELECT 1 FROM new_cards WHERE point IS NOT NULL) THEN
+            PERFORM pg_advisory_xact_lock(1415, 1);
+        END IF;
+        INSERT INTO catalogue_map_cell AS m (level, cx, cy, catalogue, type, cards, sum_lon, sum_lat)
+            SELECT l.level, floor((public.ST_X(n.point) + 180) / (360.0 / (4 << l.level)))::integer, floor((public.ST_Y(n.point) + 90) / (360.0 / (4 << l.level)))::integer,
+                n.catalogue, n.type, count(*), sum(public.ST_X(n.point)), sum(public.ST_Y(n.point))
+            FROM new_cards n CROSS JOIN (VALUES (4), (6), (8), (10), (12)) l(level)
+            WHERE n.point IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5
+        ON CONFLICT (level, cx, cy, catalogue, type) DO UPDATE SET cards = m.cards + excluded.cards, sum_lon = m.sum_lon + excluded.sum_lon, sum_lat = m.sum_lat + excluded.sum_lat;
+    ELSIF TG_OP = 'DELETE' THEN
+        IF EXISTS (SELECT 1 FROM old_cards WHERE point IS NOT NULL) THEN
+            PERFORM pg_advisory_xact_lock(1415, 1);
+        END IF;
+        INSERT INTO catalogue_map_cell AS m (level, cx, cy, catalogue, type, cards, sum_lon, sum_lat)
+            SELECT l.level, floor((public.ST_X(o.point) + 180) / (360.0 / (4 << l.level)))::integer, floor((public.ST_Y(o.point) + 90) / (360.0 / (4 << l.level)))::integer,
+                o.catalogue, o.type, -count(*), -sum(public.ST_X(o.point)), -sum(public.ST_Y(o.point))
+            FROM old_cards o CROSS JOIN (VALUES (4), (6), (8), (10), (12)) l(level)
+            WHERE o.point IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5
+        ON CONFLICT (level, cx, cy, catalogue, type) DO UPDATE SET cards = m.cards + excluded.cards, sum_lon = m.sum_lon + excluded.sum_lon, sum_lat = m.sum_lat + excluded.sum_lat;
+    ELSE
+        IF EXISTS (SELECT 1 FROM old_cards WHERE point IS NOT NULL) OR EXISTS (SELECT 1 FROM new_cards WHERE point IS NOT NULL) THEN
+            PERFORM pg_advisory_xact_lock(1415, 1);
+        END IF;
+        INSERT INTO catalogue_map_cell AS m (level, cx, cy, catalogue, type, cards, sum_lon, sum_lat)
+            SELECT l.level, floor((public.ST_X(o.point) + 180) / (360.0 / (4 << l.level)))::integer, floor((public.ST_Y(o.point) + 90) / (360.0 / (4 << l.level)))::integer,
+                o.catalogue, o.type, -count(*), -sum(public.ST_X(o.point)), -sum(public.ST_Y(o.point))
+            FROM old_cards o JOIN new_cards n ON n.id = o.id CROSS JOIN (VALUES (4), (6), (8), (10), (12)) l(level)
+            WHERE o.point IS NOT NULL AND (public.ST_AsBinary(n.point) IS DISTINCT FROM public.ST_AsBinary(o.point) OR n.type <> o.type OR n.catalogue <> o.catalogue)
+            GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5
+        ON CONFLICT (level, cx, cy, catalogue, type) DO UPDATE SET cards = m.cards + excluded.cards, sum_lon = m.sum_lon + excluded.sum_lon, sum_lat = m.sum_lat + excluded.sum_lat;
+        INSERT INTO catalogue_map_cell AS m (level, cx, cy, catalogue, type, cards, sum_lon, sum_lat)
+            SELECT l.level, floor((public.ST_X(n.point) + 180) / (360.0 / (4 << l.level)))::integer, floor((public.ST_Y(n.point) + 90) / (360.0 / (4 << l.level)))::integer,
+                n.catalogue, n.type, count(*), sum(public.ST_X(n.point)), sum(public.ST_Y(n.point))
+            FROM new_cards n JOIN old_cards o ON o.id = n.id CROSS JOIN (VALUES (4), (6), (8), (10), (12)) l(level)
+            WHERE n.point IS NOT NULL AND (public.ST_AsBinary(n.point) IS DISTINCT FROM public.ST_AsBinary(o.point) OR n.type <> o.type OR n.catalogue <> o.catalogue)
+            GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5
+        ON CONFLICT (level, cx, cy, catalogue, type) DO UPDATE SET cards = m.cards + excluded.cards, sum_lon = m.sum_lon + excluded.sum_lon, sum_lat = m.sum_lat + excluded.sum_lat;
+    END IF;
+    RETURN NULL;
+END $$;
+CREATE TRIGGER catalogue_cells_inserted AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS new_cards FOR EACH STATEMENT EXECUTE FUNCTION count_catalogue_cells();
+CREATE TRIGGER catalogue_cells_updated AFTER UPDATE ON catalogue_card REFERENCING OLD TABLE AS old_cards NEW TABLE AS new_cards FOR EACH STATEMENT EXECUTE FUNCTION count_catalogue_cells();
+CREATE TRIGGER catalogue_cells_deleted AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS old_cards FOR EACH STATEMENT EXECUTE FUNCTION count_catalogue_cells();
+CREATE FUNCTION clear_catalogue_cells() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN
+    DELETE FROM catalogue_map_cell;
+    RETURN NULL;
+END $$;
+CREATE TRIGGER catalogue_cells_truncated AFTER TRUNCATE ON catalogue_card FOR EACH STATEMENT EXECUTE FUNCTION clear_catalogue_cells();
+
+-- An OSM card's Wikidata item (its `wikidata` tag), for a deleted object's successor.
+CREATE INDEX catalogue_card_osm_wikidata_idx ON catalogue_card USING btree ((details #>> '{tags,wikidata}')) WHERE catalogue = 'osm' AND details #>> '{tags,wikidata}' IS NOT NULL;
 CREATE TRIGGER catalogue_card_search_index_insert AFTER INSERT ON catalogue_card REFERENCING NEW TABLE AS changed_new FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();
 CREATE TRIGGER catalogue_card_search_index_update AFTER UPDATE ON catalogue_card FOR EACH ROW WHEN (OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.catalogue IS DISTINCT FROM NEW.catalogue) EXECUTE FUNCTION queue_search_index_catalogue_card();
 CREATE TRIGGER catalogue_card_search_index_delete AFTER DELETE ON catalogue_card REFERENCING OLD TABLE AS changed_old FOR EACH STATEMENT EXECUTE FUNCTION queue_search_index_catalogue();

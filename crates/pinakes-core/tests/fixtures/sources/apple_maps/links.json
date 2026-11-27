@@ -1,0 +1,77 @@
+[
+  {
+    "uri": "https://maps.apple.com/place?address=Champ%20de%20Mars,%205%20Avenue%20Anatole%20France,%2075007%20Paris,%20France&coordinate=48.858260,2.294500&name=Eiffel%20Tower",
+    "name": "Eiffel Tower",
+    "point": [
+      48.85826,
+      2.2945
+    ],
+    "precision": "~1 m"
+  },
+  {
+    "uri": "https://maps.apple.com/place?place-id=IA0BF9F2CF3F76A1C&address=Champ+de+Mars,+75007+Paris,+France&coordinate=48.858260,2.294500&name=Eiffel+Tower&_provider=9902",
+    "name": "Eiffel Tower",
+    "point": [
+      48.85826,
+      2.2945
+    ],
+    "precision": "~1 m"
+  },
+  {
+    "uri": "https://maps.apple.com/?address=Champ%20de%20Mars,%205%20Avenue%20Anatole%20France,%2075007%20Paris,%20France&auid=10934669624155823143&ll=48.858260,2.294500&lsp=9902&q=Eiffel%20Tower",
+    "name": "Eiffel Tower",
+    "point": [
+      48.85826,
+      2.2945
+    ],
+    "precision": "~1 m"
+  },
+  {
+    "uri": "https://maps.apple.com/?q=Eiffel+Tower&ll=48.858260,2.294500",
+    "name": "Eiffel Tower",
+    "point": [
+      48.85826,
+      2.2945
+    ],
+    "precision": "~1 m"
+  },
+  {
+    "uri": "https://maps.apple.com/?address=1,Infinite+Loop,Cupertino,California",
+    "name": "1,Infinite Loop,Cupertino,California",
+    "point": null,
+    "precision": null
+  },
+  {
+    "uri": "https://maps.apple.com/?ll=50.894967,4.341626",
+    "name": "50.894967, 4.341626",
+    "point": [
+      50.894967,
+      4.341626
+    ],
+    "precision": "~1 m"
+  },
+  {
+    "uri": "http://maps.apple.com/?q=50.894967,4.341626",
+    "name": "50.894967, 4.341626",
+    "point": [
+      50.894967,
+      4.341626
+    ],
+    "precision": "~1 m"
+  },
+  {
+    "uri": "https://maps.apple.com/?q=Mexican+Restaurant&sll=50.894967,4.341626&z=10&t=s",
+    "name": "Mexican Restaurant",
+    "point": null,
+    "precision": null
+  },
+  {
+    "uri": "https://maps.apple.com/place?coordinate=47.3769,8.5417&name=47.3769,8.5417",
+    "name": "47.3769, 8.5417",
+    "point": [
+      47.3769,
+      8.5417
+    ],
+    "precision": "~10 m"
+  }
+]

@@ -288,11 +288,22 @@ Details: [Calendars and occurrences](api.md#calendars-and-occurrences) and
 ## Places
 
 - **OpenStreetMap objects** (`openstreetmap.org/{node|way|relation}/{id}` and their other
-  spellings) are read through Nominatim's lookup by OSM ID. Each object is one resource and one
-  cached row in `osm_place`, read again every 30 days.
+  spellings) are read through Nominatim's lookup by OSM ID, or from the OpenStreetMap catalogue's
+  card when it imported the object. Each object is one resource and one cached row in
+  `osm_place`, read again every 30 days, and at once when its catalogue card changes.
+- **Map links of other services** (Google Maps, Apple Maps, Organic Maps, `geo:`) carry a name
+  and a point read from the link; an OsmAnd link a point. This is no catalogue's: it holds with
+  every catalogue off. With the OpenStreetMap catalogue on, such a link and the one imported place
+  of its name within 50 m are maybe the same: each lists the other, nothing merges
+  ([`osm` catalogue](sources/osm_catalogue.md#place-rules)); with it off, nothing reads its cards.
+- **Map clusters**: `GET /v1/map/clusters` counts everything with a point in each cell of a map
+  view, filtered like search, each cell with the search that lists it ([Map clusters](api.md#map-clusters)).
 - **Points**: `geo:` URIs and map links that name a coordinate (OSM marker links, OsmAnd, Organic
-  Maps) become `Place` cards offline, without any request. Points are not identities and never
-  group.
+  Maps) become `Place` cards offline, without any request, named by the place where the link
+  names one. Points are not identities and never group.
+- **Google Maps and Apple Maps links** get the place's name and point from the link itself
+  (sources `google_maps`, `apple_maps`); their pages are never fetched. A Google short link's
+  redirect is read, and its body never.
 - Pinakes does no reverse geocoding, no place search and no map tiles.
 - The `places` also-on family ([sources](sources/README.md)) links an OSM object to its Wikidata item, and
   from there to its pages on other map and review services, only where the object and the item
@@ -302,10 +313,11 @@ Search filters places and events by `bbox` or by `near` and `radius` ([Search](a
 
 ## ODbL dump
 
-Facts derived from OpenStreetMap live only in the `osm_place` table, and Pinakes publishes that
-table under the ODbL as a file: `GET /v1/dumps/osm_place.ndjson.gz`, written every 24 hours
+Facts derived from OpenStreetMap live only in the `osm_place` table, the OpenStreetMap
+catalogue's cards, `osm_rename`, `osm_successor` and `osm_removed`, and Pinakes publishes them under the ODbL as a file: `GET /v1/dumps/osm_place.ndjson.gz`, written every 24 hours
 (`limits.osm_dump_every_hours`). Its first line is the licence notice, then one line per cached
-OSM object with every version the API has served. It contains no Pubky references or scores. Each
+OSM object with every version the API has served, then, while the catalogue is on, one line per
+imported place, rename, successor and removed object. It contains no Pubky references or scores. Each
 address may download it 6 times an hour (`limits.osm_dump_downloads_per_hour`). Details:
 [OpenStreetMap and locations](api.md#openstreetmap-and-locations).
 
@@ -320,8 +332,8 @@ address may download it 6 times an hour (`limits.osm_dump_downloads_per_hour`). 
 
 ## Catalogues
 
-Pinakes imports open catalogues (Wikidata, MusicBrainz, OpenAlex, Podcast Index, Tranco, software
-registries) as catalogue cards ([operations](operations.md#catalogues)). A shared link that a card
+Pinakes imports open catalogues (Wikidata, MusicBrainz, OpenStreetMap, OpenAlex, Podcast Index,
+Tranco, software registries) as catalogue cards ([operations](operations.md#catalogues)). A shared link that a card
 holds takes its card from the catalogue instead of a fetch: by the card's own link, by a link the
 catalogue lists for the item, or by an exact identifier the link names by itself (a MusicBrainz
 ID in a musicbrainz.org link, a DOI, a crate's name). A name or a title never joins, for the same
@@ -333,8 +345,8 @@ built again when its card changes. Every link built from one card, and the card'
 tags together. A podcast's feed is not built from its card, since a fetch reads its episodes; it
 joins the card's group. When the card goes upstream or its catalogue is switched off, the link
 goes back to fetching; the references stay on the link people wrote, so nothing is lost and a wrong join is
-undone by the next import. OpenStreetMap cards back no link: OSM-derived values stay in
-`osm_place`.
+undone by the next import. OpenStreetMap cards back no link: OSM-derived values stay out of the
+resource table, and an OpenStreetMap link's OSM route reads the card into `osm_place`.
 
 ## What is never indexed
 

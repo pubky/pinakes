@@ -313,6 +313,9 @@ fn missing(id: &OsmId, ttl: u64) -> ResourceMeta {
 pub struct OsmResolver {
     pub pool: PgPool,
     pub config: OsmConfig,
+    /// Whether the OSM catalogue is on: an object it holds is read from its card, not from
+    /// Nominatim.
+    pub catalogue: bool,
     client: reqwest::Client,
     next: Mutex<Instant>,
 }
@@ -332,9 +335,47 @@ impl OsmResolver {
         Ok(Self {
             pool,
             config,
+            catalogue: false,
             client,
             next: Mutex::new(Instant::now()),
         })
+    }
+    /// The resolver with the OSM catalogue on or off (`catalogues.osm`).
+    pub fn with_catalogue(mut self, on: bool) -> Self {
+        self.catalogue = on;
+        self
+    }
+    /// The objects of `pending` the OSM catalogue holds, read from their cards: their place rows
+    /// are saved as a Nominatim answer's are (unless `probe`), and they leave `pending`.
+    async fn read_catalogue(
+        &self,
+        pending: &mut Vec<OsmId>,
+        probe: bool,
+        found: &mut HashMap<OsmId, Result<ResourceMeta>>,
+    ) -> Result<()> {
+        if !self.catalogue || pending.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = pending.iter().map(OsmId::key).collect();
+        for card in crate::catalogue::osm::cards(&self.pool, &ids).await? {
+            let Some(id) = parse_id(&card.uri) else {
+                continue;
+            };
+            let Some((doc, display)) = crate::catalogue::osm::document(&card, self.config.ttl_secs)
+            else {
+                continue;
+            };
+            let result = async {
+                if !probe {
+                    self.save(&id, &doc, Some(&display)).await?;
+                }
+                Ok(doc)
+            }
+            .await;
+            pending.retain(|p| p != &id);
+            found.insert(id, result);
+        }
+        Ok(())
     }
     pub(crate) async fn request(&self, url: reqwest::Url) -> Result<Option<Value>> {
         // One lock covers the request too: all batches and fallback calls share the host budget.
@@ -523,6 +564,11 @@ impl OsmResolver {
                 Err(e) => {
                     found.insert(id.clone(), Err(e));
                 }
+            }
+        }
+        if let Err(error) = self.read_catalogue(&mut pending, probe, &mut found).await {
+            for id in pending.drain(..) {
+                found.insert(id, Err(copy_error(&error)));
             }
         }
         if !pending.is_empty() {

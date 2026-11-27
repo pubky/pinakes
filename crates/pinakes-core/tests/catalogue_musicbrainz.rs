@@ -2246,6 +2246,8 @@ async fn search_finds_the_cards_until_the_catalogue_is_off(pool: PgPool) {
 #[test]
 fn the_daemon_runs_the_importer_while_the_catalogue_is_on() {
     let mut config = Config::default();
+    // This one catalogue's importer (OpenStreetMap's has its own test).
+    config.catalogues.osm.enabled = false;
     assert!(run::importers(&config).is_empty());
     config.egress.contact = "ops@example.org".into();
     let started = run::to_start(run::importers(&config), &config);

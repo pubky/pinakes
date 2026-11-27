@@ -688,6 +688,16 @@
               "null"
             ]
           },
+          "replaced": {
+            "description": "On an OpenStreetMap place whose name changed to an unrelated one (another business moved\nin under the same OSM object): the places it was, oldest first, each with when it was\nreplaced and how many references the link got before that (those belong to that place).\nAbsent on every other card (docs/api.md, Places).",
+            "items": {
+              "$ref": "#/components/schemas/Replaced"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "tz": {
             "type": [
               "string",
@@ -1258,6 +1268,72 @@
         },
         "type": "object"
       },
+      "MapCluster": {
+        "description": "One map cell's count.",
+        "properties": {
+          "bbox": {
+            "description": "The cell: `[min_lon, min_lat, max_lon, max_lat]`.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "point": {
+            "$ref": "#/components/schemas/Point",
+            "description": "The mean of the points counted: where to draw the cluster."
+          },
+          "search": {
+            "description": "The search that lists the cell's cards: these filters with the cell as `bbox`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bbox",
+          "count",
+          "point",
+          "search"
+        ],
+        "type": "object"
+      },
+      "MapClusters": {
+        "description": "The clusters of one map view.",
+        "properties": {
+          "cell_degrees": {
+            "description": "A cell's width and height, in degrees.",
+            "format": "double",
+            "type": "number"
+          },
+          "clusters": {
+            "description": "One per cell that holds anything, the fullest first.",
+            "items": {
+              "$ref": "#/components/schemas/MapCluster"
+            },
+            "type": "array"
+          },
+          "total": {
+            "description": "Everything counted in the view.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "zoom": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "zoom",
+          "cell_degrees",
+          "total",
+          "clusters"
+        ],
+        "type": "object"
+      },
       "OccurrenceKey": {
         "properties": {
           "feed_id": {
@@ -1402,6 +1478,43 @@
         },
         "type": "object"
       },
+      "OsmDumpImportedPlace": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/OsmDumpPlace"
+          },
+          {
+            "properties": {
+              "from": {
+                "description": "`catalogue`.",
+                "example": "catalogue",
+                "type": "string"
+              },
+              "other_names": {
+                "description": "Its other names (`name:*`, `alt_name`, …).",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "replaced": {
+                "description": "Its earlier, unrelated names, oldest first: `name`, `category`, `until` (when it was\nreplaced).",
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "from",
+              "other_names",
+              "replaced"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "One place of the OSM catalogue's import per line after the cached objects, while the catalogue\nis on: an `OsmDumpPlace` (`display_name` null, `status` `ok`, `fetched_at` the card's last\nwrite, `versions` empty) with three more fields; every field is present."
+      },
       "OsmDumpLine": {
         "description": "A dump line: the notice first, then one place per line.",
         "oneOf": [
@@ -1410,6 +1523,18 @@
           },
           {
             "$ref": "#/components/schemas/OsmDumpPlace"
+          },
+          {
+            "$ref": "#/components/schemas/OsmDumpImportedPlace"
+          },
+          {
+            "$ref": "#/components/schemas/OsmDumpRename"
+          },
+          {
+            "$ref": "#/components/schemas/OsmDumpSuccessor"
+          },
+          {
+            "$ref": "#/components/schemas/OsmDumpRemoved"
           }
         ]
       },
@@ -1544,6 +1669,136 @@
         ],
         "type": "object"
       },
+      "OsmDumpRemoved": {
+        "description": "After the successors, while the OSM catalogue is on: a named OSM object an update removed (it\nwas deleted), as its card last was.",
+        "properties": {
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "description": "`removed`.",
+            "example": "removed",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "osm_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "osm_type": {
+            "type": "string"
+          },
+          "point": {
+            "$ref": "#/components/schemas/Point"
+          },
+          "removed_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "osm_type",
+          "osm_id",
+          "name",
+          "category",
+          "point",
+          "removed_at"
+        ],
+        "type": "object"
+      },
+      "OsmDumpRename": {
+        "description": "After the imported places, while the OSM catalogue is on: an earlier name of an OSM object\nthat has no imported place now.",
+        "properties": {
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "description": "`rename`.",
+            "example": "rename",
+            "type": "string"
+          },
+          "name": {
+            "description": "The earlier name.",
+            "type": "string"
+          },
+          "new_name": {
+            "description": "The name that replaced it.",
+            "type": "string"
+          },
+          "osm_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "osm_type": {
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "osm_type",
+          "osm_id",
+          "name",
+          "category",
+          "new_name",
+          "until"
+        ],
+        "type": "object"
+      },
+      "OsmDumpSuccessor": {
+        "description": "After the renames, while the OSM catalogue is on: a deleted OSM object's successor.",
+        "properties": {
+          "basis": {
+            "description": "`wikidata` or `changeset`.",
+            "type": "string"
+          },
+          "found_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "from": {
+            "description": "`successor`.",
+            "example": "successor",
+            "type": "string"
+          },
+          "new_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "new_type": {
+            "type": "string"
+          },
+          "old_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "old_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "old_type",
+          "old_id",
+          "new_type",
+          "new_id",
+          "basis",
+          "found_at"
+        ],
+        "type": "object"
+      },
       "OsmLicence": {
         "properties": {
           "attribution": {
@@ -1633,6 +1888,37 @@
         },
         "required": [
           "rel"
+        ],
+        "type": "object"
+      },
+      "Replaced": {
+        "description": "A place an OpenStreetMap object was before an unrelated name replaced its own.",
+        "properties": {
+          "category": {
+            "description": "Its OSM `key/value` category.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "references": {
+            "description": "The references the link got before `until`.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "until": {
+            "description": "When the new name replaced it.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "until",
+          "references"
         ],
         "type": "object"
       },
@@ -2007,7 +2293,7 @@
             "content": {
               "application/gzip": {}
             },
-            "description": "The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",
+            "description": "The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`), then, while the OpenStreetMap catalogue is on, one imported place per line (`OsmDumpImportedPlace`; an object both cached and imported has a line of each), the earlier names of objects with no imported place (`OsmDumpRename`), the successors found (`OsmDumpSuccessor`) and the named objects an update removed, as their cards last were (`OsmDumpRemoved`). Single byte ranges are served (206)",
             "headers": {
               "Accept-Ranges": {
                 "description": "`bytes`",
@@ -2129,6 +2415,167 @@
         },
         "tags": [
           "Service"
+        ]
+      }
+    },
+    "/v1/map/clusters": {
+      "get": {
+        "operationId": "map_clusters",
+        "parameters": [
+          {
+            "description": "The map view: `min_lon,min_lat,max_lon,max_lat`, as search's `bbox`.",
+            "in": "query",
+            "name": "bbox",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The map's zoom, 0–20: a cell is 360 / 2^(zoom+2) degrees wide and high (a quarter of a\nmap tile).",
+            "in": "query",
+            "name": "zoom",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_type",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "tags",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "author",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "reach",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "viewer",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "referenced",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapClusters"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid parameters, or a view of more than `limits.map_cluster_cells` cells at its zoom"
+          },
+          "502": {
+            "description": "Nexus reach unavailable"
+          },
+          "503": {
+            "description": "Busy, or the view too large for its filter (a `tags` filter over a wide view)"
+          }
+        },
+        "tags": [
+          "Search"
         ]
       }
     },

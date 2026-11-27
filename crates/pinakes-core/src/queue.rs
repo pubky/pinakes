@@ -1032,6 +1032,17 @@ async fn finish_job(
 async fn after_save(pool: &PgPool, job: &Job, doc: &crate::model::ResourceMeta) -> Result<()> {
     #[cfg(test)]
     tests::maybe_fail_after_save(&job.uri)?;
+    // A deleted OSM object whose successor the OSM catalogue found on evidence: its link becomes
+    // an alias of the successor's (`catalogue::osm::follow`).
+    if doc.status == Status::Missing && doc.source == "osm" {
+        if let Some(object) = crate::resolver::osm::parse_id(&job.uri) {
+            if let Some(new) =
+                crate::catalogue::osm::successor(pool, &object.osm_type, object.id).await?
+            {
+                crate::catalogue::osm::follow(pool, &object.key(), &new).await?;
+            }
+        }
+    }
     // An official API names the object's root (`source_root`), or the page names itself (its
     // head canonical, or the end of an all-permanent redirect chain) up to a trailing slash
     // and tracking, or as the other spelling of its event on a platform that gives each
@@ -1335,7 +1346,10 @@ pub fn spawn_with_egress(
     let mut workers = JoinSet::new();
     let authors = Arc::new(AuthorBudget::default());
     let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];
-    let osm = Arc::new(OsmResolver::new(pool.clone(), config.osm.clone())?);
+    let osm = Arc::new(
+        OsmResolver::new(pool.clone(), config.osm.clone())?
+            .with_catalogue(config.catalogues.enabled(crate::catalogue::Catalogue::Osm)),
+    );
     let events = config.event.enabled.then(|| {
         Arc::new(crate::event::service::EventService {
             pool: pool.clone(),

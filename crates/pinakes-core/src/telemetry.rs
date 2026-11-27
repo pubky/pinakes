@@ -241,6 +241,10 @@ impl Metrics {
         registry.register(Box::new(SEARCH_INDEX_QUEUE.clone()))?;
         registry.register(Box::new(SEARCH_INDEX_REREAD.clone()))?;
         registry.register(Box::new(SEARCH_INDEX_BUSY.clone()))?;
+        registry.register(Box::new(MAP_CLUSTERS_BUSY.clone()))?;
+        for reason in ["turns", "share", "timeout"] {
+            MAP_CLUSTERS_BUSY.with_label_values(&[reason]);
+        }
         for queue in ["resources", "catalogue"] {
             SEARCH_INDEX_QUEUE.with_label_values(&[queue]);
         }
@@ -476,11 +480,11 @@ impl Metrics {
     /// Which catalogues that are on have no importer for want of `http.contact`
     /// (`pinakes_catalogue_needs_contact`).
     pub fn catalogue_contact(&self, config: &crate::config::Config) {
-        self.catalogue_needs_contact
-            .with_label_values(&[crate::catalogue::Catalogue::Musicbrainz.name()])
-            .set(i64::from(crate::catalogue::musicbrainz::needs_contact(
-                config,
-            )));
+        for (catalogue, needs, _) in crate::catalogue::run::contact_needs(config) {
+            self.catalogue_needs_contact
+                .with_label_values(&[catalogue.name()])
+                .set(i64::from(needs));
+        }
     }
     /// A source's series from the start, each at 0: its fetches by outcome, changes by class,
     /// held snapshots and cursor resets. A rule on `increase()` reads a rise from 0; a series
@@ -854,6 +858,25 @@ static SEARCH_INDEX_BUSY: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLo
     )
     .expect("static metric")
 });
+/// Map cluster counts answered 503, by why: every turn taken (`turns`), the client's share taken
+/// (`share`), or the view too wide for its filter (`timeout`).
+static MAP_CLUSTERS_BUSY: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_map_clusters_busy_total",
+            "Map cluster counts answered 503: every turn taken (turns), the client's two taken (share), or the count past limits.map_cluster_timeout_ms (timeout)",
+        ),
+        &["reason"],
+    )
+    .expect("static metric")
+});
+pub fn map_clusters_busy(reason: &'static str) {
+    MAP_CLUSTERS_BUSY.with_label_values(&[reason]).inc();
+}
+/// The busy map cluster counts for `reason` so far.
+pub fn map_clusters_busy_count(reason: &'static str) -> u64 {
+    MAP_CLUSTERS_BUSY.with_label_values(&[reason]).get()
+}
 pub fn search_index_busy(reason: &'static str) {
     SEARCH_INDEX_BUSY.with_label_values(&[reason]).inc();
 }

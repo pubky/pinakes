@@ -171,7 +171,7 @@ A catalogue is on when both `catalogues.enabled` and its own `enabled` are true
 | `catalogues.dir` | `"catalogues"` | Downloads and temporary files of imports, one directory per catalogue (`catalogues/wikidata`), relative to the working directory. The container image sets `/var/lib/pinakes/catalogues`. |
 | `catalogues.<name>.enabled` | `true` | One catalogue: `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` or `software`. |
 | `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. |
-| `catalogues.osm.region` | `"planet"` | `planet`, or a region of Geofabrik's OpenStreetMap extracts by its path (`europe/switzerland`). |
+| `catalogues.osm.region` | `"planet"` | `planet`, or a region of Geofabrik's OpenStreetMap extracts by its path (`europe/switzerland`). A change makes the next update a full import of the new region. |
 | `catalogues.openalex.min_citations` | `50` | Import works cited more than this many times, 0–1000000. |
 
 ### Limits
@@ -260,6 +260,8 @@ resolver limits apply to pubky and to each card route.
 | `collapse_refs_per_member` | `10000` | 1–1000000 | References counted per group member when `collapse=group` picks a group's row. |
 | `max_radius_m` | `200000.0` | 1–200000 | Largest `near` radius (metres). |
 | `search_text_candidates` | `500` | 50–10000 | The best units a search with `q` reads from the text index ([Text index](#text-index)). |
+| `map_cluster_cells` | `4096` | 16–65536 | The most map cells one `GET /v1/map/clusters` view may span at its zoom ([API](api.md#map-clusters)). |
+| `map_cluster_timeout_ms` | `3000` | 100–60000 | How long one `GET /v1/map/clusters` count may take; past it the answer is 503 ([API](api.md#map-clusters)). |
 | `search_index_commit_secs` | `2` | 1–60 | Seconds between two passes that commit queued changes to the text index. |
 | `search_index_searches` | `0` | 0–256 | Text searches the text index runs at once; `0` is one per CPU core. One more waits for a turn; one client address runs at most half of them while others wait ([Text index](#text-index)). Behind a proxy, set `api.trusted_proxies`, or every client counts as the proxy's one address. |
 | `search_index_budget_ms` | `2000` | 100–30000 | The most a text search's index stage takes, its wait for a turn included; past it the search answers 503. |
@@ -702,6 +704,9 @@ and its address rules don't merge new links. Links it merged before stay merged.
   Bitcoin block or confirmed transaction) is final a day after its start or end has passed.
 - **A build with more sources.** Run `pinakesd reextract web official`, so links already known get
   their source's card.
+- **Map links.** `pinakesd reextract web geo` reads stored map links again: Google Maps and Apple
+  Maps links on the web route get their source's card (`google_maps`, `apple_maps`), and points their
+  name from the link (Organic Maps, `geo:…?q=…(name)`).
 
 ### Nominatim and Nexus
 
@@ -721,7 +726,8 @@ key (`source="osm"`) and the link is read again later.
 ### ODbL dump
 
 The daemon writes `osm_place.ndjson.gz` into `osm.dump_dir` at startup when it is missing or older than
-`limits.osm_dump_every_hours`, then at that interval. Why the dump exists is in
+`limits.osm_dump_every_hours`, then at that interval. With the OpenStreetMap catalogue on, the file
+holds its imported places too, after the cached objects, each with `from: "catalogue"`. Why the dump exists is in
 [design](design.md#odbl-dump).
 
 - **Space.** The directory must be writable by the daemon and hold two copies of the file while one is
@@ -1772,9 +1778,10 @@ of the budget (`statement_timeout` for that read; past it `503`, counted as `bud
 A catalogue card is one item of an open catalogue, stored in `catalogue_card`. The catalogues are
 `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` and `software` (crates.io,
 F-Droid and Flathub). An importer is the only writer of a catalogue's cards; they don't go
-through the fetch queue, the refresh tiers or the change journal. MusicBrainz has an importer
-([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md)); the other catalogues have none in
-this version, and hold no cards.
+through the fetch queue, the refresh tiers or the change journal. MusicBrainz and OpenStreetMap
+have importers ([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md),
+[`osm` catalogue](sources/osm_catalogue.md)); the other catalogues have none in this version, and
+hold no cards.
 
 ### What a card holds
 
@@ -1849,8 +1856,9 @@ before its catalogue was imported joins at its next refresh. A card holds a link
 Two cards of one catalogue that hold a link equally join neither, an event card among them too. A
 card typed as an event (an `Event` or one of its subtypes, such as a festival) backs no link: the
 next card that holds it does, or the link is fetched. A matching name or any other
-metadata never joins. OpenStreetMap cards back no link, and an OpenStreetMap link keeps its OSM
-route. A Podcast Index card backs no link either: a show's feed is fetched for its episodes, and
+metadata never joins. OpenStreetMap cards back no link: an OpenStreetMap link keeps its OSM
+route, which reads an imported object from its card instead of Nominatim
+([`osm` catalogue](sources/osm_catalogue.md)). A Podcast Index card backs no link either: a show's feed is fetched for its episodes, and
 joins the card's group as a related link. An event (dated or not) and a calendar (the event
 routes), a Pubky object, a `geo:` point,
 an alias, a link that carries a credential and social content (a post, even a gone one; and before
@@ -1944,7 +1952,7 @@ catalogue.
 ### Importer rules
 
 A catalogue's importer runs as a background task of `pinakesd`, started only for a catalogue that
-is on (in this version: `musicbrainz`), and follows these rules:
+is on (in this version: `musicbrainz` and `osm`), and follows these rules:
 
 | Rule | What the task does |
 | --- | --- |

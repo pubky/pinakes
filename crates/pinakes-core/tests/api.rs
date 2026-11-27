@@ -182,8 +182,8 @@ async fn info_the_openapi_document_a_card_read_and_lookup(pool: PgPool) {
         .get("score")
         .is_none());
     // The public routes, `GET /v1/resources/{id}/episodes` among them (podcast-episodes-1), and
-    // `GET /v1/resources/{id}/collections` (in-collections-1).
-    assert_eq!(spec["paths"].as_object().unwrap().len(), 17);
+    // `GET /v1/resources/{id}/collections` (in-collections-1), and `GET /v1/map/clusters`.
+    assert_eq!(spec["paths"].as_object().unwrap().len(), 18);
     assert_eq!(
         spec["paths"]["/v1/resources/{id}/collections"]["get"]["operationId"],
         "list_collections"

@@ -39,6 +39,11 @@ groups:
         for: 25m
         labels: {severity: warning}
         annotations: {summary: "The ODbL dump has failed for 25 minutes and written no file since: /v1/dumps/osm_place.ndjson.gz serves the previous file, or 503 before the first; its warning log line names the error"}
+      - alert: MapClustersBusy
+        expr: sum by (instance, job) (increase(pinakes_api_requests_total{listener="public",route="/v1/map/clusters",status="503"}[10m])) > 10
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Pinakes answered over ten map cluster counts 503 in ten minutes for ten minutes: all four turns were taken, a client held its two, or views too wide for their filter ran past limits.map_cluster_timeout_ms"}
       - alert: MetricsMissing
         expr: absent(pinakes_ingest_last_success_timestamp_seconds)
         for: 5m
@@ -132,6 +137,16 @@ groups:
         expr: (increase(pinakes_catalogue_import_errors_total[1h]) > 0) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1)
         labels: {severity: warning}
         annotations: {summary: "A {{ $labels.catalogue }} catalogue import or update failed in the last hour; pinakesd catalogue status shows the error; the run resumes from its cursor, or, abandoned for its dump, waits for another"}
+      - alert: CatalogueNeedsContact
+        expr: pinakes_catalogue_needs_contact == 1
+        for: 1h
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue is on but its importer does not start: set http.contact (or PINAKES__HTTP__CONTACT), or switch the catalogue off"}
+      - alert: CatalogueFirstImportStalled
+        expr: (pinakes_catalogue_enabled{catalogue=~"musicbrainz|osm"} == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds == 0)
+        for: 2d
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue is on and has finished no import in two days: pinakesd catalogue status shows why it waits (free disk, the large-import turn, http.contact)"}
       - alert: CatalogueDumpRefused
         expr: (pinakes_catalogue_refused == 1) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1)
         for: 1h

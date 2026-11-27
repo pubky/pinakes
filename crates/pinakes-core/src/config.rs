@@ -862,6 +862,12 @@ pub struct SearchConfig {
     /// past it the search answers 503 and its work stops.
     #[serde(skip)]
     pub index_budget_ms: u64,
+    /// The most map cells one `GET /v1/map/clusters` view may span.
+    #[serde(skip)]
+    pub map_cluster_cells: usize,
+    /// How long one `GET /v1/map/clusters` count may take before it answers 503 (milliseconds).
+    #[serde(skip)]
+    pub map_cluster_timeout_ms: u64,
     #[serde(skip)]
     pub reach_timeout_secs: u64,
     /// The taggers a related page samples: the authors of a resource's most recent tags, at most
@@ -899,6 +905,8 @@ impl Default for SearchConfig {
             index_commit_secs: 2,
             index_searches: 0,
             index_budget_ms: 2000,
+            map_cluster_cells: 4096,
+            map_cluster_timeout_ms: 3000,
             reach_timeout_secs: 5,
             related_taggers: 200,
             related_window_days: 365,
@@ -1456,6 +1464,12 @@ impl Config {
         }
         if !(100..=30_000).contains(&self.search.index_budget_ms) {
             bail!("limits.search_index_budget_ms must be 100 to 30000");
+        }
+        if !(16..=65_536).contains(&self.search.map_cluster_cells) {
+            bail!("limits.map_cluster_cells must be 16–65536");
+        }
+        if !(100..=60_000).contains(&self.search.map_cluster_timeout_ms) {
+            bail!("limits.map_cluster_timeout_ms must be 100–60000");
         }
         // A search's reach reads share this one deadline (`Nexus::reach_by`). Reads that
         // outlast the request are a 504 where they would be the reach's own answer, and
@@ -2968,6 +2982,10 @@ limits! {
     search_index_searches: usize = |c| c.search.index_searches => [|c, v| c.search.index_searches = v],
     /// The most a text search's index stage takes, its wait for a turn included (100–30000 ms).
     search_index_budget_ms: u64 = |c| c.search.index_budget_ms => [|c, v| c.search.index_budget_ms = v],
+    /// The most map cells one map clusters view may span (16–65536).
+    map_cluster_cells: usize = |c| c.search.map_cluster_cells => [|c, v| c.search.map_cluster_cells = v],
+    /// Milliseconds one map clusters count may take before it answers 503 (100–60000).
+    map_cluster_timeout_ms: u64 = |c| c.search.map_cluster_timeout_ms => [|c, v| c.search.map_cluster_timeout_ms = v],
     /// Entries the rate limiter remembers when an API request adds a client address (100–100000). It shares one table with the preview limiter; past it the oldest entry is forgotten with its used budget. Also the client addresses the dump download limiter remembers per hour.
     api_cache_capacity: usize = |c| c.api.cache_capacity => [|c, v| c.api.cache_capacity = v],
     /// Seconds a request may take on either listener before it is answered 504 (8–600).

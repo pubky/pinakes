@@ -416,6 +416,20 @@ pub async fn drop_catalogue(
     progress: impl FnMut(u64),
 ) -> Result<u64> {
     let dropped = sweep(pool, catalogue, None, progress).await?;
+    if catalogue == Catalogue::Osm {
+        // What the OSM catalogue's updates recorded goes with it, the aliases its successors
+        // made released first (their links answer for themselves again).
+        let followed: Vec<String> =
+            sqlx::query_scalar("SELECT old_type||'/'||old_id FROM osm_successor")
+                .fetch_all(pool)
+                .await?;
+        super::osm::unfollow(pool, &followed).await?;
+        sqlx::query("DELETE FROM osm_successor")
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM osm_rename").execute(pool).await?;
+        sqlx::query("DELETE FROM osm_removed").execute(pool).await?;
+    }
     sqlx::query("DELETE FROM catalogue_state WHERE catalogue=$1")
         .bind(catalogue.name())
         .execute(pool)

@@ -288,7 +288,9 @@ async fn fifty_one_jobs_two_calls_cache_refresh_and_separation(pool: PgPool) {
     // The daemon's file: gzip NDJSON, served as a download.
     let dir = dump_dir("lines");
     assert_eq!(
-        pinakes_core::osm_dump::write(&pool, &dir).await.unwrap(),
+        pinakes_core::osm_dump::write(&pool, &dir, false)
+            .await
+            .unwrap(),
         51
     );
     let dumps = api::router(AppState::new(pool.clone(), dump_config(&dir, 6)).unwrap());
@@ -1072,7 +1074,9 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
     let (status, headers, _) = download(&app, &[]).await;
     assert_eq!(status, 503);
     assert!(headers.contains_key("retry-after"));
-    pinakes_core::osm_dump::write(&pool, &dir).await.unwrap();
+    pinakes_core::osm_dump::write(&pool, &dir, false)
+        .await
+        .unwrap();
     let (status, headers, first) = download(&app, &[]).await;
     assert_eq!(status, 200);
     let etag = headers["etag"].to_str().unwrap().to_owned();
@@ -1127,7 +1131,9 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    pinakes_core::osm_dump::write(&pool, &dir).await.unwrap();
+    pinakes_core::osm_dump::write(&pool, &dir, false)
+        .await
+        .unwrap();
     let old = open.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(
         old.as_ref(),
@@ -1142,7 +1148,9 @@ async fn the_dump_is_a_static_file_written_atomically(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(pinakes_core::osm_dump::write(&pool, &dir).await.is_err());
+    assert!(pinakes_core::osm_dump::write(&pool, &dir, false)
+        .await
+        .is_err());
     assert_eq!(
         std::fs::read(pinakes_core::osm_dump::path(&dir)).unwrap(),
         second
@@ -1175,14 +1183,14 @@ async fn one_writer_per_directory_and_leftover_temporary_files_go(pool: PgPool) 
     let other = lock(&dir).unwrap().expect("free");
     std::fs::write(&a, b"another writer's partial file").unwrap();
     assert!(lock(&dir).unwrap().is_none());
-    let refused = write(&pool, &dir).await.unwrap_err();
+    let refused = write(&pool, &dir, false).await.unwrap_err();
     assert!(format!("{refused:#}").contains("lock"), "{refused:#}");
     assert_eq!(std::fs::read(path(&dir)).unwrap(), b"the dump");
     assert!(a.exists());
     // Released: the next writer clears the leftovers and publishes a whole file.
     drop(other);
     std::fs::write(dir.join(format!("{FILE}.1.dead.tmp")), b"partial").unwrap();
-    write(&pool, &dir).await.unwrap();
+    write(&pool, &dir, false).await.unwrap();
     let mut left: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -1201,7 +1209,7 @@ async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
     let dir = dump_dir("startup");
     assert_eq!(due_in(&dir, day), std::time::Duration::ZERO, "missing");
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, stopped.clone()));
+    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, false, stopped.clone()));
     for _ in 0..100 {
         if path(&dir).exists() {
             break;
@@ -1229,7 +1237,7 @@ async fn startup_writes_a_missing_or_stale_dump(pool: PgPool) {
     drop(file);
     assert_eq!(due_in(&dir, day), std::time::Duration::ZERO, "stale");
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, stopped));
+    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, false, stopped));
     for _ in 0..100 {
         if due_in(&dir, day) > std::time::Duration::ZERO {
             break;
@@ -1256,7 +1264,7 @@ async fn startup_removes_leftover_temporary_files(pool: PgPool) {
     let leftover = dir.join(format!("{FILE}.1.dead.tmp"));
     std::fs::write(&leftover, b"partial").unwrap();
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(pool, dir.clone(), day, stopped));
+    let task = tokio::spawn(run(pool, dir.clone(), day, false, stopped));
     for _ in 0..100 {
         if !leftover.exists() {
             break;
@@ -1288,7 +1296,7 @@ async fn shutdown_cancels_a_dump_write_in_progress(pool: PgPool) {
         .await
         .unwrap();
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, stopped));
+    let task = tokio::spawn(run(pool.clone(), dir.clone(), day, false, stopped));
     let temp = || {
         std::fs::read_dir(&dir).ok().is_some_and(|entries| {
             entries
@@ -1310,7 +1318,7 @@ async fn shutdown_cancels_a_dump_write_in_progress(pool: PgPool) {
         .unwrap();
     blocker.rollback().await.unwrap();
     assert!(!path(&dir).exists());
-    write(&pool, &dir).await.unwrap();
+    write(&pool, &dir, false).await.unwrap();
     assert!(path(&dir).exists());
     assert!(
         !temp(),

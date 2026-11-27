@@ -235,8 +235,12 @@ pub fn pick(cards: Vec<CardRow>, uri: &str) -> Option<CardRow> {
 }
 /// The card `uri` is built from among `catalogues`, and the cards it is a related link of.
 pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found> {
+    let place = osm_website(pool, uri).await?;
     if catalogues.is_empty() {
-        return Ok(Found::default());
+        return Ok(Found {
+            card: None,
+            related: place.into_iter().collect(),
+        });
     }
     let mut keys: Vec<String> = link_keys(uri).into_iter().map(|(key, _)| key).collect();
     keys.extend(link_key(uri));
@@ -281,9 +285,31 @@ pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found
             .iter()
             .map(|c| (c.catalogue.clone(), c.source_id.clone())),
     );
+    let mut related = related_keys(&related);
+    if related.len() < RELATED_CARDS as usize {
+        related.extend(place);
+    }
     Ok(Found {
         card: card.map(Box::new),
-        related: related_keys(&related),
+        related,
+    })
+}
+/// The group key of the OpenStreetMap place whose official website `uri` is (its `website`
+/// tag, a related link of its card), while the OSM catalogue is on: the place's own `osm:` key,
+/// which its shared link carries, so the website joins that place's group. Only when exactly one
+/// imported place names it: a chain's website, shared by its branches, joins none. An OSM card
+/// still backs no link.
+async fn osm_website(pool: &PgPool, uri: &str) -> Result<Option<String>> {
+    let places: Vec<String> = sqlx::query_scalar(
+        "SELECT c.source_id FROM catalogue_card c WHERE c.catalogue='osm' AND c.related_uris @> ARRAY[$1]::text[] \
+         AND EXISTS (SELECT 1 FROM catalogue_state s WHERE s.catalogue='osm' AND s.phase<>'disabled') LIMIT 2",
+    )
+    .bind(uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(match places.as_slice() {
+        [one] => Some(format!("osm:{one}")).filter(|k| crate::also_on::valid_key(k)),
+        _ => None,
     })
 }
 /// Whether `card` is typed as an event (`Event` or one of its subtypes, `Festival`,
@@ -946,6 +972,7 @@ async fn burst(pool: &PgPool) -> Result<bool> {
 /// off every resource. Meanwhile no answer shows such a catalogue's labels or `from` (`api`).
 /// Nothing to do (every catalogue that ever ran is on) costs one read. The resources given back.
 pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
+    sweep_osm_websites(pool).await?;
     // OpenStreetMap is never joined, so nothing is built from its cards.
     let off: Vec<String> = sqlx::query_scalar(
         "SELECT catalogue FROM catalogue_state WHERE NOT catalogue=ANY($1) AND catalogue<>$2 ORDER BY catalogue",
@@ -1036,6 +1063,62 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
             }
             (after, after_id) = last;
         }
+    }
+    Ok(released)
+}
+
+/// With the OSM catalogue off, the websites its places joined ([`osm_website`]: an `osm:` key of
+/// source `catalogue`) leave those places' groups: their keys go, a page at a time, and they are
+/// read again (spread over a day) as any link whose related keys went. The number released.
+async fn sweep_osm_websites(pool: &PgPool) -> Result<u64> {
+    let on: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM catalogue_state WHERE catalogue='osm' AND phase<>'disabled')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if on {
+        return Ok(0);
+    }
+    let (mut after, mut after_id, mut released) = (String::new(), String::new(), 0u64);
+    loop {
+        let page: Vec<(String, String)> = sqlx::query_as(SWEEP_PAGE)
+            .bind("osm:")
+            .bind("osm;")
+            .bind(&after)
+            .bind(&after_id)
+            .bind(SWEEP_ROWS)
+            .fetch_all(pool)
+            .await?;
+        let Some(last) = page.last().cloned() else {
+            break;
+        };
+        let (keys, ids): (Vec<&str>, Vec<&str>) = page
+            .iter()
+            .map(|(key, id)| (key.as_str(), id.as_str()))
+            .unzip();
+        // Only keys a website took from a place: an `osm:` key the resource's own card holds (a
+        // Wikidata item's OSM object) stays.
+        let gone: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM resource_key k USING unnest($1::text[],$2::text[]) AS x(key,resource_id) \
+             WHERE k.key=x.key AND k.resource_id=x.resource_id AND k.source='catalogue' \
+             AND NOT EXISTS (SELECT 1 FROM resource r JOIN catalogue_card c ON c.id=r.catalogue_card WHERE r.id=k.resource_id AND k.key=ANY(c.keys)) \
+             RETURNING k.resource_id",
+        )
+        .bind(&keys)
+        .bind(&ids)
+        .fetch_all(pool)
+        .await?;
+        sqlx::query(&format!(
+            "UPDATE resource r SET refresh_at={SPREAD},next_attempt_at={SPREAD} WHERE r.id=ANY($1) AND NOT r.dead_letter"
+        ))
+        .bind(&gone)
+        .execute(pool)
+        .await?;
+        released += gone.len() as u64;
+        if (page.len() as i64) < SWEEP_ROWS {
+            break;
+        }
+        (after, after_id) = last;
     }
     Ok(released)
 }

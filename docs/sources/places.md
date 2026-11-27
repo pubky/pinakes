@@ -52,7 +52,7 @@ The source reads these pages:
 
 | Site | Link | Wikidata property |
 | --- | --- | --- |
-| Google Maps | `google.com/maps?cid={cid}` | P3749 |
+| Google Maps | `google.com/maps?cid={cid}`, and a place link whose feature ID (`!1s0x{hex}:0x{hex}` in its `data`, or `ftid=0x{hex}:0x{hex}`) holds the CID as its second number, on any of Google's domains | P3749 (the CID in decimal) |
 | Apple Maps | `maps.apple.com/place?auid={auid}` | P10046 |
 | Yelp | `yelp.com/biz/{name}` | P3108 |
 | Tripadvisor | `Attraction_Review-g…-d{number}-….html`, and the same with `Restaurant_Review`, `Hotel_Review` or `ShowUserReviews`, on `tripadvisor.com` or one of its country sites | P3134 (the number after `d`) |

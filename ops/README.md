@@ -51,6 +51,8 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_search_index_reread_cards{catalogue}` | Cards of a catalogue the text index has read again so far after the catalogue's first full import; 0 when no re-read runs |
 | `pinakes_search_index_busy_total{reason}` | Text searches answered 503 because the text index was busy: `turn` (no free turn of `limits.search_index_searches` within `limits.search_index_budget_ms`), `budget` (the search ran past it) or `share` (a turn was free, but its client address ran half the turns while another client waited); alert `TextSearchBusy` past ten in ten minutes for ten minutes |
 | `pinakes_background_failures_total{loop}`, `pinakes_background_last_success_timestamp_seconds{loop}` | Failed passes of each background loop, and when it last finished one without an error (0 until it has); each loop's series from the start. The loops: `grouping`, `catalogue_sweep`, `catalogue_joins`, `catalogue_extras`, `also_on`, `same_event` and `same_recording` and their hourly `*_sweep`, the hourly maintenance steps (`retention`, `cleanup`, `osm_prune`, `also_on_prune`, `refill`, `unhint`), the minutely `search_fold`, and `osm_dump`. A failed pass logs a warning and is tried again. `BackgroundLoopFailing` fires for a loop that has failed and finished no pass for 25 minutes, `HintSweepFailing` for an hourly hint sweep after an hour and a quarter (plus 10 minutes), `MaintenanceStepFailing` for a maintenance step that failed three passes in a row (two after a start), `OdblDumpFailing` for a dump that failed for 25 minutes and wrote no file; one failure that a later pass makes good fires none |
+| `pinakes_api_requests_total{route="/v1/map/clusters",status="503"}` | Map cluster counts answered 503: all four turns taken, the client holding its two, or a view too wide for its filter past `limits.map_cluster_timeout_ms`; alert `MapClustersBusy` past ten in ten minutes for ten minutes |
+| `pinakes_map_clusters_busy_total{reason}` | The same 503s by why: `turns` (all four taken), `share` (the client's two taken), `timeout` (past `limits.map_cluster_timeout_ms`) |
 | `pinakes_group_key_conflict_resources` | Resources whose last grouping run refused a join that would put two MusicBrainz IDs, Q-ids or Discogs IDs of one kind in a group (usually a wrong ID on a hub) |
 | `pinakes_resources{resolver,status}` | Current resource totals |
 | `pinakes_api_panics_total` | API requests (public or admin listener) whose handler panicked and were answered 500 |
@@ -70,7 +72,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Catalogue join checks (`joins`, `catalogue_join_due`) and extras reads (`extras`, `catalogue_extras`) due now, and how long the oldest has been due. Alert `CatalogueJoinsBehind` past six hours of joins; extras follow Wikipedia's pace and lag after a first import by design |
 | `pinakes_catalogue_enabled{catalogue}` | Whether the catalogue is on (1) or off (0) in the configuration the daemon started with |
 | `pinakes_catalogue_refused{catalogue}` | Whether the catalogue's importer refused the newest dump it read and waits for another (1) or not (0): `refused` in its state row's position, newer than the dump applied (or before any), until a dump is applied; a refused trial of an older dump by hand is not counted. Alert `CatalogueDumpRefused` after an hour |
-| `pinakes_catalogue_needs_contact{catalogue}` | Whether the catalogue is on but its importer does not start for want of `http.contact` (1; MusicBrainz only) or not (0) |
+| `pinakes_catalogue_needs_contact{catalogue}` | Whether the catalogue is on but its importer does not start for want of `http.contact` (1; MusicBrainz and OpenStreetMap) or not (0) |
 | `pinakes_catalogue_last_import_timestamp_seconds{catalogue}` | When its last full import finished; 0 before the first |
 | `pinakes_catalogue_last_update_timestamp_seconds{catalogue}` | When its last update finished; 0 before the first |
 | `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds its cards are behind upstream: since `current_as_of`, the upstream time of the data its last finished run left (a dump's date, the last change applied); 0 before its first full import has finished. An update that finds nothing new doesn't lower it |
@@ -145,8 +147,16 @@ catalogue that is off raises neither. `CatalogueImportFailed` also fires for a f
 fails or is refused; `CatalogueUpdateLag` waits for a first finished import. `CatalogueDumpRefused`
 (warning) fires once a refusal has stood for an hour and holds until a dump is applied, so a
 refused first import, which no lag alert covers, keeps alerting. A catalogue that is on
-but whose importer can't start (MusicBrainz without `http.contact`) raises neither: its `waiting`
-in `catalogue status` and `pinakes_catalogue_needs_contact` say so. `CatalogueTurnBlocked` (warning) covers the one
+but whose importer can't start (MusicBrainz or OpenStreetMap without `http.contact`) raises
+neither: its `waiting` in `catalogue status` and `pinakes_catalogue_needs_contact` say so, and
+`CatalogueNeedsContact` (warning) fires after an hour of it. `CatalogueFirstImportStalled`
+(warning) fires when a catalogue with an importer (`musicbrainz`, `osm`) has been on for two days
+without a finished import: a wait for free disk or the large-import turn counts no error. Its
+list names the catalogues that have an importer (a catalogue without one never finishes an
+import); a step that adds an importer adds its name. On a new host with every large catalogue on,
+the large-import turn can hold the planet's first import back for more than two days while
+another catalogue's runs: then the alert is expected, and its `waiting` in `catalogue status`
+ends with "one large import runs at a time". `CatalogueTurnBlocked` (warning) covers the one
 stall that leaves: a large catalogue's full import that keeps failing keeps the large-import turn,
 so another large catalogue waits for it. It fires when a catalogue has waited six hours for the
 turn while a large catalogue's runs keep failing; fix the failing import's cause, switch it off

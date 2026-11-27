@@ -99,6 +99,7 @@ moves to the front of the refresh queue; its TTL, backoff and final state still 
 | `GET /v1/groups/{id}` | A 32-character group ID | `{id, type, curated, keys, members: [card]}` ([Groups](#groups)); 404 if unknown; 400 for a malformed ID or while groups are off (`groups.enabled = false`) |
 | `POST /v1/changes/lookup` | `{resource_ids?, uris?, since?, cursor?, limit?}`: 1–500 IDs and links together | A page of [change lines](#change-line) ([Changes](#changes)) |
 | `GET /v1/info` | None | `{version, api_shape, user_agent, resolves, limits, osm_licence, attributions?}` ([Info](#info)) |
+| `GET /v1/map/clusters` | `bbox`, `zoom`, and search's `type`, `exclude_type`, `tags`, `match`, `author`, `reach`, `viewer`, `from`, `to`, `referenced` | `{zoom, cell_degrees, total, clusters: [{bbox, count, point, search}]}`: a count per map cell ([Map clusters](#map-clusters)) |
 | `GET /v1/dumps/osm_place.ndjson.gz` | None | The ODbL derivative database as a daily gzip file ([OpenStreetMap and locations](#openstreetmap-and-locations)) |
 | `GET /v1/openapi.json` | None | The OpenAPI 3.1 document |
 | `GET /swagger-ui` | None | Swagger UI, when `api.swagger_ui` is on |
@@ -148,13 +149,17 @@ otherwise), so a client shows their tags with it. Nothing is stored and no other
 asked, so the answer has no Also on links and no Wikipedia summary. A client that opens such a card
 for a person to read calls `POST /v1/resolve` with its link: that stores it, answers with the built
 card at once, and reads its Also on and its Wikipedia summary in the background; a read of the card
-a moment later shows them. With its catalogue off, the link is unknown again. An OpenStreetMap
-card found in search does not open this way yet: its link and ID answer 404.
+a moment later shows them. With its catalogue off, the link is unknown again.
 
 A card whose root is no web link (an OpenAlex work, stored under its `doi:` root for its
 `doi.org` link) carries the root's web page ([Identifier pages](#identifier-pages)): in `open_in`
 named by the page's host (`[{"client": "doi.org", "url": "https://doi.org/…"}]`), wherever it is
 read, among an unshared card's `aliases`, and as its host for `host=` (`host=doi.org`).
+
+An OpenStreetMap card nobody shared opens the same way, by any spelling of its openstreetmap.org
+link and by that link's ID, as the card a shared OSM link has ([OpenStreetMap and
+locations](#openstreetmap-and-locations)): with `attribution`, the category, address and bbox,
+and no `labels` or `from`.
 
 ### Lookup
 
@@ -1222,8 +1227,7 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
 - `id` is the resource ID its `uri` would have, the same once someone references the link; `uri`
   is the card's canonical link; `labels` are its source's labels; `refs` is `[]`, `collections`
   0, `status` `ok`; `group`, `also_on` and `maybe_same` are empty. OpenStreetMap cards carry the
-  ODbL `attribution`. It opens by its `uri` and its `id` ([Catalogue cards](#catalogue-cards)),
-  but for an OpenStreetMap card, whose link and ID answer 404;
+  ODbL `attribution`. It opens by its `uri` and its `id` ([Catalogue cards](#catalogue-cards));
 - each thing is one row:
   - a card whose `uri` a listed resource has is listed once, as that resource; a card whose
     resource the search leaves out (not referenced any more, or not yet read) is listed as the
@@ -3207,7 +3211,57 @@ through the OSM resolver ([places](design.md#places)). These spellings are objec
 
 Every spelling is an [alias](#aliases) of the canonical object URL, so one resource and one cached
 `osm_place` row serve them all. OSM cards carry `attribution`; a resource read adds the category,
-address and bbox.
+address and bbox. With the OpenStreetMap catalogue on, an object it imported is read from its card
+instead of Nominatim, and read again as soon as an update changes its card
+([`osm` catalogue](sources/osm_catalogue.md)).
+
+### Places
+
+With the OpenStreetMap catalogue on, a resource read (`GET /v1/resources/{id}`, `by-uri`)
+applies the place rules ([`osm` catalogue](sources/osm_catalogue.md#place-rules)):
+
+- A map link whose name and point come from the link itself (Google Maps, Apple Maps, Organic
+  Maps, `geo:`; an OsmAnd link names no place) and the one imported place with the same name within 50 m list each
+  other in `maybe_same` (score 1) and in `also_on` (`kind: "maybe"`). On the place, the link's
+  entry carries its `refs`, so a client shows its tags with the place's. With no such place, or
+  several, the link stays a point. Nothing is grouped.
+- A deleted object's card (`status: missing`) lists in `maybe_same` the one imported place of its
+  name and category within 50 m of where it was. A successor found on evidence (the same Wikidata
+  item, or a delete and a create in one changeset with the same name within 50 m) makes the old
+  link an alias of the new one instead.
+- A place whose name changed to an unrelated one has `replaced`: the places it was, oldest first,
+  each with `name`, `category`, `until` (when it was replaced) and `references` (how many the link
+  got before; those belong to that place). Absent on every other card.
+
+### Map clusters
+
+`GET /v1/map/clusters?bbox=<min_lon,min_lat,max_lon,max_lat>&zoom=<0–20>` counts everything with a
+point in each cell of a map view: referenced places, events and posts with a location, and the
+catalogue cards search would list. A cell is `360 / 2^(zoom+2)` degrees wide and high
+(`cell_degrees`). It takes search's filters: `type`, `exclude_type`, `tags`, `match`, `author`,
+`reach` with `viewer`, `from`, `to` and `referenced`, as [Search](#search) reads them (catalogue
+cards are left out where search leaves them out). The answer:
+
+| Field | Meaning |
+| --- | --- |
+| `zoom`, `cell_degrees` | The zoom asked for and its cell size |
+| `total` | Everything counted in the view |
+| `clusters` | One per cell that holds anything, the fullest first: `bbox` (the cell), `count`, `point` (the mean of its points, where to draw it) and `search`, the `/v1/search` link with these filters and the cell as `bbox` |
+
+At zoom 12 and below, catalogue cards are counted from per-cell totals the database keeps at five
+sizes, the cells of zoom 4, 6, 8, 10 and 12: a view reads the coarsest that fits in its own cells
+(zoom 0–4 the zoom 4 totals, 5–6 the zoom 6 ones, and so on), so from zoom 5 each of its cells adds
+up at most 2 × 2 cells of totals. A total's cell at the edge of the view may count cards just
+outside it, and a `tags` filter, which needs each card's labels, reads the cards one by one. A
+place with cards in two catalogues (a Wikidata item and its OSM object) counts once per card,
+though search may list them joined. A referenced link that is a card's own link counts once, as
+the card, when the card passes the filters (else as the link). A job posting past its end counts
+in no cell, as search leaves it out. At zoom 12 and below, a cell at the view's edge counts the
+cards of its whole cell of totals, and the referenced links inside the view only. A view of more
+cells than `limits.map_cluster_cells` (4,096) at its zoom is a 400. The answer is a 503 when four
+cluster requests are under way, when its client (an IPv4 address or an IPv6 /64) already runs two
+of them, or when the view is too large for its filter to count in
+`limits.map_cluster_timeout_ms` (3 seconds; zoom in).
 
 Any other URL on an OSM host (user pages, map views, changesets, notes) is refused before any
 fetch: status `error`, a link-only card, stored once as final.
@@ -3231,6 +3285,13 @@ links resolve offline as `Place` points (`geo.enabled`): OSM marker links (`/?ml
 shortlinks without an object, OsmAnd `osmand.net/map?pin=` and `osmand.net/go?lat=&lon=`, and
 Organic Maps `omaps.app/<ge0 code>`. Points are not identities and never group.
 
+A point is named by its coordinates, unless the link names the place: Organic Maps
+`omaps.app/<ge0 code>/<name>` (`_` read as a space), and a `geo:` URI with Android's query,
+`geo:<lat>,<lon>?q=<lat>,<lon>(<name>)` or `geo:0,0?q=<lat>,<lon>(<name>)`, where the point is the
+one in `q`. Any other query on a `geo:` URI is an error. Google Maps and Apple Maps links that name
+a place or a point are read the same way, from the link, by their official sources
+([sources](sources/README.md)).
+
 Pinakes does no reverse geocoding and offers no place search. Event venues are geocoded through
 Nominatim (`event.geocoding`).
 
@@ -3249,10 +3310,20 @@ Decompressed, its first line is the licence notice (`notice`, `licence`, `licenc
 | `osm_type`, `osm_id` | The OSM object (`node`, `way` or `relation`, positive ID) |
 | `name`, `type`, `type_path`, `category` | The current name, schema.org type and its path, and OSM `key/value` category |
 | `point`, `bbox` | `{lat, lon}` and `[min_lon, min_lat, max_lon, max_lat]`; `null` for missing objects |
-| `address`, `tags`, `display_name` | Address parts, allowlisted OSM tags, the Nominatim display name |
+| `address`, `tags`, `display_name` | Address parts, allowlisted OSM tags, the Nominatim display name (`null` for an imported place) |
 | `status` | `ok`, or `missing` for cached missing records |
 | `fetched_at` | When Nominatim last returned the object |
-| `versions` | Every derived document served publicly, keyed by version, so earlier values behind the change journal are in the dump |
+| `versions` | Every derived document served publicly, keyed by version, so earlier values behind the change journal are in the dump (`{}` for an imported place) |
+
+With the OpenStreetMap catalogue on, one line per imported place follows, in the same shape with
+`status` `ok`, `fetched_at` the card's last write, and three more fields: `from` (`catalogue`),
+`other_names`, and `replaced` (its earlier, unrelated names: `name`, `category`, `until`). An object
+both cached and imported has two lines, one of each. Then one line per rename of an object the
+catalogue no longer holds (`from` `rename`, `osm_type`, `osm_id`, `name`, `category`, `new_name`,
+`until`), and one per deleted object's successor (`from` `successor`, `old_type`, `old_id`,
+`new_type`, `new_id`, `basis` `wikidata` or `changeset`, `found_at`), and one per named object an
+update removed, as its card last was (`from` `removed`, `osm_type`, `osm_id`, `name`, `category`,
+`point`, `removed_at`).
 
 The raw fetch, the search vector and the refresh schedule are not exported. A new column is not
 exported until it is added here, to the OpenAPI schema `OsmDumpPlace` and to the dump query. No
