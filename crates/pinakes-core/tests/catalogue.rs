@@ -2043,3 +2043,33 @@ async fn a_request_made_while_a_refused_import_ran_stands(pool: PgPool) {
     let s = state(&pool, Catalogue::Openalex).await;
     assert_eq!((s.import_requested, s.cards), (None, 5));
 }
+
+/// A try that finds its version refused before leaves the state row as it found it: no new
+/// generation, the same count, and the phase `failed` the refusal left (`catalogue status`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_try_that_finds_a_refusal_changes_nothing_in_the_state(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Fixture::new(Catalogue::Openalex, cards(5));
+    fixture.refuse.store(true, Ordering::SeqCst);
+    fixture.always_import.store(true, Ordering::SeqCst);
+    let failed = run::step(&fixture, &ctx).await.unwrap_err();
+    // As the task records it.
+    run::record_failure(
+        &pool,
+        Catalogue::Openalex,
+        &pinakes_core::catalogue::failure::shown(&failed),
+    )
+    .await
+    .unwrap();
+    let refused = state(&pool, Catalogue::Openalex).await;
+    assert_eq!(refused.phase, "failed");
+    for _ in 0..2 {
+        let again = run::step(&fixture, &ctx).await.unwrap_err();
+        assert!(again.is::<run::StillRefused>(), "{again}");
+        let s = state(&pool, Catalogue::Openalex).await;
+        assert_eq!(
+            (s.generation, s.generation_cards, s.phase.as_str(), s.run),
+            (refused.generation, refused.generation_cards, "failed", None)
+        );
+    }
+}

@@ -1116,7 +1116,17 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         Ok(ended) => ended,
         Err(error) if error.is::<Abandoned>() || error.is::<StillRefused>() => {
             let position = job.position.take();
-            return abandon(pool, catalogue, run, job.asked, position, large, error).await;
+            // A run that read nothing (still refused) leaves the row as the step found it: no new
+            // generation, the phase it showed (`failed` from the refusal).
+            let before = error.is::<StillRefused>().then(|| Before {
+                generation: job.state.generation,
+                generation_cards: job.state.generation_cards,
+                phase: job.state.phase.clone(),
+            });
+            return abandon(
+                pool, catalogue, run, job.asked, position, before, large, error,
+            )
+            .await;
         }
         Err(error) => match error.downcast::<Waits>() {
             Ok(Waits(why)) => {
@@ -1161,7 +1171,10 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         if let Err(error) = job.check_shrink().await {
             if error.is::<Abandoned>() {
                 let position = job.position.take();
-                return abandon(pool, catalogue, run, job.asked, position, large, error).await;
+                return abandon(
+                    pool, catalogue, run, job.asked, position, None, large, error,
+                )
+                .await;
             }
             return Err(error);
         }
@@ -1202,21 +1215,34 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
 /// version refused before ([`StillRefused`]): its run, cursor and `waiting` are cleared, the
 /// large-import turn is freed, and `position` (the importer's, with its refusal) is kept. A full
 /// import abandoned answers its request only when it was the import asked for (`asked`): a
-/// request made while it ran stands. `error` is returned for the task to record (a
+/// request made while it ran stands. `before` (a run that read nothing) puts back the generation,
+/// its count and the phase the step began with. `error` is returned for the task to record (a
 /// [`StillRefused`] is recorded as no failure).
+#[allow(clippy::too_many_arguments)]
 async fn abandon(
     pool: &PgPool,
     catalogue: Catalogue,
     run: Run,
     asked: bool,
     position: Option<serde_json::Value>,
+    before: Option<Before>,
     large: Option<SessionLock>,
     error: anyhow::Error,
 ) -> Result<Next> {
-    sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,phase=CASE WHEN phase IN ('import','update') THEN 'idle' ELSE phase END,position=coalesce($2,position),import_requested=CASE WHEN $3 THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1")
+    let (generation, generation_cards, phase) = match before {
+        Some(b) => (Some(b.generation), Some(b.generation_cards), Some(b.phase)),
+        None => (None, None, None),
+    };
+    sqlx::query("UPDATE catalogue_state SET run=NULL,cursor=NULL,waiting=NULL,\
+         phase=CASE WHEN coalesce($6,phase) IN ('import','update') THEN 'idle' ELSE coalesce($6,phase) END,\
+         generation=coalesce($4,generation),generation_cards=coalesce($5,generation_cards),\
+         position=coalesce($2,position),import_requested=CASE WHEN $3 THEN NULL ELSE import_requested END,updated_at=now() WHERE catalogue=$1")
         .bind(catalogue.name())
         .bind(position)
         .bind(run == Run::Import && asked)
+        .bind(generation)
+        .bind(generation_cards)
+        .bind(phase)
         .execute(pool)
         .await?;
     if let Some(lock) = large {
@@ -1230,6 +1256,12 @@ async fn abandon(
         );
     }
     Err(error)
+}
+/// The state row's generation, its count and its phase as a step found them ([`abandon`]).
+struct Before {
+    generation: i64,
+    generation_cards: i64,
+    phase: String,
 }
 /// An importer whose plan is always `run` (`pinakesd catalogue import`); it keeps what its runs
 /// wrote.
