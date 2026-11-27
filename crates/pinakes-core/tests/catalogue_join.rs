@@ -1343,6 +1343,69 @@ impl Resolver for Route {
     }
 }
 
+/// A Nostr or ActivityPub link found gone (a deleted profile answers with no type) is read again
+/// at the queue's missing interval, not after the backoff's 90 days, as a web link found gone is.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_gone_nostr_or_activitypub_link_is_not_put_off(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let read = |resolver: &'static dyn Resolver| {
+        let (pool, cfg) = (pool.clone(), cfg.clone());
+        async move {
+            due_now(&pool).await;
+            let job = queue::claim_sources(&pool, &[resolver.name()], &cfg, 1)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            queue::run_job(&pool, resolver, &cfg, &job).await.unwrap();
+            wait_days(&pool).await
+        }
+    };
+    for (route, uri) in [
+        ("nostr", "https://example.org/nostr-profile"),
+        ("activitypub", "https://example.org/@someone"),
+        ("web", "https://example.org/about-me"),
+    ] {
+        sqlx::query("DELETE FROM resource")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tagged(&pool, uri).await;
+        sqlx::query("UPDATE resource SET resolver=$1")
+            .bind(route)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut card = ResourceMeta::new(uri, route, 0);
+        card.set_type("Person");
+        card.name = Some("Someone".into());
+        let resolver: &'static Route = Box::leak(Box::new(Route(route, Mutex::new(card))));
+        read(resolver).await;
+        // Deleted: two reads, two hours apart, find it gone.
+        let mut gone = ResourceMeta::new(uri, route, 0);
+        gone.status = Status::Missing;
+        gone.http_status = Some(404);
+        *resolver.1.lock().unwrap() = gone;
+        read(resolver).await;
+        sqlx::query("UPDATE resource SET last_missing_at=now()-interval '2 hours'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let wait = read(resolver).await;
+        let status: String = sqlx::query_scalar("SELECT status FROM resource")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "missing", "{route}");
+        let missing_days = (cfg.missing_ttl_secs as f64 / 86400.0 * 100.0).round() / 100.0;
+        if route == "web" {
+            assert_eq!(wait, 90.0, "{route}");
+        } else {
+            assert!(wait <= missing_days.max(0.05), "{route}: {wait}");
+        }
+    }
+}
+
 /// A Nostr or ActivityPub profile is social content: one that answers the same keeps its weekly
 /// read (a deleted or edited profile is read again within a week), where an undated web card of
 /// a person waits longer each time.

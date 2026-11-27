@@ -1145,7 +1145,7 @@ routes) waits longer each time it answers the same:
 At the defaults an unchanged page is read after 7, 14, 28, 56 and then every 90 days. The last
 wait is the card's stored `ttl_secs`. Events (dated or not), calendars and feeds, podcast shows (a
 new episode is no change to the show's card), cards with a date, social content (within the hour),
-Nostr and ActivityPub profiles and Pubky objects (their authors edit and delete them), a card that names when it changes,
+Nostr and ActivityPub profiles (and those links found gone) and Pubky objects (their authors edit and delete them), a card that names when it changes,
 OpenStreetMap objects and `geo:` points keep the schedule above. A first tier above
 `limits.refresh_max_secs` is the longest wait instead. A stored
 card keeps its next refresh time when the daemon is upgraded: each moves to the backoff at its own
