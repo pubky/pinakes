@@ -1948,6 +1948,10 @@ is) and prints the directory it removed, or that there was none. It refuses:
 - while a daemon runs the catalogue's importer, which holds the catalogue's advisory lock for as
   long as it runs. The drop takes the same lock, so it can run beside the daemon.
 
+The drop watches its lock while it deletes: when the lock's database session ends (a database
+restart), it stops, says the lock was lost and deletes nothing more, since an importer may hold
+the lock by then. Run it again to finish.
+
 `catalogue import <name>` runs one full import of the catalogue now, or with `--update` one
 update, through the same code and state rows as the daemon's task: it takes the catalogue's lock
 (refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
@@ -1956,7 +1960,8 @@ the status table when it has finished. A full import takes up one that was cut o
 new one, and clears an update refused for removing too much. `--from`, `--limit`, `--since` and
 `--force` are the importer's own ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand),
 [Wikidata](sources/catalogue_wikidata.md#commands); the others [below](#run-an-import)). A failure is recorded as the
-task records it. `catalogue import <name> --request` needs no lock: it records that a full import
+task records it, unless the lock's database session has ended by then: the command then says the
+lock was lost and records nothing. `catalogue import <name> --request` needs no lock: it records that a full import
 is asked for (`import_requested`). The process running the importer starts it after an update
 under way, or at its next step (MusicBrainz: within the hour when idle); a full import under way
 is the one asked for, and its end, or its abandonment, clears the request. The command says when no process holds the
@@ -2041,7 +2046,7 @@ rules:
 
 | Rule | What the task does |
 | --- | --- |
-| One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
+| One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs, and watches it between runs too: when its database session ends while the task waits for its next run, the task takes the lock again at once (and logs it), keeping its wait. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
 | What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump; Wikidata every 15 minutes, and at once while more than an hour behind). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
 | How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag; Wikidata's update, which reads the changes by time, moves it to the end of the window it read even when the window held none (Wikidata changes many times a minute: the update logs a warning for a window of ten minutes or more without one). Each catalogue may lag as far as its source's publication rhythm allows (below). |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |

@@ -644,13 +644,26 @@ async fn catalogue_command(
             )?;
         }
         CatalogueCommand::Drop(catalogue) => {
-            let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
+            let Some(mut lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
                 bail!("an importer of catalogue {catalogue} is running (a pinakesd started with it enabled): switch it off and restart that daemon, then drop");
             };
-            // The lock is held until the cards, the state row and the files are gone.
-            let dropped = drop_held(config, pool, catalogue, out).await;
+            // The lock is held until the cards, the state row and the files are gone, and watched
+            // meanwhile: lost (its session ended), the drop stops, since an importer may hold
+            // the lock by then.
+            let dropped = lock
+                .hold_while(
+                    pinakes_core::locks::LOCK_CHECK,
+                    drop_held(config, pool, catalogue, out),
+                )
+                .await;
             lock.release().await;
-            dropped?;
+            dropped.map_err(|error| {
+                if error.is::<pinakes_core::catalogue::run::CatalogueLockLost>() {
+                    anyhow::anyhow!("the lock of catalogue {catalogue} was lost (its database session ended) while it was dropped: the drop stopped; run catalogue drop {catalogue} again")
+                } else {
+                    error
+                }
+            })?;
         }
         CatalogueCommand::Import {
             catalogue,
@@ -809,10 +822,6 @@ async fn import(
             bail!("catalogue {catalogue} holds {cards} cards: a full import with --limit {limit} removes all but at most {limit} of them; add --force to do so");
         }
     }
-    // After the command's own refusals, so a refused command changes nothing.
-    if let Some(since) = since {
-        move_position(pool, catalogue, since).await?;
-    }
     if !config.catalogues.enabled(catalogue) {
         writeln!(
             out,
@@ -834,7 +843,15 @@ async fn import(
         && limit.is_some_and(|l| {
             i64::try_from(l).is_ok_and(|l| l < cards) && stored_limit.is_none_or(|s| l < s)
         });
-    let (state, written) = run::run_once_with(importer, &ctx, kind, expect_shrink, |why| {
+    // `--since` moves the position under the run's own lock, after the command's own refusals
+    // (a refused command changes nothing), so no daemon can start an update in between.
+    let first = async {
+        match since {
+            Some(since) => move_position(pool, catalogue, since).await,
+            None => Ok(()),
+        }
+    };
+    let (state, written) = run::run_once_with(importer, &ctx, kind, expect_shrink, first, |why| {
         let _ = writeln!(out, "waiting: {why}");
     })
     .await?;
@@ -975,45 +992,38 @@ async fn import_files(
     Ok(())
 }
 
-/// `catalogue import NAME --update --since T`: the position moves to `T`, under the catalogue's lock (a
-/// daemon's run is never changed under it). What else the position holds (a limit) stays; an
-/// update cut off earlier is set aside (it would read from the old position), and a full import
-/// an update asked for is no longer asked for. Refused while one asked for with `--request`
-/// waits (it runs first). Refused before a first full import has finished
-/// (the catalogue must be imported first) and while a full import is under way.
+/// `catalogue import NAME --update --since T`: the position moves to `T`, as the first step of the
+/// run under the catalogue's lock (`run::run_once_with`), so a daemon's run is never changed under
+/// it and none starts between the move and the update. What else the position holds (a limit)
+/// stays; an update cut off earlier is set aside (it would read from the old position), and a full
+/// import an update asked for is no longer asked for. Refused while one asked for with
+/// `--request` waits (it runs first). Refused before a first full import has finished (the
+/// catalogue must be imported first) and while a full import is under way.
 async fn move_position(
     pool: &sqlx::PgPool,
     catalogue: Catalogue,
     since: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
-    use pinakes_core::catalogue::{run::SessionLock, store};
-    let Some(lock) = SessionLock::try_take(pool, catalogue.lock_key()).await? else {
-        bail!("another process imports catalogue {catalogue} (its lock is held): stop it, or switch the catalogue off and restart that daemon, first");
-    };
-    let moved = async {
-        let state = store::ensure_state(pool, catalogue).await?;
-        if state.last_import_at.is_none() {
-            bail!("catalogue {catalogue} has no finished full import: run catalogue import {catalogue} first");
-        }
-        // The asked-for import runs first (the runner's next step), and its end sets the position.
-        if state.import_requested.as_deref() == Some(pinakes_core::catalogue::musicbrainz::REQUESTED) {
-            bail!("catalogue {catalogue}: a full import is asked for (catalogue import {catalogue} --request); --since waits until it has run");
-        }
-        let moved = sqlx::query("UPDATE catalogue_state SET position=coalesce(position,'{}'::jsonb)||jsonb_build_object('time',$2::text,'import',false),import_requested=CASE WHEN import_requested=$3 THEN import_requested END,run=CASE WHEN run='update' THEN NULL ELSE run END,cursor=CASE WHEN run='update' THEN NULL ELSE cursor END,updated_at=now() WHERE catalogue=$1 AND (run IS NULL OR run='update')")
-            .bind(catalogue.name())
-            .bind(since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-            .bind(pinakes_core::catalogue::musicbrainz::REQUESTED)
-            .execute(pool)
-            .await?
-            .rows_affected();
-        if moved == 0 {
-            bail!("catalogue {catalogue}: a full import is under way; --since waits until it has finished");
-        }
-        Ok(())
+    use pinakes_core::catalogue::store;
+    let state = store::ensure_state(pool, catalogue).await?;
+    if state.last_import_at.is_none() {
+        bail!("catalogue {catalogue} has no finished full import: run catalogue import {catalogue} first");
     }
-    .await;
-    lock.release().await;
-    moved
+    // The asked-for import runs first (the runner's next step), and its end sets the position.
+    if state.import_requested.as_deref() == Some(pinakes_core::catalogue::musicbrainz::REQUESTED) {
+        bail!("catalogue {catalogue}: a full import is asked for (catalogue import {catalogue} --request); --since waits until it has run");
+    }
+    let moved = sqlx::query("UPDATE catalogue_state SET position=coalesce(position,'{}'::jsonb)||jsonb_build_object('time',$2::text,'import',false),import_requested=CASE WHEN import_requested=$3 THEN import_requested END,run=CASE WHEN run='update' THEN NULL ELSE run END,cursor=CASE WHEN run='update' THEN NULL ELSE cursor END,updated_at=now() WHERE catalogue=$1 AND (run IS NULL OR run='update')")
+        .bind(catalogue.name())
+        .bind(since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .bind(pinakes_core::catalogue::musicbrainz::REQUESTED)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if moved == 0 {
+        bail!("catalogue {catalogue}: a full import is under way; --since waits until it has finished");
+    }
+    Ok(())
 }
 /// The drop, under the catalogue's lock: its cards and state row, then its directory of
 /// downloads and temporary files (`catalogues.dir/<name>`).
@@ -2234,8 +2244,9 @@ mod tests {
         );
     }
     /// `update --since`: refused before a first full import, while a full import is under way
-    /// and while another process holds the lock; else the position moves to the time and keeps
-    /// its limit, an update cut off is set aside and an asked-for import is no longer asked for.
+    /// and while another process holds the lock (the command's run takes it before the move);
+    /// else the position moves to the time and keeps its limit, an update cut off is set aside
+    /// and an asked-for import is no longer asked for.
     #[sqlx::test(migrations = "../../migrations")]
     async fn since_moves_the_position_only_when_it_may(pool: sqlx::PgPool) {
         use pinakes_core::catalogue::{run::SessionLock, store};
@@ -2250,11 +2261,37 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        // While another process holds the lock, `catalogue import --update --since` is refused
+        // before the position moves (it moves under the run's own lock).
         let held = SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
             .await
             .unwrap()
             .unwrap();
-        assert!(move_position(&pool, Catalogue::Wikidata, at).await.is_err());
+        let mut config = Config::default();
+        config.egress.contact = "ops@example.org".into();
+        let mut out = Vec::new();
+        let err = catalogue_command(
+            &pool,
+            &config,
+            CatalogueCommand::Import {
+                catalogue: Catalogue::Wikidata,
+                from: Vec::new(),
+                limit: None,
+                update: true,
+                request: false,
+                force: false,
+                since: Some(at),
+            },
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("its lock is held"), "{err}");
+        let state = store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.position.unwrap()["time"], "2026-11-23T00:00:00Z");
         held.release().await;
         move_position(&pool, Catalogue::Wikidata, at).await.unwrap();
         let state = store::state(&pool, Catalogue::Wikidata)
@@ -2467,6 +2504,86 @@ mod tests {
             b"kept"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+    /// A drop whose lock's session ends while it deletes (a database restart) stops: it deletes
+    /// nothing more, keeps the state row and says the lock was lost, so it never deletes beside an
+    /// importer that took the lock meanwhile.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_drop_that_loses_its_lock_stops(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::{store, Card};
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.catalogues.dir = temp.path().to_string_lossy().into_owned();
+        config.catalogues.wikidata.enabled = false;
+        let card = Card {
+            source_id: "Q1".into(),
+            uri: "https://en.wikipedia.org/wiki/One".into(),
+            r#type: "Thing".into(),
+            name: "One".into(),
+            ..Card::default()
+        };
+        store::upsert(&pool, Catalogue::Wikidata, 1, &[card], None)
+            .await
+            .unwrap();
+        // Another transaction holds the cards: the drop's first delete waits for it.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE catalogue_card IN SHARE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let holder = || async {
+            sqlx::query_scalar::<_, i32>("SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())")
+                .bind(Catalogue::Wikidata.lock_key())
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        };
+        // Once the drop waits for the blocker, end its lock's session.
+        let end_session = async {
+            let started = std::time::Instant::now();
+            let pid = loop {
+                let waits: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%DELETE FROM catalogue_card c%')")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if let (true, Some(pid)) = (waits, holder().await) {
+                    break pid;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(60),
+                    "the drop never waited"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            sqlx::query("SELECT pg_terminate_backend($1, 5000)")
+                .bind(pid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        };
+        let mut out = Vec::new();
+        let dropping = catalogue_command(
+            &pool,
+            &config,
+            CatalogueCommand::Drop(Catalogue::Wikidata),
+            &mut out,
+        );
+        // Two lock checks at most (`locks::LOCK_CHECK`), while the delete still waits.
+        let (dropped, ()) = tokio::time::timeout(Duration::from_secs(90), async {
+            tokio::join!(dropping, end_session)
+        })
+        .await
+        .expect("the drop stops once its lock is lost");
+        let err = dropped.unwrap_err().to_string();
+        assert!(err.contains("lock") && err.contains("lost"), "{err}");
+        blocker.rollback().await.unwrap();
+        assert_eq!(
+            store::state(&pool, Catalogue::Wikidata)
+                .await
+                .unwrap()
+                .map(|s| s.cards),
+            Some(1)
+        );
     }
     /// A drop refuses a catalogue its configuration has on, and says how to switch it off.
     #[test]

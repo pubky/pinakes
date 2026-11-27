@@ -5,7 +5,9 @@
 //! until the daemon stops. It:
 //!
 //! - holds the catalogue's advisory lock (`locks::CATALOGUE`) for as long as it runs, so two
-//!   daemons never import one catalogue and `pinakesd catalogue drop` waits for no importer;
+//!   daemons never import one catalogue and `pinakesd catalogue drop` waits for no importer; the
+//!   lock is watched while a step runs and while the task waits for the next one (lost then, it
+//!   is taken again at once);
 //! - asks the importer what is due ([`Importer::plan`]): a full import when none has finished,
 //!   then an update once a day;
 //! - runs a full import of a large catalogue only while it holds the large-import lock
@@ -774,6 +776,19 @@ impl SessionLock {
     pub async fn check(&mut self, wait: Duration) -> crate::locks::Check {
         check_session(&mut *self.connection.lock().await, wait).await
     }
+    /// `work`, cut off once the lock is lost ([`SessionLock::lost`], checked every `every`): then
+    /// [`CatalogueLockLost`], and nothing more of `work` runs (a statement in flight may still
+    /// end; one in a transaction is rolled back with it).
+    pub async fn hold_while<T>(
+        &mut self,
+        every: Duration,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::select! {
+            done = work => done,
+            _ = self.lost(every) => Err(CatalogueLockLost.into()),
+        }
+    }
     pub async fn release(self) {
         let mut connection = self.connection.lock().await;
         let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
@@ -863,8 +878,9 @@ pub fn to_start(importers: Vec<Arc<dyn Importer>>, config: &Config) -> Vec<Arc<d
 /// holds it), then step ([`step`]) and wait as each step says. The lock is held from step to
 /// step and watched while a step runs: a step whose catalogue lock is lost is cut off and only
 /// logged, with nothing written to the state row (another daemon may hold the lock by then); the
-/// task takes the lock again and resumes. A step cut off (a shutdown, a lost lock) leaves its run
-/// and cursor in the state row, and the next step resumes it.
+/// task takes the lock again and resumes. It is watched while the task waits between steps too:
+/// lost then, it is taken again at once, and the wait goes on. A step cut off (a shutdown, a lost
+/// lock) leaves its run and cursor in the state row, and the next step resumes it.
 pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch::Receiver<bool>) {
     let catalogue = importer.catalogue();
     let mut lock: Option<SessionLock> = None;
@@ -948,9 +964,34 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
                 ctx.pace.retry
             }
         };
-        tokio::select! {
-            _ = shutdown.changed() => return,
-            _ = tokio::time::sleep(wait) => {}
+        // The wait, with the lock watched: lost meanwhile (its session ended), it is taken again
+        // at once, so the catalogue's lock stays with the daemon that runs its importer and a
+        // `catalogue drop` can't take it between two steps. The wait itself is kept.
+        let until = tokio::time::Instant::now() + wait;
+        loop {
+            let lost = tokio::select! {
+                _ = shutdown.changed() => return,
+                _ = tokio::time::sleep_until(until) => false,
+                _ = async {
+                    match lock.as_mut() {
+                        Some(held) => held.lost(ctx.pace.lock_check).await,
+                        None => std::future::pending().await,
+                    }
+                } => true,
+            };
+            if !lost {
+                break;
+            }
+            let taken = tokio::select! {
+                _ = shutdown.changed() => return,
+                taken = SessionLock::try_take(&ctx.pool, catalogue.lock_key()) => taken,
+            };
+            lock = taken.ok().flatten();
+            tracing::warn!(
+                catalogue = catalogue.name(),
+                taken_again = lock.is_some(),
+                "catalogue lock lost while the importer waits for its next step"
+            );
         }
     }
 }
@@ -1321,15 +1362,19 @@ pub async fn run_once(
     run: Run,
     waiting: impl FnMut(&str),
 ) -> Result<(State, WriteReport)> {
-    run_once_with(importer, ctx, run, false, waiting).await
+    run_once_with(importer, ctx, run, false, async { Ok(()) }, waiting).await
 }
 /// [`run_once`]; with `expect_shrink`, a full import that reads far fewer cards than the catalogue
-/// holds removes the rest ([`Job::expect_shrink`]: `catalogue import --force`).
+/// holds removes the rest ([`Job::expect_shrink`]: `catalogue import --force`). `first` runs
+/// once the catalogue's lock is taken, before the run, under the same lock (`catalogue import
+/// wikidata --update --since` moves the position there): no other process can take the lock
+/// between the two. When it fails, nothing runs.
 pub async fn run_once_with(
     importer: Arc<dyn Importer>,
     ctx: &Context,
     run: Run,
     expect_shrink: bool,
+    first: impl std::future::Future<Output = Result<()>>,
     mut waiting: impl FnMut(&str),
 ) -> Result<(State, WriteReport)> {
     let catalogue = importer.catalogue();
@@ -1337,7 +1382,19 @@ pub async fn run_once_with(
         anyhow::bail!("another process imports catalogue {catalogue} (its lock is held): stop that pinakesd or switch the catalogue off there first, or ask it for a full import with --request");
     };
     let held = &mut lock;
+    let lost = || {
+        anyhow::anyhow!("the lock of catalogue {catalogue} was lost (its database session ended); the run resumes from its cursor at the next import")
+    };
     let ran = async {
+        held.hold_while(ctx.pace.lock_check, first)
+            .await
+            .map_err(|e| {
+                if e.is::<CatalogueLockLost>() {
+                    lost()
+                } else {
+                    e
+                }
+            })?;
         let state = store::ensure_state(&ctx.pool, catalogue).await?;
         match run {
             // A new full import (an update under way is dropped); asked for through the run
@@ -1368,9 +1425,7 @@ pub async fn run_once_with(
             let stepped = std::panic::AssertUnwindSafe(step(&forced, ctx)).catch_unwind();
             let stepped = tokio::select! {
                 stepped = stepped => stepped.unwrap_or_else(|_| Err(Failure::new("panic").into())),
-                _ = held.lost(ctx.pace.lock_check) => {
-                    anyhow::bail!("the lock of catalogue {catalogue} was lost (its database session ended); the run resumes from its cursor at the next import");
-                }
+                _ = held.lost(ctx.pace.lock_check) => return Err(lost()),
             };
             match stepped {
                 Ok(Next::Again) => {
@@ -1393,6 +1448,12 @@ pub async fn run_once_with(
                     anyhow::bail!("catalogue {catalogue}: {refused}; nothing is read until a newer one comes (a full import reads it again, and pinakesd catalogue clear-refusal {catalogue} lets an update read it)");
                 }
                 Err(failed) => {
+                    // A failure met once the lock's session has ended too (a database restart
+                    // ends every session) is a lost lock, as the task takes it: the state row
+                    // may be another process's by then, so nothing is recorded.
+                    if held.check(ctx.pace.lock_check).await == crate::locks::Check::Gone {
+                        return Err(lost());
+                    }
                     let shown = failure::shown(&failed);
                     record_failure(&ctx.pool, catalogue, &shown).await?;
                     anyhow::bail!("catalogue {catalogue} run failed: {shown}");
@@ -1442,9 +1503,10 @@ fn narrower(old: &serde_json::Value, new: &serde_json::Value) -> bool {
         matches!((citations(old), citations(new)), (Some(was), Some(now)) if now > was);
     narrower_limit || narrower_citations
 }
-/// The catalogue's lock was lost while a run went on (its session ended).
+/// The catalogue's lock was lost while a run went on (its session ended), or while
+/// [`SessionLock::hold_while`]'s work did.
 #[derive(Debug)]
-struct CatalogueLockLost;
+pub struct CatalogueLockLost;
 impl std::fmt::Display for CatalogueLockLost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("lock_lost")

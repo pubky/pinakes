@@ -199,7 +199,8 @@ refused while an import of another file is under way.
 `--update` runs an update now instead, after a finished full import (it reads the recent changes
 with the catalogue's limit: `--from` and `--limit` are refused with it; a configured limit below
 the cards stored needs `--force`, as the update may hand over to a full import with it). `--since` (RFC 3339) moves its
-position first: an update cut off earlier is set aside, and a full import an update asked for is no
+position first, under the lock the run then holds to its end, so no daemon starts an update in
+between: an update cut off earlier is set aside, and a full import an update asked for is no
 longer asked for; refused for a time to come, before a first full import has finished, while a
 full import is under way and while one asked for with `--request` waits. A `--since` more than
 five days back is held by the gap rule like any update's

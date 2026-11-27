@@ -65,6 +65,8 @@ struct Fixture {
     imports: AtomicUsize,
     /// Plan a full import at every step.
     always_import: AtomicBool,
+    /// The backend that held the catalogue's lock as each run started.
+    lock_holders: Mutex<Vec<Option<i32>>>,
     need: u64,
 }
 impl Fixture {
@@ -89,6 +91,7 @@ impl Fixture {
             request_during: AtomicBool::new(false),
             imports: AtomicUsize::new(0),
             always_import: AtomicBool::new(false),
+            lock_holders: Mutex::default(),
             need: 1000,
         }
     }
@@ -115,6 +118,8 @@ impl Importer for Fixture {
             .lock()
             .unwrap()
             .push(job.cursor().cloned());
+        let holder = lock_holder(job.pool(), self.catalogue).await;
+        self.lock_holders.lock().unwrap().push(holder);
         if self.panic_once.swap(false, Ordering::SeqCst) {
             panic!("the fixture importer panicked");
         }
@@ -1655,6 +1660,137 @@ async fn a_failure_after_the_catalogue_lock_is_gone_is_not_recorded(pool: PgPool
     assert_eq!((s.cards, s.error_count), (25, 0));
 }
 
+/// The backend that holds `catalogue`'s lock, if one does.
+async fn lock_holder(pool: &PgPool, catalogue: Catalogue) -> Option<i32> {
+    sqlx::query_scalar(
+        "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+    )
+    .bind(catalogue.lock_key())
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+/// End the session that holds `catalogue`'s lock (as a database restart does).
+async fn end_lock_session(pool: &PgPool, catalogue: Catalogue) {
+    let pid = lock_holder(pool, catalogue).await.expect("a lock holder");
+    let ended: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1, 5000)")
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert!(ended);
+}
+
+/// The catalogue lock is watched between steps too: an importer whose lock's session ends while
+/// it waits for its next run takes the lock again then, without running before its time, so a
+/// `catalogue drop` can't take a lock the daemon believes it holds.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_importer_that_loses_its_lock_while_it_waits_takes_it_again(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    // After its import nothing is due for an hour.
+    let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(5)));
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    until("the import", || async {
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.last_import_at.is_some() && s.phase == "idle")
+    })
+    .await;
+    // The task has planned its next step (an hour away) and waits.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = lock_holder(&pool, Catalogue::Wikidata)
+        .await
+        .expect("the task holds its lock while it waits");
+    end_lock_session(&pool, Catalogue::Wikidata).await;
+    until("the lock taken again", || async {
+        lock_holder(&pool, Catalogue::Wikidata)
+            .await
+            .is_some_and(|pid| pid != before)
+    })
+    .await;
+    // Nothing ran meanwhile, and nothing was recorded.
+    assert_eq!(fixture.started_from.lock().unwrap().len(), 1);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.last_error, s.cards), (0, None, 5));
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// A run by hand (`run_once`, `pinakesd catalogue import`) that fails once its catalogue lock's
+/// session has ended records nothing in the state row (another daemon may hold the row by then):
+/// it says the lock was lost, and the run resumes from its cursor at the next import.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_by_hand_that_fails_after_its_lock_went_records_nothing(pool: PgPool) {
+    let (mut ctx, _dir) = context(&pool, plenty());
+    // The lock's watch checks rarely here: the failure comes first.
+    ctx.pace.lock_check = Duration::from_secs(30);
+    let mut fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    fixture.fail_at_gate.store(true, Ordering::SeqCst);
+    let fixture = Arc::new(fixture);
+    let once = tokio::spawn({
+        let (fixture, ctx) = (fixture.clone(), ctx.clone());
+        async move { run::run_once(fixture, &ctx, Run::Import, |_| {}).await }
+    });
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    end_lock_session(&pool, Catalogue::Wikidata).await;
+    // The run fails now, with its catalogue lock gone.
+    gate.notify_one();
+    let err = tokio::time::timeout(DEADLINE, once)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("was lost"), "{err}");
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.last_error), (0, None));
+    assert_eq!(s.cursor, Some(json!({"next": 10})));
+}
+
+/// What a run by hand does first (`catalogue import wikidata --update --since` moves the
+/// position) runs under the catalogue's lock, and the run after it under the same lock, never let
+/// go in between: no daemon can take the catalogue between the two. A first step that fails runs
+/// nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_by_hand_does_its_first_step_under_its_own_lock(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(5)));
+    let failing = async { Err(anyhow::anyhow!("the position does not move")) };
+    let err = run::run_once_with(fixture.clone(), &ctx, Run::Import, false, failing, |_| {})
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("does not move"), "{err}");
+    assert!(fixture.started_from.lock().unwrap().is_empty());
+    assert!(lock_holder(&pool, Catalogue::Wikidata).await.is_none());
+    let first_holder = Arc::new(Mutex::new(None));
+    let first = {
+        let (pool, holder) = (pool.clone(), first_holder.clone());
+        async move {
+            // Another process (a daemon's task, a drop) can't take the lock now.
+            anyhow::ensure!(
+                SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
+                    .await?
+                    .is_none(),
+                "the lock is free during the first step"
+            );
+            *holder.lock().unwrap() = lock_holder(&pool, Catalogue::Wikidata).await;
+            Ok(())
+        }
+    };
+    let (state, _) = run::run_once_with(fixture.clone(), &ctx, Run::Import, false, first, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.cards, 5);
+    let first = first_holder.lock().unwrap().expect("a lock holder");
+    assert_eq!(fixture.lock_holders.lock().unwrap()[..], [Some(first)]);
+}
+
 /// A full import that reads under half the cards the catalogue holds (a dump cut at a clean
 /// boundary, an empty answer) removes nothing: it fails (`shrunk`) with its cursor kept, and the
 /// next try fails again. It goes through when the importer says the drop is expected, when the
@@ -1806,9 +1942,16 @@ async fn a_forced_import_and_a_lower_limit_go_through_the_floor(pool: PgPool) {
     let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(25)));
     assert_eq!(run::step(&*fixture, &ctx).await.unwrap(), Next::Again);
     fixture.items.lock().unwrap().truncate(3);
-    let (state, _) = run::run_once_with(fixture.clone(), &ctx, Run::Import, true, |_| {})
-        .await
-        .unwrap();
+    let (state, _) = run::run_once_with(
+        fixture.clone(),
+        &ctx,
+        Run::Import,
+        true,
+        async { Ok(()) },
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert_eq!(
         (state.cards, count(&pool, Catalogue::Wikidata).await),
         (3, 3)
