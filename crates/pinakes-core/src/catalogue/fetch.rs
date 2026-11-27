@@ -533,10 +533,24 @@ where
     F: FnOnce(&mut dyn FnMut(Vec<Card>) -> bool) -> Result<()> + Send + 'static,
 {
     let (tx, rx) = tokio::sync::mpsc::channel(4);
+    // The receiver dropped (the run cut off) stops the reader's downloads within a moment, also
+    // in a wait (`bulk::stopping_with`).
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done, finished) = tokio::sync::oneshot::channel::<()>();
+    let (watched, flag) = (tx.clone(), stop.clone());
+    tokio::spawn(async move {
+        tokio::select! {
+            () = watched.closed() => flag.store(true, std::sync::atomic::Ordering::Relaxed),
+            _ = finished => {}
+        }
+    });
     tokio::task::spawn_blocking(move || {
+        let _done = done;
         let sent = tx.clone();
         let mut sink = move |part: Vec<Card>| sent.blocking_send(Ok(part)).is_ok();
-        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(&mut sink)));
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bulk::stopping_with(stop, || read(&mut sink))
+        }));
         let failed = match read {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(error),

@@ -1401,13 +1401,11 @@ impl Wikidata {
                 )
             }
             Source::File { path, .. } => Box::new(open_at(path, first_byte)?),
-            Source::Stream { dump, .. } => Box::new(net::stream(
-                client,
-                dump,
-                first_byte,
-                None,
-                self.slow_window,
-            )?),
+            // Read ahead of the decoders, as many reads as Wikimedia's chunks were before.
+            Source::Stream { dump, .. } => Box::new(
+                net::stream(client, dump, first_byte, None, self.slow_window)?
+                    .read_ahead(net::READ_AHEAD),
+            ),
         };
         let mut pipeline = pipeline::start(source, cursor.at, self.threads);
         // The limit the import started with, also when it resumes after the configuration

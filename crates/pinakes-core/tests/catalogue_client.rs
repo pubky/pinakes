@@ -379,3 +379,182 @@ async fn the_client_names_its_contact_and_takes_bytes_as_served() {
         .unwrap();
     assert!(String::from_utf8(said).unwrap().contains("gzip"));
 }
+
+/// A server that asks to wait half a minute, counting what it is asked.
+async fn busy() -> (String, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    let base = serve(Router::new().route(
+        "/busy",
+        get(move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("retry-after", "30")],
+                    "busy",
+                )
+            }
+        }),
+    ))
+    .await;
+    (format!("{base}/busy"), hits)
+}
+
+/// A known file read from its end asks nothing (a range already read whole).
+#[tokio::test]
+async fn a_range_read_whole_asks_nothing() {
+    let (url, hits) = busy().await;
+    let client = fetch::client("ops@example.org", &[]).unwrap();
+    let handle = tokio::runtime::Handle::current();
+    let url = url::Url::parse(&url).unwrap();
+    let read = tokio::task::spawn_blocking(move || {
+        let mut out = vec![];
+        let end = Download::new(client.clone(), handle.clone(), url.clone(), 100)
+            .known(10, "\"v\"")
+            .from(10)
+            .read_to_end(&mut out)?;
+        let empty = Download::new(client, handle, url, 100)
+            .known(10, "\"v\"")
+            .from(4)
+            .until(4)
+            .read_to_end(&mut out)?;
+        std::io::Result::Ok(end + empty)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(read, 0);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+/// A stop is heard within about a second wherever a download waits: a `Retry-After`, the pause
+/// before a resume, a reader that read ahead and was dropped, a file catalogue's reader whose run
+/// is gone.
+#[tokio::test]
+async fn a_stop_is_heard_in_every_wait() {
+    let handle = tokio::runtime::Handle::current();
+    let client = fetch::client("ops@example.org", &[]).unwrap();
+    let stopped_soon =
+        |flag: Arc<std::sync::atomic::AtomicBool>,
+         read: tokio::task::JoinHandle<std::io::Result<usize>>| async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let started = Instant::now();
+            flag.store(true, Ordering::SeqCst);
+            let failed = read.await.unwrap().unwrap_err();
+            assert_eq!(io_class(&failed), "stopped");
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+        };
+    // A `Retry-After` of half a minute.
+    let (busy_url, _) = busy().await;
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (c, h, u, f) = (
+        client.clone(),
+        handle.clone(),
+        url::Url::parse(&busy_url).unwrap(),
+        flag.clone(),
+    );
+    let read = tokio::task::spawn_blocking(move || {
+        Download::new(c, h, u, 100).stop(f).read_to_end(&mut vec![])
+    });
+    stopped_soon(flag, read).await;
+
+    // The pause before a resume: a body that breaks off, retried after half a minute.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let broken = format!("http://{}/file", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nETag: \"v\"\r\n\r\n0123456789",
+                )
+                .await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (c, h, u, f) = (
+        client.clone(),
+        handle.clone(),
+        url::Url::parse(&broken).unwrap(),
+        flag.clone(),
+    );
+    let read = tokio::task::spawn_blocking(move || {
+        Download::new(c, h, u, 1000)
+            .retry_wait(Duration::from_secs(30))
+            .stop(f)
+            .read_to_end(&mut vec![])
+    });
+    stopped_soon(flag, read).await;
+
+    // A reader that read ahead, dropped: its download is stopped.
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (c, h, u, f) = (
+        client.clone(),
+        handle.clone(),
+        url::Url::parse(&busy_url).unwrap(),
+        flag.clone(),
+    );
+    let ahead =
+        tokio::task::spawn_blocking(move || Download::new(c, h, u, 100).stop(f).read_ahead(4))
+            .await
+            .unwrap();
+    drop(ahead);
+    assert!(flag.load(Ordering::SeqCst));
+
+    // A file catalogue's reader whose run is gone (the receiver dropped) in a wait.
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+    let (c, u) = (client.clone(), busy_url.clone());
+    let parts = fetch::batches(move |_sink| {
+        let input = Input::parse(&u).unwrap();
+        let handle = tokio::runtime::Handle::current();
+        let opened = input.open(&c, &handle, 100).map(|_| ());
+        let _ = ended_tx.send(Instant::now());
+        opened
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let dropped = Instant::now();
+    drop(parts);
+    let ended = tokio::task::spawn_blocking(move || ended_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the reader ended");
+    assert!(ended.duration_since(dropped) < Duration::from_secs(3));
+}
+
+/// A download read ahead gives its bytes in order and whole.
+#[tokio::test]
+async fn a_download_read_ahead_gives_its_bytes_in_order() {
+    let body: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+    let served = body.clone();
+    let base = serve(Router::new().route(
+        "/file",
+        get(move || {
+            let served = served.clone();
+            async move { ([("etag", "\"v\"")], served) }
+        }),
+    ))
+    .await;
+    let client = fetch::client("ops@example.org", &[]).unwrap();
+    let handle = tokio::runtime::Handle::current();
+    let url = url::Url::parse(&format!("{base}/file")).unwrap();
+    let read = tokio::task::spawn_blocking(move || {
+        let mut out = vec![];
+        Download::new(client, handle, url, 2_000_000)
+            .read_ahead(4)
+            .read_to_end(&mut out)
+            .map(|_| out)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(read, body);
+}

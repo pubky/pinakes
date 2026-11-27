@@ -224,8 +224,8 @@ async fn get_text(client: &super::fetch::Client, url: &str) -> Result<Option<Str
     Ok(body.map(|b| String::from_utf8_lossy(&b).into_owned()))
 }
 /// The MD5 OpenStreetMap's file servers publish beside a bulk file (`<file>.md5`: an `md5sum`
-/// line naming it), the planet's and Geofabrik's; none when none is published or it names
-/// another file.
+/// line naming it), the planet's and Geofabrik's; none when none is published (a 404). One that
+/// names no MD5 of this file is a failure (`checksum`): the file is not the one it lists.
 async fn published_md5(client: &super::fetch::Client, file: &url::Url) -> Result<Option<String>> {
     let Some(name) = file.path_segments().and_then(|mut s| s.next_back()) else {
         return Ok(None);
@@ -235,10 +235,14 @@ async fn published_md5(client: &super::fetch::Client, file: &url::Url) -> Result
     let Some(text) = client.small(sums.as_str(), 4096).await? else {
         return Ok(None);
     };
-    Ok(super::bulk::sums(&String::from_utf8_lossy(&text), 32)
+    let listed = super::bulk::sums(&String::from_utf8_lossy(&text), 32)
         .into_iter()
         .find(|(listed, _)| listed == name)
-        .map(|(_, hex)| hex))
+        .map(|(_, hex)| hex);
+    match listed {
+        Some(hex) => Ok(Some(hex)),
+        None => Err(Failure::new("checksum").at(host_of(file.as_str())).into()),
+    }
 }
 /// The largest bulk file read (the planet is about 96 GB).
 const MAX_FILE: u64 = 250_000_000_000;
@@ -279,8 +283,14 @@ async fn download(
         tokio::runtime::Handle::current(),
         url::Url::parse(url)?,
     );
+    // A run cut off (this future dropped) stops the download's thread within a moment.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _stop = super::bulk::StopOnDrop(stop.clone());
     let opened = tokio::task::spawn_blocking(move || {
-        super::bulk::Download::open(http, handle, parsed, MAX_FILE, Duration::from_secs(5))
+        super::bulk::Download::new(http, handle, parsed, MAX_FILE)
+            .retry_wait(Duration::from_secs(5))
+            .stop(stop)
+            .start()
     })
     .await
     .map_err(|_| Failure::new("panic"))??;
@@ -294,7 +304,7 @@ async fn download(
         .unwrap_or_else(|| url::Url::parse(url).expect("parsed above"));
     let want = published_md5(client, &answered).await?;
     if want.is_none() {
-        tracing::info!(catalogue = "osm", host = %host_of(answered.as_str()), "no checksum is published beside the file; TLS and its length check it");
+        tracing::warn!(catalogue = "osm", host = %host_of(answered.as_str()), "no checksum is published beside the file (no .md5); the download goes on, checked by TLS and its length only");
     }
     tracing::info!(
         catalogue = "osm",
@@ -1304,8 +1314,13 @@ impl Importer for OsmImporter {
                 url::Url::parse(&url)?,
                 local.clone(),
             );
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _stop = super::bulk::StopOnDrop(stop.clone());
             let opened = tokio::task::spawn_blocking(move || {
-                super::bulk::Download::open(c, handle, at, MAX_CHANGES, Duration::from_secs(5))
+                super::bulk::Download::new(c, handle, at, MAX_CHANGES)
+                    .retry_wait(Duration::from_secs(5))
+                    .stop(stop)
+                    .start()
             })
             .await
             .map_err(|_| Failure::new("panic"))?;

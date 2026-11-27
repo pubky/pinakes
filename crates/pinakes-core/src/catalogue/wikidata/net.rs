@@ -33,6 +33,8 @@ const TRIES: u32 = 6;
 /// back). In the daemon they also take the egress's turn for `www.wikidata.org`
 /// ([`share_egress_pace`]): one request at a time with the resolver's, at its 200 a minute.
 const API_INTERVAL: Duration = Duration::from_millis(300);
+/// The reads of 64 KiB a dump stream reads ahead of the decoders (4 MiB).
+pub const READ_AHEAD: usize = 64;
 /// The first wait before a broken dump read is asked for again (it doubles each time).
 const RETRY_WAIT: Duration = Duration::from_secs(2);
 
@@ -213,7 +215,10 @@ pub async fn read_range(
         // Without a validator a file replaced between two ranges would be spliced.
         return Err(failure("download", &dump.url).into());
     }
-    let mut body = stream(client, dump, from, Some(to), slow)?;
+    // A run cut off (this future dropped) stops the range's thread within a moment.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _stop = bulk::StopOnDrop(stop.clone());
+    let mut body = stream(client, dump, from, Some(to), slow)?.stop(stop);
     let path = file.to_owned();
     tokio::task::spawn_blocking(move || -> Result<u64> {
         out.seek(std::io::SeekFrom::Start(from))

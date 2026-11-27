@@ -933,8 +933,8 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
 }
 
 /// A bulk file is checked against the MD5 published beside the file its answer came from
-/// (`<file>.md5`): one that differs is never used (`checksum`, no file left), one that matches is;
-/// with none published, or one naming another file, the download goes on.
+/// (`<file>.md5`): one that differs, or a checksum file naming another file, is never used
+/// (`checksum`, no file left), one that matches is; with none published the download goes on.
 #[tokio::test]
 async fn a_file_whose_published_md5_differs_is_not_used() {
     use md5::Digest as _;
@@ -991,7 +991,16 @@ async fn a_file_whose_published_md5_differs_is_not_used() {
     );
     assert!(!dest.exists() && !dir.join("import.osm.part").exists());
     assert!(!dir.join("import.osm.done").exists());
-    for file in ["x-latest", "none", "other"] {
+    // A checksum file that names another file: this one is not the file it lists.
+    let failed = download(&client, &format!("{base}/other.osm.pbf"), &dest, |_| Ok(()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed.downcast_ref::<Failure>().map(|f| f.class),
+        Some("checksum")
+    );
+    assert!(!dest.exists());
+    for file in ["x-latest", "none"] {
         let _ = std::fs::remove_file(dir.join("import.osm.done"));
         let _ = std::fs::remove_file(&dest);
         assert!(

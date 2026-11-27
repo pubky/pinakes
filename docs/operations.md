@@ -1988,8 +1988,10 @@ times, waiting as its `Retry-After` says; one that asks for more than five minut
 resumes at the byte it reached, under `If-Range`: a file replaced meanwhile fails `dump_changed`,
 one gone `dump_gone`, and a server that brings less than 8 MB in ten minutes of waiting fails
 `download`.
-Without `http.contact` no importer starts, and a run that finds none (a by-hand one) waits for it,
-as one short of disk does: `catalogue status` shows `needs http.contact` for every catalogue alike.
+Without `http.contact` the daemon starts no importer and `catalogue status` shows `needs
+http.contact` for every catalogue alike; a daemon's run that finds none waits for it, as one short
+of disk does. `catalogue import` refuses without it unless it reads only local `--from` files
+(Wikidata and Tranco always ask upstream, so they are refused).
 
 `--limit N` is Tranco's: at most N homepages are read (MusicBrainz's is its card limit).
 `--force` is MusicBrainz's alone; the other catalogues refuse it. `catalogue import tranco` reads homepages through an egress of its own, apart from a running daemon's per-host pace: stop the daemon (or switch Tranco off there) first. A

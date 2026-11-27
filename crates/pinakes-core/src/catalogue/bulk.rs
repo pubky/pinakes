@@ -9,6 +9,8 @@ use super::{failure::Failure, fetch};
 use anyhow::{bail, Result};
 use sha2::Digest;
 use std::io::{self, BufRead, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// One entry of a tar archive as [`Tar::next_entry`] gives it: its path and its size in bytes.
@@ -616,6 +618,30 @@ pub struct Download {
     started: std::time::Instant,
     deadline: Option<Duration>,
     speed: Speed,
+    /// Set when the run stops: heard before and during every wait (a `stopped` failure).
+    stop: Option<Arc<AtomicBool>>,
+}
+/// How often a wait listens for a stop.
+const STOP_SLICE: Duration = Duration::from_millis(100);
+thread_local! {
+    /// The stop of the downloads made on this thread ([`stopping_with`]).
+    static THREAD_STOP: std::cell::RefCell<Option<Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+/// Runs `f` with `flag` as the stop of every [`Download`] made on this thread meanwhile that
+/// names none of its own ([`Download::stop`]): a reader of a run's file hears the run end.
+pub fn stopping_with<T>(flag: Arc<AtomicBool>, f: impl FnOnce() -> T) -> T {
+    let before = THREAD_STOP.with(|s| s.replace(Some(flag)));
+    let out = f();
+    THREAD_STOP.with(|s| *s.borrow_mut() = before);
+    out
+}
+/// Sets its flag when dropped: a run's future cut off stops the downloads it runs on blocking
+/// threads.
+pub struct StopOnDrop(pub Arc<AtomicBool>);
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 impl Download {
     /// How many times in a row a broken body is asked for again.
@@ -670,6 +696,97 @@ impl Download {
             started: std::time::Instant::now(),
             deadline: Some(Self::DEADLINE),
             speed: Speed::new(SLOW_WINDOW),
+            stop: THREAD_STOP.with(|s| s.borrow().clone()),
+        }
+    }
+    /// Stop once `flag` is set: before and during every wait (a request, its `Retry-After`, a
+    /// chunk, the pause before a resume), within [`STOP_SLICE`]: `stopped`.
+    pub fn stop(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.stop = Some(flag);
+        self
+    }
+    /// Asks for the file now (blocking: call it on a `spawn_blocking` thread).
+    pub fn start(mut self) -> Result<Self> {
+        self.connect()?;
+        Ok(self)
+    }
+    fn stopped(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    }
+    /// `future` run to its end on the runtime, or none once the stop is set.
+    fn wait_for<F: std::future::Future>(&self, future: F) -> Option<F::Output> {
+        let Some(flag) = self.stop.clone() else {
+            return Some(self.handle.block_on(future));
+        };
+        if flag.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.handle.block_on(async move {
+            let stopped = async {
+                while !flag.load(Ordering::Relaxed) {
+                    tokio::time::sleep(STOP_SLICE).await;
+                }
+            };
+            tokio::select! {
+                out = future => Some(out),
+                () = stopped => None,
+            }
+        })
+    }
+    /// Sleeps `wait` in slices; false when the stop was set meanwhile.
+    fn pause(&self, wait: Duration) -> bool {
+        let until = std::time::Instant::now() + wait;
+        loop {
+            if self.stopped() {
+                return false;
+            }
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return true;
+            }
+            std::thread::sleep(left.min(STOP_SLICE));
+        }
+    }
+    /// Read ahead of the reader on a thread of its own, at most `depth` reads of 64 KiB waiting:
+    /// the network is read while the reader works. Dropping the reader stops the download.
+    pub fn read_ahead(mut self, depth: usize) -> ReadAhead {
+        let flag = self
+            .stop
+            .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(depth.max(1));
+        let spawned = std::thread::Builder::new()
+            .name("catalogue-read-ahead".into())
+            .spawn(move || {
+                let mut body = self;
+                loop {
+                    let mut buf = vec![0u8; 64 << 10];
+                    match body.read(&mut buf) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            buf.truncate(n);
+                            if tx.send(Ok(buf)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            return;
+                        }
+                    }
+                }
+            });
+        let failed = spawned
+            .err()
+            .map(|_| io::Error::other(Failure::new("read")));
+        ReadAhead {
+            rx,
+            chunk: Vec::new(),
+            at: 0,
+            failed,
+            _stop: StopOnDrop(flag),
         }
     }
     /// The first wait before a retry (it doubles with each one).
@@ -732,7 +849,7 @@ impl Download {
             headers.push((reqwest::header::RANGE, range));
             headers.push((reqwest::header::IF_RANGE, validator.clone()));
         }
-        let sent = self.handle.block_on(self.client.send_with(
+        let sent = self.wait_for(self.client.send_with(
             reqwest::Method::GET,
             self.url.as_str(),
             &headers,
@@ -740,8 +857,9 @@ impl Download {
             self.retry_wait,
         ));
         let response = match sent {
-            Ok((response, _)) => response,
-            Err(error) => {
+            None => bail!(Failure::new("stopped")),
+            Some(Ok((response, _))) => response,
+            Some(Err(error)) => {
                 let class = error
                     .downcast_ref::<Failure>()
                     .map_or("download", |f| f.class);
@@ -826,7 +944,9 @@ impl Download {
                 return Err(io::Error::other(self.failure("download")));
             }
             self.retries += 1;
-            std::thread::sleep(self.retry_wait * 2u32.pow(self.retries.min(6) - 1));
+            if !self.pause(self.retry_wait * 2u32.pow(self.retries.min(6) - 1)) {
+                return Err(io::Error::other(Failure::new("stopped")));
+            }
             match self.connect() {
                 Ok(()) => return Ok(()),
                 Err(_) if self.hopeless => return Err(io::Error::other(self.failure("download"))),
@@ -847,6 +967,10 @@ impl Download {
 }
 impl Read for Download {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // A known file read from its end (a range already read whole): nothing to ask.
+        if !self.connected && self.known && self.offset >= self.stop_at() {
+            return Ok(0);
+        }
         if !self.connected {
             self.connect().map_err(|e| match e.downcast::<Failure>() {
                 Ok(f) => io::Error::other(f),
@@ -875,9 +999,32 @@ impl Read for Download {
                 return Ok(0);
             };
             let asked = std::time::Instant::now();
-            let next = self
-                .handle
-                .block_on(async { tokio::time::timeout(Self::CHUNK_WAIT, response.chunk()).await });
+            let handle = self.handle.clone();
+            let next = match self.stop.clone() {
+                None => handle.block_on(async {
+                    tokio::time::timeout(Self::CHUNK_WAIT, response.chunk()).await
+                }),
+                Some(flag) => {
+                    let waited = handle.block_on(async {
+                        let stopped = async {
+                            while !flag.load(Ordering::Relaxed) {
+                                tokio::time::sleep(STOP_SLICE).await;
+                            }
+                        };
+                        tokio::select! {
+                            out = tokio::time::timeout(Self::CHUNK_WAIT, response.chunk()) => Some(out),
+                            () = stopped => None,
+                        }
+                    });
+                    match waited {
+                        Some(next) => next,
+                        None => {
+                            self.response = None;
+                            return Err(io::Error::other(Failure::new("stopped")));
+                        }
+                    }
+                }
+            };
             match next {
                 Ok(Ok(Some(chunk))) => {
                     if !self.speed.read(chunk.len() as u64, asked.elapsed()) {
@@ -898,6 +1045,37 @@ impl Read for Download {
                 }
             }
         }
+    }
+}
+
+/// [`Download::read_ahead`]'s reader: the reads the download's thread made, in order.
+pub struct ReadAhead {
+    rx: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    chunk: Vec<u8>,
+    at: usize,
+    /// The thread could not start.
+    failed: Option<io::Error>,
+    _stop: StopOnDrop,
+}
+impl Read for ReadAhead {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(e) = self.failed.take() {
+            return Err(e);
+        }
+        while self.at >= self.chunk.len() {
+            match self.rx.recv() {
+                Ok(Ok(chunk)) => {
+                    self.chunk = chunk;
+                    self.at = 0;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.chunk.len() - self.at);
+        buf[..n].copy_from_slice(&self.chunk[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
     }
 }
 

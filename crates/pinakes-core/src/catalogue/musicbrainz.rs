@@ -1383,13 +1383,12 @@ impl ReadPlan {
         match &self.source {
             Source::Mirror(base) => {
                 let url = base.join(&format!("{}/{file}", self.version))?;
-                Ok(Box::new(bulk::Download::open(
-                    self.client.clone(),
-                    self.handle.clone(),
-                    url,
-                    FILE_CAP,
-                    self.retry_wait,
-                )?))
+                Ok(Box::new(
+                    bulk::Download::new(self.client.clone(), self.handle.clone(), url, FILE_CAP)
+                        .retry_wait(self.retry_wait)
+                        .stop(self.stop.clone())
+                        .start()?,
+                ))
             }
             Source::Dir(dir) => {
                 let path = dir.join(file);
