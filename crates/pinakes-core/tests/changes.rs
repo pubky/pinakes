@@ -2400,3 +2400,191 @@ async fn an_alias_assigned_or_released_beside_a_save_of_its_root_never_deadlocks
         assert_eq!(aliased, step == "assign");
     }
 }
+
+/// A save that names a venue and the orphan cleanup that may delete it never deadlock, in either
+/// order. The venue is an orphan past its grace and the event a referenced card. The save's
+/// foreign key takes the venue's row `FOR KEY SHARE`, a lock the cleanup's `FOR UPDATE` of its
+/// batch conflicts with; the two never hold one each, because the cleanup takes the write order
+/// exclusively and a save shares it (`store::lock_writers`). Save first (held by a test trigger
+/// between its row lock and its update): the cleanup waits, then finds the venue named and keeps
+/// it. Cleanup first (held before its delete of the venue): the save waits, then its key refuses
+/// the venue that is gone (no card names a deleted resource), and the event's next reading, which
+/// records the venue again, saves. (A reading holds the venue it records for the save,
+/// `store::ensure_venue`, so a real save meets a deleted venue only with `limits.grace_days` 0.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_save_naming_a_venue_and_the_orphan_cleanup_never_deadlock(pool: PgPool) {
+    use pinakes_core::event::Venue;
+    const PAUSE: i64 = 23170;
+    let event = "https://example.org/venue-race/event";
+    let venue = "https://example.org/venue-race/hall";
+    sqlx::query(&format!(
+        "CREATE FUNCTION test_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared({PAUSE}); IF TG_OP='DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let event_id = store::ensure_resource(&pool, event).await.unwrap();
+    let named = |held: bool, venue_id: &str| {
+        let mut page = ResourceMeta::new(event, "jsonld", 3600);
+        page.set_type("MusicEvent");
+        page.name = Some(if held { "Gig (held)" } else { "Gig" }.into());
+        page.event.venue = Some(Venue {
+            resource_id: Some(venue_id.to_owned()),
+            ..Default::default()
+        });
+        page
+    };
+    let names = || {
+        let pool = pool.clone();
+        let event_id = event_id.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT venue_id FROM resource WHERE id=$1")
+                .bind(event_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    for first in ["save", "cleanup"] {
+        // The event is referenced and names no venue; the venue lost its last reference a month
+        // ago.
+        let venue_id = store::ensure_resource(&pool, venue).await.unwrap();
+        sqlx::query("UPDATE resource SET orphaned_at=NULL,venue_id=NULL WHERE id=$1")
+            .bind(&event_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE resource SET created_at=now()-interval '40 days',orphaned_at=now()-interval '30 days' WHERE id=$1")
+            .bind(&venue_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(if first == "save" {
+            "CREATE TRIGGER test_pause BEFORE UPDATE ON resource FOR EACH ROW WHEN (NEW.name='Gig (held)') EXECUTE FUNCTION test_pause()"
+        } else {
+            "CREATE TRIGGER test_pause BEFORE DELETE ON resource FOR EACH ROW WHEN (OLD.uri='https://example.org/venue-race/hall') EXECUTE FUNCTION test_pause()"
+        })
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut held = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(PAUSE)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let save = {
+            let (pool, event_id, page) = (pool.clone(), event_id.clone(), named(true, &venue_id));
+            move || {
+                tokio::spawn(async move { store::save_document(&pool, &event_id, 0, &page).await })
+            }
+        };
+        let cleanup = {
+            let pool = pool.clone();
+            move || tokio::spawn(async move { store::cleanup(&pool, 7, 24).await })
+        };
+        let (saving, cleaning) = if first == "save" {
+            let saving = save();
+            common::lock_waiters_reach(&pool, 1, "the held save").await;
+            let cleaning = cleanup();
+            common::lock_waiters_reach(&pool, 2, "the cleanup behind the save").await;
+            (saving, cleaning)
+        } else {
+            let cleaning = cleanup();
+            common::lock_waiters_reach(&pool, 1, "the held cleanup").await;
+            let saving = save();
+            common::lock_waiters_reach(&pool, 2, "the save behind the cleanup").await;
+            (saving, cleaning)
+        };
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(PAUSE)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let saved = tokio::time::timeout(Duration::from_secs(20), saving)
+            .await
+            .unwrap_or_else(|_| panic!("{first} first: the save never ended"))
+            .unwrap();
+        let cleaned = tokio::time::timeout(Duration::from_secs(20), cleaning)
+            .await
+            .unwrap_or_else(|_| panic!("{first} first: the cleanup never ended"))
+            .unwrap();
+        cleaned.unwrap_or_else(|e| panic!("{first} first: the cleanup: {e:#}"));
+        sqlx::query("DROP TRIGGER test_pause ON resource")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let venue_left: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+                .bind(&venue_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if first == "save" {
+            saved.unwrap_or_else(|e| panic!("the save before the cleanup: {e:#}"));
+            assert!(venue_left, "the venue the save named stays");
+            assert_eq!(names().await, Some(venue_id.clone()));
+        } else {
+            let refused = format!("{:#}", saved.unwrap_err());
+            assert!(refused.contains("resource_venue_id_fkey"), "{refused}");
+            assert!(!venue_left, "the cleanup deleted the venue nothing named");
+            assert_eq!(names().await, None, "no card names the deleted venue");
+            // The next reading records the venue again, and saves.
+            let again = store::ensure_resource(&pool, venue).await.unwrap();
+            store::save_document(&pool, &event_id, 0, &named(false, &again))
+                .await
+                .unwrap();
+            assert_eq!(names().await, Some(again));
+        }
+    }
+}
+
+/// A venue an event is about to name is held for the event's save (`store::ensure_venue`): one
+/// that lost its last reference past its grace, recorded again for an event, is not deleted by a
+/// cleanup that runs before the event's save, so the save, whose key names it, saves.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_venue_recorded_for_an_event_is_kept_for_its_save(pool: PgPool) {
+    use pinakes_core::event::Venue;
+    let event = "https://example.org/venue-held/event";
+    let venue = "https://example.org/venue-held/hall";
+    let event_id = store::ensure_resource(&pool, event).await.unwrap();
+    sqlx::query("UPDATE resource SET orphaned_at=NULL WHERE id=$1")
+        .bind(&event_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let venue_id = store::ensure_resource(&pool, venue).await.unwrap();
+    sqlx::query("UPDATE resource SET created_at=now()-interval '40 days',orphaned_at=now()-interval '30 days' WHERE id=$1")
+        .bind(&venue_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The event's reading records the venue; the cleanup runs before the event's save.
+    assert_eq!(store::ensure_venue(&pool, venue).await.unwrap(), venue_id);
+    store::cleanup(&pool, 7, 24).await.unwrap();
+    let kept: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+        .bind(&venue_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        kept,
+        "the cleanup deleted the venue the event is about to name"
+    );
+    let mut page = ResourceMeta::new(event, "jsonld", 3600);
+    page.set_type("MusicEvent");
+    page.name = Some("Gig".into());
+    page.event.venue = Some(Venue {
+        resource_id: Some(venue_id.clone()),
+        ..Default::default()
+    });
+    store::save_document(&pool, &event_id, 0, &page)
+        .await
+        .unwrap();
+    let named: Option<String> = sqlx::query_scalar("SELECT venue_id FROM resource WHERE id=$1")
+        .bind(&event_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(named, Some(venue_id));
+}

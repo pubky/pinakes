@@ -921,7 +921,11 @@ run whose batch hit a database deadlock twice (logged), are left for the next ru
 | A venue of a card or an occurrence | As long as something names it |
 
 A child or venue whose holder is deleted, and a venue its card or occurrence stops naming, keeps the
-full grace counted from its creation, never the preview grace.
+full grace counted from its creation, never the preview grace. A card or occurrence never names a
+deleted venue: the database refuses it. A reading that records an event's venue holds the venue for
+the event's save (its grace counted again from then), so the cleanup does not delete it in between.
+With `limits.grace_days` 0 nothing holds it: a save whose venue the cleanup deleted meanwhile fails
+like any failed save and is retried, and the next reading records the venue again.
 
 ### New previews
 

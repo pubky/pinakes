@@ -8,6 +8,27 @@ use sqlx::{PgPool, Postgres, Transaction};
 pub async fn ensure_resource(pool: &PgPool, uri: &str) -> Result<String> {
     Ok(ensure_resource_created(pool, uri).await?.0)
 }
+/// `ensure_resource` for a venue an event is about to name (`venue_id`): the row is held for the
+/// event's save, its orphan grace counted again from now (`limits.grace_days`), so the orphan
+/// cleanup cannot delete it between this call and the save, whose foreign key would then refuse
+/// the save. A row the cleanup deleted between the two statements here is made again.
+pub async fn ensure_venue(pool: &PgPool, uri: &str) -> Result<String> {
+    for _ in 0..3 {
+        let id = ensure_resource(pool, uri).await?;
+        sqlx::query("UPDATE resource SET orphaned_at=greatest(orphaned_at,now()) WHERE id=$1 AND orphaned_at IS NOT NULL")
+            .bind(&id)
+            .execute(pool)
+            .await?;
+        let held: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource WHERE id=$1)")
+            .bind(&id)
+            .fetch_one(pool)
+            .await?;
+        if held {
+            return Ok(id);
+        }
+    }
+    anyhow::bail!("a venue was deleted each time it was recorded")
+}
 /// `ensure_resource`, and whether this call created the row (another may have just done so).
 pub async fn ensure_resource_created(pool: &PgPool, uri: &str) -> Result<(String, bool)> {
     let (id, uri, _) = identity(uri)?;
@@ -444,7 +465,10 @@ pub(crate) enum WriteOrder {
     /// save, which would deadlock when the save's own trigger then writes the same mark. A mark
     /// followed by an update of the resource's row (the group triggers `mark_group_dirty` and
     /// `mark_named_group_dirty`) locks the row `FOR NO KEY UPDATE` before marking, so it waits
-    /// for the save first. The orphan cleanup, which deletes rows, locks them `FOR UPDATE`.
+    /// for the save first. The orphan cleanup, which deletes rows, locks them `FOR UPDATE`. A save
+    /// that names a venue anew (`venue_id`) also takes the venue's row `FOR KEY SHARE`, its
+    /// foreign key's check: the cleanup's `FOR UPDATE` never meets it, as the cleanup takes the
+    /// write order exclusively.
     Shared,
     /// The transaction locks several resources' rows in an order a shared writer may meet the
     /// other way round (orphans and what deleting them reaches, a reset of every reference, a

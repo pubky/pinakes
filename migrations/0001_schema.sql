@@ -37,7 +37,9 @@ CREATE TABLE resource (
     point geometry(Point,4326),
     start_at timestamp with time zone,
     end_at timestamp with time zone,
-    venue_id text,
+    -- The venue's resource (`doc.event.venue.resource_id`). A venue anything names is never
+    -- deleted (the orphan cleanup skips it, and the key refuses it).
+    venue_id text CONSTRAINT resource_venue_id_fkey REFERENCES resource(id),
     doc jsonb NOT NULL DEFAULT '{}' CONSTRAINT resource_doc_check CHECK (octet_length(doc::text) <= 8192),
     search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(doc->>'description', ''))) STORED,
     -- The route that reads it: one of `resolver::ROUTES` or `cards::KINDS` (a test holds the list
@@ -73,7 +75,11 @@ CREATE TABLE resource (
     -- Bumped by any change grouping reads (groups::fence).
     group_revision bigint NOT NULL DEFAULT 0,
     -- The catalogue card the card is built from (`catalogue_card.id`), while it is: such a row is
-    -- never fetched (`keep_catalogue_backed`); it follows its catalogue card instead.
+    -- never fetched (`keep_catalogue_backed`); it follows its catalogue card instead. No foreign
+    -- key: an import removes cards in bulk while rows still name them, and the removal marks those
+    -- rows (`catalogue_cards_deleted`), whose check (`catalogue::join::drain`) builds them again or
+    -- gives them back to the fetch queue. A key would refuse the removal, or, cleared on delete,
+    -- leave the rows final and out of the queue.
     catalogue_card bigint,
     CONSTRAINT resource_event_boundary CHECK (event_boundary(doc) AND (coalesce(doc #>> '{venue,location_source}' NOT IN ('geocoded', 'osm'), true) OR point IS NULL)),
     CONSTRAINT resource_event_status CHECK (doc->>'event_status' IS NULL OR doc->>'event_status' IN ('scheduled', 'cancelled', 'postponed', 'rescheduled', 'moved_online')),
@@ -371,7 +377,8 @@ CREATE TABLE occurrence (
     start_at timestamp with time zone NOT NULL,
     end_at timestamp with time zone,
     name text,
-    venue_id text,
+    -- The venue's resource, as `resource.venue_id`.
+    venue_id text CONSTRAINT occurrence_venue_id_fkey REFERENCES resource(id),
     status text NOT NULL,
     url text,
     doc jsonb NOT NULL DEFAULT '{}',

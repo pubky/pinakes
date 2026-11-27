@@ -301,3 +301,38 @@ async fn typed_values_are_stored_as_their_types(pool: PgPool) {
     }
     place("{1,2,3,4}", many).await.unwrap();
 }
+
+/// A venue that a card or an occurrence names cannot be deleted: each names it by a key.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_named_venue_cannot_be_deleted(pool: PgPool) {
+    sqlx::query("INSERT INTO resource(id,uri) VALUES(md5('venue'),'https://example.org/venue'),(md5('hall'),'https://example.org/hall'),(md5('event'),'https://example.org/event')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource SET venue_id=md5('venue') WHERE id=md5('event')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO occurrence(resource_id,uid,start_at,status,venue_id) VALUES(md5('event'),'u1',now(),'scheduled',md5('hall'))")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (venue, key) in [
+        ("venue", "resource_venue_id_fkey"),
+        ("hall", "occurrence_venue_id_fkey"),
+    ] {
+        let refused = sqlx::query("DELETE FROM resource WHERE id=md5($1)")
+            .bind(venue)
+            .execute(&pool)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains(key), "{venue}: {refused}");
+    }
+    let named = sqlx::query("UPDATE occurrence SET venue_id=md5('gone')")
+        .execute(&pool)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(named.contains("occurrence_venue_id_fkey"), "{named}");
+}
