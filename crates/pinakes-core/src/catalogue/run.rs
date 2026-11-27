@@ -394,7 +394,7 @@ impl<'a> Job<'a> {
             .with_context(|| Failure::new("disk").at(self.dir.display().to_string()))?;
         if free < need {
             return Err(Waits(format!(
-                "free disk: the {} needs {} under {}, {} free",
+                "{FREE_DISK} the {} needs {} under {}, {} free",
                 self.run.name(),
                 gigabytes(need),
                 self.dir.display(),
@@ -886,6 +886,10 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
     let mut lock: Option<SessionLock> = None;
     // Whether the last try found the lock held elsewhere: logged once, when that starts.
     let mut busy = false;
+    let mut waited = Waited {
+        catalogue,
+        since: None,
+    };
     loop {
         if *shutdown.borrow() {
             return;
@@ -922,6 +926,13 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             _ = shutdown.changed() => return,
             next = stepped => next,
         };
+        // Why the step waits, from the state row it wrote (none while another process holds the
+        // lock and the row): `pinakes_catalogue_waiting_seconds`.
+        let reason = match &next {
+            Ok(Next::Wait(_)) if lock.is_some() => waiting_reason(&ctx.pool, catalogue).await,
+            _ => None,
+        };
+        waited.note(reason);
         let wait = match next {
             Ok(Next::Again) => continue,
             Ok(Next::Wait(wait)) => wait,
@@ -993,6 +1004,51 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
                 "catalogue lock lost while the importer waits for its next step"
             );
         }
+    }
+}
+
+/// How long a task has waited for one reason (`pinakes_catalogue_waiting_seconds`).
+struct Waited {
+    catalogue: Catalogue,
+    /// The reason and when the task began waiting for it.
+    since: Option<(&'static str, std::time::Instant)>,
+}
+impl Waited {
+    /// After a step: it waits for `reason`, or does not wait.
+    fn note(&mut self, reason: Option<&'static str>) {
+        let name = self.catalogue.name();
+        if self.since.map(|(was, _)| was) != reason {
+            if let Some((was, _)) = self.since.take() {
+                crate::telemetry::catalogue_waiting(name, was, 0);
+            }
+            self.since = reason.map(|reason| (reason, std::time::Instant::now()));
+        }
+        if let Some((reason, at)) = self.since {
+            crate::telemetry::catalogue_waiting(name, reason, at.elapsed().as_secs());
+        }
+    }
+}
+/// The reason of the wait the catalogue's state row says (`waiting`): `turn`, `disk` or `other`;
+/// none when it says none (or can't be read).
+async fn waiting_reason(pool: &PgPool, catalogue: Catalogue) -> Option<&'static str> {
+    let waiting: Option<String> =
+        sqlx::query_scalar("SELECT waiting FROM catalogue_state WHERE catalogue=$1")
+            .bind(catalogue.name())
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()?;
+    waiting.as_deref().map(wait_reason)
+}
+/// What a `waiting` text is a wait for: the large-import turn (it holds [`TURN`]), free disk (it
+/// begins with [`FREE_DISK`]), or else (a setting the run needs).
+pub fn wait_reason(waiting: &str) -> &'static str {
+    if waiting.contains(TURN) {
+        "turn"
+    } else if waiting.starts_with(FREE_DISK) {
+        "disk"
+    } else {
+        "other"
     }
 }
 
@@ -1074,7 +1130,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     let free = (ctx.free_disk)(&dir).with_context(disk)?;
     if free < need {
         let why = format!(
-            "free disk: the {} needs {} under {}, {} free",
+            "{FREE_DISK} the {} needs {} under {}, {} free",
             run.name(),
             gigabytes(need),
             dir.display(),
@@ -1523,6 +1579,8 @@ fn shown_version(version: &serde_json::Value) -> String {
         other => other.to_string(),
     }
 }
+/// The words every wait for free disk begins with.
+pub const FREE_DISK: &str = "free disk:";
 fn gigabytes(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
@@ -1570,6 +1628,18 @@ pub async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The waits the runner and the importers write are told apart by their words.
+    #[test]
+    fn a_wait_is_for_the_turn_the_disk_or_else() {
+        let turn = format!("osm's full import is under way and has not finished; {TURN}");
+        assert_eq!(wait_reason(&turn), "turn");
+        assert_eq!(
+            wait_reason("free disk: the import needs 1.0 GB under /x, 0.0 GB free"),
+            "disk"
+        );
+        assert_eq!(wait_reason("http.contact is not set"), "other");
+    }
 
     /// A lower `limit` or a higher `min_citations` is a narrower scope; another `region` is not
     /// (a larger one would let a cut-off file empty the catalogue): the floor holds for it.

@@ -2136,6 +2136,19 @@ large-import turn meanwhile: the other large catalogues' full imports wait for i
 in the others' `waiting` and shows its `last_error`. Fix the cause, or switch it off and restart
 (its cut-off import then no longer holds the turn; it resumes when it is on again), or drop it.
 
+### An import that keeps waiting
+
+An importer that waits says why in `waiting` (`pinakesd catalogue status`), and
+`pinakes_catalogue_waiting_seconds{reason}` counts how long (alert `CatalogueWaiting`):
+
+- `disk`: the run needs more free disk under `catalogues.dir/<name>` than there is (`waiting`
+  names both). Free disk there, or move `catalogues.dir`; the run starts at its next check, within
+  ten minutes.
+- `other`: a setting the run needs, such as `http.contact` for OpenStreetMap: set it and restart.
+- `turn`: another large catalogue's full import runs or waits to be resumed (`waiting` names it).
+  Check that it moves (its progress lines, `catalogue status`); one that keeps failing is
+  [a large import that keeps failing](#a-large-import-that-keeps-failing).
+
 ### A Wikidata import that keeps failing
 
 An import that never starts shows `waiting` in `pinakesd catalogue status`: `needs http.contact`
@@ -2189,6 +2202,7 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CatalogueDumpRefused` | warning | `pinakesd catalogue status` (`waiting`: `refused: <version>`, for software each registry's; `last_error`); [a refused dump or file](#a-refused-dump-or-file), [MusicBrainz](sources/musicbrainz_catalogue.md#a-dump-that-is-refused), and each other catalogue's page. A refusal of the daemon's own source and `limit` that has stood an hour, until a newer version is applied, a full import (`--request`) finishes, or `catalogue clear-refusal` clears it. |
 | `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on; `CatalogueImportFailed` also for a first import that fails or is refused, `CatalogueUpdateLag` only after a first finished import. A catalogue on without its importer (one with an importer but no `http.contact`) shows in `catalogue status` (`waiting`) and `pinakes_catalogue_needs_contact`. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
+| `CatalogueWaiting` | warning | [An import that keeps waiting](#an-import-that-keeps-waiting): an importer has waited over six hours for free disk or a setting, or over a week for the large-import turn (`pinakes_catalogue_waiting_seconds`). |
 | `CatalogueJoinsBehind` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): the oldest join check has waited over six hours. |
 | `CatalogueHomepageReadsStalled` | warning | [Tranco](sources/tranco_catalogue.md): no homepage read has found a page for six hours while sites are due (`pinakes_catalogue_backlog{queue="homepages"}` above 0) and the reads do not wait for a large import (`pinakes_catalogue_homepage_reads_waiting` 0): every read deferred, or every read failing. |
 | `CatalogueItemsSkipped` | warning | [A Wikidata import that keeps failing](#a-wikidata-import-that-keeps-failing): an update left a changed item as it was (its answer over the API cap) within the last day. |

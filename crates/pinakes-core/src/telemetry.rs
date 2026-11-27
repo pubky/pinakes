@@ -280,6 +280,12 @@ impl Metrics {
             BACKGROUND_FAILURES.with_label_values(&[name]);
             BACKGROUND_SUCCESS.with_label_values(&[name]);
         }
+        registry.register(Box::new(CATALOGUE_WAITING.clone()))?;
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            for reason in CATALOGUE_WAIT_REASONS {
+                CATALOGUE_WAITING.with_label_values(&[catalogue.name(), reason]);
+            }
+        }
         registry.register(Box::new(CATALOGUE_ITEMS_SKIPPED.clone()))?;
         for reason in CATALOGUE_SKIP_REASONS {
             CATALOGUE_ITEMS_SKIPPED.with_label_values(&["wikidata", reason]);
@@ -867,6 +873,33 @@ pub fn catalogue_items_skipped(catalogue: &'static str, reason: &'static str, n:
     CATALOGUE_ITEMS_SKIPPED
         .with_label_values(&[catalogue, reason])
         .inc_by(n);
+}
+/// How long each catalogue's importer task has waited for one reason, in seconds: the large-import
+/// turn (`turn`), free disk under `catalogues.dir` (`disk`) or anything else its run needs (`other`,
+/// a setting). Set by the task at each step (`catalogue::run::run`), from when it began waiting for
+/// that reason; 0 while it doesn't wait.
+static CATALOGUE_WAITING: std::sync::LazyLock<IntGaugeVec> = std::sync::LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "pinakes_catalogue_waiting_seconds",
+            "How long each catalogue's importer has waited for one reason (turn, disk, other), in seconds; 0 while it doesn't wait",
+        ),
+        &["catalogue", "reason"],
+    )
+    .expect("static metric")
+});
+/// The reasons of [`catalogue_waiting`].
+pub const CATALOGUE_WAIT_REASONS: [&str; 3] = ["turn", "disk", "other"];
+pub fn catalogue_waiting(catalogue: &str, reason: &str, seconds: u64) {
+    CATALOGUE_WAITING
+        .with_label_values(&[catalogue, reason])
+        .set(i64::try_from(seconds).unwrap_or(i64::MAX));
+}
+/// What [`catalogue_waiting`] last set.
+pub fn catalogue_waiting_seconds(catalogue: &str, reason: &str) -> i64 {
+    CATALOGUE_WAITING
+        .with_label_values(&[catalogue, reason])
+        .get()
 }
 /// Resources built from a catalogue card (`built`: joined, or built again after the card
 /// changed) and given back to the fetch queue (`released`: the card went or its catalogue is

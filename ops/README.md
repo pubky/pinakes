@@ -82,6 +82,7 @@ No messages are sent or contact points provisioned by these files.
 | `pinakes_catalogue_update_lag_seconds{catalogue}` | Seconds its cards are behind upstream: since `current_as_of`, the upstream time of the data its last finished run left (a dump's date, the last change applied); 0 before its first full import has finished. An update that finds nothing new doesn't lower it (Wikidata's does: it reads the changes by time, and logs a warning for a window of ten minutes or more without one) |
 | `pinakes_catalogue_max_update_lag_seconds{catalogue}` | How far behind upstream its cards may fall before `CatalogueUpdateLag` fires: its source's publication rhythm with a margin (2 days for Wikidata, OpenStreetMap, Tranco and the package registries; 5 for MusicBrainz; 9 for Podcast Index; 100 for OpenAlex) |
 | `pinakes_catalogue_waiting_for_turn{catalogue}` | 1 while its full import waits for another large catalogue's full import (one runs at a time), else 0 |
+| `pinakes_catalogue_waiting_seconds{catalogue,reason}` | How long the catalogue's importer task has waited for one reason, in seconds: `turn` (the large-import turn), `disk` (free disk under `catalogues.dir`), `other` (a setting its run needs); 0 while it doesn't wait for it. Set by the task at each of its checks (every minute for the turn, every ten minutes for the disk), counted from when this daemon's task began waiting for that reason (a restart counts from 0 again); every series at 0 from the start. Alert `CatalogueWaiting` |
 | `pinakes_catalogue_import_errors_total{catalogue}` | Failed import and update runs; kept in the database (`catalogue_state.error_count`), so a restart does not reset it |
 | `pinakes_catalogue_cards_total{catalogue,outcome}` | Cards each catalogue's imports and updates wrote, by outcome: `inserted`, `changed`, `unchanged` (a full import's stamp only), `rejected` (refused as invalid by the card checks or the table's) and `removed` (by an update, or as unread at the end of a full import); every series at 0 from the start. Alerts `CatalogueCardsRejected` (over 100 and over a tenth of the cards read refused in an hour) and `CatalogueCardsRemoved` (over 1,000 and over a tenth of the catalogue removed in a day) |
 | `pinakes_source_token_refusals_total{source}` | Refusals of the operator's configured key, token or app credentials by its service, as each signals one (a 401; a 403 where the service uses it for a refused key, not GitHub's rate limit; a token endpoint answering anything but 200, 408, 429 or 5xx), never a 429 or 5xx. One series per keyed provider, each at 0 from the start: `courtlistener`, `discogs`, `github`, `osm` (Nominatim's 401 or 403), `podcast_index`, `spotify`, `ticketmaster`, `tidal`, `tmdb` |
@@ -168,6 +169,11 @@ stall that leaves: a large catalogue's full import that keeps failing keeps the 
 so another large catalogue waits for it. It fires when a catalogue has waited six hours for the
 turn while a large catalogue's runs keep failing; fix the failing import's cause, switch it off
 (its cut-off import then no longer holds the turn) or `pinakesd catalogue drop` it.
+`CatalogueWaiting` (warning) fires for a catalogue that is on whose importer has waited for one
+reason for too long (`pinakes_catalogue_waiting_seconds`): over six hours for free disk or a
+setting (`disk`, `other`), which never end on their own, and over a week for the large-import turn
+(`turn`), which a large import that runs holds for days. A first import that keeps waiting raises
+it, as an update's hand-over to a full import does.
 `CatalogueItemsSkipped` (warning) fires for a day after an update left a changed item as it was
 because its answer alone was over the API cap (`pinakes_catalogue_items_skipped_total`,
 `over_cap`): that card misses the change until the item changes again or a full import reads it.

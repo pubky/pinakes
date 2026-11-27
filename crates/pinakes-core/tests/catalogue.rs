@@ -67,6 +67,8 @@ struct Fixture {
     always_import: AtomicBool,
     /// The backend that held the catalogue's lock as each run started.
     lock_holders: Mutex<Vec<Option<i32>>>,
+    /// Ask for a full import at every step until one has finished (as importers do), not once.
+    import_until_done: AtomicBool,
     need: u64,
 }
 impl Fixture {
@@ -92,6 +94,7 @@ impl Fixture {
             imports: AtomicUsize::new(0),
             always_import: AtomicBool::new(false),
             lock_holders: Mutex::default(),
+            import_until_done: AtomicBool::new(false),
             need: 1000,
         }
     }
@@ -104,8 +107,10 @@ impl Importer for Fixture {
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
         self.need
     }
-    async fn plan(&self, _state: &State) -> Result<Plan> {
-        if self.always_import.load(Ordering::SeqCst) {
+    async fn plan(&self, state: &State) -> Result<Plan> {
+        if self.always_import.load(Ordering::SeqCst)
+            || (self.import_until_done.load(Ordering::SeqCst) && state.last_import_at.is_none())
+        {
             return Ok(Plan::Run(Run::Import));
         }
         Ok(match self.next.lock().unwrap().take() {
@@ -1751,6 +1756,78 @@ async fn a_run_by_hand_that_fails_after_its_lock_went_records_nothing(pool: PgPo
     let s = state(&pool, Catalogue::Wikidata).await;
     assert_eq!((s.error_count, s.last_error), (0, None));
     assert_eq!(s.cursor, Some(json!({"next": 10})));
+}
+
+/// `pinakes_catalogue_waiting_seconds{catalogue,reason}` counts how long an importer's task has
+/// waited for one reason: free disk (`disk`), the large-import turn (`turn`). It goes back to 0
+/// once the task runs, and stays 0 for the reasons it does not wait for.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_waiting_gauge_counts_how_long_a_task_waits(pool: PgPool) {
+    use pinakes_core::telemetry::catalogue_waiting_seconds as waited;
+    // Podcast Index and OpenAlex: no other test of this file runs their tasks (the gauge is the
+    // process's).
+    let free = Arc::new(AtomicU64::new(0));
+    let (ctx, _dir) = context(&pool, free.clone());
+    let turn = SessionLock::try_take(&pool, pinakes_core::locks::CATALOGUE_LARGE_IMPORT)
+        .await
+        .unwrap()
+        .unwrap();
+    let (stop, shutdown) = watch::channel(false);
+    let podcasts = Fixture::new(Catalogue::Podcastindex, cards(5));
+    let works = Fixture::new(Catalogue::Openalex, cards(5));
+    for waits in [&podcasts, &works] {
+        waits.import_until_done.store(true, Ordering::SeqCst);
+    }
+    let (podcasts, works) = (Arc::new(podcasts), Arc::new(works));
+    let tasks = [
+        tokio::spawn(run::run(podcasts.clone(), ctx.clone(), shutdown.clone())),
+        tokio::spawn(run::run(works.clone(), ctx.clone(), shutdown)),
+    ];
+    until("a second of waiting", || async {
+        waited("podcastindex", "disk") >= 1 && waited("openalex", "turn") >= 1
+    })
+    .await;
+    for (catalogue, reason) in [
+        ("podcastindex", "turn"),
+        ("podcastindex", "other"),
+        ("openalex", "disk"),
+        ("openalex", "other"),
+    ] {
+        assert_eq!(waited(catalogue, reason), 0, "{catalogue} {reason}");
+    }
+    let disk = waited("podcastindex", "disk");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(waited("podcastindex", "disk") > disk);
+    // Room on the disk: Podcast Index runs; OpenAlex still waits for the turn.
+    free.store(u64::MAX, Ordering::SeqCst);
+    until("the podcast import", || async {
+        store::state(&pool, Catalogue::Podcastindex)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.last_import_at.is_some())
+    })
+    .await;
+    until("the disk wait over", || async {
+        waited("podcastindex", "disk") == 0
+    })
+    .await;
+    assert!(waited("openalex", "turn") >= 1);
+    turn.release().await;
+    until("the works import", || async {
+        store::state(&pool, Catalogue::Openalex)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.last_import_at.is_some())
+    })
+    .await;
+    until("the turn wait over", || async {
+        waited("openalex", "turn") == 0
+    })
+    .await;
+    stop.send(true).unwrap();
+    for task in tasks {
+        task.await.unwrap();
+    }
 }
 
 /// What a run by hand does first (`catalogue import wikidata --update --since` moves the
