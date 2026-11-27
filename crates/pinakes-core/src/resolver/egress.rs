@@ -1564,6 +1564,12 @@ impl Egress {
         }
         unreachable!()
     }
+    /// The host's turn for a request made outside the egress (the Wikidata importer's API
+    /// requests to `www.wikidata.org`, `catalogue::wikidata::net`), held for the request: one
+    /// request at a time with the egress's own to the host, at the pace it keeps for it.
+    pub async fn host_turn(&self, host: &str) -> Result<OwnedMutexGuard<Instant>> {
+        self.host_permit(host).await
+    }
     /// The host's next slot, held for the whole request (and its redirects within the host): one
     /// request per host at a time. An
     /// operator's `host_rates` entry sets the rate; else a source's published rate lowers the

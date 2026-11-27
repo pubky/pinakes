@@ -143,7 +143,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue is on but its importer does not start: set http.contact (or PINAKES__HTTP__CONTACT), or switch the catalogue off"}
       - alert: CatalogueFirstImportStalled
-        expr: (pinakes_catalogue_enabled{catalogue=~"musicbrainz|osm"} == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds == 0)
+        expr: (pinakes_catalogue_enabled{catalogue=~"musicbrainz|osm|wikidata"} == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds == 0)
         for: 2d
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue is on and has finished no import in two days: pinakesd catalogue status shows why it waits (free disk, the large-import turn, http.contact)"}
@@ -167,8 +167,12 @@ groups:
         for: 1h
         labels: {severity: warning}
         annotations: {summary: "Catalogue joins keep failing (more than ten an hour for an hour): the log line names each resource and the error's kind; links are fetched instead or checked again later"}
+      - alert: CatalogueItemsSkipped
+        expr: sum by (instance, job, catalogue) (increase(pinakes_catalogue_items_skipped_total{reason="over_cap"}[1d])) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} importer left a changed item as it was within the last day: its answer alone was over the API cap, so its card misses that change (the log names the item; a full import reads it again)"}
       - alert: CatalogueUpdateLag
-        expr: (pinakes_catalogue_update_lag_seconds > on (instance, job, catalogue) pinakes_catalogue_max_update_lag_seconds) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0)
+        expr: (pinakes_catalogue_update_lag_seconds > on (instance, job, catalogue) pinakes_catalogue_max_update_lag_seconds) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds > 0) unless on (instance, job, catalogue) ((pinakes_catalogue_catching_up == 1) and on (instance, job, catalogue) (pinakes_catalogue_update_lag_seconds < on (instance, job, catalogue) (pinakes_catalogue_max_update_lag_seconds + 432000)))
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue's cards are further behind upstream than its source's publication rhythm allows (pinakes_catalogue_max_update_lag_seconds): no import or update has brought newer data"}

@@ -21,7 +21,7 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] reindex` | Builds the text index from the database into a new generation and switches to it. Run it with the daemon stopped ([text index](#text-index)). |
 | `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
-| `pinakesd [--config PATH] catalogue import NAME [--from DIR\|URL] [--limit N] [--update] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz` only in this version. |
+| `pinakesd [--config PATH] catalogue import NAME [--from DIR\|FILE\|URL] [--limit N] [--update [--since TIME]] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz`, `osm` and `wikidata` in this version. |
 | `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue allow-shrink NAME` | After a run that failed as `shrunk` (refused otherwise), lets the catalogue's next full import remove the cards it did not read, however many: it goes through at its next try, unless a run fails for another reason first. Runs beside the daemon ([catalogues](#a-full-import-that-shrinks-the-catalogue)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
@@ -170,7 +170,7 @@ A catalogue is on when both `catalogues.enabled` and its own `enabled` are true
 | `catalogues.enabled` | `true` | All catalogues. Off, Pinakes indexes only referenced links. |
 | `catalogues.dir` | `"catalogues"` | Downloads and temporary files of imports, one directory per catalogue (`catalogues/wikidata`), relative to the working directory. The container image sets `/var/lib/pinakes/catalogues`. |
 | `catalogues.<name>.enabled` | `true` | One catalogue: `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` or `software`. |
-| `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. |
+| `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. Wikidata reads its dump as a stream up to the limit instead of downloading it, and its updates add new items only below the limit ([a part of Wikidata](sources/catalogue_wikidata.md#a-part-of-wikidata)). |
 | `catalogues.osm.region` | `"planet"` | `planet`, or a region of Geofabrik's OpenStreetMap extracts by its path (`europe/switzerland`). A change makes the next update a full import of the new region. |
 | `catalogues.openalex.min_citations` | `50` | Import works cited more than this many times, 0–1000000. |
 
@@ -1778,10 +1778,14 @@ of the budget (`statement_timeout` for that read; past it `503`, counted as `bud
 A catalogue card is one item of an open catalogue, stored in `catalogue_card`. The catalogues are
 `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` and `software` (crates.io,
 F-Droid and Flathub). An importer is the only writer of a catalogue's cards; they don't go
-through the fetch queue, the refresh tiers or the change journal. MusicBrainz and OpenStreetMap
-have importers ([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md),
-[`osm` catalogue](sources/osm_catalogue.md)); the other catalogues have none in this version, and
-hold no cards.
+through the fetch queue, the refresh tiers or the change journal. MusicBrainz, OpenStreetMap
+and Wikidata have importers ([`musicbrainz` catalogue](sources/musicbrainz_catalogue.md),
+[`osm` catalogue](sources/osm_catalogue.md), [the Wikidata catalogue](sources/catalogue_wikidata.md));
+the other catalogues have none in this version, and hold no cards. Catalogues are on by default, so
+a daemon whose configuration has no `[catalogues]` section runs these importers: with `http.contact`
+set and the disk they need, the Wikidata importer downloads its 104 GB dump; without a contact they
+ask nothing, and `catalogue status` says they wait for one. Set `[catalogues] enabled = false` for
+an instance that imports nothing.
 
 ### What a card holds
 
@@ -1915,7 +1919,7 @@ max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, wh
 ```sh
 pinakesd --config <path> catalogue status
 pinakesd --config <path> catalogue drop <name>
-pinakesd --config <path> catalogue import <name> [--from DIR|URL] [--limit N] [--update] [--force]
+pinakesd --config <path> catalogue import <name> [--from DIR|FILE|URL] [--limit N] [--update [--since TIME]] [--force]
 pinakesd --config <path> catalogue import <name> --request
 ```
 
@@ -1939,8 +1943,8 @@ update, through the same code and state rows as the daemon's task: it takes the 
 (refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
 disk as the task does (printing why), watches its lock, and prints the cards before and after and
 the status table when it has finished. A full import takes up one that was cut off, else begins a
-new one. `--from`, `--limit` and `--force` are the importer's own
-([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand)). A failure is recorded as the
+new one. `--from`, `--limit`, `--since` and `--force` are the importer's own
+([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand), [Wikidata](sources/catalogue_wikidata.md#commands)). A failure is recorded as the
 task records it. `catalogue import <name> --request` needs no lock: it records that a full import
 is asked for (`import_requested`). The process running the importer starts it after an update
 under way, or at its next step (MusicBrainz: within the hour when idle); a full import under way
@@ -1952,13 +1956,13 @@ catalogue.
 ### Importer rules
 
 A catalogue's importer runs as a background task of `pinakesd`, started only for a catalogue that
-is on (in this version: `musicbrainz` and `osm`), and follows these rules:
+is on (in this version: `musicbrainz`, `osm` and `wikidata`), and follows these rules:
 
 | Rule | What the task does |
 | --- | --- |
 | One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
-| What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
-| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag. Each catalogue may lag as far as its source's publication rhythm allows (below). |
+| What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump; Wikidata every 15 minutes, and at once while more than an hour behind). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
+| How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag; Wikidata's update, which reads the changes by time, moves it to the end of the window it read even when the window held none (Wikidata changes many times a minute: the update logs a warning for a window of ten minutes or more without one). Each catalogue may lag as far as its source's publication rhythm allows (below). |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
 | Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
 | Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |
@@ -1982,6 +1986,11 @@ publication rhythm allows (`pinakes_catalogue_max_update_lag_seconds`, fixed per
 | `musicbrainz` | Dumps twice a week | 5 days |
 | `podcastindex` | A weekly database | 9 days |
 | `openalex` | A quarterly snapshot | 100 days |
+
+A Wikidata import leaves the cards as current as its dump's date, already two or three days old
+when the file is out (and older by the import's end), and the updates then catch up (`pinakes_catalogue_catching_up` is 1). The
+alert holds back while they do, unless the lag is more than five days past the allowed lag: a
+catch-up that stopped still alerts.
 
 ### A full import that shrinks the catalogue
 
@@ -2009,6 +2018,31 @@ large-import turn meanwhile: the other large catalogues' full imports wait for i
 in the others' `waiting` and shows its `last_error`. Fix the cause, or switch it off and restart
 (its cut-off import then no longer holds the turn; it resumes when it is on again), or drop it.
 
+### A Wikidata import that keeps failing
+
+An import that never starts shows `waiting` in `pinakesd catalogue status`: `needs http.contact`
+(set it and restart), short disk, or the large-import turn. One that fails shows the class in
+`last_error` ([the Wikidata catalogue](sources/catalogue_wikidata.md#import)):
+
+| `last_error` | What happened | What to do |
+| --- | --- | --- |
+| `disk (<path>)` | A work file could not be written (the disk is full, a link stands in its place) | Free disk, or remove what stands in the way. While free disk is short, before a run or before a download round (once the dump's size is known), the run waits instead (`waiting` says how much it needs) and goes on from its cursor |
+| `download`, `timeout`, `connect`, `api`, `read`, `not_found`, `oversized`, `rate_limited (…)` | The dumps host or the API did not answer, answered an error, a `--from` URL is not there, an answer was too large, or a wait over 5 minutes was asked; a dump read under 8 MB in ten minutes is `download`. After `rate_limited` nothing is asked of that host until the time it asked for (a day at most) has passed: the tries meanwhile fail at once | Nothing: the run resumes from its cursor every ten minutes. An update that fails `api` at the same position for hours (the log names the item an answer leaves out): `pinakesd catalogue import wikidata --request` reads a newer dump and loses nothing; `pinakesd catalogue import wikidata --update --since <a time past it>` (with the daemon's Wikidata off) is quicker but skips every item's changes up to that time (the progress line's `at` gives the time of the page reached) |
+| `turn_lost` | The large-import lock was lost while the import ran | Nothing: it resumes from its cursor |
+| `cursor` | The stored cursor names no valid dump | `pinakesd catalogue drop wikidata`, then import again |
+| `no_dump (…)` | None of the newest dated directories lists the full JSON dump | Nothing: tried again in ten minutes |
+| `shrunk` | The import read under half the cards the catalogue holds; nothing was removed | [A full import that shrinks the catalogue](#a-full-import-that-shrinks-the-catalogue) |
+| `checksum`, `dump_changed`, `dump_gone`, `dump_missing`, `label_files`, `bz2_…`, `empty_dump`, `bad_dump` | The files were no good: they were deleted, and the next try reads the newest dump from its start (a local `--from` file is kept, and the import fails the same way) | Nothing, unless it repeats; for a local file, `pinakesd catalogue drop wikidata`, then import the fixed file |
+| `dump_rejected (…)` | The newest dump failed three times; the import waits for the next weekly dump and keeps the large-import turn meanwhile | Switch Wikidata off and restart to let another large import run, or wait for the next dump. If the catalogue really is smaller now, drop it and import again |
+| `other_import_under_way` | `catalogue import --from` named another file than the import under way | Let the import under way finish, or drop the catalogue |
+
+An update that leaves a changed item as it was, because its answer alone is over the API cap
+(64 MB), logs it by name (`a changed item's answer is over the cap`), counts it
+(`pinakes_catalogue_items_skipped_total`, `over_cap`) and goes on; alert `CatalogueItemsSkipped`
+fires for a day. The card misses that change until the item changes again (under the cap) or a full
+import reads it from a dump: `pinakesd catalogue import wikidata --request` asks for one, when
+the item matters before the next import.
+
 ## Monitoring
 
 Scrape `GET /metrics` on the admin listener. [ops/README.md](../ops/README.md) has every series, the scrape
@@ -2034,9 +2068,10 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `PreviewCapacityReached` | warning | [New previews](#new-previews). |
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
 | `CatalogueDumpRefused` | warning | `pinakesd catalogue status` (`waiting`: `dump <version> refused`, `last_error`); [MusicBrainz](sources/musicbrainz_catalogue.md#a-dump-that-is-refused). A refusal that has stood an hour, until a dump is applied. |
-| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on; `CatalogueImportFailed` also for a first import that fails or is refused, `CatalogueUpdateLag` only after a first finished import. A catalogue on without its importer (MusicBrainz without `http.contact`) shows in `catalogue status` (`waiting`) and `pinakes_catalogue_needs_contact`. |
+| `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on; `CatalogueImportFailed` also for a first import that fails or is refused, `CatalogueUpdateLag` only after a first finished import. A catalogue on without its importer (MusicBrainz, OpenStreetMap or Wikidata without `http.contact`) shows in `catalogue status` (`waiting`) and `pinakes_catalogue_needs_contact`. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
 | `CatalogueJoinsBehind` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): the oldest join check has waited over six hours. |
+| `CatalogueItemsSkipped` | warning | [A Wikidata import that keeps failing](#a-wikidata-import-that-keeps-failing): an update left a changed item as it was (its answer over the API cap) within the last day. |
 | `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |
 | `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10 (counted from its open, so passes that fail from the start fire it too); the log says why. Text searches read Postgres alone, or miss newer changes. |
 | `TextSearchBusy` | warning | [Text index](#text-index): over ten text searches an instance answered 503 in ten minutes, for ten minutes. Raise `limits.search_index_searches` on a host with more cores, or find what makes searches slow. |

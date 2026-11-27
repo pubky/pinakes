@@ -165,6 +165,7 @@ pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
     super::musicbrainz::importer(config)
         .into_iter()
         .chain(super::osm::importer(config))
+        .chain(super::wikidata::importer(config))
         .collect()
 }
 
@@ -225,15 +226,24 @@ impl<'a> Job<'a> {
     /// The shrink floor counts only this generation's cards ([`SHRINK_FLOOR`]), and an operator's
     /// allowance to shrink, given to the attempt dropped, is taken back.
     pub async fn new_generation(&mut self) -> Result<()> {
+        self.new_generation_with(None).await
+    }
+    /// [`Job::new_generation`], keeping `cursor` as the run's cursor in the same statement (what
+    /// the import that starts over must not lose: its restarts, a command-line limit).
+    pub async fn new_generation_keeping(&mut self, cursor: serde_json::Value) -> Result<()> {
+        self.new_generation_with(Some(cursor)).await
+    }
+    async fn new_generation_with(&mut self, cursor: Option<serde_json::Value>) -> Result<()> {
         anyhow::ensure!(
             self.run == Run::Import,
             "only a full import starts a generation"
         );
-        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,generation_cards=0,shrink_allowed=false,cursor=NULL,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        self.generation = sqlx::query_scalar("UPDATE catalogue_state SET generation=generation+1,generation_cards=0,shrink_allowed=false,cursor=$2,updated_at=now() WHERE catalogue=$1 RETURNING generation")
             .bind(self.catalogue.name())
+            .bind(&cursor)
             .fetch_one(self.pool)
             .await?;
-        self.cursor = None;
+        self.cursor = cursor;
         Ok(())
     }
     /// Where to resume: the cursor of the last [`Job::write`] or [`Job::remove`] of this run, or
@@ -373,6 +383,26 @@ impl<'a> Job<'a> {
         self.report += written;
         Ok(written)
     }
+    /// Write cards this full import has read already, again with more of their data, and save
+    /// `cursor` with them ([`store::rewrite`]): they don't count twice toward the cards the import
+    /// read, which the shrink floor compares with the cards held.
+    pub async fn rewrite(
+        &mut self,
+        cards: &[Card],
+        cursor: serde_json::Value,
+    ) -> Result<WriteReport> {
+        let written = store::rewrite(
+            self.pool,
+            self.catalogue,
+            self.generation,
+            cards,
+            Some(&cursor),
+        )
+        .await?;
+        self.cursor = Some(cursor);
+        self.report += written;
+        Ok(written)
+    }
     /// Write rows the importer already checked ([`store::upsert_rows`]; each `source_id` once,
     /// `rejected` the cards it refused) and save `cursor` with them.
     pub async fn write_rows(
@@ -404,6 +434,11 @@ impl<'a> Job<'a> {
         self.cursor = Some(cursor);
         self.report.removed += removed;
         Ok(removed)
+    }
+    /// The stored cards with these source IDs (at most `store::BATCH_ROWS`), as cards
+    /// ([`store::cards`]); IDs with no card are left out.
+    pub async fn stored(&self, source_ids: &[String]) -> Result<Vec<Card>> {
+        store::cards(self.pool, self.catalogue, source_ids).await
     }
     /// The upstream version read (a dump's date), shown in `pinakesd catalogue status`.
     pub async fn upstream_version(&mut self, version: &str) -> Result<()> {
@@ -555,7 +590,7 @@ pub enum Next {
 
 /// The catalogues whose importer needs `http.contact`, with whether `config` leaves one that is
 /// on without it and what `waiting` says then.
-pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); 2] {
+pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); 3] {
     [
         (
             Catalogue::Musicbrainz,
@@ -567,10 +602,15 @@ pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); 2] {
             super::osm::needs_contact(config),
             super::osm::NEEDS_CONTACT,
         ),
+        (
+            Catalogue::Wikidata,
+            super::wikidata::needs_contact(config),
+            super::wikidata::NEEDS_CONTACT,
+        ),
     ]
 }
-/// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz or
-/// OpenStreetMap without `http.contact` (their `NEEDS_CONTACT` in `waiting`). Started with its
+/// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz,
+/// OpenStreetMap or Wikidata without `http.contact` (their `NEEDS_CONTACT` in `waiting`). Started with its
 /// contact, or with the catalogue off, the text goes (a task that starts clears any at its first
 /// step).
 pub async fn note_unstarted(pool: &PgPool, config: &Config) -> Result<()> {

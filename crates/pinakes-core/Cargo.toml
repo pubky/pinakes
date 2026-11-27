@@ -71,6 +71,9 @@ tower = { version = "0.5", features = ["util"] }
 pubky-social-specs = "=1.0.0-rc.1"
 # The text index (`search_index`): pure Rust, without its zstd (C) and stemmer features.
 tantivy = { version = "=0.27.0", default-features = false, features = ["mmap", "lz4-compression"] }
+# The Wikidata dump (`catalogue::wikidata::bz2`): bzip2 blocks decoded one by one, in pure Rust
+# (libbz2-rs-sys).
+bzip2 = "=0.6.1"
 # The text index's map cells (`search_index::cells`), H3 in pure Rust.
 h3o = "=0.11.1"
 # Catalogue bulk files (`catalogue::bulk`): xz streams with liblzma's multi-threaded decoder
@@ -106,5 +109,5 @@ http-body-util = "0.1"
 tempfile = "3"
 # The loopback relay of the relay TLS test (`resolver::egress`).
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
-# Property and fuzz tests of the OSM readers and cards (`catalogue::osm`).
+# Property and fuzz tests of the catalogue readers and cards (`catalogue::osm`, `catalogue::wikidata`).
 proptest = { version = "=1.12.0", default-features = false, features = ["std"] }

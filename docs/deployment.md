@@ -394,6 +394,23 @@ small or staging instance, or switch the catalogue off.
 The file and the index are removed once the import has finished; every 30 days (the planet: every
 90) a full import reads a new file again.
 
+### Wikidata
+
+The importer needs `http.contact` ([the Wikidata catalogue](sources/catalogue_wikidata.md)).
+Catalogues are on by default: a daemon whose configuration has no `[catalogues]` section and sets
+`http.contact` starts the Wikidata importer, which waits for 129 GB free under `catalogues.dir`,
+downloads the 104 GB dump and puts its cards in search. An instance that should import nothing sets
+`[catalogues] enabled = false`; one that should import other catalogues but not Wikidata sets
+`[catalogues.wikidata] enabled = false` (or `limit = N` for a part of it, read as a stream).
+Measured on a 150,000-card sample of the real dump; full-size figures are estimates:
+
+| Catalogue | Disk under `catalogues.dir` while it runs | PostgreSQL | Memory | First import | Updates |
+| --- | --- | --- | --- | --- | --- |
+| `wikidata` | The dump, about 104 GB, until the import ends (and the label files, kept). A first import waits for 129 GB free before it knows the dump's size, then for the dump's size and 4%, and a resumed download for what is left of it and 4 GB | About 21.4 million cards, estimated at 35-45 GB with their indexes (3.3 KB a card on the first 150,000 items, which are the best known and carry the most keys) | Up to about 1 GB for the read (bounded queues; decoded text waiting to be cut is held near 512 MB), plus the labels of classes and genres, which the daemon keeps in memory between updates (estimate: a few million labels, a few hundred MB; at most 16 million), and during an update one API answer at a time (up to 64 MB of JSON, a few hundred MB once parsed) | About 3 hours to download on two connections at Wikimedia's ~5 MB/s each, then the read on half the cores (estimate) | Every 15 minutes, one request at a time: the changed items' sitelinks first, and only those with a Wikipedia article (or a label the catalogue keeps) read in full. Measured on one 19-minute window of real changes (a 20,000-card sample with room to grow): 2,179 items named in 90 s, about 24 a second. Estimate at full size: a median day of changes (about 240,000 items) in about 3 hours, the 2-3 days a first import starts behind in 6-8 hours |
+
+With `catalogues.wikidata.limit` the dump is read as a stream and nothing is downloaded to disk;
+the stream is read only up to the limit.
+
 ## Network and secrets
 
 **Listeners.** Terminate TLS at a reverse proxy in front of the public listener (`listen`, port

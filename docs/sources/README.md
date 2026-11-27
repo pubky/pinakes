@@ -167,6 +167,7 @@ of it is fetched link by link ([catalogues](../operations.md#catalogues)).
 | --- | --- | --- |
 | [`musicbrainz`](musicbrainz_catalogue.md) | Every artist, release group and recording of MusicBrainz's JSON dumps | None |
 | [`osm`](osm_catalogue.md) | OpenStreetMap's named places and useful points, from the planet file or a region's extract | None |
+| [`wikidata`](catalogue_wikidata.md) | Every item with a Wikipedia article, from the weekly JSON dump, kept current from the recent changes | None (the operator's contact) |
 
 ## Also on
 
