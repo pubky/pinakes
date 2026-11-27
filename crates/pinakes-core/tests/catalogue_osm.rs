@@ -45,6 +45,8 @@ fn app(pool: &PgPool, config: Config) -> axum::Router {
 fn off() -> Config {
     let mut config = Config::default();
     config.catalogues.osm.enabled = false;
+    config.queue.catalogues = pinakes_core::catalogue::join::joinable(&config.catalogues);
+    config.queue.osm_catalogue = false;
     config
 }
 /// `GET path` on the map clusters route as a client of its own (each call another address): the
@@ -614,17 +616,65 @@ async fn a_link_read_missing_after_its_successor_was_found_becomes_its_alias(poo
     .await
     .unwrap();
     assert_eq!(root, "https://www.openstreetmap.org/node/71");
-    // Off: no successor is followed.
-    sqlx::query("UPDATE catalogue_state SET phase='disabled' WHERE catalogue='osm'")
+}
+
+/// The OSM route reading every object as deleted.
+struct Gone;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::Resolver for Gone {
+    fn refresh_after(&self, _: &ResourceMeta) -> std::time::Duration {
+        std::time::Duration::from_secs(86_400)
+    }
+    fn name(&self) -> &'static str {
+        "osm"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let id = pinakes_core::resolver::osm::parse_id(uri).unwrap();
+        let mut doc = ResourceMeta::new(&id.uri(), "osm", 86_400);
+        doc.set_type("Place");
+        doc.osm_id = Some(id.key());
+        doc.attribution = Some(pinakes_core::resolver::osm::ATTRIBUTION.into());
+        doc.status = pinakes_core::model::Status::Missing;
+        Ok(doc)
+    }
+}
+
+/// A link read missing follows its successor only while the configuration has the OSM catalogue
+/// on: with it off, a state row still `idle` (as a one-shot `catalogue import osm` with OSM off
+/// leaves it) follows none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_missing_link_follows_its_successor_only_with_the_catalogue_on(pool: PgPool) {
+    sqlx::query("INSERT INTO catalogue_state(catalogue,phase) VALUES('osm','idle')")
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(
-        pinakes_core::catalogue::osm::successor(&pool, "node", 70)
+    sqlx::query("INSERT INTO osm_successor(old_type,old_id,new_type,new_id,basis) VALUES('node',70,'node',71,'wikidata'),('node',72,'node',73,'changeset')").execute(&pool).await.unwrap();
+    for (config, old, followed) in [(off(), 70, false), (Config::default(), 72, true)] {
+        let id = pinakes_core::store::ensure_resource(
+            &pool,
+            &format!("https://www.openstreetmap.org/node/{old}"),
+        )
+        .await
+        .unwrap();
+        let job = pinakes_core::queue::claim(&pool, "osm", &config.queue)
             .await
-            .unwrap(),
-        None
-    );
+            .unwrap()
+            .expect("the link is due");
+        assert_eq!(job.id, id);
+        pinakes_core::queue::run_job(&pool, &Gone, &config.queue, &job)
+            .await
+            .unwrap();
+        let aliased: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(aliased, followed, "node/{old}");
+    }
 }
 
 /// A deleted place an operator placed in a curated group hands its place to its successor:
@@ -1153,11 +1203,9 @@ async fn a_places_website_joins_its_group_unless_a_chain_shares_it(pool: PgPool)
         .await
         .unwrap();
     assert!(keys(chain).await.is_empty());
-    // Off: no OSM card is read for a website.
-    sqlx::query("UPDATE catalogue_state SET phase='disabled' WHERE catalogue='osm'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Off in the configuration: no OSM card is read for a website, though the state row still
+    // says `idle` (as a one-shot `catalogue import osm` with OSM off leaves it).
+    let config = off();
     sqlx::query("DELETE FROM catalogue_card WHERE source_id='node/43'")
         .execute(&pool)
         .await
@@ -1176,7 +1224,15 @@ async fn a_places_website_joins_its_group_unless_a_chain_shares_it(pool: PgPool)
         .execute(&pool)
         .await
         .unwrap();
-    join::sweep(&pool, &config.queue.catalogues).await.unwrap();
+    let phase: String =
+        sqlx::query_scalar("SELECT phase FROM catalogue_state WHERE catalogue='osm'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(phase, "idle");
+    join::sweep(&pool, &config.queue.catalogues, config.queue.osm_catalogue)
+        .await
+        .unwrap();
     assert!(keys(off.clone()).await.is_empty());
     let due: bool = sqlx::query_scalar(
         "SELECT next_attempt_at<now()+interval '2 days' FROM resource WHERE id=$1",
@@ -1339,19 +1395,22 @@ async fn the_website_sweep_spares_keys_a_card_holds(pool: PgPool) {
                 .unwrap()
         }
     };
-    let catalogues = join::joinable(&Config::default().catalogues);
-    // On: nothing is taken.
     sqlx::query("INSERT INTO catalogue_state(catalogue,phase) VALUES('osm','idle')")
         .execute(&pool)
         .await
         .unwrap();
-    join::sweep(&pool, &catalogues).await.unwrap();
-    assert_eq!(keys().await.len(), 2);
-    // Off: the website's key goes, the item's own stays.
-    sqlx::query("UPDATE catalogue_state SET phase='disabled' WHERE catalogue='osm'")
-        .execute(&pool)
+    // On in the configuration: nothing is taken.
+    let on = Config::default();
+    assert!(on.queue.osm_catalogue);
+    join::sweep(&pool, &on.queue.catalogues, on.queue.osm_catalogue)
         .await
         .unwrap();
-    join::sweep(&pool, &catalogues).await.unwrap();
+    assert_eq!(keys().await.len(), 2);
+    // Off in the configuration (the state row still `idle`): the website's key goes, the item's
+    // own stays.
+    let off = off();
+    join::sweep(&pool, &off.queue.catalogues, off.queue.osm_catalogue)
+        .await
+        .unwrap();
     assert_eq!(keys().await, [(item.clone(), "osm:node/42".to_owned())]);
 }

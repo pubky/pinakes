@@ -1803,8 +1803,12 @@ async fn apply(
     job.remove(&removed, cursor.clone()).await?;
     touched.extend(removed.iter().cloned());
     touch_shared(pool, &touched).await?;
-    for (old, new, _) in &successors {
-        follow(pool, old, new).await?;
+    // Recorded either way; followed only while the catalogue is on (a one-shot import with it
+    // off leaves the shared links as they are).
+    if job.config().catalogues.enabled(Catalogue::Osm) {
+        for (old, new, _) in &successors {
+            follow(pool, old, new).await?;
+        }
     }
     Ok((cards.len(), removed.len(), successors.len(), renames.len()))
 }
@@ -2009,11 +2013,11 @@ async fn hand_over_curation(
     Ok(())
 }
 
-/// The successor recorded for a deleted object, when the evidence is exact.
+/// The successor recorded for a deleted object, when the evidence is exact. Read only while the
+/// catalogue is on (`QueueConfig::osm_catalogue`).
 pub async fn successor(pool: &PgPool, osm_type: &str, osm_id: i64) -> Result<Option<String>> {
     Ok(sqlx::query_scalar(
-        "SELECT new_type||'/'||new_id FROM osm_successor WHERE old_type=$1 AND old_id=$2 AND basis IN ('wikidata','changeset') \
-         AND EXISTS (SELECT 1 FROM catalogue_state WHERE catalogue='osm' AND phase<>'disabled')",
+        "SELECT new_type||'/'||new_id FROM osm_successor WHERE old_type=$1 AND old_id=$2 AND basis IN ('wikidata','changeset')",
     )
     .bind(osm_type)
     .bind(osm_id)

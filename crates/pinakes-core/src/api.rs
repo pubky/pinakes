@@ -97,6 +97,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(pool: PgPool, mut config: Config) -> anyhow::Result<Self> {
         config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
+        config.queue.osm_catalogue = config.catalogues.enabled(crate::catalogue::Catalogue::Osm);
         let config_catalogues = config.catalogues.enabled_names();
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;

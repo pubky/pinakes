@@ -413,7 +413,7 @@ async fn start(
         let mut swept = false;
         loop {
             if !swept {
-                let sweep = pinakes_core::catalogue::join::sweep(&join_pool, &join_config.catalogues);
+                let sweep = pinakes_core::catalogue::join::sweep(&join_pool, &join_config.catalogues, join_config.osm_catalogue);
                 let swept_now = tokio::select! { _=join_shutdown.changed()=>break,result=sweep=>result };
                 pinakes_core::telemetry::background_pass("catalogue_sweep", &swept_now);
                 match swept_now {

@@ -927,7 +927,7 @@ async fn finish_job(
         // The save is done. What follows it (the alias its page names, an episode's pages) are
         // transactions of their own: when one fails, what the save wrote stays and the job is
         // no failure.
-        let after = std::panic::AssertUnwindSafe(after_save(pool, job, &doc))
+        let after = std::panic::AssertUnwindSafe(after_save(pool, cfg, job, &doc))
             .catch_unwind()
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("the steps after the save panicked")));
@@ -1029,12 +1029,17 @@ async fn finish_job(
     Ok(())
 }
 /// What follows a saved card: its alias and, for a podcast episode, its pages.
-async fn after_save(pool: &PgPool, job: &Job, doc: &crate::model::ResourceMeta) -> Result<()> {
+async fn after_save(
+    pool: &PgPool,
+    cfg: &QueueConfig,
+    job: &Job,
+    doc: &crate::model::ResourceMeta,
+) -> Result<()> {
     #[cfg(test)]
     tests::maybe_fail_after_save(&job.uri)?;
     // A deleted OSM object whose successor the OSM catalogue found on evidence: its link becomes
-    // an alias of the successor's (`catalogue::osm::follow`).
-    if doc.status == Status::Missing && doc.source == "osm" {
+    // an alias of the successor's (`catalogue::osm::follow`), while the catalogue is on.
+    if cfg.osm_catalogue && doc.status == Status::Missing && doc.source == "osm" {
         if let Some(object) = crate::resolver::osm::parse_id(&job.uri) {
             if let Some(new) =
                 crate::catalogue::osm::successor(pool, &object.osm_type, object.id).await?
@@ -1343,6 +1348,7 @@ pub fn spawn_with_egress(
 ) -> Result<JoinSet<()>> {
     config.queue.groups = config.groups.clone();
     config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
+    config.queue.osm_catalogue = config.catalogues.enabled(crate::catalogue::Catalogue::Osm);
     let mut workers = JoinSet::new();
     let authors = Arc::new(AuthorBudget::default());
     let mut resolvers: Vec<(Arc<dyn Resolver>, crate::config::ResolverConfig)> = vec![];

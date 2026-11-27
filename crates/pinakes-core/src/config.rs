@@ -101,6 +101,7 @@ impl Default for Config {
         let mut config = Self::base();
         config.limits = Limits::of(&config);
         config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
+        config.queue.osm_catalogue = config.catalogues.enabled(crate::catalogue::Catalogue::Osm);
         config.share_contact();
         config
     }
@@ -769,6 +770,9 @@ pub struct QueueConfig {
     /// The catalogues a link is joined with before it is fetched (`catalogue::join::joinable`);
     /// none when every catalogue is off.
     pub catalogues: Vec<&'static str>,
+    /// Whether the OpenStreetMap catalogue is on: an imported place's website joins its group,
+    /// and a deleted place's shared link follows its successor.
+    pub osm_catalogue: bool,
     pub max_failures: u32,
     pub timeout_grace: u32,
     pub backoff_secs: u64,
@@ -782,6 +786,7 @@ impl Default for QueueConfig {
         Self {
             groups: Default::default(),
             catalogues: vec![],
+            osm_catalogue: false,
             max_failures: 5,
             timeout_grace: 3,
             backoff_secs: 30,
@@ -1124,6 +1129,7 @@ impl Config {
         limits.apply(&mut cfg);
         cfg.queue.groups = cfg.groups.clone();
         cfg.queue.catalogues = crate::catalogue::join::joinable(&cfg.catalogues);
+        cfg.queue.osm_catalogue = cfg.catalogues.enabled(crate::catalogue::Catalogue::Osm);
         cfg.share_contact();
         cfg.validate()?;
         Ok(cfg)

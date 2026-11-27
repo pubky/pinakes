@@ -263,7 +263,20 @@ pub fn pick(cards: Vec<CardRow>, uri: &str) -> Option<CardRow> {
 }
 /// The card `uri` is built from among `catalogues`, and the cards it is a related link of.
 pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found> {
-    let place = osm_website(pool, uri).await?;
+    find_with_places(pool, catalogues, false, uri).await
+}
+/// [`find`], and with `osm` (the OpenStreetMap catalogue on) the place whose website `uri` is.
+pub async fn find_with_places(
+    pool: &PgPool,
+    catalogues: &[&str],
+    osm: bool,
+    uri: &str,
+) -> Result<Found> {
+    let place = if osm {
+        osm_website(pool, uri).await?
+    } else {
+        None
+    };
     if catalogues.is_empty() {
         return Ok(Found {
             card: None,
@@ -323,14 +336,13 @@ pub async fn find(pool: &PgPool, catalogues: &[&str], uri: &str) -> Result<Found
     })
 }
 /// The group key of the OpenStreetMap place whose official website `uri` is (its `website`
-/// tag, a related link of its card), while the OSM catalogue is on: the place's own `osm:` key,
-/// which its shared link carries, so the website joins that place's group. Only when exactly one
-/// imported place names it: a chain's website, shared by its branches, joins none. An OSM card
-/// still backs no link.
+/// tag, a related link of its card), read while the OSM catalogue is on: the place's own `osm:`
+/// key, which its shared link carries, so the website joins that place's group. Only when exactly
+/// one imported place names it: a chain's website, shared by its branches, joins none. An OSM
+/// card still backs no link.
 async fn osm_website(pool: &PgPool, uri: &str) -> Result<Option<String>> {
     let places: Vec<String> = sqlx::query_scalar(
-        "SELECT c.source_id FROM catalogue_card c WHERE c.catalogue='osm' AND c.related_uris @> ARRAY[$1]::text[] \
-         AND EXISTS (SELECT 1 FROM catalogue_state s WHERE s.catalogue='osm' AND s.phase<>'disabled') LIMIT 2",
+        "SELECT c.source_id FROM catalogue_card c WHERE c.catalogue='osm' AND c.related_uris @> ARRAY[$1]::text[] LIMIT 2",
     )
     .bind(uri)
     .fetch_all(pool)
@@ -561,7 +573,7 @@ async fn join_in(
             .as_deref()
             .is_some_and(|r| !matches!(r, "pubky" | "geo" | "osm" | "event" | "event_platform"));
     let mut found = if joins {
-        find(pool, &cfg.catalogues, &row.uri).await?
+        find_with_places(pool, &cfg.catalogues, cfg.osm_catalogue, &row.uri).await?
     } else {
         Found::default()
     };
@@ -999,8 +1011,11 @@ async fn burst(pool: &PgPool) -> Result<bool> {
 /// fetches), take the catalogue's mark and labels off its card (with a change line) and its keys
 /// off every resource. Meanwhile no answer shows such a catalogue's labels or `from` (`api`).
 /// Nothing to do (every catalogue that ever ran is on) costs one read. The resources given back.
-pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
-    sweep_osm_websites(pool).await?;
+/// With `osm` (the OpenStreetMap catalogue on) the websites its places joined keep their keys.
+pub async fn sweep(pool: &PgPool, catalogues: &[&str], osm: bool) -> Result<u64> {
+    if !osm {
+        sweep_osm_websites(pool).await?;
+    }
     // OpenStreetMap is never joined, so nothing is built from its cards.
     let off: Vec<String> = sqlx::query_scalar(
         "SELECT catalogue FROM catalogue_state WHERE NOT catalogue=ANY($1) AND catalogue<>$2 ORDER BY catalogue",
@@ -1099,14 +1114,6 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str]) -> Result<u64> {
 /// source `catalogue`) leave those places' groups: their keys go, a page at a time, and they are
 /// read again (spread over a day) as any link whose related keys went. The number released.
 async fn sweep_osm_websites(pool: &PgPool) -> Result<u64> {
-    let on: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM catalogue_state WHERE catalogue='osm' AND phase<>'disabled')",
-    )
-    .fetch_one(pool)
-    .await?;
-    if on {
-        return Ok(0);
-    }
     let (mut after, mut after_id, mut released) = (String::new(), String::new(), 0u64);
     loop {
         let page: Vec<(String, String)> = sqlx::query_as(SWEEP_PAGE)

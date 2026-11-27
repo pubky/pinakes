@@ -387,7 +387,7 @@ async fn a_removed_card_or_a_catalogue_off_gives_the_link_back_to_fetching(pool:
     // once, due at times spread over the next day.
     let off = QueueConfig::default();
     let released = pinakes_core::telemetry::catalogue_joins("wikidata", "released");
-    assert_eq!(join::sweep(&pool, &off.catalogues).await.unwrap(), 2);
+    assert_eq!(join::sweep(&pool, &off.catalogues, false).await.unwrap(), 2);
     // At least these two (other tests in this binary count too).
     assert!(pinakes_core::telemetry::catalogue_joins("wikidata", "released") >= released + 2);
     let spread: Vec<f64> = sqlx::query_scalar(
@@ -1649,7 +1649,7 @@ async fn a_start_with_the_catalogues_on_keeps_every_key(pool: PgPool) {
         catalogue_keys(&pool, &article).await,
         catalogue_keys(&pool, &site).await,
     );
-    assert_eq!(join::sweep(&pool, &cfg.catalogues).await.unwrap(), 0);
+    assert_eq!(join::sweep(&pool, &cfg.catalogues, false).await.unwrap(), 0);
     assert_eq!(
         (
             catalogue_keys(&pool, &article).await,
@@ -1678,7 +1678,7 @@ async fn a_start_with_the_catalogues_on_keeps_every_key(pool: PgPool) {
         .copied()
         .filter(|c| *c != "software")
         .collect();
-    assert_eq!(join::sweep(&pool, &without).await.unwrap(), 1);
+    assert_eq!(join::sweep(&pool, &without, false).await.unwrap(), 1);
     assert_eq!(
         pinakes_core::telemetry::catalogue_joins("software", "released"),
         released + 1
@@ -1916,7 +1916,7 @@ async fn a_taken_over_key_is_given_back_to_its_source(pool: PgPool) {
         ..Default::default()
     };
     import(&pool, Catalogue::Osm, &[osm]).await;
-    assert_eq!(join::sweep(&pool, &cfg.catalogues).await.unwrap(), 0);
+    assert_eq!(join::sweep(&pool, &cfg.catalogues, false).await.unwrap(), 0);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -2039,7 +2039,7 @@ async fn a_catalogue_off_shows_nothing_until_its_sweep_and_each_removal_is_a_cha
         .into_iter()
         .filter(|c| *c != "wikidata")
         .collect();
-    assert_eq!(join::sweep(&pool, &joinable).await.unwrap(), 1);
+    assert_eq!(join::sweep(&pool, &joinable, false).await.unwrap(), 1);
     assert_eq!(lines(pool.clone(), article.clone()).await, before + 1);
     assert_eq!(backed(&pool, &article).await.labels, None);
     // A first tier past the backoff's cap is a valid configuration: it is the longest wait.
@@ -2301,7 +2301,7 @@ async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: Pg
         .await
         .unwrap();
     let before = join::sweep_keys_read();
-    join::sweep(&pool, &["musicbrainz"]).await.unwrap();
+    join::sweep(&pool, &["musicbrainz"], false).await.unwrap();
     let read = join::sweep_keys_read() - before;
     assert_eq!(read, 2600, "only the off catalogue's keys are read");
     let counts: Vec<(String, i64)> = sqlx::query_as(

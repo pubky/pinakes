@@ -135,12 +135,12 @@ at it, and a full import follows once the files are 60 behind (`pinakesd catalog
 - records a deleted object's successor (`osm_successor`) on evidence only: the one created or
   stored object tagged with the same Wikidata item within 1 km, or the one object created in the
   same changeset with the same name within 50 m. Geofabrik's change files name no changesets, so a
-  region's updates find successors by Wikidata only. Shared links of the deleted object become
-  aliases of the successor's link (also a link first read after the successor was found, once it
-  reads as missing). A link an operator placed in a curated group hands its place there to the
-  successor, unless the successor is in a curated group of its own. When the deleted object comes
-  back (the deletion is reverted), its successor is forgotten and its links answer for themselves
-  again;
+  region's updates find successors by Wikidata only. While the catalogue is on, shared links of
+  the deleted object become aliases of the successor's link (also a link first read after the
+  successor was found, once it reads as missing). A link an operator placed in a curated group
+  hands its place there to the successor, unless the successor is in a curated group of its own.
+  When the deleted object comes back (the deletion is reverted), its successor is forgotten and
+  its links answer for themselves again;
 - records a named deleted object's last card (`osm_removed`: its name, category and point), which
   the deleted-place rule compares once the card is gone; gone again when the object comes back;
 - records a kept object's change to an unrelated name (`osm_rename`): a name whose words don't run
@@ -206,6 +206,8 @@ Every card, and every OSM link's card read from one, carries `attribution`
 ## Turn it off
 
 `[catalogues.osm] enabled = false`: no import runs, the cards leave search at once, OSM links are
-read from Nominatim again, the place rules and the dump's imported places go. The cards stay until
-`pinakesd catalogue drop osm`, which also forgets the successors, renames and removed objects
-updates recorded, releasing the aliases the successors made.
+read from Nominatim again, the place rules and the dump's imported places go, no website joins a
+place and no deleted place's link follows its successor. A `catalogue import osm` run by hand
+meanwhile changes none of this. At the next start, websites that joined a place leave its group.
+The cards stay until `pinakesd catalogue drop osm`, which also forgets the successors, renames and
+removed objects updates recorded, releasing the aliases the successors made.
