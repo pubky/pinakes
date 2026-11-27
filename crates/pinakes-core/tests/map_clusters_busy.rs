@@ -47,8 +47,13 @@ async fn a_busy_or_slow_count_is_a_503(pool: PgPool) {
     drop(held);
     // Every turn taken.
     let turns = api::MAP_TURNS.acquire_many(4).await.unwrap();
+    let every = pinakes_core::telemetry::map_clusters_busy_count("turns");
     let (status, _) = common::get_from(&app, "127.0.0.2:1", path).await;
     assert_eq!(status, 503);
+    assert_eq!(
+        pinakes_core::telemetry::map_clusters_busy_count("turns"),
+        every + 1
+    );
     drop(turns);
     // The totals locked by another writer for longer than the limit.
     let mut writer = pool.begin().await.unwrap();
@@ -57,9 +62,14 @@ async fn a_busy_or_slow_count_is_a_503(pool: PgPool) {
         .await
         .unwrap();
     let started = std::time::Instant::now();
+    let slow = pinakes_core::telemetry::map_clusters_busy_count("timeout");
     let (status, _) = common::get_from(&app, "127.0.0.2:1", path).await;
     assert_eq!(status, 503);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(
+        pinakes_core::telemetry::map_clusters_busy_count("timeout"),
+        slow + 1
+    );
     writer.rollback().await.unwrap();
     assert_eq!(common::get(&app, path).await["total"], 1);
 }

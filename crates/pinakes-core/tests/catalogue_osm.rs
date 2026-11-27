@@ -49,9 +49,13 @@ fn off() -> Config {
     config.queue.osm_catalogue = false;
     config
 }
-/// `GET path` on the map clusters route as a client of its own (each call another address): the
-/// per-client share of turns never holds back a parallel test. Must answer 200.
+/// `GET path` on the map clusters route, one call at a time across this binary's tests (they share
+/// the route's four process-wide turns, `api::MAP_TURNS`), each as a client of its own (another
+/// address, so no client's share of turns is taken): a parallel test never holds back another's.
+/// Must answer 200.
 async fn clusters(app: &axum::Router, path: &str) -> Value {
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE_AT_A_TIME.lock().await;
     static PEER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     let n = PEER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let peer = format!("10.{}.{}.{}:1", (n >> 16) & 255, (n >> 8) & 255, n & 255);
@@ -144,8 +148,30 @@ async fn an_osm_card_nobody_shared_opens_by_its_link_and_its_id(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(rows, 0);
-    // With the catalogue off, it is an unknown link again.
-    let app = self::app(&pool, off());
+    // With the catalogue off, no search lists it, at once (the text index still holds it).
+    let on = AppState::new(pool.clone(), Config::default()).unwrap();
+    let index = on.search_index.clone();
+    let on = api::router(on);
+    let searches = [
+        "/v1/search?q=engel",
+        "/v1/search?tags=restaurant",
+        "/v1/search?bbox=9.5,47.13,9.54,47.15",
+        "/v1/search?q=engel&bbox=9.5,47.13,9.54,47.15&type=Restaurant",
+    ];
+    for path in searches {
+        let page = common::get(&on, path).await;
+        assert_eq!(page["items"][0]["id"], id_of(uri), "{path}: {page}");
+    }
+    index.settle();
+    assert!(index.holds_word("engel"));
+    let mut off_state = AppState::new(pool.clone(), off()).unwrap();
+    off_state.search_index = index.clone();
+    let app = api::router(off_state);
+    for path in searches {
+        let page = common::get(&app, path).await;
+        assert_eq!(page["items"], serde_json::json!([]), "{path}: {page}");
+    }
+    // And it is an unknown link again.
     let (status, _) = common::get_from(
         &app,
         "127.0.0.2:1",
@@ -1395,7 +1421,20 @@ async fn the_website_sweep_spares_keys_a_card_holds(pool: PgPool) {
                 .unwrap()
         }
     };
+    let again = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT resource_id FROM also_on_dirty ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
     sqlx::query("INSERT INTO catalogue_state(catalogue,phase) VALUES('osm','idle')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM also_on_dirty")
         .execute(&pool)
         .await
         .unwrap();
@@ -1406,11 +1445,13 @@ async fn the_website_sweep_spares_keys_a_card_holds(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(keys().await.len(), 2);
+    assert!(again().await.is_empty());
     // Off in the configuration (the state row still `idle`): the website's key goes, the item's
-    // own stays.
+    // own stays, and the website's also-on sources run again (one may vouch for the key).
     let off = off();
     join::sweep(&pool, &off.queue.catalogues, off.queue.osm_catalogue)
         .await
         .unwrap();
     assert_eq!(keys().await, [(item.clone(), "osm:node/42".to_owned())]);
+    assert_eq!(again().await, std::slice::from_ref(&site));
 }

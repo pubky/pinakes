@@ -1112,7 +1112,9 @@ pub async fn sweep(pool: &PgPool, catalogues: &[&str], osm: bool) -> Result<u64>
 
 /// With the OSM catalogue off, the websites its places joined ([`osm_website`]: an `osm:` key of
 /// source `catalogue`) leave those places' groups: their keys go, a page at a time, and they are
-/// read again (spread over a day) as any link whose related keys went. The number released.
+/// read again (spread over a day) as any link whose related keys went. Their also-on sources run
+/// again, as when a card drops a key ([`write_keys`]): a key the catalogue took over from one of
+/// them comes back from it. The number released.
 async fn sweep_osm_websites(pool: &PgPool) -> Result<u64> {
     let (mut after, mut after_id, mut released) = (String::new(), String::new(), 0u64);
     loop {
@@ -1131,6 +1133,7 @@ async fn sweep_osm_websites(pool: &PgPool) -> Result<u64> {
             .iter()
             .map(|(key, id)| (key.as_str(), id.as_str()))
             .unzip();
+        let mut tx = pool.begin().await?;
         // Only keys a website took from a place: an `osm:` key the resource's own card holds (a
         // Wikidata item's OSM object) stays.
         let gone: Vec<String> = sqlx::query_scalar(
@@ -1141,14 +1144,19 @@ async fn sweep_osm_websites(pool: &PgPool) -> Result<u64> {
         )
         .bind(&keys)
         .bind(&ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
         sqlx::query(&format!(
             "UPDATE resource r SET refresh_at={SPREAD},next_attempt_at={SPREAD} WHERE r.id=ANY($1) AND NOT r.dead_letter"
         ))
         .bind(&gone)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+        let mut again: Vec<&str> = gone.iter().map(String::as_str).collect();
+        again.sort_unstable();
+        again.dedup();
+        also_on_again(&mut tx, &again).await?;
+        tx.commit().await?;
         released += gone.len() as u64;
         if (page.len() as i64) < SWEEP_ROWS {
             break;

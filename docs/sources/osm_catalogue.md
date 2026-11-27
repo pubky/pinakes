@@ -88,7 +88,9 @@ OpenStreetMap's buckets (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amaz
   finishes without reading the file again, unless it was another region's: that one starts over.
 - At its end, the import removes the cards the file no longer holds, a part at a time, and marks
   their shared links due once they are gone. A named place swept so that someone shared keeps
-  its last card in `osm_removed`, for the deleted-place rule.
+  its last card in `osm_removed`, for the deleted-place rule (and the ODbL dump's removed
+  objects). A full import of another `region` than the last one's keeps none: the places it
+  sweeps are outside the new region, not deleted in OpenStreetMap.
 - The shrink floor applies first, as to any catalogue's full import: a re-import that read under
   half the cards held (a cut-off file, a smaller region) removes nothing and fails `shrunk`, its
   run kept, until `pinakesd catalogue allow-shrink osm` lets the next try through. The file and

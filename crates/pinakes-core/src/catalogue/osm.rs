@@ -859,6 +859,14 @@ impl OsmImporter {
         // cut-off file, another region) waits for the operator's allowance, as any catalogue's
         // full import does: nothing is removed.
         job.check_shrink().await?;
+        // A full import of another region than the last one's sweeps the places outside the new
+        // region: they still exist in OpenStreetMap, so none is recorded as removed.
+        let region = job.config().catalogues.scope(Catalogue::Osm);
+        let moved = job
+            .state()
+            .scope
+            .as_ref()
+            .is_some_and(|last| last.get("region") != region.get("region"));
         let mut after = String::new();
         loop {
             let gone: Vec<String> = sqlx::query_scalar(
@@ -873,7 +881,8 @@ impl OsmImporter {
             after = last.clone();
             // A shared link of a named place swept here reads missing next: the deleted-place
             // rule compares its card as it last was.
-            sqlx::query("INSERT INTO osm_removed(osm_type,osm_id,name,category,point) \
+            if !moved {
+                sqlx::query("INSERT INTO osm_removed(osm_type,osm_id,name,category,point) \
                  SELECT split_part(c.source_id,'/',1),split_part(c.source_id,'/',2)::bigint,c.name,c.details->>'category',c.point FROM catalogue_card c \
                  WHERE c.catalogue='osm' AND c.source_id=ANY($1) AND c.point IS NOT NULL AND c.details->>'category' IS NOT NULL AND NOT coalesce((c.details->>'unnamed')::boolean,false) \
                  AND EXISTS (SELECT 1 FROM resource r WHERE r.osm_type=split_part(c.source_id,'/',1) AND r.osm_id=split_part(c.source_id,'/',2)::bigint) \
@@ -881,6 +890,7 @@ impl OsmImporter {
                 .bind(&gone)
                 .execute(pool)
                 .await?;
+            }
             job.remove(&gone, cursor.clone()).await?;
             touch_shared(pool, &gone).await?;
         }

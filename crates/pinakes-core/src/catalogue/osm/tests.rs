@@ -1713,15 +1713,12 @@ async fn a_way_newly_kept_without_its_nodes_has_no_geometry(pool: PgPool) {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A named place a full import sweeps, whose link someone shared, keeps its last card in
-/// `osm_removed`; read again by a later full import, it is no removed object.
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_swept_shared_place_is_removed_until_a_file_holds_it_again(pool: PgPool) {
-    let dir = tempfile_dir();
+/// The region imported, then a shared place the file does not hold (node 777, as if deleted
+/// since), and one it holds listed as removed (node 9). The file's path.
+async fn a_shared_place_gone(pool: &PgPool, dir: &Path) -> PathBuf {
     let pbf = dir.join("region.osm.pbf");
     std::fs::write(&pbf, region()).unwrap();
-    step(&pool, &dir, Run::Import, vec![pbf.clone()], false).await;
-    // A place the next file no longer holds, shared, and one it holds, listed as removed.
+    step(pool, dir, Run::Import, vec![pbf.clone()], false).await;
     let gone = place::read(
         "node",
         777,
@@ -1737,26 +1734,67 @@ async fn a_swept_shared_place_is_removed_until_a_file_holds_it_again(pool: PgPoo
     .unwrap();
     let generation: i64 =
         sqlx::query_scalar("SELECT generation FROM catalogue_state WHERE catalogue='osm'")
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .unwrap();
-    store::upsert(&pool, Catalogue::Osm, generation, &[gone], None)
+    store::upsert(pool, Catalogue::Osm, generation, &[gone], None)
         .await
         .unwrap();
-    crate::store::ensure_resource(&pool, "https://www.openstreetmap.org/node/777")
+    crate::store::ensure_resource(pool, "https://www.openstreetmap.org/node/777")
         .await
         .unwrap();
     sqlx::query("INSERT INTO osm_removed(osm_type,osm_id,name,category,point) VALUES('node',9,'Löwen','amenity/restaurant',ST_SetSRID(ST_MakePoint(9.54,47.14),4326))")
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
+    pbf
+}
+async fn removed(pool: &PgPool) -> Vec<(String, i64, String)> {
+    sqlx::query_as("SELECT osm_type,osm_id,name FROM osm_removed ORDER BY osm_id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// A named place a full import sweeps, whose link someone shared, keeps its last card in
+/// `osm_removed`; read again by a later full import, it is no removed object.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_swept_shared_place_is_removed_until_a_file_holds_it_again(pool: PgPool) {
+    let dir = tempfile_dir();
+    let pbf = a_shared_place_gone(&pool, &dir).await;
     step(&pool, &dir, Run::Import, vec![pbf], false).await;
-    let removed: Vec<(String, i64, String)> =
-        sqlx::query_as("SELECT osm_type,osm_id,name FROM osm_removed ORDER BY osm_id")
-            .fetch_all(&pool)
+    assert_eq!(
+        removed(&pool).await,
+        [("node".to_owned(), 777, "Sonne".to_owned())]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A full import of another region sweeps the last region's places, shared ones too, but records
+/// none as removed (nor does the ODbL dump list one): they still exist in OpenStreetMap.
+#[sqlx::test(migrations = "../../migrations")]
+async fn another_regions_import_records_no_removed_place(pool: PgPool) {
+    let dir = tempfile_dir();
+    let pbf = a_shared_place_gone(&pool, &dir).await;
+    let mut cfg = (*config(&dir)).clone();
+    cfg.catalogues.osm.region = "europe/switzerland".into();
+    let importer = files_importer(&cfg, vec![pbf]);
+    let mut ctx = Context::new(pool.clone(), Arc::new(cfg));
+    ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
+    runner::step(&importer, &ctx).await.unwrap();
+    assert_eq!(name(&pool, "node/777").await, None);
+    assert_eq!(removed(&pool).await, []);
+    let lines: Vec<Value> = sqlx::query_scalar(crate::api::OSM_DUMP_REMOVED_LINE)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lines, Vec::<Value>::new());
+    let scope: Value =
+        sqlx::query_scalar("SELECT scope FROM catalogue_state WHERE catalogue='osm'")
+            .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(removed, [("node".to_owned(), 777, "Sonne".to_owned())]);
+    assert_eq!(scope["region"], "europe/switzerland");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
