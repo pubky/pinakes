@@ -1981,3 +1981,47 @@ async fn the_types_read_follow_a_write_of_the_catalogue(pool: PgPool) {
         ["Mont Blanc"]
     );
 }
+
+/// A common label lists its best known cards: those holding it among each catalogue's best known
+/// are read in fame order, whatever cards the labels index gives first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_common_label_lists_its_best_known_cards(pool: PgPool) {
+    // Written first, so the labels index gives them first: 4,000 little-known songs with the
+    // label. Then 30 well known people without it, and 20 stars with it, a little less known
+    // than the people: half of them past the first 40 best known the search reads first, all
+    // within the 57 best known each of the seven catalogues looks at (20 times 20, shared).
+    let mut cards: Vec<Card> = (0..4000)
+        .map(|n| {
+            card(
+                10_000 + n,
+                &format!("Song {n}"),
+                "MusicRecording",
+                &["common-tag"],
+                None,
+                0.01,
+            )
+        })
+        .collect();
+    cards.extend((0..30).map(|n| card(n + 1, &format!("Person {n}"), "Person", &[], None, 0.9)));
+    cards.extend((0..20).map(|n| {
+        card(
+            1_000 + n,
+            &format!("Star {n}"),
+            "MusicGroup",
+            &["common-tag"],
+            None,
+            0.8,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("Star")), "{page:?}");
+}
