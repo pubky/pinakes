@@ -1821,6 +1821,38 @@ async fn the_waiting_gauge_counts_how_long_a_task_waits(pool: PgPool) {
     }
 }
 
+/// A run by hand that waits (here for free disk) watches its lock while it waits and checks it
+/// before each step: once the lock's session has ended, it stops and says the lock was lost
+/// instead of stepping on, and runs nothing more.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_by_hand_that_waits_stops_once_its_lock_is_lost(pool: PgPool) {
+    let free = Arc::new(AtomicU64::new(0));
+    let (ctx, _dir) = context(&pool, free.clone());
+    let fixture = Fixture::new(Catalogue::Wikidata, cards(5));
+    fixture.import_until_done.store(true, Ordering::SeqCst);
+    let fixture = Arc::new(fixture);
+    let once = tokio::spawn({
+        let (fixture, ctx) = (fixture.clone(), ctx.clone());
+        async move { run::run_once(fixture, &ctx, Run::Import, |_| {}).await }
+    });
+    until("the disk wait", || async {
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.waiting.is_some())
+    })
+    .await;
+    end_lock_session(&pool, Catalogue::Wikidata).await;
+    let err = tokio::time::timeout(DEADLINE, once)
+        .await
+        .expect("the run stops once its lock is lost")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("was lost"), "{err}");
+    assert!(fixture.started_from.lock().unwrap().is_empty());
+}
+
 /// What a run by hand does first (`catalogue import wikidata --update --since` moves the
 /// position) runs under the catalogue's lock, and the run after it under the same lock, never let
 /// go in between: no daemon can take the catalogue between the two. A first step that fails runs

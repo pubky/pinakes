@@ -19,7 +19,7 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] --migrate` | Creates the schema on an empty database and exits. |
 | `pinakesd [--config PATH] reextract ROUTE…\|all\|also-on` | Reads stored links again after a parser, routing or source change. Run it with the daemon stopped ([re-extraction](#re-extraction)). |
 | `pinakesd [--config PATH] reindex` | Builds the text index from the database into a new generation and switches to it. Run it with the daemon stopped ([text index](#text-index)). |
-| `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
+| `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, upstream version, last import and update, how current its cards are, wait and last error ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue import NAME [--from FILE\|DIR\|URL]… [--limit N] [--reads N] [--update [--since TIME]] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop), [run an import](#run-an-import)). |
 | `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
@@ -1951,13 +1951,15 @@ is) and prints the directory it removed, or that there was none. It refuses:
 
 The drop watches its lock while it deletes: when the lock's database session ends (a database
 restart), it stops, says the lock was lost and deletes nothing more, since an importer may hold
-the lock by then. Run it again to finish.
+the lock by then. It deletes the cards and the state row first, then checks the lock once more
+and removes the directory only while it still holds it. Run it again to finish.
 
 `catalogue import <name>` runs one full import of the catalogue now, or with `--update` one
 update, through the same code and state rows as the daemon's task: it takes the catalogue's lock
 (refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
 disk as the task does (printing why), watches its lock, and prints the cards before and after and
-the status table when it has finished (the cards each run wrote: new, changed, unchanged,
+the status table when it has finished; it checks its lock before each step and watches it while
+it waits, and stops (the lock lost) once its session has ended (the cards each run wrote: new, changed, unchanged,
 rejected as invalid, removed). A full import takes up one that was cut off, else begins a
 new one, and clears an update refused for removing too much. `--from`, `--limit`, `--reads`, `--since` and
 `--force` are the importer's own ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand),
@@ -2208,7 +2210,7 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |
 | `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10 (counted from its open, so passes that fail from the start fire it too); the log says why. Text searches read Postgres alone, or miss newer changes. |
 | `TextSearchBusy` | warning | [Text index](#text-index): over ten text searches an instance answered 503 in ten minutes, for ten minutes. Raise `limits.search_index_searches` on a host with more cores, or find what makes searches slow. |
-| `CatalogueCardsRejected`, `CatalogueCardsRemoved` | warning | [Importer rules](#importer-rules): a catalogue's runs refused over a tenth of the cards they read in an hour (a dump format change, an importer bug: the debug log names the refused cards), or removed over a tenth of the catalogue in a day (check upstream; a full import under half its cards fails instead). |
+| `CatalogueCardsRejected`, `CatalogueCardsRemoved` | warning | [Importer rules](#importer-rules): a catalogue's runs rejected over a tenth of the cards they read in an hour (a dump format change, an importer bug: the debug log names the rejected cards), or removed over a tenth of the catalogue in a day (check upstream; a full import under half its cards fails instead). |
 
 A new key needs a restart.
 

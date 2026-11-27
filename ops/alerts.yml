@@ -188,7 +188,7 @@ groups:
       - alert: CatalogueCardsRejected
         expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="rejected"}[1h])) > 100) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="rejected"}[1h])) > 0.1 * sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome=~"inserted|changed|unchanged|rejected"}[1h])))
         labels: {severity: warning}
-        annotations: {summary: "The {{ $labels.catalogue }} catalogue's runs refused over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the refused cards"}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's runs rejected over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the rejected cards"}
       - alert: CatalogueCardsRemoved
         expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d])) > 1000) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d])) > 0.1 * (sum by (instance, job, catalogue) (pinakes_catalogue_cards) + sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d]))))
         labels: {severity: warning}

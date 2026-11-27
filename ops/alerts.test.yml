@@ -273,6 +273,14 @@ tests:
       - series: 'pinakes_catalogue_enabled{instance="e",job="pinakes",catalogue="tranco"}'
         values: '1x540'
     alert_rule_test:
+      # At 7h e's site has been due for 20 minutes with no page read in six hours: under the
+      # rule's hour, so only a fires.
+      - eval_time: 7h
+        alertname: CatalogueHomepageReadsStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes}
+            exp_annotations:
+              summary: "No Tranco homepage read has found a page for six hours while sites are due and the reads do not wait for a large import: every read is deferred (the egress gives them no turn) or fails; pinakes_catalogue_homepage_reads_total and pinakesd catalogue status say which"
       - eval_time: 8h
         alertname: CatalogueHomepageReadsStalled
         exp_alerts:
@@ -361,7 +369,7 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: musicbrainz}
             exp_annotations:
-              summary: "The musicbrainz catalogue's runs refused over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the refused cards"
+              summary: "The musicbrainz catalogue's runs rejected over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the rejected cards"
   # Removed cards: a removes 5,000 of 20,000 in a day (fires); b 2,000 of 1,000,000.
   - interval: 1h
     input_series:

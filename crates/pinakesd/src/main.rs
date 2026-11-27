@@ -649,13 +649,17 @@ async fn catalogue_command(
             };
             // The lock is held until the cards, the state row and the files are gone, and watched
             // meanwhile: lost (its session ended), the drop stops, since an importer may hold
-            // the lock by then.
-            let dropped = lock
+            // the lock by then. It is checked once more before the directory goes.
+            let dropped = match lock
                 .hold_while(
                     pinakes_core::locks::LOCK_CHECK,
-                    drop_held(config, pool, catalogue, out),
+                    drop_held(pool, catalogue, out),
                 )
-                .await;
+                .await
+            {
+                Ok(()) => remove_work_dir(&mut lock, config, catalogue, out).await,
+                Err(error) => Err(error),
+            };
             lock.release().await;
             dropped.map_err(|error| {
                 if error.is::<pinakes_core::catalogue::run::CatalogueLockLost>() {
@@ -965,10 +969,8 @@ async fn move_position(
     }
     Ok(())
 }
-/// The drop, under the catalogue's lock: its cards and state row, then its directory of
-/// downloads and temporary files (`catalogues.dir/<name>`).
+/// The drop's first part, under the catalogue's lock: its cards and state row.
 async fn drop_held(
-    config: &Config,
     pool: &sqlx::PgPool,
     catalogue: Catalogue,
     out: &mut dyn std::io::Write,
@@ -986,6 +988,20 @@ async fn drop_held(
         out,
         "dropped {dropped} cards of catalogue {catalogue}; its state is reset"
     )?;
+    Ok(())
+}
+/// The drop's last part: the catalogue's directory of downloads and temporary files
+/// (`catalogues.dir/<name>`), removed only while `lock` is still held (checked just before: a
+/// removal once begun can't be cut off, and an importer may hold the lock once it is lost).
+async fn remove_work_dir(
+    lock: &mut pinakes_core::catalogue::run::SessionLock,
+    config: &Config,
+    catalogue: Catalogue,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
+    if lock.check(pinakes_core::locks::LOCK_CHECK).await == pinakes_core::locks::Check::Gone {
+        return Err(pinakes_core::catalogue::run::CatalogueLockLost.into());
+    }
     // Named in full: a relative `catalogues.dir` is relative to this command's working directory.
     let dir = std::path::absolute(config.catalogues.work_dir(catalogue))?;
     match tokio::fs::remove_dir_all(&dir).await {
@@ -2553,6 +2569,43 @@ mod tests {
                 .map(|s| s.cards),
             Some(1)
         );
+    }
+    /// The drop removes the catalogue's directory only while its lock is still held: once the
+    /// lock's session has ended, the directory stays and the drop says the lock was lost.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_drop_removes_the_directory_only_while_it_holds_the_lock(pool: sqlx::PgPool) {
+        use pinakes_core::catalogue::run::{CatalogueLockLost, SessionLock};
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.catalogues.dir = temp.path().to_string_lossy().into_owned();
+        let dir = config.catalogues.work_dir(Catalogue::Wikidata);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut lock = SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("SELECT pg_terminate_backend(pid, 5000) FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())")
+            .bind(Catalogue::Wikidata.lock_key())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        let err = remove_work_dir(&mut lock, &config, Catalogue::Wikidata, &mut out)
+            .await
+            .unwrap_err();
+        assert!(err.is::<CatalogueLockLost>(), "{err}");
+        assert!(dir.exists());
+        // Held, it goes.
+        let mut lock = SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut out = Vec::new();
+        remove_work_dir(&mut lock, &config, Catalogue::Wikidata, &mut out)
+            .await
+            .unwrap();
+        assert!(!dir.exists());
+        lock.release().await;
     }
     /// A drop refuses a catalogue its configuration has on, and says how to switch it off.
     #[test]

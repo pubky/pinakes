@@ -916,12 +916,15 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             next = stepped => next,
         };
         // Why the step waits, from the state row it wrote (none while another process holds the
-        // lock and the row): `pinakes_catalogue_waiting_seconds`.
-        let reason = match &next {
-            Ok(Next::Wait(_)) if lock.is_some() => waiting_reason(&ctx.pool, catalogue).await,
-            _ => None,
-        };
-        waited.note(reason);
+        // lock and the row): `pinakes_catalogue_waiting_seconds`. A failed step keeps the wait's
+        // start, so a wait broken by failures in between still counts from its beginning.
+        match &next {
+            Ok(Next::Wait(_)) if lock.is_some() => {
+                waited.note(waiting_reason(&ctx.pool, catalogue).await)
+            }
+            Ok(_) => waited.note(None),
+            Err(_) => waited.failed(),
+        }
         let wait = match next {
             Ok(Next::Again) => continue,
             Ok(Next::Wait(wait)) => wait,
@@ -1012,8 +1015,20 @@ impl Waited {
             }
             self.since = reason.map(|reason| (reason, std::time::Instant::now()));
         }
+        self.show();
+    }
+    /// After a step that failed: the wait goes on from its start (a run that fails is tried
+    /// again, and waits again for the same reason).
+    fn failed(&mut self) {
+        self.show();
+    }
+    fn show(&self) {
         if let Some((reason, at)) = self.since {
-            crate::telemetry::catalogue_waiting(name, reason, at.elapsed().as_secs());
+            crate::telemetry::catalogue_waiting(
+                self.catalogue.name(),
+                reason,
+                at.elapsed().as_secs(),
+            );
         }
     }
 }
@@ -1466,6 +1481,11 @@ pub async fn run_once_with(
         };
         let mut said: Option<String> = None;
         loop {
+            // The lock is checked before each step and watched while it waits between them: a
+            // run whose lock's session has ended stops, as the task's does.
+            if held.check(ctx.pace.lock_check).await == crate::locks::Check::Gone {
+                return Err(lost());
+            }
             // As the task does: a panic is a failed run, and the lock watched while it goes on.
             let stepped = std::panic::AssertUnwindSafe(step(&forced, ctx)).catch_unwind();
             let stepped = tokio::select! {
@@ -1487,7 +1507,13 @@ pub async fn run_once_with(
                         waiting(&why);
                         said = Some(why);
                     }
-                    tokio::time::sleep(wait.min(Duration::from_secs(60))).await;
+                    let pause = async {
+                        tokio::time::sleep(wait.min(Duration::from_secs(60))).await;
+                        Ok(())
+                    };
+                    held.hold_while(ctx.pace.lock_check, pause)
+                        .await
+                        .map_err(|_| lost())?;
                 }
                 Err(refused) if refused.is::<StillRefused>() => {
                     anyhow::bail!("catalogue {catalogue}: {refused}; nothing is read until a newer one comes (a full import reads it again, and pinakesd catalogue clear-refusal {catalogue} lets an update read it)");
@@ -1621,6 +1647,28 @@ pub async fn record_failure(pool: &PgPool, catalogue: Catalogue, error: &str) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A wait keeps its start through failed steps between its waits (a disk wait broken by
+    /// failures still reaches the alert's hours); a step that runs, or another reason, starts
+    /// it again.
+    #[test]
+    fn a_wait_keeps_its_start_through_failed_steps() {
+        let mut waited = Waited {
+            catalogue: Catalogue::Osm,
+            since: None,
+        };
+        waited.note(Some("disk"));
+        let started = waited.since.expect("waiting").1;
+        waited.failed();
+        waited.note(Some("disk"));
+        assert_eq!(waited.since.map(|s| s.1), Some(started));
+        waited.note(Some("turn"));
+        assert!(waited
+            .since
+            .is_some_and(|s| s.0 == "turn" && s.1 >= started));
+        waited.note(None);
+        assert_eq!(waited.since, None);
+    }
 
     /// The waits the runner and the importers write are told apart by their words.
     #[test]
