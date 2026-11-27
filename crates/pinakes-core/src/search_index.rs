@@ -823,7 +823,7 @@ pub struct SearchIndex {
 /// The address a client's share of turns is counted by: an IPv4 address, or an IPv6 address's
 /// /64 (one host's or one network's addresses, which a client may rotate through); an IPv4
 /// address written as IPv6 (`::ffff:a.b.c.d`) is that IPv4 address.
-fn share_key(client: std::net::IpAddr) -> std::net::IpAddr {
+pub(crate) fn share_key(client: std::net::IpAddr) -> std::net::IpAddr {
     match client {
         std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => std::net::IpAddr::V4(v4),

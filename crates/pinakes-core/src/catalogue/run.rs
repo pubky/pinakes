@@ -162,7 +162,10 @@ pub trait Importer: Send + Sync + 'static {
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
 /// ([`to_start`]).
 pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
-    super::musicbrainz::importer(config).into_iter().collect()
+    super::musicbrainz::importer(config)
+        .into_iter()
+        .chain(super::osm::importer(config))
+        .collect()
 }
 
 /// What a run writes through: its catalogue, generation, resume point, position, work directory
@@ -187,14 +190,27 @@ pub struct Job<'a> {
     dir: &'a Path,
     config: &'a Config,
     report: WriteReport,
+    free_disk: FreeDisk,
 }
-impl Job<'_> {
+/// A run that can't go on yet (short free disk once its download's size is known, a setting it
+/// needs): the runner records why in `waiting`, keeps the run and its cursor, and steps again
+/// after `Pace::disk`. Not a failure. The reason is the importer's own text, naming nothing an
+/// upstream sent.
+#[derive(Debug)]
+pub struct Waits(pub String);
+impl std::fmt::Display for Waits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for Waits {}
+impl<'a> Job<'a> {
+    /// The database the run writes to (an importer reads its stored cards through it).
+    pub fn pool(&self) -> &'a PgPool {
+        self.pool
+    }
     pub fn catalogue(&self) -> Catalogue {
         self.catalogue
-    }
-    /// The database the run writes to (an importer reads its stored cards through it).
-    pub fn pool(&self) -> &PgPool {
-        self.pool
     }
     pub fn run(&self) -> Run {
         self.run
@@ -266,6 +282,73 @@ impl Job<'_> {
     /// `limit` of Wikidata and MusicBrainz (`[catalogues.<name>] limit`).
     pub fn limit(&self) -> Option<u64> {
         self.config.catalogues.limit(self.catalogue)
+    }
+    /// Fails the run with [`Waits`] unless `catalogues.dir/<name>` has `need` bytes free (the
+    /// runner's own check, for a need known only once the run has begun).
+    pub fn need_disk(&self, need: u64) -> Result<()> {
+        let free = (self.free_disk)(self.dir)
+            .with_context(|| Failure::new("disk").at(self.dir.display().to_string()))?;
+        if free < need {
+            return Err(Waits(format!(
+                "free disk: the {} needs {} under {}, {} free",
+                self.run.name(),
+                gigabytes(need),
+                self.dir.display(),
+                gigabytes(free)
+            ))
+            .into());
+        }
+        Ok(())
+    }
+    /// The shrink floor of a full import, before it removes the cards it did not read: past a
+    /// first import, one that read under [`SHRINK_FLOOR`] of the cards held fails (`shrunk`) and
+    /// removes nothing, unless the drop is expected ([`Job::expect_shrink`]), allowed
+    /// (`pinakesd catalogue allow-shrink`) or the scope is narrower. The runner checks it before
+    /// its sweep; an importer that removes cards itself checks it first.
+    pub async fn check_shrink(&self) -> Result<()> {
+        let (held, read, allowed): (i64, i64, bool) = sqlx::query_as(
+            "SELECT cards,generation_cards,shrink_allowed FROM catalogue_state WHERE catalogue=$1",
+        )
+        .bind(self.catalogue.name())
+        .fetch_one(self.pool)
+        .await?;
+        // A state row from before scopes were kept: the limit its position records.
+        let old_scope = self.state.scope.clone().or_else(|| {
+            self.state
+                .position
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .map(|limit| serde_json::json!({ "limit": limit }))
+        });
+        let narrower = old_scope
+            .as_ref()
+            .is_some_and(|old| narrower(old, &self.config.catalogues.scope(self.catalogue)));
+        let expected = self.shrink_expected || allowed || narrower;
+        if self.state.last_import_at.is_some() && shrunk(held, read) {
+            if !expected {
+                tracing::warn!(
+                catalogue = self.catalogue.name(),
+                held,
+                read,
+                "catalogue full import read far fewer cards than the catalogue holds; nothing is removed (pinakesd catalogue allow-shrink lets the next try remove them)"
+            );
+                return Err(Failure::new("shrunk").into());
+            }
+            tracing::warn!(
+            catalogue = self.catalogue.name(),
+            held,
+            read,
+            importer = self.shrink_expected,
+            operator = allowed,
+            narrower,
+            "catalogue full import removes the cards it did not read, more than half the catalogue"
+        );
+        }
+        Ok(())
+    }
+    /// How free disk is read (the daemon's: the file system; tests set their own).
+    pub fn free_disk(&self) -> FreeDisk {
+        self.free_disk.clone()
     }
     /// What the run has written so far.
     pub fn report(&self) -> WriteReport {
@@ -470,19 +553,37 @@ pub enum Next {
     Wait(Duration),
 }
 
-/// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz without
-/// `http.contact` ([`super::musicbrainz::NEEDS_CONTACT`] in `waiting`). Started with its contact,
-/// or with the catalogue off, the text goes (a task that starts clears any at its first step).
+/// The catalogues whose importer needs `http.contact`, with whether `config` leaves one that is
+/// on without it and what `waiting` says then.
+pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); 2] {
+    [
+        (
+            Catalogue::Musicbrainz,
+            super::musicbrainz::needs_contact(config),
+            super::musicbrainz::NEEDS_CONTACT,
+        ),
+        (
+            Catalogue::Osm,
+            super::osm::needs_contact(config),
+            super::osm::NEEDS_CONTACT,
+        ),
+    ]
+}
+/// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz or
+/// OpenStreetMap without `http.contact` (their `NEEDS_CONTACT` in `waiting`). Started with its
+/// contact, or with the catalogue off, the text goes (a task that starts clears any at its first
+/// step).
 pub async fn note_unstarted(pool: &PgPool, config: &Config) -> Result<()> {
-    let note = super::musicbrainz::NEEDS_CONTACT;
-    if super::musicbrainz::needs_contact(config) {
-        set_waiting(pool, Catalogue::Musicbrainz, note).await?;
-    } else {
-        sqlx::query("UPDATE catalogue_state SET waiting=NULL,updated_at=now() WHERE catalogue=$1 AND waiting=$2")
-            .bind(Catalogue::Musicbrainz.name())
-            .bind(note)
-            .execute(pool)
-            .await?;
+    for (catalogue, needs, note) in contact_needs(config) {
+        if needs {
+            set_waiting(pool, catalogue, note).await?;
+        } else {
+            sqlx::query("UPDATE catalogue_state SET waiting=NULL,updated_at=now() WHERE catalogue=$1 AND waiting=$2")
+                .bind(catalogue.name())
+                .bind(note)
+                .execute(pool)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -716,6 +817,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         dir: &dir,
         config: &ctx.config,
         report: WriteReport::default(),
+        free_disk: ctx.free_disk.clone(),
     };
     // The large-import lock is watched while the run goes on: lost while this task still holds
     // the catalogue lock, the run stops as a recorded failure (`turn_lost`) and resumes from its
@@ -757,7 +859,16 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
             );
             return Err(error);
         }
-        Err(error) => return Err(error),
+        Err(error) => match error.downcast::<Waits>() {
+            Ok(Waits(why)) => {
+                set_waiting(pool, catalogue, &why).await?;
+                if let Some(lock) = large {
+                    lock.release().await;
+                }
+                return Ok(Next::Wait(ctx.pace.disk));
+            }
+            Err(error) => return Err(error),
+        },
     };
     let mut report = job.report;
     let position = job.position.take();
@@ -786,42 +897,7 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         // expected, the operator allows it (`pinakesd catalogue allow-shrink`, or `catalogue import
         // --force`), or the import's scope is narrower than the last finished import's (a lower
         // `limit`, a higher `min_citations`). No scope recorded: the limit the position records.
-        let (held, read, allowed): (i64, i64, bool) = sqlx::query_as(
-            "SELECT cards,generation_cards,shrink_allowed FROM catalogue_state WHERE catalogue=$1",
-        )
-        .bind(catalogue.name())
-        .fetch_one(pool)
-        .await?;
-        // A state row from before scopes were kept: the limit its position records.
-        let old_scope = job.state.scope.clone().or_else(|| {
-            job.state
-                .position
-                .as_ref()
-                .and_then(|p| p.get("limit"))
-                .map(|limit| serde_json::json!({ "limit": limit }))
-        });
-        let narrower = old_scope.as_ref().is_some_and(|old| narrower(old, &scope));
-        let expected = job.shrink_expected || allowed || narrower;
-        if job.state.last_import_at.is_some() && shrunk(held, read) {
-            if !expected {
-                tracing::warn!(
-                    catalogue = catalogue.name(),
-                    held,
-                    read,
-                    "catalogue full import read far fewer cards than the catalogue holds; nothing is removed (pinakesd catalogue allow-shrink lets the next try remove them)"
-                );
-                return Err(Failure::new("shrunk").into());
-            }
-            tracing::warn!(
-                catalogue = catalogue.name(),
-                held,
-                read,
-                importer = job.shrink_expected,
-                operator = allowed,
-                narrower,
-                "catalogue full import removes the cards it did not read, more than half the catalogue"
-            );
-        }
+        job.check_shrink().await?;
         report.removed += store::finish_import(pool, catalogue, generation).await?;
     }
     sqlx::query(

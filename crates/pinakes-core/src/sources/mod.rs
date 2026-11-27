@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
 pub mod app_store;
+pub mod apple_maps;
 pub mod artic;
 pub mod biodiversity;
 pub mod bluesky;
@@ -55,6 +56,7 @@ pub mod ghost;
 pub mod github;
 pub mod gitlab;
 pub mod gleif;
+pub mod google_maps;
 pub mod google_play;
 pub mod govinfo;
 pub mod greenhouse;
@@ -103,6 +105,7 @@ pub mod zenodo;
 #[rustfmt::skip]
 pub static REGISTRY: &[&dyn Source] = &[
     &app_store::AppStore,
+    &apple_maps::AppleMaps,
     &artic::Artic,
     &bluesky::Bluesky,
     &castro::Castro,
@@ -129,6 +132,7 @@ pub static REGISTRY: &[&dyn Source] = &[
     &github::Github,
     &gitlab::Gitlab,
     &gleif::Gleif,
+    &google_maps::GoogleMaps,
     &google_play::GooglePlay,
     &govinfo::Govinfo,
     &greenhouse::Greenhouse,

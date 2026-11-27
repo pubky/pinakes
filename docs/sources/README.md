@@ -145,6 +145,13 @@ they record, and what a lookup costs.
 | [`cleveland`](cleveland.md) | Cleveland Museum of Art artworks by accession number | None |
 | [`met`](met.md) | The Metropolitan Museum of Art's works by object ID | None |
 
+### Maps
+
+| Source | Reads | Credentials |
+| --- | --- | --- |
+| [`apple_maps`](apple_maps.md) | Apple Maps links that name a place or a point, from the link itself | None |
+| [`google_maps`](google_maps.md) | Google Maps links that name a place or a point, from the link itself (a short link's redirect is its one request) | None |
+
 ### Bitcoin
 
 | Source | Reads | Credentials |
@@ -159,6 +166,7 @@ of it is fetched link by link ([catalogues](../operations.md#catalogues)).
 | Catalogue | Imports | Credentials |
 | --- | --- | --- |
 | [`musicbrainz`](musicbrainz_catalogue.md) | Every artist, release group and recording of MusicBrainz's JSON dumps | None |
+| [`osm`](osm_catalogue.md) | OpenStreetMap's named places and useful points, from the planet file or a region's extract | None |
 
 ## Also on
 

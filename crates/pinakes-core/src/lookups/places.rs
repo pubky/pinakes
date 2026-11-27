@@ -86,7 +86,9 @@ const TRIPADVISOR: &[&str] = &[
 
 /// The Wikidata property a place's page on a map or review site names, its value, and the
 /// site: Google Maps (`?cid=`), Apple Maps (`?auid=`) and Yelp by the place table's links
-/// (`wikidata::PLACE`), and Tripadvisor by the location number in any of its pages' names
+/// (`wikidata::PLACE`), Google Maps also by the CID in a place link's feature ID
+/// (`/maps/place/…/data=…!1s0x…:0x…`, `?ftid=0x…:0x…`, on any of Google's domains:
+/// `geo::google_cid`), and Tripadvisor by the location number in any of its pages' names
 /// (`…-d188151-…`, on any of its country sites), which is all its property holds.
 pub fn place_page(uri: &str) -> Option<(&'static str, String, &'static str)> {
     let url = super::web_url(uri)?;
@@ -110,6 +112,9 @@ pub fn place_page(uri: &str) -> Option<(&'static str, String, &'static str)> {
         let number = rest.split('-').find_map(|part| part.strip_prefix('d'))?;
         return (plain(number, 12, |c| c.is_ascii_digit()) && !number.starts_with('0'))
             .then(|| ("P3134", number.to_owned(), "Tripadvisor"));
+    }
+    if let Some(cid) = crate::resolver::geo::google_cid(uri) {
+        return Some(("P3749", cid, "Google Maps"));
     }
     wikidata::PLACE
         .iter()
@@ -1045,6 +1050,35 @@ mod tests {
             ("https://www.tripadvisor.evil.example/Attraction_Review-g1-d2-Reviews-x.html", None),
             ("https://tripadvisor.xyz.com/Attraction_Review-g1-d2-Reviews-x.html", None),
             ("https://www.google.com/maps/place/Eiffel+Tower", None),
+            // A place link's feature ID names its CID, on any of Google's domains.
+            (
+                "https://www.google.com/maps/place/Tour+Eiffel/data=!4m2!3m1!1s0x47e66e2964e34e2d:0x8ddca9ee380ef7e0",
+                Some(("P3749", "10222232094831998944", "Google Maps")),
+            ),
+            (
+                "https://www.google.com/maps/place/Eiffel+Tower/@48.8583701,2.2919064,17z/data=!3m1!4b1!4m6!3m5!1s0x47e66e2964e34e2d:0x8ddca9ee380ef7e0!8m2!3d48.8583701!4d2.2944813!16zL20vMDJqODE?entry=ttu",
+                Some(("P3749", "10222232094831998944", "Google Maps")),
+            ),
+            (
+                "https://www.google.com/maps/place/Falafel+M.+Sahyoun/@33.8904447,35.5066505,17z/data=!3m1!4b1!4m6!3m5!1s0x151f16e2123697fd:0x8e6626b678863990!8m2!3d33.8904447!4d35.5066505!16s%2Fg%2F1td7wffc?utm_source=mstt_1&coh=164777&entry=tt&shorturl=1",
+                Some(("P3749", "10260931366158219664", "Google Maps")),
+            ),
+            (
+                "https://www.google.de/maps/place/Tour+Eiffel/data=!4m2!3m1!1s0x47e66e2964e34e2d%3A0x8ddca9ee380ef7e0",
+                Some(("P3749", "10222232094831998944", "Google Maps")),
+            ),
+            (
+                "https://maps.google.com/maps?q=Tour+Eiffel&ftid=0x47e66e2964e34e2d:0x8ddca9ee380ef7e0",
+                Some(("P3749", "10222232094831998944", "Google Maps")),
+            ),
+            // Not a Google domain, no feature ID, a street view's panorama, two places, a CID 0.
+            ("https://www.google.evil.example/maps/place/X/data=!4m2!3m1!1s0x1:0x2", None),
+            ("https://google.com.evil.example/maps/place/X/data=!4m2!3m1!1s0x1:0x2", None),
+            ("https://www.google.com/search/place/X/data=!4m2!3m1!1s0x1:0x2", None),
+            ("https://www.google.com/maps/@48.85,2.29,3a,75y,90t/data=!3m6!1e1!3m4!1sAF1QipN:x!2e0", None),
+            ("https://www.google.com/maps/place/X/data=!1s0x1:0x2!1s0x1:0x3", None),
+            ("https://www.google.com/maps/place/X/data=!1s0x1:0x0", None),
+            ("https://www.google.com/maps/place/X/data=!1s0x1:0x12345678901234567", None),
         ] {
             let got = place_page(uri);
             assert_eq!(

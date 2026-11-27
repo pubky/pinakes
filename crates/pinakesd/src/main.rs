@@ -522,6 +522,9 @@ async fn start(
             pool.clone(),
             PathBuf::from(&config.osm.dump_dir),
             Duration::from_secs(config.osm.dump_every_hours * 3600),
+            config
+                .catalogues
+                .enabled(pinakes_core::catalogue::Catalogue::Osm),
             shutdown_rx.clone(),
         ),
     );
@@ -691,18 +694,39 @@ async fn import(
     force: bool,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    use pinakes_core::catalogue::{musicbrainz, run, store};
+    use pinakes_core::catalogue::{musicbrainz, osm, run, store};
     let mut config = config.clone();
     if limit.is_some() {
         config.catalogues.musicbrainz.limit = limit;
     }
-    let source = match from {
-        Some(from) => musicbrainz::Source::parse(from)?,
-        None => musicbrainz::Source::official(),
+    let importer: std::sync::Arc<dyn run::Importer> = match catalogue {
+        Catalogue::Osm => {
+            if from.is_none() && config.egress.contact.is_empty() {
+                bail!("set http.contact (or PINAKES__HTTP__CONTACT): OpenStreetMap's bulk files are read with the operator's contact");
+            }
+            std::sync::Arc::new(osm::OsmImporter {
+                input: match from {
+                    Some(file) => osm::Input::Files(vec![PathBuf::from(file)]),
+                    None => osm::Input::Region,
+                },
+                region: config.catalogues.osm.region.clone(),
+                ..Default::default()
+            })
+        }
+        _ => {
+            let source = match from {
+                Some(from) => musicbrainz::Source::parse(from)?,
+                None => musicbrainz::Source::official(),
+            };
+            if matches!(source, musicbrainz::Source::Mirror(_)) && config.egress.contact.is_empty()
+            {
+                bail!("set http.contact (or PINAKES__HTTP__CONTACT): the dump mirror is asked with the operator's contact");
+            }
+            std::sync::Arc::new(
+                musicbrainz::MusicBrainz::new(source, &config.egress.contact)?.configured(&config),
+            )
+        }
     };
-    if matches!(source, musicbrainz::Source::Mirror(_)) && config.egress.contact.is_empty() {
-        bail!("set http.contact (or PINAKES__HTTP__CONTACT): the dump mirror is asked with the operator's contact");
-    }
     let before = store::state(pool, catalogue).await?;
     let cards = before.as_ref().map_or(0, |s| s.cards);
     let stored_limit = before
@@ -723,8 +747,6 @@ async fn import(
             "catalogue {catalogue} is off in this configuration: its cards stay out of search and lookups until it is on"
         )?;
     }
-    let importer =
-        musicbrainz::MusicBrainz::new(source, &config.egress.contact)?.configured(&config);
     let ctx = run::Context::new(pool.clone(), std::sync::Arc::new(config.clone()));
     let started = std::time::Instant::now();
     let kind = if update {
@@ -740,15 +762,9 @@ async fn import(
         && limit.is_some_and(|l| {
             i64::try_from(l).is_ok_and(|l| l < cards) && stored_limit.is_none_or(|s| l < s)
         });
-    let (state, written) = run::run_once_with(
-        std::sync::Arc::new(importer),
-        &ctx,
-        kind,
-        expect_shrink,
-        |why| {
-            let _ = writeln!(out, "waiting: {why}");
-        },
-    )
+    let (state, written) = run::run_once_with(importer, &ctx, kind, expect_shrink, |why| {
+        let _ = writeln!(out, "waiting: {why}");
+    })
     .await?;
     // An update can have handed over to a full import (a limit changed, one asked for).
     let ran = if state.last_import_at != before.as_ref().and_then(|s| s.last_import_at) {
@@ -984,7 +1000,7 @@ async fn healthcheck(config: Option<&std::path::Path>) -> Result<()> {
 /// Options in any position; every other word after `reextract` is a route, checked here, before
 /// any config is read or database touched.
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>, Command)> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     let (mut config, mut command) = (None, Command::Serve);
     let mut routes: Option<Vec<String>> = None;
     let mut catalogue = None;
@@ -1019,7 +1035,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                             )
                         })?;
                         anyhow::ensure!(
-                            catalogue == Catalogue::Musicbrainz,
+                            matches!(catalogue, Catalogue::Musicbrainz | Catalogue::Osm),
                             "catalogue {catalogue} has no importer in this build"
                         );
                         let (mut from, mut limit, mut update, mut request, mut force) =
@@ -1049,6 +1065,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Option<PathBuf>
                         anyhow::ensure!(
                             !request || (from.is_none() && limit.is_none() && !update && !force),
                             "catalogue import --request takes no other option"
+                        );
+                        // OpenStreetMap: `--from` a PBF file to import; updates read upstream.
+                        anyhow::ensure!(
+                            catalogue != Catalogue::Osm || (limit.is_none() && !(update && from.is_some())),
+                            "catalogue import osm takes --from FILE (a .osm.pbf) for a full import; --update reads the region's change files and takes no --from; there is no --limit (use catalogues.osm.region)"
                         );
                         CatalogueCommand::Import {
                             catalogue,
@@ -1189,6 +1210,21 @@ mod tests {
                 force: false,
             }
         );
+        let (_, command) = parse(&["catalogue", "import", "osm", "--from", "a.osm.pbf"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::Import { catalogue: Catalogue::Osm, ref from, update: false, .. }) if from.as_deref() == Some("a.osm.pbf")
+        ));
+        let (_, command) = parse(&["catalogue", "import", "osm", "--update"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Catalogue(CatalogueCommand::Import {
+                catalogue: Catalogue::Osm,
+                from: None,
+                update: true,
+                ..
+            })
+        ));
         let (_, command) = parse(&["catalogue", "import", "musicbrainz", "--request"]).unwrap();
         assert!(matches!(
             command,
@@ -1196,7 +1232,15 @@ mod tests {
         ));
         for bad in [
             &["catalogue", "import"][..],
-            &["catalogue", "import", "osm"],
+            &["catalogue", "import", "osm", "--limit", "5"],
+            &[
+                "catalogue",
+                "import",
+                "osm",
+                "--update",
+                "--from",
+                "a.osc.gz",
+            ],
             &["catalogue", "import", "musicbrainz", "--limit", "0"],
             &["catalogue", "import", "musicbrainz", "--limit"],
             &["catalogue", "import", "musicbrainz", "--bogus"],
@@ -1231,6 +1275,10 @@ mod tests {
             &["catalogue", "drop", "wikipedia"],
             &["catalogue", "allow-shrink"],
             &["catalogue", "list"],
+            &["catalogue", "import"],
+            &["catalogue", "import", "atlas"],
+            &["catalogue", "import", "osm", "--from"],
+            &["catalogue", "update", "osm"],
             &["catalogue", "status", "--migrate"],
             &["catalogue", "status", "reextract", "all"],
             &["reextract", "all", "catalogue", "status"],

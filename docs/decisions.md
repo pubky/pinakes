@@ -209,12 +209,34 @@ search Pinakes needs.
 
 ### OpenStreetMap data is published as a dump
 
-Everything Pinakes derives from OpenStreetMap is kept in one table, `osm_place`, and published as
-`GET /v1/dumps/osm_place.ndjson.gz` with its licence notice, every `limits.osm_dump_every_hours`
-(24).
+Everything Pinakes derives from OpenStreetMap is kept in `osm_place`, the OpenStreetMap
+catalogue's cards, `osm_rename`, `osm_successor` and `osm_removed`, and published as `GET /v1/dumps/osm_place.ndjson.gz` with its
+licence notice, every `limits.osm_dump_every_hours` (24). Resource rows hold only the OSM
+reference.
 
-Why: keeping every OSM-derived value in one table makes the published dump complete, with nothing
-OSM-derived left elsewhere.
+Why: keeping every OSM-derived value in these tables makes the published dump complete, with
+nothing OSM-derived left elsewhere.
+
+### Map links join an OpenStreetMap place only as maybe the same
+
+A Google Maps, Apple Maps or other map link keeps its own card and its own tags; it is never
+rewritten. With exactly one imported place of the same name within 50 m, the link and the place
+list each other as maybe the same, and the place shows the link's references. Nothing merges or
+groups, and a match never chains from one link to another.
+
+Why: a name and a point are metadata, not an identity; the join can be wrong and must be undone
+by the data alone, while people see a place's tags from every map service together.
+
+### A deleted OpenStreetMap object is followed only on evidence
+
+A deleted object's link becomes an alias of a new object's link only when an update shows the
+same Wikidata tag, or a delete and a create in one changeset with the same name within 50 m. The
+same name and category nearby in separate edits is maybe the same; a name alone in another
+category is never used. A name changed to an unrelated one keeps the object (`replaced` says what
+it was, and which references came before).
+
+Why: a matching name alone, in another category, is often another place; the same item or the
+same edit is evidence a client can rely on, and a revert undoes it.
 
 ## API
 
@@ -225,11 +247,14 @@ parameters of `GET /v1/search`. Identifier search is part of it, not a separate 
 
 Why: clients compose filters freely, and one endpoint keeps the API small.
 
-### Clients cluster map pins
+### Map clusters are one endpoint over search's filters
 
-The API has no clustering parameter. A client clusters the results of a page itself.
+Search has no clustering parameter: a client clusters the page it shows. A map of a whole area
+asks `GET /v1/map/clusters`, which counts everything with a point per map cell with search's
+filters, and gives each cell the search that lists it.
 
-Why: clients cluster the page they show, so server-side clustering would add cost and no value.
+Why: a count per cell can't come from one page of results, and one URL per cell keeps the map,
+lists and shared links on the same search.
 
 ### The resource type is Pinakes' reading
 

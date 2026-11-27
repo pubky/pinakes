@@ -1,0 +1,7 @@
+{
+  "links": {
+    "file": "links.json",
+    "note": "No request: the link forms the source reads, with the name, point and precision each card takes from the link. The `?q=`, `?ll=`, `?address=` and `sll` forms are from Apple's Map Links reference; the `/place?\u2026&coordinate=\u2026&name=\u2026` and `?address=\u2026&auid=\u2026&ll=\u2026&q=\u2026` forms are the Maps app's share links.",
+    "url": "https://developer.apple.com/library/archive/featuredarticles/iPhoneURLScheme_Reference/MapLinks/MapLinks.html"
+  }
+}

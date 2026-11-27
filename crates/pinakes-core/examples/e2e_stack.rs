@@ -599,7 +599,12 @@ fn live(pool: &sqlx::PgPool) -> Result<Live> {
     pinakes_core::configure_sources(&cfg);
     let cfg = Arc::new(cfg);
     let egress = Egress::new(cfg.egress.clone());
-    let osm = Arc::new(OsmResolver::new(pool.clone(), cfg.osm.clone())?);
+    let osm = Arc::new(
+        OsmResolver::new(pool.clone(), cfg.osm.clone())?.with_catalogue(
+            cfg.catalogues
+                .enabled(pinakes_core::catalogue::Catalogue::Osm),
+        ),
+    );
     let events = Arc::new(EventService {
         pool: pool.clone(),
         config: cfg.event.clone(),

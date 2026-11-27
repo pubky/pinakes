@@ -373,6 +373,26 @@ dump (48.8 million cards):
 
 A full import takes about an hour; the text index then reads the new cards in the background
 ([text index](operations.md#text-index)).
+### OpenStreetMap
+
+The `osm` catalogue ([source page](sources/osm_catalogue.md)) starts once `http.contact` is set.
+With the default `catalogues.osm.region = "planet"`, a daemon with the catalogue on downloads the
+planet file as soon as `catalogues.dir` has the room: set a region (`europe/switzerland`) on a
+small or staging instance, or switch the catalogue off.
+
+| | Planet | A region |
+| --- | --- | --- |
+| Download | About 96 GB (`planet-latest.osm.pbf`: 96,072,105,092 bytes on 2026-11-26) | The extract (Switzerland about 550 MB) |
+| Temporary disk while importing | The file, the node index (about 115 GB, dense; the import stops with `disk` past about 172 GB) and the set-aside relations (a few GB) | The file and about twice its size (the node index, 16 bytes per node) |
+| Memory | Up to about 2.5 GB for the relations' member ways, plus the decoded blocks waiting: at most 2 per decoding thread (at most 8 threads), each at most about 250 MB (real blocks: a few MB), so at most about 4 GB | Hundreds of MB |
+| Cards | About 35 million (estimate), about 1.4 KB each in PostgreSQL with their indexes: about 49 GB. The map cells' totals add a few million rows (Switzerland: 48,914 rows, 7.5 MB) | Switzerland: 400,838 cards, 1,391 B each (measured) |
+| Import time | About 15 hours plus the download at the measured rate (673 cards/s, a debug build on a busy host; a release build is faster). The map cells' triggers take about 40% of a card write (Switzerland: 100,000 located cards in 7.7 s with them, 4.7 s without) | Switzerland: 596 s after a 552 MB download (measured, debug build) |
+| Updates | One daily change file (about 130 MB compressed), read to `catalogues.dir/osm`; about 1 GB of memory while it is applied (estimate: every object's last version, the changed nodes' locations); a file that would hold more than 1 GiB is refused (`too_large`) | The region's daily file (kilobytes to a few MB) |
+| Update lag | Updates wait while a full import runs (every 90 days, about 15 hours plus the download, estimate): the lag can pass the 2-day alert when the import waits for the large-import turn or free disk | Minutes of import every 30 days |
+| ODbL dump | Adds one line per imported place, written from one repeatable-read snapshot: Switzerland's 400,839 places took 32 s and 21 MB compressed (measured), so the planet's about 45 minutes and 2 GB (estimate); the dump directory holds two copies while one is written | Megabytes |
+
+The file and the index are removed once the import has finished; every 30 days (the planet: every
+90) a full import reads a new file again.
 
 ## Network and secrets
 
@@ -407,6 +427,12 @@ CORS headers.
 private, loopback, link-local and metadata addresses at the network layer. Pinakes checks and
 pins DNS answers and checks redirects itself for every request a link can steer
 ([egress policy](operations.md#egress-policy)).
+
+**Bulk files.** The OpenStreetMap catalogue reads its files and change files only from
+`download.geofabrik.de`, `planet.openstreetmap.org` and the two buckets the planet's site redirects
+them to (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com`,
+`osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com`), over https, following redirects only
+to those names. Allow them where outbound traffic is filtered by host.
 
 **Nexus and Nominatim.** These are trusted upstreams the operator configures, outside that
 policy: their clients follow no redirect and don't apply the DNS pinning or the private-address

@@ -1,5 +1,6 @@
 //! The ODbL derivative database as a static file: the licence notice, then one `osm_place` row per
-//! line (`api::OSM_DUMP_LINE`), gzip-compressed. The daemon writes it from one read-only snapshot
+//! line (`api::OSM_DUMP_LINE`), then, while the OSM catalogue is on, one imported place per line
+//! (`api::OSM_DUMP_CATALOGUE_LINE`, with the renames the updates saw), the renames of objects with no imported place, and the successors found, gzip-compressed. The daemon writes it from one read-only snapshot
 //! every `limits.osm_dump_every_hours` into a temporary file and renames it into place, so a
 //! reader always sees a whole file; the API only serves that file and never reads the database
 //! for it. A lock file keeps it to one writer per directory, across daemons.
@@ -98,9 +99,10 @@ pub fn remove_leftovers(dir: &Path) -> std::io::Result<usize> {
 }
 
 /// Write the file from one read-only snapshot and rename it into place; returns the places
-/// written. On any failure the previous file stays and the temporary one is removed. Refused while
-/// another writer holds the directory's lock.
-pub async fn write(pool: &PgPool, dir: &Path) -> Result<usize> {
+/// written. `catalogue`: the OSM catalogue is on, and its places are written too. On any failure
+/// the previous file stays and the temporary one is removed. Refused while another writer holds
+/// the directory's lock.
+pub async fn write(pool: &PgPool, dir: &Path, catalogue: bool) -> Result<usize> {
     let _one = WRITER.lock().await;
     tokio::fs::create_dir_all(dir)
         .await
@@ -108,7 +110,7 @@ pub async fn write(pool: &PgPool, dir: &Path) -> Result<usize> {
     let lock = lock(dir)?.context("another writer holds the dump directory's lock")?;
     remove_temps(dir)?;
     let tmp = temp_path(dir);
-    match write_to(pool, &tmp).await {
+    match write_to(pool, &tmp, catalogue).await {
         Ok(places) => replace(dir, tmp, lock).await.map(|()| places),
         Err(error) => {
             let _ = tokio::fs::remove_file(&tmp).await;
@@ -159,7 +161,7 @@ fn before_rename(dir: &Path) {
     }
 }
 
-async fn write_to(pool: &PgPool, tmp: &Path) -> Result<usize> {
+async fn write_to(pool: &PgPool, tmp: &Path, catalogue: bool) -> Result<usize> {
     use futures_util::TryStreamExt;
     let (lines, mut received) = tokio::sync::mpsc::channel::<String>(256);
     let file = tmp.to_owned();
@@ -194,6 +196,27 @@ async fn write_to(pool: &PgPool, tmp: &Path) -> Result<usize> {
             places += 1;
         }
         drop(rows);
+        if catalogue {
+            let mut rows =
+                sqlx::query_scalar::<_, Value>(crate::api::OSM_DUMP_CATALOGUE_LINE).fetch(&mut *tx);
+            while let Some(mut row) = rows.try_next().await? {
+                let path = crate::model::type_path(row["type"].as_str().unwrap_or("Place"));
+                row["type_path"] = json!(path);
+                lines.send(row.to_string()).await?;
+                places += 1;
+            }
+            drop(rows);
+            for query in [
+                crate::api::OSM_DUMP_RENAME_LINE,
+                crate::api::OSM_DUMP_SUCCESSOR_LINE,
+                crate::api::OSM_DUMP_REMOVED_LINE,
+            ] {
+                let mut rows = sqlx::query_scalar::<_, Value>(query).fetch(&mut *tx);
+                while let Some(row) = rows.try_next().await? {
+                    lines.send(row.to_string()).await?;
+                }
+            }
+        }
         tx.commit().await?;
         anyhow::Ok(places)
     };
@@ -208,7 +231,13 @@ async fn write_to(pool: &PgPool, tmp: &Path) -> Result<usize> {
 /// directory may have written it), checking again after `every`. A failed write is retried after
 /// five minutes. Shutdown cancels a write in progress: the previous file stays, and the next
 /// start (or the next writer) removes the temporary one.
-pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watch::Receiver<bool>) {
+pub async fn run(
+    pool: PgPool,
+    dir: PathBuf,
+    every: Duration,
+    catalogue: bool,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let leftovers = dir.clone();
     match tokio::task::spawn_blocking(move || remove_leftovers(&leftovers)).await {
         Ok(Ok(0)) => {}
@@ -228,11 +257,15 @@ pub async fn run(pool: PgPool, dir: PathBuf, every: Duration, mut shutdown: watc
             wait = due;
             continue;
         }
-        let written = tokio::select! { _=shutdown.changed()=>break, r=write(&pool, &dir)=>r };
+        let started = std::time::Instant::now();
+        let written =
+            tokio::select! { _=shutdown.changed()=>break, r=write(&pool, &dir, catalogue)=>r };
         crate::telemetry::background_pass("osm_dump", &written);
         wait = match written {
             Ok(places) => {
-                tracing::info!(places, file=%path(&dir).display(), "ODbL dump written");
+                // How long its one snapshot stayed open.
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                tracing::info!(places, elapsed_ms, file=%path(&dir).display(), "ODbL dump written");
                 every
             }
             Err(error) => {
@@ -257,7 +290,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinakes-cancelled-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        write(&pool, &dir).await.unwrap();
+        write(&pool, &dir, false).await.unwrap();
         let before = std::fs::read(path(&dir)).unwrap();
         // Writer A stops before its rename until `go`.
         let (paused, reached) = std::sync::mpsc::channel::<()>();
@@ -272,7 +305,7 @@ mod tests {
         ));
         let a = {
             let (pool, dir) = (pool.clone(), dir.clone());
-            tokio::spawn(async move { write(&pool, &dir).await })
+            tokio::spawn(async move { write(&pool, &dir, false).await })
         };
         tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(10)))
             .await
@@ -282,7 +315,7 @@ mod tests {
         assert!(a.await.unwrap_err().is_cancelled());
         // A's rename is still to come: B neither takes the lock nor publishes.
         assert!(lock(&dir).unwrap().is_none(), "the lock is free");
-        let refused = write(&pool, &dir).await.unwrap_err();
+        let refused = write(&pool, &dir, false).await.unwrap_err();
         assert!(format!("{refused:#}").contains("lock"), "{refused:#}");
         assert_eq!(std::fs::read(path(&dir)).unwrap(), before);
         go.send(()).unwrap();
@@ -298,7 +331,7 @@ mod tests {
         }
         assert!(free, "the lock was never released");
         let a_file = std::fs::metadata(path(&dir)).unwrap().ino();
-        write(&pool, &dir).await.unwrap();
+        write(&pool, &dir, false).await.unwrap();
         let b_file = std::fs::metadata(path(&dir)).unwrap().ino();
         assert_ne!(a_file, b_file);
         tokio::time::sleep(Duration::from_millis(200)).await;

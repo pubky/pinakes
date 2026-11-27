@@ -530,6 +530,7 @@ fn rest_routes() -> Router<AppState> {
         .route("/v1/info", get(info))
         .route("/v1/changes/lookup", post(crate::change_api::lookup))
         .route("/v1/search", get(search))
+        .route("/v1/map/clusters", get(map_clusters))
         .route("/v1/groups/{id}", get(group))
         .route("/v1/resources/lookup", post(lookup))
         .route("/v1/resources/by-uri", get(by_uri))
@@ -1179,6 +1180,23 @@ pub struct Details {
     /// A gone social post lists none: a spelling's link can carry the post's title.
     pub aliases: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// On an OpenStreetMap place whose name changed to an unrelated one (another business moved
+    /// in under the same OSM object): the places it was, oldest first, each with when it was
+    /// replaced and how many references the link got before that (those belong to that place).
+    /// Absent on every other card (docs/api.md, Places).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<Vec<Replaced>>,
+}
+/// A place an OpenStreetMap object was before an unrelated name replaced its own.
+#[derive(Serialize, ToSchema)]
+pub struct Replaced {
+    pub name: String,
+    /// Its OSM `key/value` category.
+    pub category: Option<String>,
+    /// When the new name replaced it.
+    pub until: DateTime<Utc>,
+    /// The references the link got before `until`.
+    pub references: i64,
 }
 #[derive(Serialize, ToSchema)]
 pub struct OrganizerRef {
@@ -2025,6 +2043,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             keys,
             aliases,
             updated_at: row["resolved_at"].as_str().and_then(|s| s.parse().ok()),
+            replaced: None,
         },
         None => Details {
             category: None,
@@ -2043,6 +2062,7 @@ fn detail(row: &Value) -> Result<ResourceDetail, ApiError> {
             keys,
             aliases,
             updated_at: None,
+            replaced: None,
         },
     };
     // The read's card, with up to ten possible duplicates.
@@ -4558,6 +4578,8 @@ pub async fn resource(
         None => read_unshared(&state.pool, &id, &state.config).await?,
     }
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "resource not found".into()))?;
+    let mut detail = detail;
+    place_hints(&state.pool, &state.config, &mut detail).await?;
     tagged(&headers, &detail)
 }
 /// A card someone opens whose refresh is due is read again first (`store::opened`): the
@@ -4617,25 +4639,62 @@ async fn read_unshared_with(
     config: &Config,
     caps: (i64, i64),
 ) -> Result<Option<ResourceDetail>, ApiError> {
-    let catalogues = crate::catalogue::join::joinable(&config.catalogues);
-    let Some(card) = crate::catalogue::join::unshared(pool, &catalogues, id).await? else {
-        return Ok(None);
+    // An imported OSM place nobody shared: the card the OSM route builds from it, as a shared
+    // OSM link shows it (its values come from the catalogue, never from a resource row).
+    let osm = if config.catalogues.enabled(crate::catalogue::Catalogue::Osm) {
+        crate::catalogue::osm::card_by_link(pool, id).await?
+    } else {
+        None
     };
-    let Some(doc) = crate::catalogue::join::document(&card, &card.uri) else {
-        return Ok(None);
+    let (uri, name, doc, keys, member, category, osm_object) = match osm {
+        Some(card) => {
+            let Some((doc, _)) = crate::catalogue::osm::document(&card, config.osm.ttl_secs) else {
+                return Ok(None);
+            };
+            let object = crate::resolver::osm::parse_id(&card.uri);
+            let category = doc.category.clone();
+            (
+                card.uri.clone(),
+                card.name.clone(),
+                doc,
+                vec![format!("osm:{}", card.source_id)],
+                None,
+                category,
+                object,
+            )
+        }
+        None => {
+            let catalogues = crate::catalogue::join::joinable(&config.catalogues);
+            let Some(card) = crate::catalogue::join::unshared(pool, &catalogues, id).await? else {
+                return Ok(None);
+            };
+            let Some(doc) = crate::catalogue::join::document(&card, &card.uri) else {
+                return Ok(None);
+            };
+            // The group of the links built from the card or related to it, when one is stored,
+            // and its members as `also_on` (that member first, as another member lists it):
+            // their tags show with the card.
+            let member = crate::catalogue::join::member(pool, &card).await?;
+            let keys = crate::catalogue::join::backed_keys(&card);
+            (
+                card.uri.clone(),
+                card.name.clone(),
+                doc,
+                keys,
+                member,
+                None,
+                None,
+            )
+        }
     };
-    let host = crate::catalogue::card_host(&card.uri);
+    let host = crate::catalogue::card_host(&uri);
     // A root that is no web link lists its web page as an alias (by-uri answers it by that page).
-    let aliases: Vec<String> = crate::catalogue::root_page(&card.uri)
+    let aliases: Vec<String> = crate::catalogue::root_page(&uri)
         .map(|(page, _)| page)
         .into_iter()
         .collect();
-    // The group of the links built from the card or related to it, when one is stored, and its
-    // members as `also_on` (that member first, as another member lists it): their tags show with
-    // the card.
-    let member = crate::catalogue::join::member(pool, &card).await?;
     let value: Value = sqlx::query_scalar(&[
-        "SELECT jsonb_build_object('id',$1::text,'uri',$5::text,'host',$6::text,'type',$7::text,'type_path',to_jsonb($2::text[]),'name',$8::text,'category',NULL,'doc',$9::jsonb,'resolver',NULL,'resolved_at',NULL,'refresh_at',NULL,'status','ok','osm_type',NULL,'osm_id',NULL)||jsonb_build_object('group',CASE WHEN $12 AND $11::text IS NOT NULL THEN group_hint($11) END,'maybe_same',",
+        "SELECT jsonb_build_object('id',$1::text,'uri',$5::text,'host',$6::text,'type',$7::text,'type_path',to_jsonb($2::text[]),'name',$8::text,'category',$14::text,'doc',$9::jsonb,'resolver',NULL,'resolved_at',NULL,'refresh_at',NULL,'status','ok','osm_type',$15::text,'osm_id',$16::bigint)||jsonb_build_object('group',CASE WHEN $12 AND $11::text IS NOT NULL THEN group_hint($11) END,'maybe_same',",
         &maybe_same_sql("$1::text", "$2::text[]", caps.0 as u32, "$3", "$4"),
         // The member first, as another member lists it, then the member's own; `caps.1` in all.
         &format!(",'also_on',CASE WHEN $11::text IS NULL OR NOT $12 THEN '[]'::jsonb ELSE (SELECT coalesce(jsonb_agg(e ORDER BY n),'[]'::jsonb) FROM (SELECT e,n FROM jsonb_array_elements(coalesce((SELECT jsonb_agg(e) FROM jsonb_array_elements(also_on((SELECT u.unit_id FROM group_unit u JOIN group_unit me ON me.group_id=u.group_id WHERE me.unit_id=$11 AND u.unit_id<>$11 AND u.group_id IS NOT NULL ORDER BY u.unit_id LIMIT 1),'',{0},true)) e WHERE e->>'id'=$11),'[]'::jsonb)||also_on($11,'',{0},$12)) WITH ORDINALITY AS a(e,n) ORDER BY n LIMIT {0}) x) END,'aliases',to_jsonb($13::text[]),'keys',to_jsonb($10::text[]),'facts',NULL)", caps.1),
@@ -4645,20 +4704,659 @@ async fn read_unshared_with(
     .bind(&doc.type_path)
     .bind(same_event(config))
     .bind(same_recording(config))
-    .bind(&card.uri)
+    .bind(&uri)
     .bind(host)
     .bind(&doc.type_name)
-    .bind(&card.name)
+    .bind(&name)
     .bind(serde_json::to_value(&doc)?)
-    .bind(crate::catalogue::join::backed_keys(&card))
+    .bind(keys)
     .bind(member)
     .bind(config.groups.enabled)
     .bind(aliases)
+    .bind(category)
+    .bind(osm_object.as_ref().map(|o| o.osm_type.clone()))
+    .bind(osm_object.as_ref().map(|o| o.id))
     .fetch_one(pool)
     .await?;
     let mut detail = detail(&value)?;
     with_refs(pool, std::iter::once(&mut detail.card)).await?;
     Ok(Some(detail))
+}
+
+/// The catalogue cards a map view counts one by one (`x`, `y`, `n` rows, each branch after a
+/// `UNION ALL`): one branch per catalogue, its name a literal, so the planner reads that
+/// catalogue's partial point index (a bound list of names matches none of them).
+fn push_cluster_cards(
+    sql: &mut QueryBuilder<'_, Postgres>,
+    catalogues: &[String],
+    boxes: &[[f64; 4]],
+    types: Option<&Vec<String>>,
+    excluded: Option<&Vec<String>>,
+    tags: &[String],
+    all: bool,
+) {
+    for catalogue in catalogues
+        .iter()
+        .filter_map(|c| crate::catalogue::Catalogue::parse(c))
+    {
+        sql.push(format!(
+            " UNION ALL SELECT ST_X(c.point),ST_Y(c.point),1 FROM catalogue_card c WHERE c.catalogue='{}' AND c.point IS NOT NULL AND (",
+            catalogue.name()
+        ));
+        for (i, b) in boxes.iter().enumerate() {
+            if i > 0 {
+                sql.push(" OR ");
+            }
+            sql.push("c.point && ST_MakeEnvelope(");
+            for (j, n) in b.iter().enumerate() {
+                if j > 0 {
+                    sql.push(",");
+                }
+                sql.push_bind(*n);
+            }
+            sql.push(",4326)");
+        }
+        sql.push(")");
+        if let Some(types) = types {
+            sql.push(" AND c.type=ANY(")
+                .push_bind(types.clone())
+                .push(")");
+        }
+        if let Some(types) = excluded {
+            sql.push(" AND NOT c.type=ANY(")
+                .push_bind(types.clone())
+                .push(")");
+        }
+        if !tags.is_empty() {
+            sql.push(if all {
+                " AND c.labels@>"
+            } else {
+                " AND c.labels&&"
+            })
+            .push_bind(tags.to_vec());
+        }
+    }
+}
+/// `GET /v1/map/clusters`: the parameters. Filters are search's (`GET /v1/search`).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterQuery {
+    /// The map view: `min_lon,min_lat,max_lon,max_lat`, as search's `bbox`.
+    pub bbox: String,
+    /// The map's zoom, 0–20: a cell is 360 / 2^(zoom+2) degrees wide and high (a quarter of a
+    /// map tile).
+    pub zoom: u8,
+    #[serde(rename = "type")]
+    pub type_name: Option<String>,
+    pub exclude_type: Option<String>,
+    pub tags: Option<String>,
+    #[serde(rename = "match")]
+    pub match_mode: Option<String>,
+    pub author: Option<String>,
+    pub reach: Option<String>,
+    pub viewer: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub referenced: Option<bool>,
+}
+/// The clusters of one map view.
+#[derive(Serialize, ToSchema)]
+pub struct MapClusters {
+    pub zoom: u8,
+    /// A cell's width and height, in degrees.
+    pub cell_degrees: f64,
+    /// Everything counted in the view.
+    pub total: i64,
+    /// One per cell that holds anything, the fullest first.
+    pub clusters: Vec<MapCluster>,
+}
+/// One map cell's count.
+#[derive(Serialize, ToSchema)]
+pub struct MapCluster {
+    /// The cell: `[min_lon, min_lat, max_lon, max_lat]`.
+    pub bbox: [f64; 4],
+    pub count: i64,
+    /// The mean of the points counted: where to draw the cluster.
+    pub point: model::Point,
+    /// The search that lists the cell's cards: these filters with the cell as `bbox`.
+    pub search: String,
+}
+/// The zoom up to which catalogue cards are counted from their cells' totals.
+pub const MAP_CELL_ZOOM: u8 = 12;
+/// Cluster requests answered at once; one more is a 503. Public for the tests that fill it.
+pub static MAP_TURNS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+/// The most of [`MAP_TURNS`] one client holds at once (by IPv4 address or IPv6 /64, as text
+/// search counts its share): one client's wide views leave the other turns to others.
+pub const MAP_TURNS_PER_CLIENT: usize = 2;
+static MAP_CLIENTS: std::sync::Mutex<BTreeMap<std::net::IpAddr, usize>> =
+    std::sync::Mutex::new(BTreeMap::new());
+/// One map clusters count's turn, given back when dropped.
+pub struct MapTurn {
+    _permit: tokio::sync::SemaphorePermit<'static>,
+    client: Option<std::net::IpAddr>,
+}
+impl Drop for MapTurn {
+    fn drop(&mut self) {
+        if let (Some(client), Ok(mut clients)) = (self.client, MAP_CLIENTS.lock()) {
+            if let Some(n) = clients.get_mut(&client) {
+                *n -= 1;
+                if *n == 0 {
+                    clients.remove(&client);
+                }
+            }
+        }
+    }
+}
+/// A turn for a count of `client`'s, now: none when all four are taken or the client holds its
+/// share.
+pub fn map_turn(client: Option<std::net::IpAddr>) -> Option<MapTurn> {
+    let client = client.map(crate::search_index::share_key);
+    let mut clients = MAP_CLIENTS.lock().ok()?;
+    if client.is_some_and(|c| clients.get(&c).copied().unwrap_or(0) >= MAP_TURNS_PER_CLIENT) {
+        return None;
+    }
+    let permit = MAP_TURNS.try_acquire().ok()?;
+    if let Some(c) = client {
+        *clients.entry(c).or_default() += 1;
+    }
+    Some(MapTurn {
+        _permit: permit,
+        client,
+    })
+}
+#[utoipa::path(get,tag="Search",path="/v1/map/clusters",params(ClusterQuery),responses((status=200,body=MapClusters),(status=400,description="Invalid parameters, or a view of more than `limits.map_cluster_cells` cells at its zoom"),(status=502,description="Nexus reach unavailable"),(status=503,description="Busy, or the view too large for its filter (a `tags` filter over a wide view)")))]
+pub async fn map_clusters(
+    State(state): State<AppState>,
+    client: Option<axum::Extension<ClientAddr>>,
+    Query(c): Query<ClusterQuery>,
+) -> Result<Json<MapClusters>, ApiError> {
+    if c.zoom > 20 {
+        return Err(ApiError::bad("zoom is 0–20"));
+    }
+    let q = SearchQuery {
+        type_name: c.type_name.clone(),
+        exclude_type: c.exclude_type.clone(),
+        tags: c.tags.clone(),
+        match_mode: c.match_mode.clone(),
+        author: c.author.clone(),
+        reach: c.reach.clone(),
+        viewer: c.viewer.clone(),
+        bbox: Some(c.bbox.clone()),
+        from: c.from.clone(),
+        to: c.to.clone(),
+        referenced: c.referenced,
+        ..Default::default()
+    };
+    let tags = validate_search(&q)?;
+    let at = state.now();
+    let spatial = crate::spatial::Filters::parse_at(&q, &state.config.search, at)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    let cell = 360.0 / f64::from(1u32 << (u32::from(c.zoom) + 2));
+    let view = spatial.bbox.as_ref().expect("bbox given").0;
+    let width = if view[0] > view[2] {
+        view[2] + 360.0 - view[0]
+    } else {
+        view[2] - view[0]
+    };
+    let cells_in_view = ((width / cell).ceil() + 1.0) * (((view[3] - view[1]) / cell).ceil() + 1.0);
+    let most = state.config.search.map_cluster_cells;
+    if cells_in_view > most as f64 {
+        return Err(ApiError::bad(format!(
+            "the view spans more than {most} cells at this zoom: zoom in or narrow bbox"
+        )));
+    }
+    let reach =
+        match (&q.viewer, &q.reach) {
+            (Some(viewer), Some(kind)) => {
+                if !state.config.nexus_reach_set && kind == "wot_2" {
+                    return Err(ApiError(
+                        StatusCode::NOT_IMPLEMENTED,
+                        "wot_2 is not supported: the Nexus this instance reads serves no reach set"
+                            .into(),
+                    ));
+                }
+                let deadline = state.nexus.reach_deadline();
+                Some(state.nexus.reach_by(viewer, kind, deadline).await.map_err(|e| {
+                tracing::warn!(error=%crate::resolver::log_error(&e),"reach unavailable");
+                ApiError(StatusCode::BAD_GATEWAY, "Nexus reach unavailable".into())
+            })?)
+            }
+            _ => None,
+        };
+    let labelled: Vec<String> = crate::catalogue::join::joinable(&state.config.catalogues)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let catalogues: Vec<String> = state
+        .config
+        .catalogues
+        .enabled_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    // Cards are counted from the per-cell totals at zoom 12 and below (`catalogue_map_cell`),
+    // unless a filter needs each card's labels; above it, card by card.
+    let cards = !catalogues.is_empty() && catalogue_cards_allowed(&q, None);
+    let from_cells = cards && c.zoom <= MAP_CELL_ZOOM && tags.is_empty();
+    let boxes = spatial.bbox.as_ref().expect("bbox given").split();
+    let push_boxes = |sql: &mut QueryBuilder<'_, Postgres>, column: &str| {
+        sql.push(" AND (");
+        for (i, b) in boxes.iter().enumerate() {
+            if i > 0 {
+                sql.push(" OR ");
+            }
+            sql.push(format!("{column} && ST_MakeEnvelope("));
+            for (j, n) in b.iter().enumerate() {
+                if j > 0 {
+                    sql.push(",");
+                }
+                sql.push_bind(*n);
+            }
+            sql.push(",4326)");
+        }
+        sql.push(")");
+    };
+    // A point on the last edge (latitude 90, longitude 180) is in the last cell.
+    let (most_x, most_y) = ((4i64 << c.zoom) - 1, (2i64 << c.zoom) - 1);
+    let mut sql = QueryBuilder::<Postgres>::new("SELECT least(floor((x+180)/");
+    sql.push_bind(cell)
+        .push(")::bigint,")
+        .push_bind(most_x)
+        .push(") AS cx,least(floor((y+90)/")
+        .push_bind(cell)
+        .push(")::bigint,")
+        .push_bind(most_y)
+        .push(") AS cy,sum(n)::bigint AS n,sum(x*n)/sum(n) AS x,sum(y*n)/sum(n) AS y FROM (");
+    // Referenced units with a point (places, events, located posts), as search lists them.
+    sql.push("SELECT ST_X(r.point) AS x,ST_Y(r.point) AS y,1 AS n FROM search_unit r WHERE r.point IS NOT NULL AND r.status<>'missing'");
+    spatial.apply(&mut sql);
+    if let Some(types) = &q.type_name {
+        sql.push(" AND r.type_path && ")
+            .push_bind(search_types("type", types, SEARCH_TYPES_MAX)?);
+    }
+    if let Some(types) = &q.exclude_type {
+        sql.push(" AND r.type IS NOT NULL AND NOT coalesce(r.type_path && ")
+            .push_bind(search_types(
+                "exclude_type",
+                types,
+                SEARCH_EXCLUDED_TYPES_MAX,
+            )?)
+            .push(",false)");
+    }
+    push_referenced(&mut sql, "r", &q, &reach);
+    push_tags_or_labels(&mut sql, "r", &q, &reach, &tags, &labelled);
+    // A job posting past its end is closed: search leaves it out, and so does its cell.
+    sql.push(" AND NOT coalesce(r.type_path @> ARRAY['JobPosting'] AND r.end_at<=")
+        .push_bind(at)
+        .push(",false)");
+    // A unit that is a counted card's own link counts once, as the card: on both paths it is
+    // left out when its card passes the cards' filters (card by card, the view too).
+    let card_types = match &q.type_name {
+        Some(t) => Some(model::subtypes(&search_types("type", t, SEARCH_TYPES_MAX)?)),
+        None => None,
+    };
+    let card_excluded = match &q.exclude_type {
+        Some(t) => Some(model::subtypes(&search_types(
+            "exclude_type",
+            t,
+            SEARCH_EXCLUDED_TYPES_MAX,
+        )?)),
+        None => None,
+    };
+    let push_card_filters = |sql: &mut QueryBuilder<'_, Postgres>, column: &str| {
+        if let Some(types) = &card_types {
+            sql.push(format!(" AND {column}=ANY("))
+                .push_bind(types.clone())
+                .push(")");
+        }
+        if let Some(types) = &card_excluded {
+            sql.push(format!(" AND NOT {column}=ANY("))
+                .push_bind(types.clone())
+                .push(")");
+        }
+    };
+    if cards {
+        sql.push(" AND NOT EXISTS (SELECT 1 FROM catalogue_card x WHERE x.uri=r.uri AND x.catalogue=ANY(")
+            .push_bind(catalogues.clone())
+            .push(") AND x.point IS NOT NULL");
+        push_card_filters(&mut sql, "x.type");
+        if !from_cells {
+            push_boxes(&mut sql, "x.point");
+            if !tags.is_empty() {
+                sql.push(if q.match_mode.as_deref() == Some("all") {
+                    " AND x.labels@>"
+                } else {
+                    " AND x.labels&&"
+                })
+                .push_bind(tags.clone());
+            }
+        }
+        sql.push(")");
+    }
+    if from_cells {
+        // The coarsest level of totals whose cells fit in the view's own (zoom 4, 6, 8, 10 or
+        // 12): from zoom 5 a view's cell adds up at most 2 x 2 of them.
+        let level: u8 = match c.zoom {
+            0..=4 => 4,
+            5..=6 => 6,
+            7..=8 => 8,
+            9..=10 => 10,
+            _ => 12,
+        };
+        let fine = 360.0 / f64::from(4u32 << level);
+        sql.push(" UNION ALL SELECT m.sum_lon/m.cards,m.sum_lat/m.cards,m.cards FROM catalogue_map_cell m WHERE m.level=")
+            .push_bind(i16::from(level))
+            .push(" AND m.cards>0 AND m.catalogue=ANY(")
+            .push_bind(catalogues.clone())
+            .push(") AND (");
+        for (i, b) in boxes.iter().enumerate() {
+            if i > 0 {
+                sql.push(" OR ");
+            }
+            let index = |v: f64, shift: f64| ((v + shift) / fine).floor() as i64;
+            sql.push("(m.cx BETWEEN ")
+                .push_bind(index(b[0], 180.0))
+                .push(" AND ")
+                .push_bind(index(b[2], 180.0))
+                .push(" AND m.cy BETWEEN ")
+                .push_bind(index(b[1], 90.0))
+                .push(" AND ")
+                .push_bind(index(b[3], 90.0))
+                .push(")");
+        }
+        sql.push(")");
+        push_card_filters(&mut sql, "m.type");
+    } else if cards {
+        // Catalogue cards with a point, where search lists them, one by one.
+        push_cluster_cards(
+            &mut sql,
+            &catalogues,
+            &boxes,
+            card_types.as_ref(),
+            card_excluded.as_ref(),
+            &tags,
+            q.match_mode.as_deref() == Some("all"),
+        );
+    }
+    sql.push(") p GROUP BY 1,2 ORDER BY n DESC,cx,cy LIMIT ")
+        .push_bind(cells_in_view as i64 + 1024);
+    // One at a time per few: a cheap request must not hold every connection; and bounded in
+    // time, the view too broad for its filter is a 503.
+    let _turn = map_turn(client.map(|axum::Extension(ClientAddr(ip))| ip)).ok_or_else(|| {
+        // Why: every turn taken, or this client holding its share.
+        let reason = if MAP_TURNS.available_permits() == 0 {
+            "turns"
+        } else {
+            "share"
+        };
+        crate::telemetry::map_clusters_busy(reason);
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "map clusters are busy; retry in a moment".into(),
+        )
+    })?;
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(&format!(
+        "SET LOCAL statement_timeout = {}",
+        state.config.search.map_cluster_timeout_ms
+    ))
+    .execute(&mut *tx)
+    .await?;
+    let rows = match sql.build().fetch_all(&mut *tx).await {
+        Ok(rows) => rows,
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("57014") => {
+            crate::telemetry::map_clusters_busy("timeout");
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the view is too large for this filter: zoom in".into(),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    tx.commit().await?;
+    // The cell's search: these filters, with the cell as its bbox.
+    let mut base = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in [
+        ("type", &c.type_name),
+        ("exclude_type", &c.exclude_type),
+        ("tags", &c.tags),
+        ("match", &c.match_mode),
+        ("author", &c.author),
+        ("reach", &c.reach),
+        ("viewer", &c.viewer),
+        ("from", &c.from),
+        ("to", &c.to),
+    ] {
+        if let Some(value) = value {
+            base.append_pair(key, value);
+        }
+    }
+    if let Some(referenced) = c.referenced {
+        base.append_pair("referenced", if referenced { "true" } else { "false" });
+    }
+    let rest = base.finish();
+    let mut total = 0;
+    let mut clusters = Vec::with_capacity(rows.len());
+    for row in rows {
+        let (cx, cy, n, x, y): (i64, i64, i64, f64, f64) = (
+            row.try_get(0)?,
+            row.try_get(1)?,
+            row.try_get(2)?,
+            row.try_get(3)?,
+            row.try_get(4)?,
+        );
+        total += n;
+        let round = |v: f64| (v * 1e7).round() / 1e7;
+        let bbox = [
+            round((cx as f64 * cell - 180.0).max(-180.0)),
+            round((cy as f64 * cell - 90.0).max(-90.0)),
+            round(((cx + 1) as f64 * cell - 180.0).min(180.0)),
+            round(((cy + 1) as f64 * cell - 90.0).min(90.0)),
+        ];
+        let mut search = url::form_urlencoded::Serializer::new(String::new());
+        search.append_pair("bbox", &bbox.map(|v| v.to_string()).join(","));
+        let mut search = search.finish();
+        if !rest.is_empty() {
+            search.push('&');
+            search.push_str(&rest);
+        }
+        clusters.push(MapCluster {
+            bbox,
+            count: n,
+            point: model::Point { lat: y, lon: x },
+            search: format!("/v1/search?{search}"),
+        });
+    }
+    Ok(Json(MapClusters {
+        zoom: c.zoom,
+        cell_degrees: cell,
+        total,
+        clusters,
+    }))
+}
+/// The place rules on a read, with the OSM catalogue on (`catalogue::osm::rules`): a map link
+/// and the one imported place of its name within 50 m list each other as maybe the same (in
+/// `maybe_same` and, with the link's references, in `also_on`); a deleted OSM object lists the one
+/// imported place of its name and category within 50 m of where it was; a place renamed to an
+/// unrelated name lists what it was (`replaced`). Nothing changes with the catalogue off.
+async fn place_hints(
+    pool: &PgPool,
+    config: &Config,
+    detail: &mut ResourceDetail,
+) -> Result<(), ApiError> {
+    use crate::catalogue::osm::rules;
+    // Only places, with the catalogue on and holding cards.
+    if !config.catalogues.enabled(crate::catalogue::Catalogue::Osm)
+        || !detail.card.type_path.iter().any(|t| t == "Place")
+        || !rules::imported(pool).await?
+    {
+        return Ok(());
+    }
+    let card = &mut detail.card;
+    let stored = rules::stored(pool, &card.id).await?;
+    let object = match &stored {
+        Some(s) => s.osm_type.clone().zip(s.osm_id),
+        None => crate::resolver::osm::parse_id(&card.uri).map(|o| (o.osm_type, o.id)),
+    };
+    let mut maybe: Vec<SameEvent> = vec![];
+    let mut also: Vec<AlsoOn> = vec![];
+    let place_link = |id: String, uri: String, site: Option<String>, refs: Vec<String>| AlsoOn {
+        id: Some(id),
+        uri,
+        refs,
+        site,
+        derived: false,
+        via: None,
+        kind: Some("maybe".into()),
+        at: None,
+        embed: None,
+    };
+    if let Some((osm_type, osm_id)) = object {
+        if card.status == "ok" {
+            if let (Some(point), Some(name)) = (&card.point, &card.name) {
+                // The map links that name this place, each with this place as its one match.
+                let source_id = format!("{osm_type}/{osm_id}");
+                let places = rules::places_near(pool, point.lat, point.lon).await?;
+                let me = places.iter().find(|p| p.source_id == source_id);
+                let links: Vec<_> = rules::links_near(pool, point.lat, point.lon)
+                    .await?
+                    .into_iter()
+                    .take(rules::LINKS_CHECKED)
+                    .collect();
+                // A link joined exactly (an exact place key) is no "maybe".
+                let exact = rules::exactly_placed(
+                    pool,
+                    &links.iter().map(|l| l.id.clone()).collect::<Vec<_>>(),
+                )
+                .await?;
+                for link in links.into_iter().filter(|l| !exact.contains(&l.id)) {
+                    let named = me.map_or_else(
+                        || {
+                            crate::catalogue::osm::place::folded(&link.name)
+                                == crate::catalogue::osm::place::folded(name)
+                        },
+                        |me| me.named(&link.name),
+                    );
+                    if !named {
+                        continue;
+                    }
+                    let around = rules::places_near(pool, link.lat, link.lon).await?;
+                    if rules::the_one(&around, &link.name).map(|p| p.source_id.as_str())
+                        != Some(source_id.as_str())
+                    {
+                        continue;
+                    }
+                    maybe.push(SameEvent {
+                        id: link.id.clone(),
+                        uri: link.uri.clone(),
+                        site: link.site.clone(),
+                        start: None,
+                        score: 1.0,
+                    });
+                    let refs = if link.referenced {
+                        vec![link.uri.clone()]
+                    } else {
+                        vec![]
+                    };
+                    also.push(place_link(link.id, link.uri, link.site, refs));
+                }
+            }
+            let renames = rules::renames(pool, &osm_type, osm_id).await?;
+            if !renames.is_empty() {
+                let mut replaced = vec![];
+                for r in renames {
+                    replaced.push(Replaced {
+                        references: rules::references_before(pool, &card.id, r.changed_at).await?,
+                        name: r.old_name,
+                        category: r.old_category,
+                        until: r.changed_at,
+                    });
+                }
+                detail.details.replaced = Some(replaced);
+            }
+        } else if card.status == "missing" {
+            // Deleted: the one imported place of its name and category where it was.
+            if let Some((name, category, lat, lon)) =
+                rules::last_place(pool, &osm_type, osm_id).await?
+            {
+                let own = format!("{osm_type}/{osm_id}");
+                let around: Vec<_> = rules::places_near(pool, lat, lon)
+                    .await?
+                    .into_iter()
+                    .filter(|p| {
+                        p.source_id != own && p.category.as_deref() == Some(category.as_str())
+                    })
+                    .collect();
+                if let Some(p) = rules::the_one(&around, &name) {
+                    if let Ok((id, uri, _)) = model::identity(&p.uri) {
+                        maybe.push(SameEvent {
+                            id,
+                            uri,
+                            site: Some("OpenStreetMap".into()),
+                            start: None,
+                            score: 1.0,
+                        });
+                    }
+                }
+            }
+        }
+    } else if stored.as_ref().is_some_and(|s| {
+        s.status == "ok"
+            && s.location_source.as_deref() == Some("uri")
+            && s.source
+                .as_deref()
+                .is_some_and(|src| rules::MAP_LINK_SOURCES.contains(&src))
+    }) {
+        // A map link: the one imported place of its name within 50 m, unless it is joined
+        // exactly already (an exact place key: a Wikidata item, an OSM object).
+        let exact = !rules::exactly_placed(pool, std::slice::from_ref(&card.id))
+            .await?
+            .is_empty();
+        if let (Some(point), Some(name), false) = (&card.point, &card.name, exact) {
+            if rules::place_name(name) {
+                let around = rules::places_near(pool, point.lat, point.lon).await?;
+                if let Some(p) = rules::the_one(&around, name) {
+                    if let Ok((id, uri, _)) = model::identity(&p.uri) {
+                        maybe.push(SameEvent {
+                            id: id.clone(),
+                            uri: uri.clone(),
+                            site: Some("OpenStreetMap".into()),
+                            start: None,
+                            score: 1.0,
+                        });
+                        also.push(place_link(id, uri, Some("OpenStreetMap".into()), vec![]));
+                    }
+                }
+            }
+        }
+    }
+    // A place the card already joins exactly (the group's members in `also_on`, an exact
+    // Wikidata join among them) is no "maybe": only places not listed yet are added, each once.
+    let mut known: std::collections::HashSet<String> = card
+        .also_on
+        .iter()
+        .flat_map(|a| a.id.iter().cloned().chain(std::iter::once(a.uri.clone())))
+        .collect();
+    known.extend(
+        card.maybe_same
+            .iter()
+            .flatten()
+            .flat_map(|m| [m.id.clone(), m.uri.clone()]),
+    );
+    let new = |id: &str, uri: &str, known: &std::collections::HashSet<String>| {
+        !known.contains(id) && !known.contains(uri)
+    };
+    maybe.retain(|m| new(&m.id, &m.uri, &known));
+    also.retain(|a| new(a.id.as_deref().unwrap_or_default(), &a.uri, &known));
+    let mut seen = std::collections::HashSet::new();
+    also.retain(|a| seen.insert(a.uri.clone()));
+    let mut seen = std::collections::HashSet::new();
+    maybe.retain(|m| seen.insert(m.uri.clone()));
+    if !maybe.is_empty() {
+        card.maybe_same.get_or_insert_with(Vec::new).extend(maybe);
+    }
+    card.also_on.extend(also);
+    Ok(())
 }
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
@@ -4696,7 +5394,9 @@ pub async fn by_uri(
             }
         }
     }
-    let detail = detail.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
+    let mut detail =
+        detail.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "link not known".into()))?;
+    place_hints(&state.pool, &state.config, &mut detail).await?;
     tagged(&headers, &detail)
 }
 /// The ID of `uri`'s root by the static alias rule (`alias::root`: tracking parameters, a DOI
@@ -5145,6 +5845,7 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         (name = "Agents", description = "The usage guide for AI agents (also as a skill) and the index that links it and the MCP endpoint, `POST /mcp`, which docs/api.md describes.")
     ),
     paths(
+        map_clusters,
         group,
         crate::event::storage::list,
         crate::event::storage::lookup,
@@ -5164,6 +5865,9 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         crate::agents::skill_md
     ),
     components(schemas(
+        MapClusters,
+        MapCluster,
+        Replaced,
         CollapseMode,
         crate::event::storage::OccurrencePage,
         crate::event::storage::OccurrenceLookup,
@@ -5201,6 +5905,10 @@ async fn full_info(state: &AppState) -> Result<Value, ApiError> {
         OsmDumpLine,
         OsmDumpNotice,
         OsmDumpPlace,
+        OsmDumpImportedPlace,
+        OsmDumpRename,
+        OsmDumpSuccessor,
+        OsmDumpRemoved,
         crate::agents::Index,
         crate::agents::IndexLinks
     ))
@@ -5390,6 +6098,24 @@ pub struct OsmDumpPlace {
     #[schema(value_type = Object)]
     versions: Value,
 }
+/// One place of the OSM catalogue's import per line after the cached objects, while the catalogue
+/// is on: an `OsmDumpPlace` (`display_name` null, `status` `ok`, `fetched_at` the card's last
+/// write, `versions` empty) with three more fields; every field is present.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpImportedPlace {
+    #[serde(flatten)]
+    place: OsmDumpPlace,
+    /// `catalogue`.
+    #[schema(example = "catalogue")]
+    from: String,
+    /// Its other names (`name:*`, `alt_name`, …).
+    other_names: Vec<String>,
+    /// Its earlier, unrelated names, oldest first: `name`, `category`, `until` (when it was
+    /// replaced).
+    #[schema(value_type = Vec<Object>)]
+    replaced: Value,
+}
 /// A dump line: the notice first, then one place per line.
 #[derive(ToSchema)]
 #[allow(dead_code, clippy::large_enum_variant)]
@@ -5397,6 +6123,59 @@ pub struct OsmDumpPlace {
 pub enum OsmDumpLine {
     Notice(OsmDumpNotice),
     Place(OsmDumpPlace),
+    Imported(OsmDumpImportedPlace),
+    Rename(OsmDumpRename),
+    Successor(OsmDumpSuccessor),
+    Removed(OsmDumpRemoved),
+}
+/// After the imported places, while the OSM catalogue is on: an earlier name of an OSM object
+/// that has no imported place now.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpRename {
+    /// `rename`.
+    #[schema(example = "rename")]
+    from: String,
+    osm_type: String,
+    osm_id: i64,
+    /// The earlier name.
+    name: String,
+    #[schema(required = true)]
+    category: Option<String>,
+    /// The name that replaced it.
+    new_name: String,
+    until: chrono::DateTime<chrono::Utc>,
+}
+/// After the renames, while the OSM catalogue is on: a deleted OSM object's successor.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpSuccessor {
+    /// `successor`.
+    #[schema(example = "successor")]
+    from: String,
+    old_type: String,
+    old_id: i64,
+    new_type: String,
+    new_id: i64,
+    /// `wikidata` or `changeset`.
+    basis: String,
+    found_at: chrono::DateTime<chrono::Utc>,
+}
+/// After the successors, while the OSM catalogue is on: a named OSM object an update removed (it
+/// was deleted), as its card last was.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct OsmDumpRemoved {
+    /// `removed`.
+    #[schema(example = "removed")]
+    from: String,
+    osm_type: String,
+    osm_id: i64,
+    name: String,
+    #[schema(required = true)]
+    category: Option<String>,
+    point: model::Point,
+    removed_at: chrono::DateTime<chrono::Utc>,
 }
 /// The public dump line format (see `OsmDumpPlace`); a new `osm_place` column is not exported
 /// until it is added here, to the schema and to docs/api.md.
@@ -5404,8 +6183,27 @@ pub const OSM_DUMP_LINE: &str = "SELECT jsonb_build_object('osm_type',osm_type,'
     'point',CASE WHEN point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)) END,\
     'bbox',bbox,'address',address,'tags',tags,'display_name',display_name,'status',status,'fetched_at',fetched_at,'versions',versions) \
     FROM osm_place ORDER BY osm_type,osm_id";
+/// An earlier name of an OSM object that has no imported place now (a removed card's renames),
+/// as a dump line.
+pub const OSM_DUMP_RENAME_LINE: &str = "SELECT jsonb_build_object('from','rename','osm_type',r.osm_type,'osm_id',r.osm_id,'name',r.old_name,'category',r.old_category,'new_name',r.new_name,'until',r.changed_at) \
+    FROM osm_rename r WHERE NOT EXISTS (SELECT 1 FROM catalogue_card c WHERE c.catalogue='osm' AND c.source_id=r.osm_type||'/'||r.osm_id) ORDER BY r.osm_type,r.osm_id,r.changed_at";
+/// A deleted OSM object's successor, as a dump line.
+pub const OSM_DUMP_SUCCESSOR_LINE: &str = "SELECT jsonb_build_object('from','successor','old_type',old_type,'old_id',old_id,'new_type',new_type,'new_id',new_id,'basis',basis,'found_at',found_at) \
+    FROM osm_successor ORDER BY old_type,old_id";
+/// A named OSM object an update removed, as a dump line.
+pub const OSM_DUMP_REMOVED_LINE: &str = "SELECT jsonb_build_object('from','removed','osm_type',osm_type,'osm_id',osm_id,'name',name,'category',category,'point',jsonb_build_object('lat',ST_Y(point),'lon',ST_X(point)),'removed_at',removed_at) \
+    FROM osm_removed ORDER BY osm_type,osm_id";
+/// One imported place of the OSM catalogue as a dump line, in `OSM_DUMP_LINE`'s shape (its
+/// `type_path` filled in by the writer), with `from` `catalogue`, its other names and the renames
+/// an update saw (`replaced`).
+pub const OSM_DUMP_CATALOGUE_LINE: &str = "SELECT jsonb_build_object('osm_type',split_part(c.source_id,'/',1),'osm_id',split_part(c.source_id,'/',2)::bigint,'name',c.name,'type',c.type,'type_path',NULL,'category',c.details->>'category',\
+    'point',CASE WHEN c.point IS NULL THEN NULL ELSE jsonb_build_object('lat',ST_Y(c.point),'lon',ST_X(c.point)) END,\
+    'bbox',c.details->'bbox','address',coalesce(c.details->'address','{}'::jsonb),'tags',coalesce(c.details->'tags','{}'::jsonb),'display_name',NULL,'status','ok','fetched_at',c.updated_at,'versions','{}'::jsonb,\
+    'from','catalogue','other_names',to_jsonb(c.other_names),'replaced',coalesce(r.replaced,'[]'::jsonb)) \
+    FROM catalogue_card c LEFT JOIN (SELECT osm_type||'/'||osm_id AS source_id,jsonb_agg(jsonb_build_object('name',old_name,'category',old_category,'until',changed_at) ORDER BY changed_at) AS replaced FROM osm_rename GROUP BY 1) r ON r.source_id=c.source_id \
+    WHERE c.catalogue='osm' ORDER BY c.source_id";
 
-#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet; retry later")))]
+#[utoipa::path(get,tag="Licensing",path="/v1/dumps/osm_place.ndjson.gz",responses((status=200,description="The ODbL derivative database, written daily, as a gzip file download. Decompressed it is one JSON object per line: the licence notice first (`OsmDumpNotice`), then one cached OSM object per line (`OsmDumpPlace`), then, while the OpenStreetMap catalogue is on, one imported place per line (`OsmDumpImportedPlace`; an object both cached and imported has a line of each), the earlier names of objects with no imported place (`OsmDumpRename`), the successors found (`OsmDumpSuccessor`) and the named objects an update removed, as their cards last were (`OsmDumpRemoved`). Single byte ranges are served (206)",content_type="application/gzip",headers(("Content-Disposition"=String,description="`attachment; filename=\"osm_place.ndjson.gz\"`"),("ETag"=String),("Last-Modified"=String),("Accept-Ranges"=String,description="`bytes`"))),(status=206,description="The requested byte range of the file",content_type="application/gzip"),(status=304,description="ETag or Last-Modified unchanged"),(status=416,description="Range not satisfiable"),(status=429,description="Over `limits.osm_dump_downloads_per_hour` transfers (200 or 206) to this address in the last hour; HEAD, 304 and 416 are free"),(status=503,description="No dump file written yet; retry later")))]
 async fn osm_dump(
     State(state): State<AppState>,
     ClientAddr(client): ClientAddr,
@@ -5900,6 +6698,92 @@ mod tests {
         ] {
             assert!(trend_window(Some(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    /// The card-by-card cluster count reads each catalogue's partial point index, with every
+    /// catalogue of the default configuration on (a bound list of names would read none).
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn cluster_cards_read_each_catalogues_point_index(pool: PgPool) {
+        let config = Config::default();
+        let catalogues: Vec<String> = config
+            .catalogues
+            .enabled_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert!(catalogues.len() > 1 && catalogues.iter().any(|c| c == "osm"));
+        let mut sql = QueryBuilder::<Postgres>::new(
+            "EXPLAIN (FORMAT JSON) SELECT count(*) FROM (SELECT 0::float8 AS x,0::float8 AS y,1 AS n WHERE false",
+        );
+        let tags = vec!["restaurant".to_owned()];
+        push_cluster_cards(
+            &mut sql,
+            &catalogues,
+            &[[8.4, 47.3, 8.7, 47.45]],
+            None,
+            None,
+            &tags,
+            false,
+        );
+        sql.push(") p");
+        // Cards of every catalogue, almost all outside the view, as a real table holds them.
+        for (i, catalogue) in catalogues.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO catalogue_card(catalogue,source,source_id,uri,type,name,point,seen_generation,content_hash) \
+                 SELECT $1,$1,$1||n,'https://example.org/'||$1||'/'||n,'Place','X',\
+                 ST_SetSRID(ST_MakePoint(CASE WHEN n<=5 THEN 8.5 ELSE -60+(n%100) END,CASE WHEN n<=5 THEN 47.35 ELSE -40+(n%50) END),4326),1,\
+                 decode(md5($1||n)||md5(n||$1),'hex') FROM generate_series(1,$2) n",
+            )
+            .bind(catalogue)
+            .bind(2000 + i as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("ANALYZE catalogue_card")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let plan: Value = sql.build_query_scalar().fetch_one(&pool).await.unwrap();
+        // Every read of the card table is an index read on the view's box, through the
+        // catalogue's partial index (a bound list of names proves no partial index's condition,
+        // and reads the table).
+        fn scans<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
+            if node["Relation Name"] == "catalogue_card" {
+                out.push(node);
+            }
+            for child in node["Plans"].as_array().into_iter().flatten() {
+                scans(child, out);
+            }
+        }
+        let mut found = vec![];
+        scans(&plan[0]["Plan"], &mut found);
+        assert_eq!(found.len(), catalogues.len(), "{plan}");
+        for scan in found {
+            let cond = scan["Index Cond"]
+                .as_str()
+                .or_else(|| scan["Recheck Cond"].as_str())
+                .unwrap_or_default();
+            assert!(cond.contains("point &&"), "{scan}");
+        }
+        assert!(!plan.to_string().contains("\"Seq Scan\""), "{plan}");
+    }
+
+    /// One client holds at most two of the four cluster turns; another client takes the rest;
+    /// a turn given back is the client's again.
+    #[test]
+    fn a_client_holds_at_most_its_share_of_cluster_turns() {
+        let (a, b): (std::net::IpAddr, std::net::IpAddr) =
+            ("192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap());
+        let first = map_turn(Some(a)).unwrap();
+        let _second = map_turn(Some(a)).unwrap();
+        assert!(map_turn(Some(a)).is_none());
+        // The same /64 is the same client.
+        let _other = map_turn(Some(b)).unwrap();
+        let _fourth = map_turn(Some("2001:db8::2".parse().unwrap())).unwrap();
+        assert!(map_turn(Some("2001:db8::3".parse().unwrap())).is_none());
+        drop(first);
+        assert!(map_turn(Some(a)).is_some());
     }
 
     /// Exact members use Card.refs' bounded ranking; repeated members in a response share it.

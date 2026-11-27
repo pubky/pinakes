@@ -9,3 +9,6 @@ POST), the HTTP status, the content type, the time of recording, the size and SH
 as served, and the file that holds it. Bodies over 64 KB are stored gzip-compressed (`.gz`); a
 redirect is recorded as its status and `Location` only; an error page keeps the extension of its
 content type. Licences and required attributions are named in `docs/sources/<name>.md`.
+
+A source that makes no request keeps the link forms it reads instead (`links.json`), with where
+each form comes from in its `provenance.json`.

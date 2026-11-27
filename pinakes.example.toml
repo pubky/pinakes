@@ -69,6 +69,8 @@ enabled = true
 # Official-API sources, in alphabetical order (docs/sources/README.md).
 [sources.app_store]
 enabled = true
+[sources.apple_maps]
+enabled = true
 [sources.artic]
 enabled = true
 [sources.bluesky]
@@ -121,6 +123,8 @@ enabled = true
 [sources.gitlab]
 enabled = true
 [sources.gleif]
+enabled = true
+[sources.google_maps]
 enabled = true
 [sources.google_play]
 enabled = true
@@ -303,7 +307,7 @@ enabled = true
 # limit = 100000 # At most this many cards: the dump's first releases that fit.
 [catalogues.osm]
 enabled = true
-region = "planet" # Or a region of Geofabrik's extracts, e.g. "europe/switzerland".
+region = "planet" # Or a region of Geofabrik's extracts, e.g. "europe/switzerland". The planet is a 96 GB download and a 115 GB node index: a small instance takes a region.
 [catalogues.openalex]
 enabled = true
 min_citations = 50 # Works cited more than this many times.

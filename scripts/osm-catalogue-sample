@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""osm-catalogue-sample [options]: import a real OpenStreetMap extract a few days old into a new
+throwaway database through `pinakesd`, check it, run the daemon's own update (it reads the
+region's real change files since the extract), check that only the objects those files name
+changed, check search, reads, the map clusters, the ODbL dump and the off switch, then drop the
+database.
+
+The database server is DATABASE_URL's (its database name is replaced); the daemon serves on
+private loopback ports while checks run. Downloads go to --dir and are kept there (delete them
+after). Defaults: Geofabrik's Liechtenstein extract of three days ago.
+
+  --pinakesd PATH     the pinakesd binary (default target/debug/pinakesd)
+  --region R          a Geofabrik region path (default europe/liechtenstein)
+  --pbf FILE          an extract already downloaded (else the dated one of --days ago)
+  --days N            how old the extract is (default 3): the update applies N days of changes
+  --dir DIR           where downloads and the run's files go (default: a new temporary directory)
+  --database NAME     the database to create (default cat1125_step6_osm); refused if it exists
+  --keep              keep the database
+  --port N            the API port (default 18492; admin is N+1)
+  --max-mb N          the most megabytes one download may take (default 300)
+
+Prints one JSON object of measurements and the checks; exits 1 when a check fails.
+The contact for the User-Agent of downloads comes from PINAKES__HTTP__CONTACT, else from
+~/.config/pinakes/contact.env (required).
+"""
+import gzip
+import tempfile
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+
+
+def arg(name, default=None, flag=False):
+    if flag:
+        return name in sys.argv
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 >= len(sys.argv):
+            sys.exit(f"{name} needs a value")
+        return sys.argv[i + 1]
+    return default
+
+
+PINAKESD = os.path.abspath(arg("--pinakesd", os.path.join(REPO, "target/debug/pinakesd")))
+REGION = arg("--region", "europe/liechtenstein")
+DIR = os.path.abspath(arg("--dir", "") or tempfile.mkdtemp(prefix="osm-sample-"))
+DB = arg("--database", "cat1125_step6_osm")
+PORT = int(arg("--port", "18492"))
+CONTACT = os.environ.get("PINAKES__HTTP__CONTACT", "")
+if not CONTACT:
+    # The operator's contact file, if any (`export PINAKES__HTTP__CONTACT=...`); never printed.
+    try:
+        with open(os.path.expanduser("~/.config/pinakes/contact.env")) as f:
+            m = re.search(r"PINAKES__HTTP__CONTACT=['\"]?([^'\"\n]+)", f.read())
+            CONTACT = m.group(1).strip() if m else ""
+    except OSError:
+        pass
+if not re.fullmatch(r"[a-z0-9_]{1,63}", DB):
+    sys.exit("--database: lower case letters, digits and _")
+if not re.fullmatch(r"[a-z0-9-]+(/[a-z0-9-]+){0,3}", REGION):
+    sys.exit("--region: a Geofabrik region path")
+if "DATABASE_URL" not in os.environ:
+    sys.exit("set DATABASE_URL (the server to create the database on)")
+os.makedirs(DIR, exist_ok=True)
+UA = f"pinakes-osm-sample (+https://pubky.app; {CONTACT})"
+result = {"region": REGION, "checks": {}}
+failed = []
+
+
+def check(name, ok, detail=None):
+    result["checks"][name] = {"ok": bool(ok), **({"detail": detail} if detail is not None else {})}
+    if not ok:
+        failed.append(name)
+
+
+# The bulk-file hosts, as pinakesd reads them: Geofabrik, the planet's site and the two buckets it
+# redirects files and change files to. Exact names, https only.
+HOSTS = (
+    "download.geofabrik.de",
+    "planet.openstreetmap.org",
+    "osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com",
+    "osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com",
+)
+MAX_BYTES = int(arg("--max-mb", "300")) * 1_000_000
+
+
+class Hosts(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to the bulk-file hosts over https, before it is requested."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urlparse(newurl)
+        host = target.hostname
+        if target.scheme != "https" or target.port is not None or host not in HOSTS:
+            raise urllib.error.HTTPError(newurl, code, f"redirect to {host} refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(Hosts)
+
+
+def download(url, dest):
+    if not CONTACT:
+        sys.exit("set PINAKES__HTTP__CONTACT: downloads name the operator's contact")
+    request = urllib.request.Request(url, headers={"User-Agent": UA})
+    read = 0
+    with OPENER.open(request, timeout=120) as r, open(dest + ".part", "wb") as out:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            read += len(chunk)
+            if read > MAX_BYTES:
+                sys.exit(f"{url}: over {MAX_BYTES} bytes")
+            out.write(chunk)
+    os.replace(dest + ".part", dest)
+    return os.path.getsize(dest)
+
+
+def get_text(url):
+    request = urllib.request.Request(url, headers={"User-Agent": UA})
+    with OPENER.open(request, timeout=60) as r:
+        return r.read(65536).decode()
+
+
+last = REGION.rsplit("/", 1)[-1]
+base = f"https://download.geofabrik.de/{REGION}"
+downloaded = 0
+pbf = arg("--pbf")
+if not pbf:
+    import datetime
+    day = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=int(arg("--days", "3")))).strftime("%y%m%d")
+    pbf = os.path.join(DIR, f"{last}-{day}.osm.pbf")
+    t = time.time()
+    downloaded += download(f"{base}/{last}-{day}.osm.pbf", pbf)
+    result["pbf_download_s"] = round(time.time() - t, 1)
+    result["pbf_url"] = f"{base}/{last}-{day}.osm.pbf"
+result["pbf_bytes"] = os.path.getsize(pbf)
+
+# The database URL with another database name; psql connects by the PG* variables (pg-env).
+def with_database(name):
+    # The URL as given with its database name replaced (urlunsplit would drop an empty host's
+    # `//`, which libpq needs).
+    raw = os.environ["DATABASE_URL"]
+    scheme, rest = raw.split("://", 1)
+    authority, _, tail = rest.partition("/")
+    query = tail.partition("?")[2]
+    return f"{scheme}://{authority}/{name}" + (f"?{query}" if query else "")
+
+
+server = with_database("postgres")
+target = with_database(DB)
+
+
+def psql(sql, database_url=None):
+    env = dict(os.environ, DATABASE_URL=database_url or target)
+    out = subprocess.run(
+        [os.path.join(HERE, "pg-env"), "psql", "-X", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql],
+        env=env, capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip()[:500])
+    return out.stdout.strip()
+
+
+if psql(f"SELECT count(*) FROM pg_database WHERE datname='{DB}'", server) != "0":
+    sys.exit(f"database {DB} exists: drop it or choose --database")
+psql(f"CREATE DATABASE {DB}", server)
+
+
+def config(enabled=True):
+    path = os.path.join(DIR, "pinakes-sample.toml")
+    with open(path, "w") as f:
+        f.write(f'''listen = "127.0.0.1:{PORT}"
+admin_listen = "127.0.0.1:{PORT + 1}"
+nexus_url = "http://127.0.0.1:9"
+[osm]
+nominatim_url = "http://127.0.0.1:9"
+dump_dir = {json.dumps(os.path.join(DIR, "dumps"))}
+[search]
+index_dir = {json.dumps(os.path.join(DIR, "search-index"))}
+[catalogues]
+dir = {json.dumps(os.path.join(DIR, "catalogues"))}
+[catalogues.osm]
+enabled = {"true" if enabled else "false"}
+region = "{REGION}"
+[catalogues.wikidata]
+enabled = false
+[catalogues.musicbrainz]
+enabled = false
+[catalogues.openalex]
+enabled = false
+[catalogues.podcastindex]
+enabled = false
+[catalogues.tranco]
+enabled = false
+[catalogues.software]
+enabled = false
+''')
+    return path
+
+
+def pinakesd(*args, timed=False):
+    env = dict(os.environ, PINAKES__DATABASE_URL=target, PINAKES__HTTP__CONTACT=CONTACT, PINAKES__LIMITS__OSM_DUMP_EVERY_HOURS="1")
+    import resource
+    command = [PINAKESD, "--config", config(), *args]
+    t = time.time()
+    out = subprocess.run(command, env=env, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"pinakesd {' '.join(args)}: {out.stderr[-2000:]}")
+    # The peak resident size of the largest child so far (kilobytes on Linux).
+    rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss if timed else None
+    return out.stdout, time.time() - t, rss
+
+
+daemon = None
+
+
+def start(enabled=True):
+    global daemon
+    env = dict(os.environ, PINAKES__DATABASE_URL=target, PINAKES__HTTP__CONTACT=CONTACT, PINAKES__LIMITS__OSM_DUMP_EVERY_HOURS="1")
+    log = open(os.path.join(DIR, "daemon.log"), "a")
+    daemon = subprocess.Popen([PINAKESD, "--config", config(enabled)], env=env, stdout=log, stderr=log)
+    for _ in range(600):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{PORT + 1}/healthz", timeout=2)
+            return
+        except Exception:
+            time.sleep(0.5)
+    raise RuntimeError("the daemon did not start")
+
+
+def stop():
+    global daemon
+    if daemon:
+        daemon.terminate()
+        daemon.wait(60)
+        daemon = None
+
+
+def api(path, body=None):
+    request = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", data=None if body is None else json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+
+try:
+    pinakesd("--migrate")
+    out, seconds, rss = pinakesd("catalogue", "import", "osm", "--from", pbf, timed=True)
+    cards = int(psql("SELECT count(*) FROM catalogue_card WHERE catalogue='osm'"))
+    result.update(import_s=round(seconds, 1), import_peak_rss_kb=rss, cards=cards)
+    result["cards_per_s"] = round(cards / seconds) if seconds else None
+    result["db_bytes"] = int(psql("SELECT pg_total_relation_size('catalogue_card')"))
+    result["bytes_per_card"] = round(result["db_bytes"] / cards) if cards else None
+    check("cards imported", cards > 1000, cards)
+    check("keys", psql("SELECT count(*) FROM catalogue_card WHERE catalogue='osm' AND NOT keys @> ARRAY['osm:'||source_id]") == "0")
+    check("canonical links", psql("SELECT count(*) FROM catalogue_card WHERE catalogue='osm' AND uri<>'https://www.openstreetmap.org/'||source_id") == "0")
+    check("labels", int(psql("SELECT count(*) FROM catalogue_card WHERE catalogue='osm' AND labels<>'{}'")) > cards // 2)
+    useful = psql("SELECT count(*) FROM catalogue_card WHERE catalogue='osm' AND details->>'unnamed'='true'")
+    check("useful unnamed points", int(useful) > 0, int(useful))
+    check("no stop positions", psql("SELECT count(*) FROM catalogue_card WHERE catalogue='osm' AND details->>'category'='public_transport/stop_position'") == "0")
+    check("ways and relations have boxes", int(psql("SELECT count(*) FROM catalogue_card WHERE catalogue='osm' AND source_id NOT LIKE 'node/%' AND details ? 'bbox'")) > 0)
+    check("position for updates", psql("SELECT position->>'sequence' IS NOT NULL FROM catalogue_state WHERE catalogue='osm'") == "t")
+    places = [p.split("|", 1) for p in psql("SELECT source_id||'|'||name FROM catalogue_card WHERE catalogue='osm' AND details->>'category' IN ('place/town','place/city','place/village') ORDER BY fame DESC,source_id LIMIT 2").splitlines()]
+    sample, other = places[0], places[-1]
+    result["sample_place"] = sample
+    before = dict(line.split("|") for line in psql("SELECT source_id||'|'||encode(content_hash,'hex') FROM catalogue_card WHERE catalogue='osm'").splitlines())
+
+    start()
+    # Search finds the place, by its name (once the text index has read the import).
+    uri = f"https://www.openstreetmap.org/{sample[0]}"
+    found, status = False, None
+    for _ in range(120):
+        status, page = api("/v1/search?" + urllib.parse.urlencode({"q": sample[1], "limit": 20}))
+        found = status == 200 and any(r.get("uri") == uri for r in page.get("items", []) or [])
+        if found:
+            break
+        time.sleep(1)
+    check("text search finds the place", found, status)
+    # An OSM card nobody shared opens by its link and by its id.
+    status, card = api("/v1/resources/by-uri?" + urllib.parse.urlencode({"uri": uri}))
+    check("opens by uri", status == 200 and card and card.get("name") == sample[1], status)
+    if card:
+        status, by_id = api(f"/v1/resources/{card['id']}")
+        check("opens by id", status == 200 and by_id.get("uri") == uri, status)
+    # A shared link of it is built from its card (the Nominatim URL is unreachable).
+    status, _ = api("/v1/resolve", {"uri": uri})
+    for _ in range(60):
+        row = psql(f"SELECT r.status FROM resource r JOIN osm_place o USING(osm_type,osm_id) WHERE r.uri='{uri}'")
+        if row == "ok":
+            break
+        time.sleep(1)
+    check("a shared link joins its card", row == "ok", row)
+    # Map clusters over the region's extent.
+    extent = psql("SELECT concat_ws(',',ST_XMin(e),ST_YMin(e),ST_XMax(e),ST_YMax(e)) FROM (SELECT ST_Extent(point) e FROM catalogue_card WHERE catalogue='osm') x")
+    status, clusters = api("/v1/map/clusters?" + urllib.parse.urlencode({"bbox": extent, "zoom": 10}))
+    check("map clusters", status == 200 and clusters["total"] >= cards * 0.9, status)
+    # How long a count takes: the world at zoom 2, the region at zoom 6, 10 and 13 (card by card).
+    timings = {}
+    for name, bbox, zoom in [("world_z2", "-180,-90,180,90", 2), ("region_z6", extent, 6), ("region_z10", extent, 10), ("region_z13", extent, 13)]:
+        best = None
+        for _ in range(3):
+            t = time.time()
+            status, answer = api("/v1/map/clusters?" + urllib.parse.urlencode({"bbox": bbox, "zoom": zoom}))
+            took = round((time.time() - t) * 1000, 1)
+            best = took if best is None else min(best, took)
+        timings[name] = {"status": status, "ms": best, "total": answer.get("total") if isinstance(answer, dict) else None}
+    result.update(cluster_timings=timings)
+    # The ODbL dump holds the imported places.
+    dump = os.path.join(DIR, "dumps", "osm_place.ndjson.gz")
+    for _ in range(120):
+        if os.path.exists(dump):
+            break
+        time.sleep(1)
+    lines = sum(1 for line in gzip.open(dump) if b'"from": "catalogue"' in line or b'"from":"catalogue"' in line) if os.path.exists(dump) else 0
+    check("ODbL dump holds the places", lines == cards, lines)
+    stop()
+
+    # The daemon's update: it reads the region's real change files after the extract's sequence.
+    first = int(psql("SELECT position->>'sequence' FROM catalogue_state WHERE catalogue='osm'"))
+    out, seconds, _ = pinakesd("catalogue", "import", "osm", "--update")
+    last_applied = int(psql("SELECT position->>'sequence' FROM catalogue_state WHERE catalogue='osm'"))
+    after = dict(line.split("|") for line in psql("SELECT source_id||'|'||encode(content_hash,'hex') FROM catalogue_card WHERE catalogue='osm'").splitlines())
+    changed = sorted(k for k in after if k in before and after[k] != before[k])
+    added = sorted(k for k in after if k not in before)
+    removed = sorted(k for k in before if k not in after)
+    named = set()
+    diff_bytes = 0
+    for seq in range(first + 1, last_applied + 1):
+        path = f"{seq // 1000000:03d}/{seq // 1000 % 1000:03d}/{seq % 1000:03d}"
+        local = os.path.join(DIR, f"{seq}.osc.gz")
+        if not os.path.exists(local):
+            downloaded += download(f"{base}/updates/{path}.osc.gz", local)
+        diff_bytes += os.path.getsize(local)
+        for m in re.finditer(rb'<(node|way|relation) id="(\d+)"', gzip.open(local).read()):
+            named.add(f"{m.group(1).decode()}/{m.group(2).decode()}")
+    outside = [k for k in changed + added + removed if k not in named]
+    result.update(update_files=last_applied - first, update_s=round(seconds, 1), update_changed=len(changed), update_added=len(added), update_removed=len(removed), diff_objects=len(named), diff_bytes=diff_bytes)
+    check("update read the change files after the extract", last_applied > first, [first, last_applied])
+    check("update changed cards", len(changed) + len(added) + len(removed) > 0)
+    check("update changes only the objects the files name", not outside, outside[:10])
+    result["successors"] = int(psql("SELECT count(*) FROM osm_successor"))
+    result["renames"] = int(psql("SELECT count(*) FROM osm_rename"))
+
+    # Off: the catalogue leaves search at once (a place nobody resolved).
+    start(enabled=False)
+    other_uri = f"https://www.openstreetmap.org/{other[0]}"
+    status, page = api("/v1/search?" + urllib.parse.urlencode({"q": other[1], "limit": 20}))
+    listed = status == 200 and any(r.get("uri") == other_uri for r in page.get("items", []) or [])
+    check("off removes the cards from search", status == 200 and not listed, status)
+    stop()
+finally:
+    stop()
+    if not arg("--keep", flag=True):
+        psql(f"DROP DATABASE IF EXISTS {DB} WITH (FORCE)", server)
+        result["database_dropped"] = True
+result["bytes_downloaded"] = downloaded
+result["failed"] = failed
+print(json.dumps(result, indent=1))
+sys.exit(1 if failed else 0)

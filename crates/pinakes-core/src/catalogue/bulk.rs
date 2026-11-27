@@ -596,6 +596,10 @@ impl Download {
         self.response = Some(response);
         Ok(())
     }
+    /// The file's length, from the first answer.
+    pub fn length(&self) -> u64 {
+        self.length
+    }
     /// The bytes read so far.
     pub fn offset(&self) -> u64 {
         self.offset

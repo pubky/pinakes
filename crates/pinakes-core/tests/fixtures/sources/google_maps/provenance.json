@@ -1,0 +1,45 @@
+{
+  "short-falafel": {
+    "bytes": 0,
+    "content_type": "text/html; charset=utf-8",
+    "file": null,
+    "location": "https://www.google.com/maps/place/Falafel+M.+Sahyoun/@33.8904447,35.5066505,17z/data=!3m1!4b1!4m6!3m5!1s0x151f16e2123697fd:0x8e6626b678863990!8m2!3d33.8904447!4d35.5066505!16s%2Fg%2F1td7wffc?utm_source=mstt_1&coh=164777&entry=tt&shorturl=1",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-11-26T02:39:09+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://goo.gl/maps/sXnse1erRvkA6aV99"
+  },
+  "short-istanbul": {
+    "bytes": 0,
+    "content_type": "text/html; charset=utf-8",
+    "file": null,
+    "location": "https://www.google.com/maps/place/Mollafenari,+Elizi,+Bab-%C4%B1+Ali+Cd.+No:27,+34120+Fatih%2F%C4%B0stanbul,+Turkey/data=!4m2!3m1!1s0x14cab996a54299cb:0x40acb197d028d115?utm_source=mstt_1&entry=gps",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-11-26T02:39:10+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://maps.app.goo.gl/9ivZQ71CKMqRPDtQA"
+  },
+  "short-missing": {
+    "bytes": 9240,
+    "content_type": "text/html; charset=utf-8",
+    "file": null,
+    "note": "Status only: the source reads no body.",
+    "recorded_at": "2026-11-26T02:39:10+00:00",
+    "sha256": "fadd4cba49922129fb869c6aaf986b684bb5974a539266ddbdb6996ea9d274ba",
+    "status": 404,
+    "url": "https://maps.app.goo.gl/doesnotexist123"
+  },
+  "short-point": {
+    "bytes": 0,
+    "content_type": "text/html; charset=utf-8",
+    "file": null,
+    "location": "https://www.google.com/maps/search/5.811698,+-55.118891?entry=tts&g_ep=EgoyMDI1MDEyOS4xIPu8ASoASAFQAw%3D%3D",
+    "note": "Status and Location only.",
+    "recorded_at": "2026-11-26T02:39:10+00:00",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status": 302,
+    "url": "https://maps.app.goo.gl/TvPZdQo9HRmnfb4d8"
+  }
+}
