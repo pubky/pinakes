@@ -2381,7 +2381,8 @@ async fn tranco_removes_at_most_a_tenth_in_a_run(pool: PgPool) {
         .unwrap_err();
     assert!(again.to_string().contains("was refused before"), "{again}");
     // The sites are listed again, the refusal cleared; every homepage now answers 404 (no card):
-    // the run removes at most ten, then refuses the rest.
+    // a small instance's sites that stopped answering go (the reads' floor is 100 cards), with no
+    // `--request`.
     store::clear_refusal(&pool, Catalogue::Tranco)
         .await
         .unwrap();
@@ -2392,11 +2393,10 @@ async fn tranco_removes_at_most_a_tenth_in_a_run(pool: PgPool) {
     for host in &hosts {
         sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
     }
-    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
-        .unwrap_err();
-    assert!(failed.to_string().contains("homepage reads"), "{failed}");
-    assert!(count(&pool, "tranco", None).await >= 2);
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 0);
 }
 
 /// The shrink floor holds per registry: a full import reading a short Flathub file (one app of
@@ -2556,7 +2556,7 @@ async fn a_refused_round_of_homepage_reads_writes_nothing_of_it(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
     let ctx = context(&pool, dir.path(), without_large);
     let list = dir.path().join("list.csv");
-    let hosts: Vec<String> = (1..=30).map(|n| format!("site{n}.example")).collect();
+    let hosts: Vec<String> = (1..=150).map(|n| format!("site{n}.example")).collect();
     let text: String = hosts
         .iter()
         .enumerate()
@@ -2571,7 +2571,7 @@ async fn a_refused_round_of_homepage_reads_writes_nothing_of_it(pool: PgPool) {
     run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
         .await
         .unwrap();
-    assert_eq!(count(&pool, "tranco", None).await, 30);
+    assert_eq!(count(&pool, "tranco", None).await, 150);
     let rows = || async {
         sqlx::query_as::<
             _,
@@ -2604,7 +2604,8 @@ async fn a_refused_round_of_homepage_reads_writes_nothing_of_it(pool: PgPool) {
             .unwrap()
             .into_iter()
             .collect();
-    assert!(carded.len() >= 20, "{}", carded.len());
+    // Past the floor (100) and a tenth of the cards: refused, the rounds before applied.
+    assert!(carded.len() >= 50, "{}", carded.len());
     for (row, was) in rows().await.into_iter().zip(before) {
         if carded.contains(&row.0) {
             assert_eq!(row, was, "a site of the refused round is as it was");
@@ -2612,4 +2613,49 @@ async fn a_refused_round_of_homepage_reads_writes_nothing_of_it(pool: PgPool) {
             assert_eq!(row.1.as_deref(), Some("status"), "{row:?}");
         }
     }
+}
+
+/// A Tranco list that names no site (an empty or garbage body) is refused (`empty`) in an update
+/// and in a full import, one asked for too: nothing moves (the position, the cards' time, the
+/// cards).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tranco_list_with_no_site_is_refused(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,example.org\n2,other.example\n").unwrap();
+    let sites = Sites::default();
+    for host in ["example.org", "other.example"] {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 2);
+    let before = state_of(&pool, Catalogue::Tranco).await;
+    std::fs::write(&list, "<html>not a list</html>\n").unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&list)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    a_day_passed(&pool).await;
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("empty (list"), "{failed}");
+    let after = state_of(&pool, Catalogue::Tranco).await;
+    assert_eq!(after.current_as_of, before.current_as_of);
+    let position = after.position.unwrap();
+    assert_eq!(position["list"], before.position.as_ref().unwrap()["list"]);
+    assert!(position["refused"].is_string(), "{position}");
+    // A full import by hand (asked for) refuses it too, and keeps the cards.
+    let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("empty (list"), "{failed}");
+    assert_eq!(count(&pool, "tranco", None).await, 2);
 }

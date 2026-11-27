@@ -57,6 +57,10 @@ const LISTED_REFRESH: i64 = 7;
 const LONGEST_WAIT: u64 = 7 * 86400;
 /// The most sites a list may name (1,000,000).
 pub const SITES_CAP: usize = 2_000_000;
+/// The cards a run's homepage reads may always remove, whatever their share: a small instance's
+/// sites that stopped answering for good go (a cap of ten would refuse them at every list), while
+/// a mass failure of the reads on a larger catalogue is still refused past a tenth of its cards.
+pub const READ_REMOVAL_FLOOR: u64 = 100;
 /// Reads that failed in a row (no answer, a server error) before the card goes.
 const FAILURES: i32 = 3;
 /// The least time between two runs that read what fell due ([`plan_after`]).
@@ -126,9 +130,18 @@ impl Tranco {
             }
         }
     }
-    /// Load the list into `catalogue_site`: new sites due now, a known site's rank and last
-    /// listed day moved when that day is more than a week old (a row is written at most weekly).
-    async fn load(&self, job: &mut Job<'_>, input: &Input, day: chrono::NaiveDate) -> Result<u64> {
+    /// Load the list (`version`) into `catalogue_site`: new sites due now, a known site's rank and
+    /// last listed day moved when that day is more than a week old (a row is written at most
+    /// weekly). A list that names no site (an empty or garbage body) is refused (`empty`) in every
+    /// run, a full import asked for too: it would move the position and the cards' time on
+    /// nothing, and leave every site to fall off the list.
+    async fn load(
+        &self,
+        job: &mut Job<'_>,
+        input: &Input,
+        day: chrono::NaiveDate,
+        version: &str,
+    ) -> Result<u64> {
         // The list (22 MB) is read whole: Tranco sends it without a length, so not as a download
         // that resumes.
         let body = input.read_small(&self.client, LIST_MAX).await?;
@@ -138,7 +151,14 @@ impl Tranco {
         })
         .await
         .map_err(|_| Failure::new("panic"))??;
-        // A full import whose list names no site reads no record: the runner refuses it.
+        if sites.is_empty() {
+            let shown = super::run::shown_version(&json!(version));
+            return Err(job.refuse(
+                json!(version),
+                "empty",
+                format!("list {shown} names no site"),
+            ));
+        }
         job.count_read(sites.len() as u64);
         let pool = job.pool().clone();
         for part in sites.chunks(10_000) {
@@ -178,7 +198,8 @@ impl Tranco {
         .await?;
         let held = job.state().cards.max(0) as u64;
         if !forced(job) && super::diff::too_many(gone.max(0) as u64, held) {
-            let note = format!("list {list}: {gone} of {held} cards' sites off the list");
+            let shown = super::run::shown_version(&json!(list));
+            let note = format!("list {shown}: {gone} of {held} cards' sites off the list");
             return Err(job.refuse(json!(list), "refused", note));
         }
         let mut removed = 0;
@@ -281,10 +302,10 @@ impl Tranco {
         Ok((next, waits, first_reads))
     }
     /// Keep what a round of reads found: the cards, the sites' outcomes and when each is due. A
-    /// round whose removals take the run's past a tenth of the catalogue's cards (and past ten,
-    /// `diff::too_many`: the egress or the network broken, every read failing) refuses the list
-    /// `list` instead of removing them ([`Job::refuse`]): nothing of the round is written, its
-    /// sites are due again, and the reads wait for the next list. A full import asked for
+    /// round whose removals take the run's past a tenth of the catalogue's cards and past
+    /// [`READ_REMOVAL_FLOOR`] (the egress or the network broken, every read failing) refuses the
+    /// list `list` instead of removing them ([`Job::refuse`]): nothing of the round is written,
+    /// its sites are due again, and the reads wait for the next list. A full import asked for
     /// ([`forced`]) has no cap.
     async fn record(
         &self,
@@ -393,7 +414,8 @@ impl Tranco {
             let report = job.report();
             let held = job.state().cards.max(0) as u64 + report.inserted;
             let removing = report.removed + carded.max(0) as u64;
-            if carded > 0 && super::diff::too_many(removing, held) {
+            if carded > 0 && removing > READ_REMOVAL_FLOOR && super::diff::too_many(removing, held)
+            {
                 // The round's sites were claimed for an hour: they are due again as they were.
                 let claimed: Vec<&str> = reads
                     .iter()
@@ -404,8 +426,9 @@ impl Tranco {
                     .bind(&claimed)
                     .execute(&pool)
                     .await?;
+                let shown = super::run::shown_version(&json!(list));
                 let note =
-                    format!("list {list}: homepage reads would remove {removing} of {held} cards");
+                    format!("list {shown}: homepage reads would remove {removing} of {held} cards");
                 return Err(job.refuse(json!(list), "refused", note));
             }
         }
@@ -501,7 +524,8 @@ impl Tranco {
         if let Some((version, input, at)) = latest {
             // A list refused before is not loaded again, and no homepage is read on it.
             if job.refused_before(&json!(version)) {
-                return Err(job.still_refused(format!("list {version}")));
+                let shown = super::run::shown_version(&json!(version));
+                return Err(job.still_refused(format!("list {shown}")));
             }
             job.reading(json!(version));
             let known = position.get("list").and_then(Value::as_str) == Some(version.as_str());
@@ -512,7 +536,7 @@ impl Tranco {
             let day = at.date_naive();
             position["checked"] = json!(now.to_rfc3339());
             if !known || job.run() == Run::Import {
-                self.load(job, &input, day).await?;
+                self.load(job, &input, day, &version).await?;
                 if job.run() == Run::Import {
                     stamp(job).await?;
                 }
