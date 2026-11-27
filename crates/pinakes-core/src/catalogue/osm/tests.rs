@@ -672,6 +672,7 @@ async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
     // OpenStreetMap's importer alone (the others have their own tests).
     config.catalogues.musicbrainz.enabled = false;
     config.catalogues.wikidata.enabled = false;
+    config.catalogues.podcastindex.enabled = false;
     config.catalogues.software.enabled = false;
     assert!(runner::to_start(runner::importers(&config), &config).is_empty());
     runner::note_unstarted(&pool, &config).await.unwrap();

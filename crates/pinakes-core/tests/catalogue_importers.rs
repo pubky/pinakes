@@ -8,7 +8,7 @@ mod common;
 use pinakes_core::{
     catalogue::{
         fetch::Input,
-        join,
+        join, podcastindex,
         run::{self, Context, Pace, Run},
         software, store, Catalogue,
     },
@@ -495,4 +495,236 @@ async fn a_software_import_that_reads_no_card_fails(pool: PgPool) {
         .unwrap_err();
     assert!(failed.to_string().contains("parse"), "{failed}");
     assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
+}
+
+// --- Podcast Index -------------------------------------------------------------------------------
+
+fn podcast_archive(db: &[u8]) -> Vec<u8> {
+    gzip(&tar(&[("./podcastindex_feeds.db", db)]))
+}
+
+/// The Podcast Index database's live feeds become cards with their podcast keys; the same
+/// archive again writes nothing; a new archive rewrites the changed feed and removes the gone
+/// one; the unpacked database is deleted after each run; a feed link joins the card's group
+/// without being built from it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn podcast_index_imports_and_updates(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let files = Files::default();
+    let db = fixture("podcastindex", "podcastindex_feeds.db");
+    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&db), "p1");
+    let base = files.serve().await;
+    let input = Input::Url(url::Url::parse(&format!("{base}/podcastindex_feeds.db.tgz")).unwrap());
+    let importer = Arc::new(podcastindex::PodcastIndex::new(input, "test@example.org").unwrap());
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "podcastindex", None).await, 11);
+    let (uri, name, keys, _, _, _) = row(&pool, "podcastindex", "1").await;
+    assert_eq!(
+        uri,
+        "https://rss.libsyn.com/shows/60231/destinations/278964.xml"
+    );
+    assert_eq!(name, "Christianity Questions and Answers");
+    assert!(
+        keys.contains(&"podcast:guid:78e9f51b-0ac3-5711-a921-1f2c7b5dbb35".to_owned()),
+        "{keys:?}"
+    );
+    assert!(
+        keys.contains(&"podcast:apple:1000000618".to_owned()),
+        "{keys:?}"
+    );
+    assert!(keys.contains(
+        &pinakes_core::catalogue::link_key("https://podcastindex.org/podcast/1").unwrap()
+    ));
+    let work = dir.path().join("podcastindex");
+    assert!(
+        !work.join("podcastindex_feeds.db").exists(),
+        "the database is deleted after the run"
+    );
+
+    // The same archive: nothing to do.
+    let before = versions(&pool, "podcastindex").await;
+    let gets = files.gets("/podcastindex_feeds.db.tgz");
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(files.gets("/podcastindex_feeds.db.tgz"), gets);
+    assert_eq!(versions(&pool, "podcastindex").await, before);
+
+    // A new archive: feed 2 renamed, feed 4 gone.
+    let edited = dir.path().join("edited.db");
+    std::fs::write(&edited, &db).unwrap();
+    {
+        let c = rusqlite::Connection::open(&edited).unwrap();
+        c.execute(
+            "UPDATE podcasts SET title='Rahdo Talks Through (new)' WHERE id=2",
+            [],
+        )
+        .unwrap();
+        c.execute("DELETE FROM podcasts WHERE id=4", []).unwrap();
+    }
+    files.put(
+        "/podcastindex_feeds.db.tgz",
+        podcast_archive(&std::fs::read(&edited).unwrap()),
+        "p2",
+    );
+    let (_, written) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        (written.changed, written.removed, written.inserted),
+        (1, 1, 0),
+        "{written:?}"
+    );
+    let after = versions(&pool, "podcastindex").await;
+    for (id, version) in &before {
+        if id != "2" && id != "4" {
+            assert_eq!(after.get(id), Some(version), "{id} rewritten");
+        }
+    }
+    assert!(!after.contains_key("4"));
+
+    // A feed link is a related link of its card (fetched for its episodes), never built from it.
+    let found = join::find(
+        &pool,
+        &["podcastindex"],
+        "https://rss.libsyn.com/shows/60231/destinations/278964.xml",
+    )
+    .await
+    .unwrap();
+    assert!(found.card.is_none());
+    assert_eq!(found.related, ["catalogue:podcastindex:1"]);
+    // So is the show's Apple Podcasts page.
+    let found = join::find(
+        &pool,
+        &["podcastindex"],
+        "https://podcasts.apple.com/us/podcast/x/id1000000618",
+    )
+    .await
+    .unwrap();
+    assert_eq!(found.related, ["catalogue:podcastindex:1"]);
+}
+
+/// A copy of the fixture database with `sql` run on it.
+fn edited_db(dir: &std::path::Path, name: &str, sql: &str) -> Vec<u8> {
+    let path = dir.join(name);
+    std::fs::write(&path, fixture("podcastindex", "podcastindex_feeds.db")).unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(sql)
+        .unwrap();
+    std::fs::read(&path).unwrap()
+}
+
+/// A Podcast Index update that would remove every feed is refused once: nothing is removed, the
+/// unpacked database is deleted, and the task's next update does not download that archive
+/// again; a full import asked for then runs, and fails (`parse`) on a database with no live feed,
+/// removing nothing; a newer archive is then imported.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let files = Files::default();
+    let db = fixture("podcastindex", "podcastindex_feeds.db");
+    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&db), "p1");
+    let base = files.serve().await;
+    let input = Input::Url(url::Url::parse(&format!("{base}/podcastindex_feeds.db.tgz")).unwrap());
+    let importer = Arc::new(
+        podcastindex::PodcastIndex::new(input, "test@example.org")
+            .unwrap()
+            .configured(&ctx.config),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "podcastindex", None).await, 11);
+    age(&pool, Catalogue::Podcastindex).await;
+    let empty = edited_db(dir.path(), "empty.db", "UPDATE podcasts SET dead=1");
+    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&empty), "p2");
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert_eq!(count(&pool, "podcastindex", None).await, 11);
+    let work = ctx.config.catalogues.work_dir(Catalogue::Podcastindex);
+    assert!(
+        !work.join("podcastindex_feeds.db").exists(),
+        "deleted on refusal"
+    );
+    let state = state_of(&pool, Catalogue::Podcastindex).await;
+    assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
+    assert_eq!(state.position.as_ref().unwrap()["refused_file"], "\"p2\"");
+    let table = store::status_table(&ctx.config.catalogues, std::slice::from_ref(&state));
+    assert!(table.contains("file \"p2\" refused"), "{table}");
+    // The task's next update: no download, no failure.
+    let gets = files.gets("/podcastindex_feeds.db.tgz");
+    run::step(&*importer, &ctx).await.unwrap();
+    assert_eq!(files.gets("/podcastindex_feeds.db.tgz"), gets);
+    assert_eq!(
+        state_of(&pool, Catalogue::Podcastindex).await.error_count,
+        1
+    );
+    // A full import asked for: it runs, finds no live feed and fails, removing nothing.
+    run::request_import(
+        &pool,
+        Catalogue::Podcastindex,
+        pinakes_core::catalogue::musicbrainz::REQUESTED,
+    )
+    .await
+    .unwrap();
+    let failed = run::step(&*importer, &ctx).await.unwrap_err();
+    assert!(
+        pinakes_core::catalogue::failure::shown(&failed).contains("parse"),
+        "{failed}"
+    );
+    assert_eq!(count(&pool, "podcastindex", None).await, 11);
+    assert_eq!(files.gets("/podcastindex_feeds.db.tgz"), gets + 1);
+    // A newer archive, one feed gone: the import under way takes it.
+    let fewer = edited_db(dir.path(), "fewer.db", "DELETE FROM podcasts WHERE id=4");
+    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&fewer), "p3");
+    run::step(&*importer, &ctx).await.unwrap();
+    assert_eq!(count(&pool, "podcastindex", None).await, 10);
+    let state = state_of(&pool, Catalogue::Podcastindex).await;
+    assert!(state.import_requested.is_none());
+    assert_eq!(
+        state.position.unwrap(),
+        serde_json::json!({"version": "\"p3\""})
+    );
+}
+
+/// An update's refused cards (a record that makes no card the table takes) and unchanged cards
+/// are counted as a full import counts them (`pinakes_catalogue_cards_total`); a refused card's
+/// stored copy stays.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_update_counts_its_refused_and_unchanged_cards(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let files = Files::default();
+    let db = fixture("podcastindex", "podcastindex_feeds.db");
+    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&db), "p1");
+    let base = files.serve().await;
+    let input = Input::Url(url::Url::parse(&format!("{base}/podcastindex_feeds.db.tgz")).unwrap());
+    let importer = Arc::new(podcastindex::PodcastIndex::new(input, "test@example.org").unwrap());
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let counted =
+        |outcome| pinakes_core::telemetry::catalogue_cards_counted("podcastindex", outcome);
+    let (rejected, unchanged) = (counted("rejected"), counted("unchanged"));
+    // Feed 2's link becomes a post on a social site: no card's own link.
+    let edited = edited_db(
+        dir.path(),
+        "social.db",
+        "UPDATE podcasts SET url='https://x.com/someone/status/1795000000000000000' WHERE id=2",
+    );
+    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&edited), "p2");
+    let (_, written) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!((written.rejected, written.removed), (1, 0), "{written:?}");
+    assert!(counted("rejected") > rejected);
+    assert!(counted("unchanged") >= unchanged + 10);
+    assert_eq!(count(&pool, "podcastindex", None).await, 11);
 }
