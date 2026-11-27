@@ -31,11 +31,17 @@ pub(crate) async fn answer(cx: &Context, path: &str) -> Result<Option<Value>> {
         .egress
         .discover(&url, &options, cx.egress.config().discovery_secs)
         .await?;
-    let busy = || super::media::busy("deezer_busy", &fetched);
+    crate::resolver::busy(&fetched, "deezer_busy")?;
+    let busy = || -> anyhow::Error {
+        crate::resolver::RetryLater {
+            class: "deezer_busy",
+            seconds: crate::resolver::busy_wait(fetched.retry_after_secs),
+        }
+        .into()
+    };
     match fetched.status {
         200 => {}
         404 => return Ok(None),
-        429 | 500..=599 => return Err(busy()),
         status => anyhow::bail!("deezer answered {status}"),
     }
     let v: Value = serde_json::from_slice(&fetched.body)?;

@@ -409,7 +409,9 @@ async fn start(
         loop {
             if !swept {
                 let sweep = pinakes_core::catalogue::join::sweep(&join_pool, &join_config.catalogues);
-                match tokio::select! { _=join_shutdown.changed()=>break,result=sweep=>result } {
+                let swept_now = tokio::select! { _=join_shutdown.changed()=>break,result=sweep=>result };
+                pinakes_core::telemetry::background_pass("catalogue_sweep", &swept_now);
+                match swept_now {
                     Ok(released) => {
                         if released > 0 {
                             tracing::info!(resources = released, "links built from a catalogue that is off are fetched again");
@@ -424,6 +426,7 @@ async fn start(
                 }
             }
             let batch = tokio::select! { _=join_shutdown.changed()=>break,result=pinakes_core::catalogue::join::drain(&join_pool,&join_config,JOIN_BATCH)=>result };
+            pinakes_core::telemetry::background_pass("catalogue_joins", &batch);
             let drained = match batch {
                 Ok(n) => n as i64,
                 Err(error) => {
@@ -451,6 +454,7 @@ async fn start(
         }
         loop {
             let batch = tokio::select! { _=extras_shutdown.changed()=>break,result=pinakes_core::catalogue::extras::run_due(&extras_pool,&extras_egress,&extras_catalogues,EXTRAS_BATCH)=>result };
+            pinakes_core::telemetry::background_pass("catalogue_extras", &batch);
             match batch {
                 Ok(n) if n as i64 == EXTRAS_BATCH => continue,
                 Err(error) => {
@@ -467,6 +471,7 @@ async fn start(
     tasks.spawn("grouping", async move {
         loop {
             let batch = tokio::select! { _=group_shutdown.changed()=>break,result=pinakes_core::groups::drain(&group_pool,&group_config,25)=>result };
+            pinakes_core::telemetry::background_pass("grouping", &batch);
             match batch {
                 Ok(25) => {
                     tokio::task::yield_now().await;
@@ -563,6 +568,13 @@ async fn start(
         if let Err(error) = served {
             tracing::error!(error = %pinakes_core::resolver::log_error(&error), "the public listener failed");
         }
+    });
+    // Once the listeners serve: what switched-off also-on sources wrote leaves the cards no
+    // refresh reads (`also_on::unhint`), a step that never stops the daemon.
+    let unhint_pool = pool.clone();
+    let mut unhint_shutdown = shutdown_rx.clone();
+    tasks.spawn_optional("also-on cards no refresh reads", async move {
+        tokio::select! { _=unhint_shutdown.changed()=>{}, _=pinakes_core::also_on::unhint_after_start(unhint_pool)=>{} }
     });
     Ok(Some(Daemon {
         tasks,

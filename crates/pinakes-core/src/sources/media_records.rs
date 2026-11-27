@@ -199,7 +199,7 @@ pub async fn item(
             .await?;
         return Err(crate::resolver::RetryLater {
             class: "wikidata_busy",
-            seconds: f.retry_after_secs.clamp(60, 3600),
+            seconds: crate::resolver::busy_wait(f.retry_after_secs),
         })
         .with_context(|| format!("Wikidata labels: {code}"));
     }

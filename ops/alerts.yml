@@ -19,6 +19,26 @@ groups:
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "Pinakes answered over ten text searches 503 in ten minutes for ten minutes: the text index had no free turn (limits.search_index_searches), searches ran past limits.search_index_budget_ms, or one client held its share of turns"}
+      - alert: BackgroundLoopFailing
+        expr: increase(pinakes_background_failures_total{loop!~"retention|cleanup|osm_prune|also_on_prune|refill|unhint|osm_dump|same_event_sweep|same_recording_sweep"}[15m]) > 0 and on (instance, job, loop) time() - pinakes_background_last_success_timestamp_seconds > 900
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "The Pinakes {{ $labels.loop }} loop has failed and finished no pass for 25 minutes: its work waits (groups, also-on rows, hints, catalogue joins and extras, the search revision fold); its warning log line names the error"}
+      - alert: HintSweepFailing
+        expr: increase(pinakes_background_failures_total{loop=~"same_event_sweep|same_recording_sweep"}[15m]) > 0 and on (instance, job, loop) time() - pinakes_background_last_success_timestamp_seconds > 4500
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "The hourly {{ $labels.loop }} has failed and finished no pass for an hour and a quarter: hint pairs of units that entered or left the window wait; its warning log line names the error"}
+      - alert: MaintenanceStepFailing
+        expr: increase(pinakes_background_failures_total{loop=~"retention|cleanup|osm_prune|also_on_prune|refill|unhint"}[3h]) > 0 and on (instance, job, loop) time() - pinakes_background_last_success_timestamp_seconds > 7200
+        for: 1h30m
+        labels: {severity: warning}
+        annotations: {summary: "The hourly {{ $labels.loop }} maintenance step keeps failing (three passes in a row, two after a start): its work waits (change retention, orphan cleanup, OSM place or also-on pruning, stale card values); its warning log line names the error"}
+      - alert: OdblDumpFailing
+        expr: increase(pinakes_background_failures_total{loop="osm_dump"}[30m]) > 0 and on (instance, job, loop) time() - pinakes_background_last_success_timestamp_seconds > 1800
+        for: 25m
+        labels: {severity: warning}
+        annotations: {summary: "The ODbL dump has failed for 25 minutes and written no file since: /v1/dumps/osm_place.ndjson.gz serves the previous file, or 503 before the first; its warning log line names the error"}
       - alert: MetricsMissing
         expr: absent(pinakes_ingest_last_success_timestamp_seconds)
         for: 5m

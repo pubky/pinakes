@@ -255,6 +255,12 @@ impl Metrics {
                 CATALOGUE_CARDS.with_label_values(&[catalogue.name(), outcome]);
             }
         }
+        registry.register(Box::new(BACKGROUND_FAILURES.clone()))?;
+        registry.register(Box::new(BACKGROUND_SUCCESS.clone()))?;
+        for name in BACKGROUND_LOOPS {
+            BACKGROUND_FAILURES.with_label_values(&[name]);
+            BACKGROUND_SUCCESS.with_label_values(&[name]);
+        }
         let out = Self {
             api_panics,
             api_requests,
@@ -917,6 +923,74 @@ pub fn catalogue_joins(catalogue: &str, outcome: &'static str) -> u64 {
     CATALOGUE_JOINS
         .with_label_values(&[catalogue, outcome])
         .get()
+}
+/// The daemon's background loops, as `pinakes_background_failures_total` and
+/// `pinakes_background_last_success_timestamp_seconds` name them (`loop`): the grouping writer,
+/// the catalogue sweep, joins and extras, the also-on worker, the same-event and same-recording
+/// passes and their hourly sweeps, each step of the hourly maintenance (change retention, orphan
+/// cleanup, OSM place pruning, also-on pruning, refill, the switched-off sources' values on cards
+/// no refresh reads) and its minutely search revision fold,
+/// and the ODbL dump.
+pub const BACKGROUND_LOOPS: &[&str] = &[
+    "grouping",
+    "catalogue_sweep",
+    "catalogue_joins",
+    "catalogue_extras",
+    "also_on",
+    "same_event",
+    "same_event_sweep",
+    "same_recording",
+    "same_recording_sweep",
+    "retention",
+    "cleanup",
+    "osm_prune",
+    "also_on_prune",
+    "refill",
+    "unhint",
+    "search_fold",
+    "osm_dump",
+];
+/// Failed passes of each background loop ([`BACKGROUND_LOOPS`]): the loop logs a warning and
+/// tries again, so one that fails on every pass shows here, its last success standing still.
+static BACKGROUND_FAILURES: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "pinakes_background_failures_total",
+            "Failed passes of each background loop (logged and tried again), by loop",
+        ),
+        &["loop"],
+    )
+    .expect("static metric")
+});
+/// When each background loop last finished a pass without an error, in Unix seconds; 0 until
+/// it has.
+static BACKGROUND_SUCCESS: std::sync::LazyLock<IntGaugeVec> = std::sync::LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "pinakes_background_last_success_timestamp_seconds",
+            "When each background loop last finished a pass without an error, Unix seconds (0 until it has), by loop",
+        ),
+        &["loop"],
+    )
+    .expect("static metric")
+});
+/// One pass of the background loop `name` ([`BACKGROUND_LOOPS`]): a failure counted, a success's
+/// time kept. The loop logs its own warning.
+pub fn background_pass<T, E>(name: &'static str, result: &std::result::Result<T, E>) {
+    match result {
+        Ok(_) => BACKGROUND_SUCCESS
+            .with_label_values(&[name])
+            .set(chrono::Utc::now().timestamp()),
+        Err(_) => BACKGROUND_FAILURES.with_label_values(&[name]).inc(),
+    }
+}
+/// The failed passes counted for background loop `name` so far.
+pub fn background_failures(name: &str) -> u64 {
+    BACKGROUND_FAILURES.with_label_values(&[name]).get()
+}
+/// When background loop `name` last finished a pass without an error (0 before it has).
+pub fn background_success(name: &str) -> i64 {
+    BACKGROUND_SUCCESS.with_label_values(&[name]).get()
 }
 pub fn after_save_failure(resolver: &str) {
     AFTER_SAVE_FAILURES.with_label_values(&[resolver]).inc();

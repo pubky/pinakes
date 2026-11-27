@@ -210,7 +210,7 @@ async fn prefetch(cx: &Context, kind: Kind, ids: &[&str]) -> Result<()> {
             s.refuse(&TIDAL, "forbidden", 403);
             return Err(TIDAL.refused(s.hold));
         }
-        429 | 500..=599 => {
+        status if crate::resolver::busy_status(status) => {
             s.cool_down(fetched.retry_after_secs);
             return Err(TIDAL.busy(fetched.retry_after_secs));
         }

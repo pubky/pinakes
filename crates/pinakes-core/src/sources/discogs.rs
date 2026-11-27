@@ -9,10 +9,7 @@ use super::{text, Budget, Context, Example, Source};
 use crate::event::adapters::SecretKey;
 use crate::{
     model::ResourceMeta,
-    resolver::{
-        egress::{Egress, FetchOptions},
-        RetryLater,
-    },
+    resolver::egress::{Egress, FetchOptions},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -105,6 +102,7 @@ async fn record_with(
             );
         }
     }
+    crate::resolver::busy(&f, "upstream")?;
     match f.status {
         200 => {
             let v: Value = serde_json::from_slice(&f.body)?;
@@ -115,11 +113,6 @@ async fn record_with(
             Ok((Some(v), authenticated))
         }
         404 => Ok((None, authenticated)),
-        408 | 429 | 500..=599 => Err(RetryLater {
-            class: "upstream",
-            seconds: f.retry_after_secs.clamp(60, 3600),
-        }
-        .into()),
         status => anyhow::bail!("Discogs answered {status}"),
     }
 }

@@ -883,6 +883,29 @@ CREATE TABLE also_on_source_off (
     CONSTRAINT also_on_source_off_source_check CHECK ((source ~ '^[a-z0-9_]{1,32}$'))
 );
 
+-- Moves when the cards that hold a switched-off source's finding (`hinted_by`) and that no refresh
+-- reads may have changed: the set of switched-off sources changed (`also_on::configure`), or such a
+-- card became final or dead-lettered (the trigger below). `also_on::unhint` reads those cards only
+-- when this has moved since the run it records in `also_on_unhint_done`.
+CREATE SEQUENCE also_on_unhint_due;
+-- The count of `also_on_unhint_due` (its value, plus one once called) the last completed
+-- `also_on::unhint` run covered; 0 before any.
+CREATE SEQUENCE also_on_unhint_done MINVALUE 0 START WITH 0;
+CREATE FUNCTION mark_also_on_unhint_due() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+ IF jsonb_typeof(NEW.doc->'hinted_by')='object'
+    AND EXISTS (SELECT 1 FROM also_on_source_off o WHERE NEW.doc->'hinted_by' ? o.source) THEN
+  PERFORM nextval('also_on_unhint_due');
+ END IF;
+ RETURN NULL;
+END
+$$;
+CREATE TRIGGER resource_also_on_unhint_due AFTER UPDATE OF final, dead_letter ON resource FOR EACH ROW
+    WHEN ((NEW.final AND NOT OLD.final) OR (NEW.dead_letter AND NOT OLD.dead_letter))
+    EXECUTE FUNCTION mark_also_on_unhint_due();
+
 -- Resources whose sources are due: after a save that changed the document, and when the
 -- shortest source lifetime has passed. Failures back off like grouping's.
 CREATE TABLE also_on_dirty (

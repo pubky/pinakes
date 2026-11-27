@@ -656,6 +656,19 @@ Discogs, GitHub). The page fetch of web resolution and most official-API reads d
 | TIDAL's and Spotify's 401 and 403; GitHub's and TMDB's 401 | Never, so a new token asks again |
 | A wait for Pinakes's own host budget | Never |
 
+### Busy services
+
+A service that answers 408, 429 or 5xx is busy for now. The readers of a service (official sources, event
+platforms, also-on sources, lookups, the hubs) and the egress's own 429 turn such an answer into a wait of
+the same length:
+
+| Answer | Wait |
+| --- | --- |
+| Names a wait (`Retry-After`, or a spent quota's reset) | That wait, at least a minute and at most an hour |
+| A 429 that names no wait | Five minutes |
+| A 408 or 5xx that names no wait | A minute |
+| The egress's own 429 read again from the discovery cache | What is left of its time there, at most 300 seconds |
+
 ### User-Agent and contact
 
 Every request introduces itself as `pinakes/<version> (+https://pubky.app; <contact>)`, with
@@ -898,8 +911,8 @@ The hourly cleanup deletes orphans in batches of 100, until it has caught up or 
 | A derived child | `limits.grace_days` after its link's expiry, however it was created |
 | A venue of a card or an occurrence | As long as something names it |
 
-A child or venue whose holder is deleted keeps the full grace counted from its creation, never the
-preview grace.
+A child or venue whose holder is deleted, and a venue its card or occurrence stops naming, keeps the
+full grace counted from its creation, never the preview grace.
 
 ### New previews
 
@@ -1466,8 +1479,14 @@ shows them at once. TMDB also counts as switched off while it has no credential;
 its credentials doesn't run, and its stored rows show until they expire.
 
 When a source is switched, the resources that its keys and keyed links name are regrouped. Cards that hold
-its keys or facts are due at once, unless they are final or dead-lettered, so what it wrote into a card (a
-title's name and description, a type) changes as the queue reaches them. A card records the findings it
+its keys or facts are due at once, final ones included, unless they are dead-lettered, so what it wrote into a
+card (a title's name and description, a type) changes as the queue reaches them; a final card is read once
+and is final again after. After a start, once the listeners serve, a final card that still holds what a
+switched-off source wrote is read once the same way, and a dead-lettered card, which no read reaches until a
+new reference, loses the name, description and stream that source wrote into it; a type it gave stays until
+the card is read again. Every hourly maintenance pass does the same. The step reads the cards only after a
+switch, or after such a card became final or dead-lettered; a failure is logged and the next pass or start
+tries again. A card records the findings it
 carries (`hinted_by`); one whose finding is off, expired or changed is read in full, so a 304 never keeps
 it.
 

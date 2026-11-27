@@ -523,14 +523,7 @@ fn missing(uri: &str, source: &str, ttl: u64) -> ResourceMeta {
     d
 }
 fn retry_status(f: &Fetched) -> Result<()> {
-    if f.status >= 500 || matches!(f.status, 408 | 429) {
-        return Err(super::RetryLater {
-            class: "upstream",
-            seconds: f.retry_after_secs.max(60),
-        }
-        .into());
-    }
-    Ok(())
+    super::busy(f, "upstream")
 }
 fn check_status(uri: &str, source: &str, f: &Fetched, ttl: u64) -> Result<Option<ResourceMeta>> {
     retry_status(f)?;

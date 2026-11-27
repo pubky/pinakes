@@ -1067,16 +1067,12 @@ pub async fn resolve(
 /// (`FetchOptions::error_json`). The class `rate_limited` is the daemon's own budget wait alone
 /// (`own_rate_limit`), never a service's answer.
 pub(crate) fn retry(f: &Fetched) -> Result<()> {
-    let class = match f.status {
-        408 | 429 => "http_4xx",
-        s if s >= 500 => "upstream",
-        _ => return Ok(()),
+    let class = if f.status >= 500 {
+        "upstream"
+    } else {
+        "http_4xx"
     };
-    Err(crate::resolver::RetryLater {
-        class,
-        seconds: f.retry_after_secs.max(60),
-    }
-    .into())
+    crate::resolver::busy(f, class)
 }
 
 /// Text with every e-mail address removed (`name@host.tld`, also in `<…>` or after

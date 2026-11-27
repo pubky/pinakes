@@ -382,7 +382,7 @@ impl Source for Feed {
             .await
         {
             Ok(f) if f.status == 200 => news_sitemaps(&String::from_utf8_lossy(&f.body), &url),
-            Ok(f) if !matches!(f.status, 408 | 429 | 500..=599) => vec![],
+            Ok(f) if !crate::resolver::busy_status(f.status) => vec![],
             _ => {
                 robots_failed = true;
                 vec![]
@@ -410,7 +410,7 @@ async fn feed_entries(
     let f = answer.map_err(|_| ())?;
     match f.status {
         200 => {}
-        408 | 429 | 500..=599 => return Err(()),
+        status if crate::resolver::busy_status(status) => return Err(()),
         _ => return Ok(None),
     }
     crate::resolver::html::blocking(move || entries_of(&f.body, f.truncated))

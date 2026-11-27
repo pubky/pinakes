@@ -745,13 +745,16 @@ impl Heard {
 
 impl Podcasts {
     async fn itunes(cx: &Context, url: &str) -> Result<crate::resolver::egress::Fetched> {
-        cx.egress
+        let f = cx
+            .egress
             .discover(
                 url,
                 &super::itunes_api::options(),
                 cx.egress.config().discovery_secs,
             )
-            .await
+            .await?;
+        crate::resolver::busy(&f, "upstream")?;
+        Ok(f)
     }
     /// iTunes' record of the show, if it knows it.
     async fn itunes_show(cx: &Context, show: u64) -> Result<Option<ItunesShow>> {
@@ -788,6 +791,9 @@ impl Podcasts {
         };
         let options = pi_options(key, secret);
         let fetched = cx.egress.fetch_with(url, &options).await?;
+        // Podcast Index's errors come with their body (`error_json`): its 429 too, which waits
+        // what it asks.
+        crate::resolver::busy(&fetched, "upstream")?;
         // A refused key lasts: a refusal of the credentials, counted, which brings no run back
         // early and leaves what this source recorded with Podcast Index's answers where it is
         // (`Deferred`).
@@ -1337,6 +1343,60 @@ impl Podcasts {
 
 #[cfg(test)]
 mod tests {
+    /// Podcast Index's 429 (an answer: its errors come with their body) and an iTunes 5xx wait
+    /// what each asked, as every busy answer does (`resolver::busy`), not a fixed minute.
+    #[tokio::test]
+    async fn podcast_index_and_itunes_busy_answers_wait_what_they_ask() {
+        use crate::resolver::egress::{Dns, Egress, Fetched, Transport};
+        use std::{net::SocketAddr, sync::Arc};
+        struct Public;
+        #[async_trait::async_trait]
+        impl Dns for Public {
+            async fn lookup(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>> {
+                Ok(vec![SocketAddr::new("8.8.8.8".parse()?, port)])
+            }
+        }
+        struct Busy;
+        #[async_trait::async_trait]
+        impl Transport for Busy {
+            async fn get(&self, url: &url::Url, _: &[SocketAddr]) -> Result<Fetched> {
+                let (status, retry_after_secs) = match url.host_str() {
+                    Some("api.podcastindex.org") => (429, 900),
+                    _ => (503, 120),
+                };
+                Ok(Fetched {
+                    retry_after_secs,
+                    ..Fetched::answer(url.clone(), status, "application/json".into(), vec![])
+                })
+            }
+        }
+        let mut config = crate::config::Config::default();
+        config.podcast_index.key = Some("KEY".into());
+        config.podcast_index.secret = Some("SECRET".into());
+        let cx = Context {
+            egress: Egress::with_backends(
+                crate::config::EgressConfig {
+                    host_requests_per_second: 1000.0,
+                    ..Default::default()
+                },
+                Arc::new(Public),
+                Arc::new(Busy),
+            ),
+            config: Arc::new(config),
+        };
+        let wait = |error: anyhow::Error| {
+            error
+                .downcast_ref::<RetryLater>()
+                .map(|r| (r.class, r.seconds))
+        };
+        let index = pi_request(Ask::FeedId(920666)).unwrap();
+        let error = Podcasts::index_get(&cx, &index).await.unwrap_err();
+        assert_eq!(wait(error), Some(("upstream", 900)));
+        let error = Podcasts::itunes(&cx, &show_request(1200361736, "us"))
+            .await
+            .unwrap_err();
+        assert_eq!(wait(error), Some(("upstream", 120)));
+    }
     /// The RSS item link a page's podcast links name (`rss_item`) is the feed item an Episodes
     /// entry names (`episodes::item_uri`), whatever its GUID holds: the list joins its entries to
     /// the publisher's pages by that identity.

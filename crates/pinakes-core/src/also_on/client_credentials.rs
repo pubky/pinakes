@@ -43,7 +43,7 @@ impl Api {
     pub(crate) fn busy(&self, seconds: u64) -> anyhow::Error {
         RetryLater {
             class: self.busy_class,
-            seconds: seconds.clamp(60, 3600),
+            seconds: crate::resolver::busy_wait(seconds),
         }
         .into()
     }
@@ -115,7 +115,7 @@ impl Slot {
     }
     /// The service asked to wait: no request before, and a shorter wait never cuts a longer one.
     pub(crate) fn cool_down(&mut self, seconds: u64) {
-        let until = Instant::now() + Duration::from_secs(seconds.clamp(60, 3600));
+        let until = Instant::now() + Duration::from_secs(crate::resolver::busy_wait(seconds));
         self.busy_until = Some(self.busy_until.map_or(until, |b| b.max(until)));
     }
     /// `Err` while a wait the service asked for holds.
@@ -213,7 +213,7 @@ impl Slot {
                 Ok(token)
             }
             // A timeout, a rate limit or an outage is a wait, never a refusal of the credentials.
-            408 | 429 | 500..=599 => {
+            status if crate::resolver::busy_status(status) => {
                 self.cool_down(fetched.retry_after_secs);
                 Err(api.busy(fetched.retry_after_secs))
             }
@@ -366,8 +366,8 @@ pub(crate) async fn object_as(
             .into());
         }
         404 => return Ok(None),
-        429 | 500..=599 => {
-            shorten(fetched.retry_after_secs.clamp(60, 3600)).await?;
+        status if crate::resolver::busy_status(status) => {
+            shorten(crate::resolver::busy_wait(fetched.retry_after_secs)).await?;
             s.cool_down(fetched.retry_after_secs);
             return Err(api.busy(fetched.retry_after_secs));
         }

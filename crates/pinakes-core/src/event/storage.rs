@@ -693,6 +693,10 @@ pub async fn apply(
     Ok(Some(true))
 }
 impl Prepared {
+    /// The venues this snapshot's occurrences name.
+    pub(crate) fn venues(&self) -> impl Iterator<Item = &str> {
+        self.rows.iter().filter_map(|row| row["venue_id"].as_str())
+    }
     pub fn exceeds_limit(&self, additional: usize) -> bool {
         self.change_count.saturating_add(additional) > self.change_limit
     }

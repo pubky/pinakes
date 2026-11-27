@@ -189,7 +189,8 @@ impl Pause {
             ..Default::default()
         };
         let f = egress.fetch_with(url, &options).await?;
-        let busy = matches!(f.status, 429 | 503).then(|| f.retry_after_secs.max(60));
+        let busy =
+            matches!(f.status, 429 | 503).then(|| crate::resolver::busy_wait(f.retry_after_secs));
         let held = serde_json::from_slice::<Value>(&f.body)
             .ok()
             .and_then(|v| pause(&v))

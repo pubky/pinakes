@@ -576,7 +576,9 @@ pub fn registered() -> &'static [Arc<dyn Source>] {
 /// shows again when switched on. A change regroups what its rows name (the table's trigger), and
 /// the cards holding its keys or facts are due at once: what it gave a card itself (a title's
 /// name, a type) leaves, or comes back, at that read (`media::outdated` keeps a 304 from holding
-/// it). The rows of a source this build no longer has are read as before. Run at
+/// it). A final card is read once too. The cards no refresh reads are seen to by [`unhint`] (after
+/// the start, [`unhint_after_start`], and in every maintenance pass), which a change here makes run
+/// (`also_on_unhint_due`). The rows of a source this build no longer has are read as before. Run at
 /// startup, before the workers.
 pub async fn configure(pool: &PgPool, config: &Config) -> Result<()> {
     let off: Vec<&str> = registered()
@@ -602,18 +604,123 @@ pub async fn configure(pool: &PgPool, config: &Config) -> Result<()> {
     if !changed.is_empty() {
         // Many resources' rows, in no particular order.
         crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
-        let due = sqlx::query("UPDATE resource SET next_attempt_at=now(),refresh_at=now(),priority_at=coalesce(priority_at,now()) WHERE id IN (SELECT resource_id FROM resource_key WHERE source=ANY($1) UNION SELECT resource_id FROM resource_fact WHERE source=ANY($1)) AND NOT final AND NOT dead_letter")
+        // A final card is read once too (its next save makes it final again): a switch is rare.
+        let due = sqlx::query("UPDATE resource SET final=false,next_attempt_at=now(),refresh_at=now(),priority_at=coalesce(priority_at,now()) WHERE id IN (SELECT resource_id FROM resource_key WHERE source=ANY($1) UNION SELECT resource_id FROM resource_fact WHERE source=ANY($1)) AND NOT dead_letter")
             .bind(&changed)
             .execute(&mut *tx)
             .await?
             .rows_affected();
         tracing::info!(sources = ?changed, due, "also-on sources switched: the cards holding their rows are read again");
+        // The cards no refresh reads are looked at again (`unhint`).
+        sqlx::query("SELECT nextval('also_on_unhint_due')")
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
     if !off.is_empty() {
         tracing::info!(sources = ?off, "also-on sources switched off: their stored rows are not read");
     }
     Ok(())
+}
+/// [`unhint`] once, after the daemon has started (its listener open), as a step that never stops
+/// it: a failure is logged, and the next start tries again.
+pub async fn unhint_after_start(pool: PgPool) {
+    match unhint(&pool).await {
+        Ok((reread, cards)) if reread + cards > 0 => tracing::info!(
+            reread,
+            cards,
+            "cards that hold what switched-off also-on sources wrote: final ones read again, dead-lettered ones without it"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            kind = crate::resolver::error_class(&error),
+            "the cards that hold what switched-off also-on sources wrote were not all read; the next start tries again"
+        ),
+    }
+}
+/// The cards that hold what the sources `off` wrote (`hinted_by`) and that no read brings back
+/// otherwise: a final one is due once (its read takes what the sources on give, and nothing of
+/// those off); a dead-lettered one, which no read reaches until a new reference, loses it from
+/// its stored card (`media::unhint`), each under its row lock with its change line
+/// (`changes::rewrite`), in batches of [`REFILL_BATCH`]. The sources are those switched off
+/// (`also_on_source_off`). Its scans run only when such cards may have changed since its last
+/// completed run (`also_on_unhint_due` moved: a switch, or such a card became final or
+/// dead-lettered); then that run is recorded (`also_on_unhint_done`). The cards made due and
+/// rewritten.
+pub async fn unhint(pool: &PgPool) -> Result<(u64, u64)> {
+    const FINAL: &str = "final AND NOT dead_letter AND osm_id IS NULL AND doc->'hinted_by' ?| $1";
+    let (due, done): (i64, i64) = sqlx::query_as("SELECT (SELECT last_value+is_called::int FROM also_on_unhint_due),(SELECT last_value FROM also_on_unhint_done)")
+        .fetch_one(pool)
+        .await?;
+    if due == done {
+        return Ok((0, 0));
+    }
+    let off: Vec<String> = sqlx::query_scalar("SELECT source FROM also_on_source_off")
+        .fetch_all(pool)
+        .await?;
+    let off: Vec<&str> = off.iter().map(String::as_str).collect();
+    let off = off.as_slice();
+    let record = || async {
+        // What moved meanwhile is read at the next start.
+        sqlx::query("SELECT setval('also_on_unhint_done',$1)")
+            .bind(due)
+            .execute(pool)
+            .await
+    };
+    if off.is_empty() {
+        record().await?;
+        return Ok((0, 0));
+    }
+    // Looked for first without a lock: the write order is taken only when there is one.
+    let any: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM resource WHERE {FINAL})"
+    ))
+    .bind(off)
+    .fetch_one(pool)
+    .await?;
+    let mut reread = 0;
+    if any {
+        let mut tx = pool.begin().await?;
+        // Many resources' rows, in no particular order.
+        crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
+        reread = sqlx::query(&format!("UPDATE resource SET final=false,next_attempt_at=now(),refresh_at=now(),priority_at=coalesce(priority_at,now()) WHERE {FINAL}"))
+            .bind(off)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+    }
+    let mut rewritten_cards = 0;
+    let mut after = String::new();
+    loop {
+        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT id,doc FROM resource WHERE dead_letter AND id>$1 AND osm_id IS NULL AND doc->'hinted_by' ?| $2 ORDER BY id LIMIT $3")
+            .bind(&after)
+            .bind(off)
+            .bind(REFILL_BATCH)
+            .fetch_all(pool)
+            .await?;
+        let Some((last, _)) = rows.last() else { break };
+        after = last.clone();
+        for (id, doc) in rows {
+            let Ok(mut doc) = serde_json::from_value::<ResourceMeta>(doc) else {
+                continue;
+            };
+            if !media::unhint(off, &mut doc) {
+                continue;
+            }
+            // Under the row lock, against the card as it is then (a read may have replaced it).
+            let rewritten = crate::changes::rewrite(
+                pool,
+                &id,
+                || async { Ok(()) },
+                |doc, ()| media::unhint(off, doc),
+            )
+            .await?;
+            rewritten_cards += u64::from(rewritten);
+        }
+    }
+    record().await?;
+    Ok((reread, rewritten_cards))
 }
 /// The API hosts ([`Source::api_hosts`]) of the sources that do not run under `config`: switched
 /// off (or not ready, for a source [`Source::off_until_ready`]), or the worker off. The egress
@@ -1545,6 +1652,7 @@ pub async fn run(
     loop {
         // Up to 100 resources a tick, so their hub lookups batch.
         let handled = tokio::select! { _=shutdown.changed()=>break, result=drain(&pool,&cx,&sources,100)=>result };
+        crate::telemetry::background_pass("also_on", &handled);
         match handled {
             Ok(100) => continue,
             Ok(_) => {}

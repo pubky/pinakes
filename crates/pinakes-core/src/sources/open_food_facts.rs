@@ -311,13 +311,7 @@ pub mod also_on {
                     .egress
                     .discover(&database.api(&code), &options, 86400)
                     .await?;
-                if f.status == 429 || f.status >= 500 {
-                    return Err(crate::resolver::RetryLater {
-                        class: "open_food_facts_busy",
-                        seconds: f.retry_after_secs.clamp(60, 3600),
-                    }
-                    .into());
-                }
+                crate::resolver::busy(&f, "open_food_facts_busy")?;
                 match answer(&code, f.status, &f.body)? {
                     Answer::Elsewhere(other) if asked.is_none() => {
                         asked = Some(database);

@@ -36,9 +36,7 @@ impl WikipediaSource {
             .egress
             .discover(url.as_str(), &options, cx.egress.config().discovery_secs)
             .await?;
-        if matches!(fetched.status, 429 | 500..=599) {
-            return Err(super::media::busy("wikipedia_busy", &fetched));
-        }
+        crate::resolver::busy(&fetched, "wikipedia_busy")?;
         // Only an article its Wikipedia does not have, or one without an item, is "nothing".
         let Some(qid) = item_answer(fetched.status, &fetched.body)? else {
             return Ok(Found::default());

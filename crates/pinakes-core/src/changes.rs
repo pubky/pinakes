@@ -311,9 +311,13 @@ pub(crate) async fn rewrite<T, F: std::future::Future<Output = Result<T>>>(
         return Ok(false);
     }
     let after = normalize(&doc);
-    sqlx::query("UPDATE resource SET doc=$2 WHERE id=$1")
+    // The columns read from the card follow it (`store::write_document`).
+    sqlx::query("UPDATE resource SET doc=$2,name=$3,type=$4,type_path=$5 WHERE id=$1")
         .bind(id)
         .bind(serde_json::to_value(&doc)?)
+        .bind(&doc.name)
+        .bind(&doc.type_name)
+        .bind(&doc.type_path)
         .execute(&mut *tx)
         .await?;
     if let Some(diff) = diff(Some(&before), Some(&after)) {
@@ -327,6 +331,8 @@ pub(crate) async fn rewrite<T, F: std::future::Future<Output = Result<T>>>(
 /// too complex to parse). Unlike `save`, nothing of the old card is kept: no drift guard holds
 /// it, and no retained snapshot. `pinakesd reextract` revives the resource.
 pub async fn clear(pool: &PgPool, id: &str, generation: i64, last_error: &str) -> Result<()> {
+    // Its venues stay held (`hold_venues`): the empty card names none.
+    hold_venues(pool, &[id.to_owned()], &[]).await?;
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
     let row = sqlx::query("SELECT r.uri,r.resolver,r.doc AS accepted FROM resource r WHERE r.id=$1 AND r.generation=$2 AND r.osm_id IS NULL FOR UPDATE OF r")
@@ -410,6 +416,17 @@ pub async fn save(
     // A post whose author has not opted in to search keeps no text in its history: what was kept
     // before goes now, and its lines carry only their kind, fields and time.
     let opted_out = opted_out(doc);
+    // The venues the stored card and its occurrences name, which this one may drop, and those it
+    // names stay held (`hold_venues`).
+    let named: Vec<String> = doc
+        .event
+        .venue
+        .as_ref()
+        .and_then(|v| v.resource_id.clone())
+        .into_iter()
+        .chain(prepared.iter().flat_map(|p| p.venues().map(str::to_owned)))
+        .collect();
+    hold_venues(pool, &[id.to_owned()], &named).await?;
     let mut tx = pool.begin().await?;
     crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
     if opted_out || doc.status == Status::Missing {
@@ -834,6 +851,27 @@ pub async fn scrub_stored(pool: &PgPool) -> Result<u64> {
             scrubbed_posts += u64::from(changed > 0);
         }
     }
+}
+/// Marks as held the venues `ids` name (a card's venue, its occurrences' venues) and `named`, as
+/// the delete path marks what a deleted resource held: once its holder drops it, a venue keeps the
+/// full grace counted from its creation, never the preview grace (`delete_orphan_batch`). Run
+/// before a write that may drop them (a save, `clear`, a route's reset), outside its transaction:
+/// each venue still unmarked is written alone, so no writer waits on another resource's row while
+/// it holds its own.
+pub(crate) async fn hold_venues(pool: &PgPool, ids: &[String], named: &[String]) -> Result<()> {
+    // One set of IDs, read by the primary key: never a scan of every resource.
+    let unmarked: Vec<String> = sqlx::query_scalar("SELECT r.id FROM resource r WHERE r.id IN (SELECT unnest($2::text[]) UNION SELECT venue_id FROM resource WHERE id=ANY($1) UNION SELECT venue_id FROM occurrence WHERE resource_id=ANY($1)) AND r.orphaned_at=r.created_at ORDER BY r.id")
+        .bind(ids)
+        .bind(named)
+        .fetch_all(pool)
+        .await?;
+    for venue in unmarked {
+        sqlx::query("UPDATE resource SET orphaned_at=created_at+interval '1 microsecond' WHERE id=$1 AND orphaned_at=created_at")
+            .bind(venue)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 /// How long one cleanup run deletes for at most: it goes on until a batch comes back short or this
 /// runs out, so cleanup keeps up with what the preview cap admits.

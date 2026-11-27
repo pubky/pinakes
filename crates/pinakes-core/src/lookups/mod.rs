@@ -265,8 +265,8 @@ impl Found {
     }
 }
 
-/// A JSON GET through the shared discovery cache (an hour). A busy service (429, 5xx) answers
-/// `RetryLater` with `class`; every other status is the caller's. A Wikidata read takes the
+/// A JSON GET through the shared discovery cache (an hour). A busy service (408, 429, 5xx) answers
+/// `RetryLater` with `class` (`resolver::busy`); every other status is the caller's. A Wikidata read takes the
 /// hubs' larger cap (a much-edited item), as the hubs' own reads of the same URL do.
 pub(crate) async fn get(cx: &Context, url: &str, class: &'static str) -> Result<(u16, Vec<u8>)> {
     let options = FetchOptions {
@@ -280,13 +280,7 @@ pub(crate) async fn get(cx: &Context, url: &str, class: &'static str) -> Result<
         .egress
         .discover(url, &options, cx.egress.config().discovery_secs)
         .await?;
-    if f.status == 429 || f.status >= 500 {
-        return Err(RetryLater {
-            class,
-            seconds: f.retry_after_secs.clamp(60, 3600),
-        }
-        .into());
-    }
+    crate::resolver::busy(&f, class)?;
     Ok((f.status, f.body))
 }
 
@@ -321,7 +315,7 @@ pub(crate) async fn item(cx: &Context, qid: &str) -> Result<Option<(Value, hubs:
 }
 
 /// A request a builder made, through the shared discovery cache (an hour), with its `Accept`.
-/// A busy service (429, 5xx) answers `RetryLater` with `class`.
+/// A busy service (408, 429, 5xx) answers `RetryLater` with `class` (`resolver::busy`).
 pub(crate) async fn send(
     cx: &Context,
     request: &Request,
@@ -345,13 +339,9 @@ pub(crate) async fn send(
             cx.egress.config().discovery_secs,
         )
         .await?;
-    if f.status == 429 || f.status >= 500 {
-        return Err(RetryLater {
-            class,
-            seconds: f.retry_after_secs.clamp(60, 3600),
-        }
-        .into());
-    }
+    // A 429 gets here as an answer only from a page kept for its in-page redirect
+    // (`keep_redirect`), fresh or from the discovery cache: a wait, as any other busy answer.
+    crate::resolver::busy(&f, class)?;
     Ok(f)
 }
 

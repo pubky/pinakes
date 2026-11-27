@@ -1,4 +1,4 @@
-# promtool unit tests of the catalogue alerts with two scraped instances (a and b) of one job:
+# promtool unit tests of the catalogue and background loop alerts with two scraped instances (a and b) of one job:
 # each instance's series match only that instance's (scripts/check-ops runs this with promtool).
 rule_files:
   - alerts.yml
@@ -236,3 +236,102 @@ tests:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: tranco}
             exp_annotations:
               summary: "The tranco catalogue removed over a tenth of its cards in a day: check that upstream removed them (pinakesd catalogue status; a full import under half its cards fails instead)"
+  # The grouping loop fails on every pass on a; on b it failed once and goes on. The hourly
+  # cleanup fails on every pass on a since the start; on b its first pass after the start fails and
+  # the next succeeds. The ODbL dump fails every five minutes on a; on b it fails once and is
+  # written five minutes later.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_background_failures_total{instance="a",job="pinakes",loop="grouping"}'
+        values: '0+30x240'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="a",job="pinakes",loop="grouping"}'
+        values: '0x240'
+      - series: 'pinakes_background_failures_total{instance="b",job="pinakes",loop="grouping"}'
+        values: '0 1x239'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="b",job="pinakes",loop="grouping"}'
+        values: '0+60x240'
+      - series: 'pinakes_background_failures_total{instance="a",job="pinakes",loop="cleanup"}'
+        values: '1x59 2x60 3x60 4x60'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="a",job="pinakes",loop="cleanup"}'
+        values: '0x240'
+      - series: 'pinakes_background_failures_total{instance="b",job="pinakes",loop="cleanup"}'
+        values: '1x240'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="b",job="pinakes",loop="cleanup"}'
+        values: '0x59 3600x180'
+      - series: 'pinakes_background_failures_total{instance="a",job="pinakes",loop="osm_dump"}'
+        values: '0 0+1x239'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="a",job="pinakes",loop="osm_dump"}'
+        values: '0x240'
+      - series: 'pinakes_background_failures_total{instance="b",job="pinakes",loop="osm_dump"}'
+        values: '0 1x239'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="b",job="pinakes",loop="osm_dump"}'
+        values: '0x5 300x235'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BackgroundLoopFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, loop: grouping}
+            exp_annotations:
+              summary: "The Pinakes grouping loop has failed and finished no pass for 25 minutes: its work waits (groups, also-on rows, hints, catalogue joins and extras, the search revision fold); its warning log line names the error"
+      - eval_time: 1h
+        alertname: OdblDumpFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, loop: osm_dump}
+            exp_annotations:
+              summary: "The ODbL dump has failed for 25 minutes and written no file since: /v1/dumps/osm_place.ndjson.gz serves the previous file, or 503 before the first; its warning log line names the error"
+      - eval_time: 1h
+        alertname: MaintenanceStepFailing
+      - eval_time: 4h
+        alertname: MaintenanceStepFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, loop: cleanup}
+            exp_annotations:
+              summary: "The hourly cleanup maintenance step keeps failing (three passes in a row, two after a start): its work waits (change retention, orphan cleanup, OSM place or also-on pruning, stale card values); its warning log line names the error"
+  # Each loop last succeeded long ago by its cadence, fails once, and its next pass succeeds: no
+  # alert fires while the failure is waited out.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_background_failures_total{instance="a",job="pinakes",loop="grouping"}'
+        values: '0x19 1x40'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="a",job="pinakes",loop="grouping"}'
+        values: '1x21 1320x38'
+      - series: 'pinakes_background_failures_total{instance="a",job="pinakes",loop="osm_dump"}'
+        values: '0x34 1x25'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="a",job="pinakes",loop="osm_dump"}'
+        values: '1x39 2400x20'
+      - series: 'pinakes_background_failures_total{instance="a",job="pinakes",loop="cleanup"}'
+        values: '0x124 1x115'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="a",job="pinakes",loop="cleanup"}'
+        values: '1x184 11100x55'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: BackgroundLoopFailing
+      - eval_time: 38m
+        alertname: OdblDumpFailing
+      - eval_time: 2h20m
+        alertname: MaintenanceStepFailing
+      - eval_time: 3h50m
+        alertname: MaintenanceStepFailing
+  # The same-event sweep, hourly, last succeeded at the start. On a it fails on every try from
+  # 50 minutes on; on b one try fails at 50 minutes and the next succeeds.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_background_failures_total{instance="a",job="pinakes",loop="same_event_sweep"}'
+        values: '0x49 0+12x150'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="a",job="pinakes",loop="same_event_sweep"}'
+        values: '1x200'
+      - series: 'pinakes_background_failures_total{instance="b",job="pinakes",loop="same_event_sweep"}'
+        values: '0x49 1x150'
+      - series: 'pinakes_background_last_success_timestamp_seconds{instance="b",job="pinakes",loop="same_event_sweep"}'
+        values: '1x50 3060x150'
+    alert_rule_test:
+      - eval_time: 1h5m
+        alertname: BackgroundLoopFailing
+      - eval_time: 1h5m
+        alertname: HintSweepFailing
+      - eval_time: 1h40m
+        alertname: HintSweepFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, loop: same_event_sweep}
+            exp_annotations:
+              summary: "The hourly same_event_sweep has failed and finished no pass for an hour and a quarter: hint pairs of units that entered or left the window wait; its warning log line names the error"

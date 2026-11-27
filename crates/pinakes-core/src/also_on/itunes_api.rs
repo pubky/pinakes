@@ -23,10 +23,10 @@ pub(crate) async fn answer(cx: &Context, url: &str) -> Result<Option<Value>> {
         .egress
         .discover(url, &options(), cx.egress.config().discovery_secs)
         .await?;
+    crate::resolver::busy(&fetched, "itunes_busy")?;
     match fetched.status {
         200 => {}
         400 | 404 => return Ok(None),
-        429 | 500..=599 => return Err(super::media::busy("itunes_busy", &fetched)),
         status => anyhow::bail!("itunes answered {status}"),
     }
     // iTunes answers `text/javascript` with leading newlines.
@@ -121,7 +121,7 @@ mod tests {
         assert_eq!(lookup(&cx, "404").await.unwrap(), None);
         // An ID iTunes cannot read (400) is no object either: it answers the same every time.
         assert_eq!(lookup(&cx, "400").await.unwrap(), None);
-        for status in ["403", "401", "408"] {
+        for status in ["403", "401"] {
             let failed = match lookup(&cx, status).await {
                 Ok(answer) => panic!("{status} answered {answer:?}"),
                 Err(error) => error,
@@ -131,10 +131,14 @@ mod tests {
                 "{status}: {failed:#}"
             );
         }
-        let busy = lookup(&cx, "503").await.unwrap_err();
-        assert_eq!(
-            busy.downcast_ref::<RetryLater>().map(|r| r.class),
-            Some("itunes_busy")
-        );
+        // A timeout of the request (408) is a wait, as an outage is (`resolver::busy`).
+        for status in ["503", "408"] {
+            let busy = lookup(&cx, status).await.unwrap_err();
+            assert_eq!(
+                busy.downcast_ref::<RetryLater>().map(|r| r.class),
+                Some("itunes_busy"),
+                "{status}"
+            );
+        }
     }
 }

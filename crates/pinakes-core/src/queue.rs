@@ -299,6 +299,8 @@ async fn reextract_pass(pool: &PgPool, routes: &[String], all: bool, moves: bool
             total += aliases.len() as u64;
         }
         if !ids.is_empty() {
+            // A reset card drops its venue below: the venue stays held.
+            crate::changes::hold_venues(pool, &ids, &[]).await?;
             let mut tx = pool.begin().await?;
             // Many resources' rows, in no particular order.
             crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Exclusive).await?;
