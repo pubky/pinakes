@@ -37,7 +37,9 @@ without a fetch.
   the page without asking the file again. Then the homepage: a
   2xx HTML page that is no bot wall (the web route's own wall check) and that ends on the same
   site makes the card. Redirects are followed by hand, at most five, each on the same site
-  (registrable domain), and each new host's robots.txt is asked before its page is read. A list entry that is an address, not a name, is passed over. A read waits at most two seconds for its host's or address's turn at the
+  (registrable domain; for a listed site that is itself a public suffix, such as `github.io` or
+  `blogspot.com`, that host only, since its subdomains are other people's sites), and each new
+  host's robots.txt is asked before its page is read. A list entry that is an address, not a name, is passed over. A read waits at most two seconds for its host's or address's turn at the
   egress, so it gives way to the daemon's other fetches; one not given its turn is tried again
   an hour later (or when the egress's pause for that site ends, if later), without counting as a
   failure. A 429, a 408 or a 5xx is tried again the next day or after its `Retry-After`,

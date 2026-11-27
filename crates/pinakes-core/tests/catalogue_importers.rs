@@ -1574,6 +1574,37 @@ async fn tranco_reads_homepages_by_the_rules(pool: PgPool) {
     }
 }
 
+/// A listed site that is itself a public suffix (`github.io`, `blogspot.com`) is read on its own
+/// host: a redirect on that host is followed and its page becomes the site's card; a redirect to
+/// one of its subdomains (another person's site) makes none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tranco_site_that_is_a_public_suffix_reads_on_its_own_host(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,github.io\n2,blogspot.com\n").unwrap();
+    let sites = Sites::default();
+    sites.redirect("https://github.io/", "https://github.io/home");
+    sites.page("https://github.io/home", "GitHub Pages");
+    sites.redirect("https://blogspot.com/", "https://someone.blogspot.com/");
+    sites.page("https://someone.blogspot.com/", "Someone's blog");
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let cards: Vec<String> = versions(&pool, "tranco").await.into_keys().collect();
+    assert_eq!(cards, ["github.io"]);
+    let (uri, name, keys, _, _, _) = row(&pool, "tranco", "github.io").await;
+    assert_eq!(
+        (uri.as_str(), name.as_str()),
+        ("https://github.io/", "GitHub Pages")
+    );
+    assert!(keys.contains(&"homepage:github.io".to_owned()), "{keys:?}");
+    assert_eq!(sites.asked("https://someone.blogspot.com/"), 0);
+    let outcomes = outcomes(&pool).await;
+    assert_eq!(outcomes["blogspot.com"].as_deref(), Some("other"));
+}
+
 /// A card stays through two transient failures in a row (no answer, a server error) and goes
 /// with the third; a page read between them starts the count again.
 #[sqlx::test(migrations = "../../migrations")]

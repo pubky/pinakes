@@ -999,7 +999,6 @@ async fn read_homepage(
     fresh: &mut Vec<(String, Robots)>,
 ) -> Homepage {
     use crate::resolver::egress::FetchOptions;
-    let site = registrable(host);
     let mut url = match url::Url::parse(&format!("https://{host}/")) {
         Ok(url) => url,
         Err(_) => return Homepage::Other,
@@ -1064,9 +1063,8 @@ async fn read_homepage(
                 && next
                     .host_str()
                     .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
-                    .and_then(|h| registrable(&h))
-                    == site;
-            if !on_site || site.is_none() {
+                    .is_some_and(|h| same_site(host, &h));
+            if !on_site {
                 return Homepage::Other;
             }
             url = next;
@@ -1118,7 +1116,17 @@ fn path_and_query(url: &url::Url) -> String {
 fn registrable(host: &str) -> Option<String> {
     psl::domain_str(host).map(str::to_owned)
 }
-/// The card of a homepage read at `at`; none when the page ended on another site or has no name.
+/// Whether `other` is on the listed site `host`: the same registrable domain, or, for a listed
+/// host that is itself a public suffix (`github.io`, `blogspot.com`, whose subdomains are other
+/// people's sites), that host itself.
+fn same_site(host: &str, other: &str) -> bool {
+    match registrable(host) {
+        Some(site) => registrable(other).as_deref() == Some(site.as_str()),
+        None => psl::suffix_str(host) == Some(host) && other == host,
+    }
+}
+/// The card of a homepage read at `at`; none when the page ended on another site ([`same_site`])
+/// or has no name.
 pub fn card(
     host: &str,
     rank: i32,
@@ -1131,7 +1139,7 @@ pub fn card(
         .host_str()?
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    if registrable(&landed)? != registrable(host)? {
+    if !same_site(host, &landed) {
         return None;
     }
     let name = name
@@ -1331,6 +1339,46 @@ mod tests {
         .is_none());
         assert!(card("example.org", 5, &None, None, "https://example.org/").is_none());
         assert!(rank_fame(1_000_000) < 0.01 && rank_fame(1000) > 0.4);
+    }
+
+    /// A listed site that is itself a public suffix (`github.io`, `blogspot.com`) gets a card
+    /// for its own host; its subdomains are other people's sites, so landing on one makes none,
+    /// and a redirect may go to that host only.
+    #[test]
+    fn a_site_that_is_a_public_suffix_is_its_own_host() {
+        for host in ["github.io", "blogspot.com"] {
+            let made = card(
+                host,
+                30,
+                &Some("Pages".into()),
+                None,
+                &format!("https://{host}/"),
+            )
+            .unwrap_or_else(|| panic!("{host}"));
+            let row = made.checked(Catalogue::Tranco).unwrap();
+            assert_eq!(row.uri, format!("https://{host}/"));
+            assert!(
+                row.keys.contains(&format!("homepage:{host}")),
+                "{:?}",
+                row.keys
+            );
+            assert!(card(
+                host,
+                30,
+                &Some("P".into()),
+                None,
+                &format!("https://someone.{host}/")
+            )
+            .is_none());
+            assert!(same_site(host, host));
+            assert!(!same_site(host, &format!("someone.{host}")));
+            assert!(!same_site(host, &format!("www.{host}")));
+        }
+        // A site's own subdomains stay on it; a public suffix is no site's subdomain.
+        assert!(same_site("example.co.uk", "www.example.co.uk"));
+        assert!(same_site("www.example.co.uk", "example.co.uk"));
+        assert!(!same_site("example.co.uk", "co.uk"));
+        assert!(!same_site("example.co.uk", "other.co.uk"));
     }
 
     #[test]
