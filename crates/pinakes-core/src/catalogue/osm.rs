@@ -460,6 +460,15 @@ fn centre(b: [f64; 4]) -> Point {
     }
 }
 
+/// A pass's error as a `parse` failure of `file`, unless it already says its own (`disk`, `panic`).
+fn pass_failure(error: anyhow::Error, file: &Path) -> anyhow::Error {
+    let own = error.downcast_ref::<Failure>().is_some() || error.chain().any(|c| c.is::<Failure>());
+    if own {
+        return error;
+    }
+    error.context(Failure::new("parse").at(file.display().to_string()))
+}
+
 /// The first pass over the file from `cursor` (a blob boundary): nodes into the index, node and
 /// way cards sent to be written, kept relations set aside. Blocking work.
 #[allow(clippy::too_many_arguments)]
@@ -500,7 +509,6 @@ fn first_pass(
     let mut pending_len = pending_len;
     let mut reader: Option<nodes::Reader> = None;
     let mut cards = vec![];
-    let parse = || Failure::new("parse").at(file.display().to_string());
     pbf::read_blocks(file, offset, first, threads, |d| {
         let b = &d.block;
         // The index's disk, every 64 blocks of nodes too (a stretch without cards writes it).
@@ -595,7 +603,7 @@ fn first_pass(
         }
         Ok(true)
     })
-    .with_context(parse)?;
+    .map_err(|e| pass_failure(e, file))?;
     index.sync()?;
     nodes::check_room(&dir.join("nodes.idx"), room, &free)?;
     if let Some(r) = &reader {
@@ -655,7 +663,6 @@ fn second_pass(
     let index = nodes::Reader::open(&dir.join("nodes.idx"), layout)?;
     let mut boxes: Vec<(i64, [f64; 4])> = Vec::with_capacity(wanted.len());
     if !wanted.is_empty() {
-        let parse = || Failure::new("parse").at(file.display().to_string());
         pbf::read_blocks(file, ways_at, 0, threads, |d| {
             let b = &d.block;
             for w in &b.ways {
@@ -673,7 +680,7 @@ fn second_pass(
             // Relations follow the ways in a sorted file: the ways are all read.
             Ok(b.relations.is_empty() || !b.ways.is_empty())
         })
-        .with_context(parse)?;
+        .map_err(|e| pass_failure(e, file))?;
         boxes.sort_unstable_by_key(|b| b.0);
     }
     let mut cards = vec![];

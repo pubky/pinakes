@@ -658,11 +658,55 @@ pub struct Decoded {
 /// Read the data blobs of a PBF file from `start` (a blob boundary; 0 for the whole file, whose
 /// header is checked), decoding them on `threads` threads, and pass each block to `each` in file
 /// order with its index (counted from `first_index`). `each` returns false to stop early.
+///
+/// A panic while decoding a block or in `each` ends the read with an error (a [`Failure`] of
+/// class `panic`): every thread stops, none is left waiting.
+///
+/// [`Failure`]: crate::catalogue::failure::Failure
 pub fn read_blocks(
     path: &std::path::Path,
     start: u64,
     first_index: u64,
     threads: usize,
+    each: impl FnMut(Decoded) -> Result<bool>,
+) -> Result<Option<Header>> {
+    read_blocks_with(path, start, first_index, threads, decode, each)
+}
+
+/// A blob's bytes decoded to a block.
+fn decode(blob: &[u8]) -> Result<Block> {
+    block(&inflate(blob)?)
+}
+
+/// A panic caught on a reading thread, as the read's error.
+fn panicked(what: &'static str) -> anyhow::Error {
+    anyhow::Error::new(crate::catalogue::failure::Failure::new("panic")).context(what)
+}
+
+/// Sets `stop` under the turn's lock and wakes the feeder when dropped: the read stops on every
+/// way out, a panic included.
+struct StopOnDrop<'a> {
+    stop: &'a std::sync::atomic::AtomicBool,
+    passed: &'a (std::sync::Mutex<u64>, std::sync::Condvar),
+}
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        {
+            // Set under the turn's lock: a feeder about to wait sees it, one waiting is woken.
+            let _held = self.passed.0.lock();
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.passed.1.notify_all();
+    }
+}
+
+/// [`read_blocks`] with the decoder given (tests pass one that panics).
+fn read_blocks_with(
+    path: &std::path::Path,
+    start: u64,
+    first_index: u64,
+    threads: usize,
+    decode: fn(&[u8]) -> Result<Block>,
     mut each: impl FnMut(Decoded) -> Result<bool>,
 ) -> Result<Option<Header>> {
     use std::io::{Seek, SeekFrom};
@@ -691,8 +735,8 @@ pub fn read_blocks(
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                let decoded = inflate(&blob.data)
-                    .and_then(|d| block(&d))
+                let decoded = std::panic::catch_unwind(|| decode(&blob.data))
+                    .unwrap_or_else(|_| Err(panicked("pbf: decoding a block panicked")))
                     .map(|block| Decoded {
                         index,
                         offset: blob.offset,
@@ -735,6 +779,9 @@ pub fn read_blocks(
                                 .wait(at)
                                 .map_err(|_| anyhow::anyhow!("pbf: reader poisoned"))?;
                         }
+                        if stop_reading.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         #[cfg(test)]
                         tests::MOST_AHEAD.fetch_max(
                             index as i64 + 1 - (*at + ahead) as i64,
@@ -753,6 +800,10 @@ pub fn read_blocks(
             drop(raw_tx);
             Ok((index, header))
         });
+        let stopping = StopOnDrop {
+            stop: &stop,
+            passed: &passed,
+        };
         // Blocks come back in any order; they are passed on in file order.
         let mut waiting = std::collections::BTreeMap::new();
         let mut want = first_index;
@@ -773,7 +824,12 @@ pub fn read_blocks(
                             *at = want;
                         }
                         passed.1.notify_all();
-                        match each(d) {
+                        let passed_on =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| each(d)))
+                                .unwrap_or_else(|_| {
+                                    Err(panicked("pbf: a block's reader panicked"))
+                                });
+                        match passed_on {
                             Ok(true) => {}
                             Ok(false) => {
                                 go_on = false;
@@ -793,17 +849,12 @@ pub fn read_blocks(
                 }
             }
         }
-        {
-            // Set under the turn's lock: a feeder about to wait sees it, one waiting is woken.
-            let _held = passed.0.lock();
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        passed.1.notify_all();
+        drop(stopping);
         // Drain so the feeder and the workers can end.
         drop(done_rx);
         let fed = feeder
             .join()
-            .map_err(|_| anyhow::anyhow!("pbf: reader panicked"))?;
+            .map_err(|_| panicked("pbf: the file's reader panicked"))?;
         outcome?;
         let (fed, header) = fed?;
         ensure!(
@@ -1117,6 +1168,73 @@ pub(crate) mod tests {
         assert_eq!(n, 64);
         let most = MOST_AHEAD.load(std::sync::atomic::Ordering::Relaxed);
         assert!(most > i64::MIN && most <= 0, "{most}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A file of `n` blocks, each one node (block `i` holds node `i + 1`).
+    fn many_blocks(name: &str, n: i64) -> (std::path::PathBuf, std::path::PathBuf) {
+        let header = Header {
+            required_features: vec!["OsmSchema-V0.6".into(), "DenseNodes".into()],
+            ..Default::default()
+        };
+        let blocks: Vec<Vec<u8>> = (0..n)
+            .map(|i| data_block(&[Element::Node(i + 1, 47.0, 9.0, &[("amenity", "atm")])]))
+            .collect();
+        let dir = tempfile_dir();
+        let path = dir.join(name);
+        std::fs::write(&path, file(&header, &blocks)).unwrap();
+        (dir, path)
+    }
+
+    /// `read` on a thread of its own, its answer within 30 seconds or the test fails (a hang).
+    fn within_time<T: Send + 'static>(read: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the read hung or panicked")
+    }
+
+    /// A panic in the code a block is passed to ends the read with a `panic` failure: the
+    /// feeder, waiting for its turn many blocks ahead, is stopped and the read returns.
+    #[test]
+    fn a_panic_passing_a_block_on_fails_the_read_without_hanging() {
+        let (dir, path) = many_blocks("panic-each.osm.pbf", 64);
+        let failed = within_time(move || {
+            read_blocks(&path, 0, 0, 2, |d| {
+                assert!(d.index < 1, "a reader's bug");
+                Ok(true)
+            })
+            .map(|_| ())
+        })
+        .unwrap_err();
+        assert_eq!(crate::catalogue::failure::shown(&failed), "panic");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A panic decoding one block on one thread ends the read with a `panic` failure, while the
+    /// other threads and the feeder would wait for that block for ever.
+    #[test]
+    fn a_panic_decoding_a_block_fails_the_read_without_hanging() {
+        fn decode_but_node_3(blob: &[u8]) -> Result<Block> {
+            let b = decode(blob)?;
+            assert!(b.nodes.iter().all(|n| n.id != 3), "a decoder's bug");
+            Ok(b)
+        }
+        let (dir, path) = many_blocks("panic-decode.osm.pbf", 64);
+        let (failed, passed) = within_time(move || {
+            let mut passed = vec![];
+            let read = read_blocks_with(&path, 0, 0, 2, decode_but_node_3, |d| {
+                passed.push(d.index);
+                Ok(true)
+            });
+            (read.map(|_| ()), passed)
+        });
+        let failed = failed.unwrap_err();
+        assert_eq!(crate::catalogue::failure::shown(&failed), "panic");
+        // Only blocks before the one that failed were passed on, in order.
+        assert!(passed.len() <= 2 && passed.iter().copied().eq(0..passed.len() as u64));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
