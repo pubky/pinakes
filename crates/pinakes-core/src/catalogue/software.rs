@@ -408,9 +408,10 @@ impl Importer for Software {
             .collect();
         (!given.is_empty()).then(|| given.join(" "))
     }
-    /// Everything is read as a stream; the cards take about 0.4 GB of the database.
+    /// None: everything is read as a stream, and nothing is written under `catalogues.dir` (the
+    /// cards' 0.4 GB of the database are sized apart).
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
-        1 << 30
+        0
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         self.run(job).await

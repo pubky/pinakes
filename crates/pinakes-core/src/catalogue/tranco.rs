@@ -630,9 +630,10 @@ impl Importer for Tranco {
             ListSource::Given(input) => super::diff::source_of(input, LATEST_ID),
         }
     }
-    /// The list and the cards take about 1 GB of the database.
+    /// None: the list is read into memory, and nothing is written under `catalogues.dir` (the
+    /// list and the cards' 1.1 GB of the database are sized apart).
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
-        1 << 30
+        0
     }
     /// A full import first; then an update ([`plan_after`]): at once while the last run left
     /// homepages due, ten minutes after one that stopped for a large import, else when the next

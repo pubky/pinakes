@@ -46,9 +46,10 @@ const FILE: &str = "podcastindex_feeds.db";
 /// The most bytes read of the archive (1.85 GB today) and of the database in it (5.1 GB).
 const ARCHIVE_MAX: u64 = 8 << 30;
 const DATABASE_MAX: u64 = 12 << 30;
-/// What a run needs free in the catalogue's directory: the unpacked database, room for it to
-/// grow, and the cards' 5 GB of the database (on one disk with it).
-const DISK_NEED: u64 = 20 << 30;
+/// What a run needs free in the catalogue's directory: the unpacked database (5.1 GB today) and
+/// room for it to grow. The cards' share of the database is sized apart (it may be on another
+/// disk).
+const DISK_NEED: u64 = 8 << 30;
 /// The most feeds read (4.8M today).
 pub const FEEDS_CAP: u64 = 50_000_000;
 /// The most distinct site links counted while reading (4.7M feeds name one today); past it,
@@ -261,10 +262,10 @@ impl Importer for PodcastIndex {
         diff::source_of(&self.input, DATABASE)
     }
     /// [`DISK_NEED`], less what an unpacked database a cut-off run kept already holds; for a local
-    /// database (`--from FILE.db`, a sample), 1 GB for the cards.
+    /// database (`--from FILE.db`, a sample), none: nothing is unpacked.
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
         if matches!(&self.input, Input::File(f) if f.extension().is_some_and(|e| e == "db")) {
-            return 1 << 30;
+            return 0;
         }
         let kept = self
             .dir

@@ -2016,3 +2016,43 @@ async fn tranco_plans_from_its_stored_position(pool: PgPool) {
     .await;
     assert!(minutes(plan) > 59.0, "{plan:?}");
 }
+
+/// The free-disk check counts the files a run writes under `catalogues.dir` only: OpenAlex,
+/// software and Tranco write none there (they read streams; their cards' share of the database is
+/// sized apart); Podcast Index needs room for its unpacked database alone, less what a kept one
+/// holds, and a local `.db` none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_file_catalogues_ask_disk_for_their_own_files_only(pool: PgPool) {
+    use pinakes_core::catalogue::run::Importer;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let state = store::ensure_state(&pool, Catalogue::Openalex)
+        .await
+        .unwrap();
+    let url = |u: &str| Input::Url(url::Url::parse(u).unwrap());
+    let openalex = openalex::OpenAlex::new(url(openalex::BUCKET), "test@example.org").unwrap();
+    let software =
+        software::Software::new(software::Sources::official(), "test@example.org").unwrap();
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,example.org\n").unwrap();
+    let tranco = tranco_over(&list, &Sites::default(), &[]);
+    for run in [Run::Import, Run::Update] {
+        assert_eq!(openalex.disk_need(run, &state), 0);
+        assert_eq!(software.disk_need(run, &state), 0);
+        assert_eq!(tranco.disk_need(run, &state), 0);
+    }
+    let podcasts = podcastindex::PodcastIndex::new(url(podcastindex::DATABASE), "test@example.org")
+        .unwrap()
+        .configured(&ctx.config);
+    assert_eq!(podcasts.disk_need(Run::Import, &state), 8 << 30);
+    let work = ctx.config.catalogues.work_dir(Catalogue::Podcastindex);
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("podcastindex_feeds.db"), vec![0u8; 4096]).unwrap();
+    assert_eq!(podcasts.disk_need(Run::Update, &state), (8 << 30) - 4096);
+    let local = podcastindex::PodcastIndex::new(
+        Input::File(dir.path().join("feeds.db")),
+        "test@example.org",
+    )
+    .unwrap();
+    assert_eq!(local.disk_need(Run::Import, &state), 0);
+}

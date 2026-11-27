@@ -1080,15 +1080,10 @@ impl Importer for OpenAlex {
     fn source(&self) -> Option<String> {
         diff::source_of(&self.base, BUCKET)
     }
-    /// Nothing is downloaded to disk; a full import's cards take about 26 GB of the database,
-    /// which on one disk with `catalogues.dir` is what it needs free. An update: a few GB. A local
-    /// snapshot (`--from DIR`, a sample): 1 GB.
-    fn disk_need(&self, run: Run, _state: &State) -> u64 {
-        match (&self.base, run) {
-            (Input::File(_), _) => 1 << 30,
-            (_, Run::Import) => 32 << 30,
-            (_, Run::Update) => 4 << 30,
-        }
+    /// None: the files are read as streams, and nothing is written under `catalogues.dir` (the
+    /// cards' share of the database is sized apart: it may be on another disk).
+    fn disk_need(&self, _run: Run, _state: &State) -> u64 {
+        0
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         let manifest = self.manifest().await?;
