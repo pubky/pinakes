@@ -324,4 +324,26 @@ test('the links the cards cover wait, bounded, for an alias that lands after the
   assert.deepEqual(kept.get('osm'), place);
   await coveringLinks(kept, uris, [], async () => null, 300);
   assert.deepEqual(kept.get('osm'), place);
+  // A read that fails is no answer: the wait goes on to its bound, then the caller asserts.
+  let failed = 0;
+  const failing = await coveringLinks(new Map([['osm', place]]), uris, [], async () => { failed++; throw new TypeError('fetch failed'); }, 700);
+  assert(!failing.includes(history));
+  assert(failed >= 2);
+  // A read that hangs is cut off at the bound: its signal aborts, and the wait ends on time even
+  // when a read ignores its signal.
+  for (const honours of [true, false]) {
+    const at = Date.now();
+    let aborted = false;
+    const hanging = (id, bound) => new Promise((resolve, reject) => {
+      if (honours) bound.addEventListener('abort', () => { aborted = true; reject(bound.reason); }, { once: true });
+    });
+    const got = await coveringLinks(new Map([['osm', place]]), uris, [], hanging, 600);
+    assert(!got.includes(history));
+    assert(Date.now() - at < 1500, `the wait ended at its bound (${Date.now() - at} ms)`);
+    if (honours) assert(aborted, 'the read was told to stop');
+  }
+  // The run interrupted while a read is under way: that throws.
+  const interrupt = new AbortController();
+  setTimeout(() => interrupt.abort(new Error('Interrupted')), 400);
+  await assert.rejects(coveringLinks(new Map([['osm', place]]), uris, [], (id, bound) => new Promise(() => {}), 5000, interrupt.signal), /Interrupted/);
 });

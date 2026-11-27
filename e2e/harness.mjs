@@ -285,16 +285,24 @@ export async function findsEvery(label, query, tags, docs, reread, timeout, sign
 /** The links the cards answer for, as a client combines Pinakes with Nexus: each card's own `uri`
  * and its `aliases`, and `extra` (an occurrence's feed). An alias can land after its card was
  * read (an OSM spelling's alias is joined in the background): while a tagged link in `uris` is
- * not among them, every card's `aliases` are read again (`readById`), for at most `timeout` ms.
- * The links; the caller asserts the cover. */
+ * not among them, every card's `aliases` are read again (`readById(id, signal)`), for at most
+ * `timeout` ms in all. Each read is given a signal that ends at that bound, and is not waited for
+ * past it; a read that fails or is cut off counts as no answer. Only `signal` (the run
+ * interrupted) throws. The links; the caller asserts the cover. */
 export async function coveringLinks(docs, uris, extra, readById, timeout = 10000, signal) {
   const links = () => [...new Set([...docs.values()].flatMap(d => [d.uri, ...(d.aliases ?? [])]).concat(extra))];
   const end = Date.now() + timeout;
+  const left = () => end - Date.now();
   let asked = links();
-  while (!uris.every(uri => asked.includes(uri)) && Date.now() < end) {
-    await sleep(250, undefined, { signal });
+  while (!uris.every(uri => asked.includes(uri)) && left() > 0) {
+    await sleep(Math.min(250, left()), undefined, { signal });
     for (const [kind, doc] of docs) {
-      const fresh = await readById(doc.id);
+      if (left() <= 0) break;
+      const bound = AbortSignal.timeout(left());
+      const read = signal ? AbortSignal.any([signal, bound]) : bound;
+      const cutOff = new Promise(resolve => read.addEventListener('abort', () => resolve(null), { once: true }));
+      const fresh = await Promise.race([Promise.resolve().then(() => readById(doc.id, read)), cutOff]).catch(() => null);
+      signal?.throwIfAborted();
       if (fresh?.id === doc.id && Array.isArray(fresh.aliases)) docs.set(kind, { ...doc, aliases: fresh.aliases });
     }
     asked = links();
@@ -468,8 +476,8 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       // tagged). Those links cover every tagged one, and Nexus hydrates each.
       const occurrence = occurrences.items[0];
       assert.equal(occurrence.occurrence.feed_uri, docs.get('ics').uri, 'an occurrence names its feed\'s URI');
-      const readById = async id => {
-        const r = await fetch(`${pinakes}/v1/resources/${id}`, { signal: AbortSignal.timeout(15000) });
+      const readById = async (id, bound) => {
+        const r = await fetch(`${pinakes}/v1/resources/${id}`, { signal: bound });
         return r.ok ? r.json() : null;
       };
       const asked = await coveringLinks(docs, uris, [occurrence.occurrence.feed_uri], readById, 10000, signal);
