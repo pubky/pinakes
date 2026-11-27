@@ -1717,8 +1717,10 @@ Aliases follow these rules:
 - **Wikidata items**: `wikidata.org`, `m.wikidata.org`, `/entity/Q…` and
   `/wiki/Special:EntityPage/Q…` are aliases of `https://www.wikidata.org/wiki/{Q-id}`.
 - **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
-  spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}`. A
-  redirect's title stays its own link.
+  spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}` (a `?` in
+  the title written `%3F`, a `\` `%5C`). A redirect's title stays its own link. A title MediaWiki
+  refuses because a URL reads it otherwise (`.`, `..`, a `./` or `../` part, a percent-escape) is
+  no article.
 - **MusicBrainz pages**: a recording, release, release group or artist page, or an ISRC's page,
   on `musicbrainz.org`, `www.` or `beta.`, over http or https, its web service record
   (`/ws/2/…`), the MBID in any letter case, a trailing slash and parameters are aliases of
