@@ -678,18 +678,15 @@ CREATE TABLE group_unit (
 CREATE INDEX group_unit_group_idx ON group_unit USING btree (group_id, resource_id, unit_id);
 CREATE INDEX group_unit_resource_idx ON group_unit USING btree (resource_id);
 
--- The grouping keys (evidence) of each unit.
+-- The grouping keys (evidence) of each unit. The unit's resource and group are its `group_unit`
+-- row's, read by the unit.
 CREATE TABLE resource_group (
     unit_id text NOT NULL REFERENCES group_unit(unit_id) ON DELETE CASCADE,
-    resource_id text NOT NULL REFERENCES resource(id) ON DELETE CASCADE,
-    group_id text REFERENCES "group"(id) DEFERRABLE INITIALLY DEFERRED,
     key text NOT NULL CONSTRAINT resource_group_key_check CHECK (octet_length(key) <= 2200),
     admitted_at timestamp with time zone NOT NULL DEFAULT now(),
     PRIMARY KEY (unit_id, key)
 );
 CREATE INDEX resource_group_admission_idx ON resource_group USING btree (key, admitted_at, unit_id);
-CREATE INDEX resource_group_group_idx ON resource_group USING btree (group_id);
-CREATE INDEX resource_group_resource_idx ON resource_group USING btree (resource_id);
 
 -- A unit an operator placed in a curated group.
 CREATE TABLE group_override (

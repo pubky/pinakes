@@ -69,3 +69,16 @@ async fn no_index_is_the_leading_part_of_another(pool: PgPool) {
     .unwrap();
     assert_eq!(found, Vec::<String>::new());
 }
+
+/// A unit's keys hold no copy of its resource or group: those are its `group_unit` row's, which
+/// grouping moves, so a key row can never name another group than its unit's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_unit_s_keys_hold_no_copy_of_its_resource_or_group(pool: PgPool) {
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name::text FROM information_schema.columns WHERE table_schema='public' AND table_name='resource_group' ORDER BY ordinal_position",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(columns, ["unit_id", "key", "admitted_at"]);
+}

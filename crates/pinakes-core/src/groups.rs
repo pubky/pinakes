@@ -381,13 +381,13 @@ pub async fn sync(tx: &mut Transaction<'_, Postgres>, id: &str, cfg: &GroupConfi
             .map(|u| json!({"unit":u.0,"resource":id,"occurrence":u.1,"occurrence_ref":u.2,"keys":u.3}))
             .collect();
         sqlx::query("INSERT INTO group_unit(unit_id,resource_id,occurrence_key,occurrence) SELECT v->>'unit',v->>'resource',v->>'occurrence',nullif(v->'occurrence_ref','null'::jsonb) FROM jsonb_array_elements($1) v ON CONFLICT(unit_id) DO UPDATE SET occurrence_key=excluded.occurrence_key,occurrence=excluded.occurrence").bind(json!(data)).execute(&mut **tx).await?;
-        sqlx::query("INSERT INTO resource_group(unit_id,resource_id,key) SELECT v->>'unit',v->>'resource',k FROM jsonb_array_elements($1) v CROSS JOIN LATERAL jsonb_array_elements_text(v->'keys') k ON CONFLICT(unit_id,key) DO NOTHING").bind(json!(data)).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO resource_group(unit_id,key) SELECT v->>'unit',k FROM jsonb_array_elements($1) v CROSS JOIN LATERAL jsonb_array_elements_text(v->'keys') k ON CONFLICT(unit_id,key) DO NOTHING").bind(json!(data)).execute(&mut **tx).await?;
     }
     let retained: Vec<_> = units
         .iter()
         .flat_map(|u| u.3.iter().map(|k| json!([u.0, k])))
         .collect();
-    sqlx::query("DELETE FROM resource_group k WHERE resource_id=$1 AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) v WHERE v->>0=k.unit_id AND v->>1=k.key)").bind(id).bind(json!(retained)).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM resource_group k USING group_unit u WHERE u.unit_id=k.unit_id AND u.resource_id=$1 AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) v WHERE v->>0=k.unit_id AND v->>1=k.key)").bind(id).bind(json!(retained)).execute(&mut **tx).await?;
     let (resume, parked) = (plan.resume.clone(), plan.parked as i32);
     let conflicts = i32::try_from(plan.conflicts).unwrap_or(i32::MAX);
     apply(tx, plan).await?;
@@ -474,7 +474,7 @@ async fn load_edges(
     let max_edges = cfg.max_graph_units.saturating_mul(20);
     let mut stream=sqlx::query_as::<_,Edge>(r#"WITH wanted AS (
       SELECT DISTINCT picked.unit_id,picked.group_id FROM unnest($2::text[]) wanted(key) CROSS JOIN LATERAL
-      (SELECT k.unit_id,k.group_id FROM resource_group k WHERE k.key=wanted.key ORDER BY k.admitted_at,k.unit_id LIMIT $4) picked
+      (SELECT k.unit_id,u.group_id FROM resource_group k JOIN group_unit u USING(unit_id) WHERE k.key=wanted.key ORDER BY k.admitted_at,k.unit_id LIMIT $4) picked
     ), affected AS (SELECT unnest($1::text[]) AS unit_id UNION SELECT unit_id FROM group_unit WHERE group_id=ANY($3)
       UNION SELECT u.unit_id FROM group_unit u WHERE u.group_id IN(SELECT group_id FROM wanted) UNION SELECT unit_id FROM wanted
       UNION SELECT unit_id FROM group_override WHERE group_id=ANY($3))
@@ -1117,7 +1117,6 @@ async fn apply(tx: &mut Transaction<'_, Postgres>, plan: Plan) -> Result<()> {
         let moved: Vec<String> = sqlx::query_scalar("SELECT DISTINCT m.resource_id FROM jsonb_array_elements($1) v JOIN group_unit u ON u.unit_id=v->>'unit' AND u.group_id IS DISTINCT FROM v->>'group' JOIN group_unit m ON m.unit_id=u.unit_id OR m.group_id=u.group_id OR m.group_id=v->>'group'").bind(json!(chunk)).fetch_all(&mut **tx).await?;
         crate::also_on::requeue_placed(tx, &moved).await?;
         sqlx::query("UPDATE group_unit u SET group_id=v->>'group' FROM jsonb_array_elements($1) v WHERE u.unit_id=v->>'unit'").bind(json!(chunk)).execute(&mut **tx).await?;
-        sqlx::query("UPDATE resource_group k SET group_id=v->>'group' FROM jsonb_array_elements($1) v WHERE k.unit_id=v->>'unit'").bind(json!(chunk)).execute(&mut **tx).await?;
     }
     sqlx::query("DELETE FROM \"group\" g WHERE g.id=ANY($1) AND NOT g.curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id)").bind(old).execute(&mut **tx).await?;
     Ok(())
@@ -1264,7 +1263,7 @@ pub async fn uncurate(pool: &PgPool, id: &str, cfg: &GroupConfig) -> Result<bool
         .bind(&units)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM \"group\" g WHERE id=$1 AND NOT curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id) AND NOT EXISTS(SELECT 1 FROM resource_group k WHERE k.group_id=g.id)")
+    sqlx::query("DELETE FROM \"group\" g WHERE id=$1 AND NOT curated AND NOT EXISTS(SELECT 1 FROM group_unit u WHERE u.group_id=g.id)")
         .bind(id)
         .execute(&mut *tx)
         .await?;
