@@ -50,10 +50,10 @@ A link this instance does not know is a 404 there: nobody referenced it, or it h
   `embed` is the frame that shows the link as its own site does (a player, a post, a map): load
   its `src` in a sandboxed iframe sized by `height` or `aspect`; `null` when there is none. Each
   `also_on` link carries its own.
-- **Referenced links and catalogue cards.** Search lists links someone tagged, replied to,
-  embedded or added to a collection on Pubky, and the cards of open catalogues the instance holds
-  (Wikidata, MusicBrainz, OpenStreetMap and others: `labels` and `catalogue` set, `refs: []`)
-  even when nobody shared them. Pass `referenced=true` to list only referenced links.
+- **Referenced links.** Search lists links someone tagged, replied to, embedded or added to a
+  collection on Pubky. When the host has catalogues on, it also lists the cards of open
+  catalogues (Wikidata, MusicBrainz, OpenStreetMap and others: `labels` and `from` set,
+  `refs: []`) that nobody shared; `referenced=true` lists only referenced links.
   Pinakes holds no posts, users or tags of its own: those are Nexus's (below).
 - **Groups.** Links that are the same thing on several services (a song on Spotify and on
   Apple Music, a DOI and its landing page, an event page and the same date in its organiser's
