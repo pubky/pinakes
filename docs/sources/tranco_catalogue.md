@@ -61,7 +61,7 @@ without a fetch.
 | `other` (a redirect off the site, more than five redirects, or a page without a name) | Removed | 90 days |
 | `deferred` (the egress gave the read no turn within two seconds, or the site's pause runs: nothing was read) | Kept, outcome unchanged | An hour later, or when the egress's wait ends |
 
-`pinakes_catalogue_homepage_reads_total{result}` counts the reads by outcome;
+`pinakes_catalogue_homepage_reads_total{outcome}` counts the reads by outcome;
 `pinakes_catalogue_backlog{queue="homepages"}` the sites due now, and
 `pinakes_catalogue_backlog_age_seconds{queue="homepages"}` how long the oldest has been due (a
 backlog that only grows: reads waiting for a large import, or every read deferred; the count

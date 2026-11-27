@@ -694,6 +694,8 @@ fn read_part(
         Message::Gone(std::mem::take(&mut gone)),
     ];
     out(&mut held, &mut held_cards, part, true);
+    crate::telemetry::catalogue_items_skipped("openalex", "bad_line", broken);
+    crate::telemetry::catalogue_items_skipped("openalex", "oversized_line", lines.too_long());
     if broken > 0 {
         tracing::warn!(catalogue = "openalex", file = %input.at(), broken, "works that do not parse were passed over (their cards stay)");
     }

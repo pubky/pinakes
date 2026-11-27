@@ -2296,3 +2296,31 @@ fn the_daemon_runs_the_importer_while_the_catalogue_is_on() {
     config.catalogues.enabled = false;
     assert!(started(&config).is_empty());
 }
+
+/// MusicBrainz counts the dump lines it passes over (no entity) in
+/// `pinakes_catalogue_items_skipped_total`, as it logs them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_bad_line_is_counted_as_skipped(pool: PgPool) {
+    let s = setup(&pool, None);
+    let dir = dump(s.root.path(), B, |entity, lines| {
+        if entity == "artist" {
+            lines.push(json!("no entity"));
+        }
+    });
+    let series =
+        r#"pinakes_catalogue_items_skipped_total{catalogue="musicbrainz",reason="bad_line"} "#;
+    let skipped = || -> f64 {
+        let text = pinakes_core::telemetry::Metrics::new()
+            .unwrap()
+            .encode()
+            .unwrap();
+        text.lines()
+            .find_map(|l| l.strip_prefix(series))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let before = skipped();
+    run(&s, &dir, Run::Import).await.unwrap();
+    assert!(skipped() >= before + 1.0);
+}

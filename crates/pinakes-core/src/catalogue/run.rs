@@ -1150,12 +1150,14 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
     }
     let scope = ctx.config.catalogues.scope(catalogue);
     if run == Run::Import {
-        // A full import that read far fewer cards than the catalogue holds (a dump cut at a clean
-        // boundary, an empty answer, a filter gone wrong) removes nothing: it fails (`shrunk`) with
-        // its cursor kept, and is tried again; it goes through once the importer says the drop is
-        // expected, the operator allows it (`pinakesd catalogue allow-shrink`, or `catalogue import
-        // --force`), or the import's scope is narrower than the last finished import's (a lower
-        // `limit`, a higher `min_citations`). No scope recorded: the limit the position records.
+        // A full import that read no record is refused (`empty`). One that read far fewer cards
+        // than the catalogue holds (a dump cut at a clean boundary, a filter gone wrong) removes
+        // nothing: it fails (`shrunk`) with its cursor kept, and is tried again; it goes through
+        // once the importer says the drop is expected (`catalogue import --force` with a `--limit`
+        // below the cards held says so), the operator allows it (`pinakesd catalogue
+        // allow-shrink`), or the import's scope is narrower than the last finished import's (a
+        // lower `limit`, a higher `min_citations`). No scope recorded: the limit the position
+        // records.
         if let Err(error) = job.check_shrink().await {
             if error.is::<Abandoned>() {
                 let position = job.position.take();

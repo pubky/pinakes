@@ -2169,3 +2169,41 @@ async fn a_short_registry_file_meets_its_own_floor(pool: PgPool) {
         .unwrap();
     assert_eq!(count(&pool, "software", Some("flathub")).await, 1);
 }
+
+/// `pinakes_catalogue_items_skipped_total` of `catalogue` for `reason` (a counter of the process,
+/// which other tests may move too: compare a rise).
+fn skipped(catalogue: &str, reason: &str) -> f64 {
+    let text = pinakes_core::telemetry::Metrics::new()
+        .unwrap()
+        .encode()
+        .unwrap();
+    let series = format!(
+        r#"pinakes_catalogue_items_skipped_total{{catalogue="{catalogue}",reason="{reason}"}} "#
+    );
+    text.lines()
+        .find_map(|l| l.strip_prefix(series.as_str()))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// OpenAlex counts the works it passes over (a line that doesn't parse) in
+/// `pinakes_catalogue_items_skipped_total`, as it logs them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn openalex_counts_the_lines_it_passes_over(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let mut lines = works();
+    lines.push(r#"{"id":"https://openalex.org/W9","cited_by_count":99,"#.to_owned());
+    snapshot(snap.path(), "2026-10-14", &[("2026-10-14", lines)]);
+    let before = skipped("openalex", "bad_line");
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer, &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 5);
+    assert!(skipped("openalex", "bad_line") >= before + 1.0);
+}

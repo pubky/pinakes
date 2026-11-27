@@ -187,9 +187,9 @@ tests:
   # minutes). Only a fires.
   - interval: 1m
     input_series:
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",outcome="ok"}'
         values: '100x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="a",job="pinakes",queue="homepages"}'
         values: '500x540'
@@ -197,9 +197,9 @@ tests:
         values: '0x540'
       - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="tranco"}'
         values: '1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",outcome="ok"}'
         values: '0+6x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="b",job="pinakes",queue="homepages"}'
         values: '900000x540'
@@ -207,9 +207,9 @@ tests:
         values: '0x540'
       - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="tranco"}'
         values: '1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",outcome="ok"}'
         values: '100x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="c",job="pinakes",queue="homepages"}'
         values: '500x540'
@@ -217,9 +217,9 @@ tests:
         values: '1x540'
       - series: 'pinakes_catalogue_enabled{instance="c",job="pinakes",catalogue="tranco"}'
         values: '1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",outcome="ok"}'
         values: '100x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="d",job="pinakes",queue="homepages"}'
         values: '500x540'
@@ -227,9 +227,9 @@ tests:
         values: '0x540'
       - series: 'pinakes_catalogue_enabled{instance="d",job="pinakes",catalogue="tranco"}'
         values: '0x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",outcome="ok"}'
         values: '0+0.1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",outcome="deferred"}'
         values: '0x540'
       - series: 'pinakes_catalogue_backlog{instance="e",job="pinakes",queue="homepages"}'
         values: '3x540'
@@ -312,13 +312,13 @@ tests:
   # Refused cards: on a, 300 of 1,000 read an hour (fires); on b, 150 of 10,000 (a few, fires not).
   - interval: 1m
     input_series:
-      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",result="rejected"}'
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",outcome="rejected"}'
         values: '0+5x90'
-      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",result="inserted"}'
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",outcome="inserted"}'
         values: '0+11.67x90'
-      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",result="rejected"}'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",outcome="rejected"}'
         values: '0+2.5x90'
-      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",result="unchanged"}'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",outcome="unchanged"}'
         values: '0+164x90'
     alert_rule_test:
       - eval_time: 80m
@@ -330,11 +330,11 @@ tests:
   # Removed cards: a removes 5,000 of 20,000 in a day (fires); b 2,000 of 1,000,000.
   - interval: 1h
     input_series:
-      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="tranco",result="removed"}'
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="tranco",outcome="removed"}'
         values: '0 5000x30'
       - series: 'pinakes_catalogue_cards{instance="a",job="pinakes",catalogue="tranco"}'
         values: '20000 15000x30'
-      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="tranco",result="removed"}'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="tranco",outcome="removed"}'
         values: '0 2000x30'
       - series: 'pinakes_catalogue_cards{instance="b",job="pinakes",catalogue="tranco"}'
         values: '1000000 998000x30'

@@ -600,8 +600,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (catalogue, result) (rate(pinakes_catalogue_cards_total[5m]))",
-          "legendFormat": "{{catalogue}} {{result}}"
+          "expr": "sum by (catalogue, outcome) (rate(pinakes_catalogue_cards_total[5m]))",
+          "legendFormat": "{{catalogue}} {{outcome}}"
         }
       ],
       "fieldConfig": {

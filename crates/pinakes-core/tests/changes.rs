@@ -857,9 +857,14 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
         {
             assert!(names.contains(name), "unregistered alert metric {name}");
         }
-        // Every fetch outcome a rule matches is one the daemon records.
+        // Every fetch outcome a rule matches is one the daemon records (the other metrics with an
+        // `outcome` label have outcomes of their own).
         let expr = rule["expr"].as_str().unwrap();
-        for matcher in expr.split("outcome=").skip(1) {
+        let fetches = expr
+            .split("pinakes_fetch_total{")
+            .skip(1)
+            .map(|selector| selector.split('}').next().unwrap_or_default());
+        for matcher in fetches.flat_map(|selector| selector.split("outcome=").skip(1)) {
             let value = matcher
                 .trim_start_matches('~')
                 .strip_prefix('"')

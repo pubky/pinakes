@@ -284,6 +284,12 @@ impl Metrics {
         for reason in CATALOGUE_SKIP_REASONS {
             CATALOGUE_ITEMS_SKIPPED.with_label_values(&["wikidata", reason]);
         }
+        // MusicBrainz's and OpenAlex's dump lines.
+        for catalogue in ["musicbrainz", "openalex"] {
+            for reason in ["bad_line", "oversized_line"] {
+                CATALOGUE_ITEMS_SKIPPED.with_label_values(&[catalogue, reason]);
+            }
+        }
         let out = Self {
             api_panics,
             api_requests,
@@ -964,9 +970,9 @@ static CATALOGUE_CARDS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock
     IntCounterVec::new(
         Opts::new(
             "pinakes_catalogue_cards_total",
-            "Cards each catalogue's imports and updates wrote, by result: inserted, changed, unchanged (stamped only), rejected (refused as invalid) or removed",
+            "Cards each catalogue's imports and updates wrote, by outcome: inserted, changed, unchanged (stamped only), rejected (refused as invalid) or removed",
         ),
-        &["catalogue", "result"],
+        &["catalogue", "outcome"],
     )
     .expect("static metric")
 });
@@ -1100,7 +1106,7 @@ pub const HOMEPAGE_RESULTS: [&str; 9] = [
     "deferred",
     "other",
 ];
-/// The Tranco catalogue's homepage reads, by result: `ok` (a card), `robots` (its robots.txt
+/// The Tranco catalogue's homepage reads, by outcome: `ok` (a card), `robots` (its robots.txt
 /// says no), `wall`, `not_html`, `status` (a 4xx), `busy` (a 429 or 5xx), `unreached`,
 /// `deferred` (no egress turn in time: not read) and `other` (a redirect off the site, or no
 /// name).
@@ -1109,15 +1115,15 @@ static CATALOGUE_HOMEPAGE_READS: std::sync::LazyLock<IntCounterVec> = std::sync:
         IntCounterVec::new(
         Opts::new(
             "pinakes_catalogue_homepage_reads_total",
-            "Tranco catalogue homepage reads, by result (ok, robots, wall, not_html, status, busy, unreached, deferred, other)",
+            "Tranco catalogue homepage reads, by outcome (ok, robots, wall, not_html, status, busy, unreached, deferred, other)",
         ),
-        &["result"],
+        &["outcome"],
     )
     .expect("static metric")
     },
 );
-pub fn homepage_read(result: &'static str) {
-    CATALOGUE_HOMEPAGE_READS.with_label_values(&[result]).inc();
+pub fn homepage_read(outcome: &'static str) {
+    CATALOGUE_HOMEPAGE_READS.with_label_values(&[outcome]).inc();
 }
 /// The homepage reads counted for `result` so far.
 pub fn homepage_reads(result: &'static str) -> u64 {

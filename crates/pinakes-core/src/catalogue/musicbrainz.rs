@@ -1599,6 +1599,8 @@ fn read_dump(plan: ReadPlan) -> Result<Done> {
         done.lines += read.lines;
         done.bad_lines += read.bad_lines;
         done.too_long += read.too_long;
+        crate::telemetry::catalogue_items_skipped("musicbrainz", "bad_line", read.bad_lines);
+        crate::telemetry::catalogue_items_skipped("musicbrainz", "oversized_line", read.too_long);
         done.cut += read.cut;
         done.records += read.records;
         done.files.insert(file.to_owned(), read.records);

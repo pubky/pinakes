@@ -140,8 +140,8 @@ A first import (or one an update asked for):
 5. writes the cards that wait for labels again ([labels](#labels)), deletes the dump, and removes
    the cards of an earlier import that this one didn't read.
 
-A read that gives no card is refused (`empty`), and one with more than 1% of lines (and over 100)
-that are not JSON or too large fails (`bad_dump`), without removing any card. A failure that makes
+A read that gives no card is refused (`empty`), and one with more than one in a thousand of its lines
+(and over 100) that are not JSON or too large fails (`bad_dump`), without removing any card. A failure that makes
 the files useless (`checksum`, `dump_changed`, `dump_gone`, `dump_missing`, `label_files`, a
 `bz2_…` block that doesn't decode, `bad_dump`) deletes the work files, and the next try starts over
 from the newest dump (a local `--from` file is never deleted: the import fails until the catalogue is dropped and the

@@ -1092,6 +1092,11 @@ async fn look_up_labels(
     }
     Ok(items.len())
 }
+/// Whether a dump of `lines` lines with `bad` that are no entity (or over the line cap) is broken:
+/// more than 100 of them, and more than one in a thousand, as for every catalogue.
+fn too_bad(bad: u64, lines: u64) -> bool {
+    bad > 100 && bad.saturating_mul(1000) > lines
+}
 /// A refused version as a message names it.
 fn shown(version: &serde_json::Value) -> String {
     version
@@ -1512,7 +1517,7 @@ impl Wikidata {
         // A dump of mostly lines that are not entities is not a dump: no card is removed for it.
         // One that gave no card at all is refused by the runner (`empty`).
         let c = cursor.counts;
-        if c.bad + c.oversized > (c.lines / 100).max(100) {
+        if too_bad(c.bad + c.oversized, c.lines) {
             return Err(Failure::new("bad_dump").into());
         }
         cursor.labels_len = label_file.sync()?;
@@ -1998,6 +2003,16 @@ mod tests {
         assert!(matches!(w.plan(&s).await.unwrap(), Plan::Wait(_)));
         s.last_import_at = Some(now - chrono::Duration::minutes(20));
         assert_eq!(w.plan(&s).await.unwrap(), Plan::Run(Run::Update));
+    }
+
+    /// More than 100 bad lines, and more than one in a thousand, break a dump.
+    #[test]
+    fn a_dump_breaks_on_one_bad_line_in_a_thousand() {
+        assert!(!too_bad(100, 100));
+        assert!(too_bad(101, 101));
+        assert!(too_bad(200, 100_000));
+        assert!(!too_bad(200, 200_000));
+        assert!(!too_bad(u64::MAX / 2, u64::MAX));
     }
 
     #[test]
