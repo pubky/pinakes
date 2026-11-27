@@ -689,7 +689,6 @@ CREATE TABLE resource_group (
 );
 CREATE INDEX resource_group_admission_idx ON resource_group USING btree (key, admitted_at, unit_id);
 CREATE INDEX resource_group_group_idx ON resource_group USING btree (group_id);
-CREATE INDEX resource_group_key_idx ON resource_group USING btree (key);
 CREATE INDEX resource_group_resource_idx ON resource_group USING btree (resource_id);
 
 -- A unit an operator placed in a curated group.

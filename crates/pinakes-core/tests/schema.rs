@@ -42,3 +42,30 @@ async fn a_database_from_another_schema_is_refused_with_the_remedy(pool: PgPool)
     let chain = pinakes_core::migrate(&pool).await.unwrap_err().to_string();
     assert!(chain.contains("docs/operations.md (Database)"), "{chain}");
 }
+
+/// No index repeats the leading keys of another: a plain b-tree index whose keys (in their order,
+/// direction, collation and operator class) begin another plain b-tree index of the same table
+/// serves no lookup the longer one cannot, and costs every write. Unique and partial indexes, and
+/// those on expressions, are left to their own reasons.
+#[sqlx::test(migrations = "../../migrations")]
+async fn no_index_is_the_leading_part_of_another(pool: PgPool) {
+    let found: Vec<String> = sqlx::query_scalar(
+        "WITH ix AS (
+           SELECT c.relname AS name, i.indrelid, i.indisunique AS uniq, i.indnkeyatts AS n,
+             string_to_array(i.indkey::text, ' ')::int[] AS keys,
+             string_to_array(i.indoption::text, ' ')::int[] AS options,
+             string_to_array(i.indcollation::text, ' ')::oid[] AS collations,
+             string_to_array(i.indclass::text, ' ')::oid[] AS classes
+           FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am am ON am.oid = c.relam
+           JOIN pg_namespace s ON s.oid = c.relnamespace
+           WHERE s.nspname = 'public' AND am.amname = 'btree' AND i.indpred IS NULL AND i.indexprs IS NULL)
+         SELECT a.name || ' begins ' || b.name FROM ix a JOIN ix b ON b.indrelid = a.indrelid AND b.name <> a.name
+         WHERE NOT a.uniq AND a.n <= b.n AND a.keys[1:a.n] = b.keys[1:a.n] AND a.options[1:a.n] = b.options[1:a.n]
+           AND a.collations[1:a.n] = b.collations[1:a.n] AND a.classes[1:a.n] = b.classes[1:a.n]
+         ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(found, Vec::<String>::new());
+}
