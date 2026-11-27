@@ -2806,6 +2806,70 @@ mod tests {
         assert_eq!(off.event.same_event_hint, SameEventHint::Off);
         assert!(toml::from_str::<Config>("[event]\nsame_event_hint = true\n").is_err());
     }
+    /// Every TOML block of docs/deployment.md is a configuration this build loads, as the file
+    /// loader does (the defaults, then the block), with no retired key, and the catalogue
+    /// choices the `[catalogues]` blocks document hold: a renamed or retired key fails here.
+    #[test]
+    fn the_deployment_guide_s_configurations_load() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/deployment.md");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let blocks: Vec<&str> = text
+            .split("```toml\n")
+            .skip(1)
+            .map(|rest| rest.split("```").next().unwrap())
+            .collect();
+        let mut regions = Vec::new();
+        for block in &blocks {
+            let file: toml::Value = toml::from_str(block)
+                .unwrap_or_else(|e| panic!("a TOML block of docs/deployment.md: {e}\n{block}"));
+            let mut value = Config::defaults().unwrap();
+            merge(&mut value, serde_json::to_value(file).unwrap());
+            let config = Config::from_value(value).unwrap_or_else(|e| {
+                panic!("a TOML block of docs/deployment.md does not load: {e:#}\n{block}")
+            });
+            assert!(
+                config.ignored.is_empty(),
+                "retired keys {:?}\n{block}",
+                config.ignored
+            );
+            // The contact stays commented out: a copied block starts no importer with a
+            // placeholder address.
+            assert!(
+                config.egress.contact.is_empty(),
+                "a contact set in\n{block}"
+            );
+            // The other blocks (other sections' snippets) only need to load.
+            if !block.contains("[catalogues") {
+                continue;
+            }
+            let catalogues = &config.catalogues;
+            regions.push(catalogues.osm.region.clone());
+            match catalogues.osm.region.as_str() {
+                "europe/luxembourg" => {
+                    assert_eq!(catalogues.wikidata.limit, Some(100_000));
+                    assert_eq!(catalogues.musicbrainz.limit, Some(100_000));
+                    assert!(!catalogues.openalex.enabled && !catalogues.podcastindex.enabled);
+                }
+                "europe/switzerland" => {
+                    assert_eq!(catalogues.wikidata.limit, Some(1_000_000));
+                    assert_eq!(catalogues.musicbrainz.limit, Some(1_000_000));
+                }
+                "planet" => {
+                    assert_eq!(catalogues.wikidata.limit, None);
+                    assert_eq!(catalogues.musicbrainz.limit, None);
+                    assert_eq!(catalogues.openalex.min_citations, 50);
+                }
+                other => panic!("a TOML block of docs/deployment.md with region {other}"),
+            }
+            assert!(catalogues.enabled && catalogues.software.enabled && catalogues.tranco.enabled);
+        }
+        regions.sort();
+        assert_eq!(
+            regions,
+            ["europe/luxembourg", "europe/switzerland", "planet"]
+        );
+    }
     #[test]
     fn reach_and_ingest_limits_have_safe_defaults_and_config_bounds() {
         let config = Config::default();
