@@ -669,15 +669,20 @@ async fn an_update_reads_the_change_files_after_its_sequence(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
     let mut config = crate::config::Config::default();
-    // OpenStreetMap's importer alone (MusicBrainz's and Wikidata's have their own tests).
+    // OpenStreetMap's importer alone (the others have their own tests).
     config.catalogues.musicbrainz.enabled = false;
     config.catalogues.wikidata.enabled = false;
-    assert!(runner::to_start(runner::importers(&config), &config).is_empty());
+    config.catalogues.openalex.enabled = false;
+    config.catalogues.podcastindex.enabled = false;
+    config.catalogues.tranco.enabled = false;
+    config.catalogues.software.enabled = false;
+    let egress = crate::resolver::egress::Egress::new(config.egress.clone());
+    assert!(runner::to_start(runner::importers(&config, &egress), &config).is_empty());
     runner::note_unstarted(&pool, &config).await.unwrap();
     let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
     assert_eq!(state.waiting.as_deref(), Some(NEEDS_CONTACT));
     config.egress.contact = "ops@example.org".into();
-    let started = runner::to_start(runner::importers(&config), &config);
+    let started = runner::to_start(runner::importers(&config, &egress), &config);
     assert_eq!(
         started.iter().map(|i| i.catalogue()).collect::<Vec<_>>(),
         [Catalogue::Osm]
@@ -692,7 +697,7 @@ async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
         None
     );
     config.catalogues.osm.enabled = false;
-    assert!(runner::to_start(runner::importers(&config), &config).is_empty());
+    assert!(runner::to_start(runner::importers(&config, &egress), &config).is_empty());
 }
 
 /// A local mirror: each path's status, extra headers and body (`Content-Length` from the body

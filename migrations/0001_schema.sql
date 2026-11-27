@@ -1657,6 +1657,25 @@ CREATE TABLE catalogue_extras (
 );
 CREATE INDEX catalogue_extras_due_idx ON catalogue_extras USING btree (due_at, resource_id) WHERE due_at IS NOT NULL;
 
+-- The sites of Tranco's daily top-million list (`catalogue::tranco`): each site's rank, the day of
+-- the last list that named it (moved at most weekly), when its homepage is read next, and the
+-- last read's outcome (`ok`, `robots`, `wall`, `not_html`, `status`, `busy`, `unreached`, `other`) with the
+-- transient failures in a row. A site off the list for a month leaves with its card.
+CREATE TABLE catalogue_site (
+    host text PRIMARY KEY CONSTRAINT catalogue_site_host_check CHECK (octet_length(host) BETWEEN 1 AND 253),
+    rank integer NOT NULL CONSTRAINT catalogue_site_rank_check CHECK (rank > 0),
+    listed_on date NOT NULL,
+    due_at timestamp with time zone NOT NULL DEFAULT now(),
+    read_at timestamp with time zone,
+    outcome text CONSTRAINT catalogue_site_outcome_check CHECK (outcome IN ('ok','robots','wall','not_html','status','busy','unreached','other')),
+    failures integer NOT NULL DEFAULT 0 CONSTRAINT catalogue_site_failures_check CHECK (failures >= 0)
+);
+CREATE INDEX catalogue_site_due_idx ON catalogue_site USING btree (due_at, rank);
+CREATE INDEX catalogue_site_listed_idx ON catalogue_site USING btree (listed_on);
+-- The OpenAlex cards that gave up a DOI another work holds (`catalogue::openalex::share_dois`),
+-- by that DOI: an update looks at the DOIs it read only.
+CREATE INDEX catalogue_card_shared_doi_idx ON catalogue_card USING btree (((details->'shared_doi'->>'key'))) WHERE catalogue = 'openalex' AND details ? 'shared_doi';
+
 -- The canonical links a join key names (`catalogue::join::link_keys` reads each back to the key):
 -- a row with one of these links joins a card holding the key when the card is written. A crate's
 -- key spells `_` as `-` (crates.io takes them for one name): its pages with each, so a link to a
@@ -1671,6 +1690,8 @@ CREATE FUNCTION catalogue_key_links(key text) RETURNS text[]
   WHEN 'doi' THEN ARRAY[key]
   WHEN 'arxiv' THEN ARRAY['https://arxiv.org/abs/'||substr(key,7),'https://arxiv.org/pdf/'||substr(key,7)]
   WHEN 'openalex' THEN ARRAY['https://openalex.org/'||substr(key,10)]
+  WHEN 'pmid' THEN ARRAY['https://pubmed.ncbi.nlm.nih.gov/'||substr(key,6)||'/','https://pubmed.ncbi.nlm.nih.gov/'||substr(key,6)]
+  WHEN 'podcast' THEN CASE WHEN split_part(key,':',2)='apple' THEN ARRAY['https://podcasts.apple.com/podcast/id'||split_part(key,':',3),'https://podcasts.apple.com/us/podcast/id'||split_part(key,':',3)] END
   WHEN 'crate' THEN ARRAY(SELECT p.page||n.name FROM unnest(ARRAY['https://crates.io/crates/','https://docs.rs/','https://docs.rs/crate/','https://lib.rs/crates/']) WITH ORDINALITY AS p(page,i)
    CROSS JOIN unnest(ARRAY[substr(key,7)]||CASE WHEN strpos(key,'-')>0 THEN ARRAY[replace(substr(key,7),'-','_')] ELSE '{}'::text[] END) WITH ORDINALITY AS n(name,j) ORDER BY p.i,n.j)
   WHEN 'android' THEN ARRAY['https://f-droid.org/packages/'||substr(key,9)||'/','https://f-droid.org/packages/'||substr(key,9),'https://f-droid.org/en/packages/'||substr(key,9)||'/']

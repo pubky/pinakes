@@ -1,0 +1,563 @@
+#!/usr/bin/env bash
+# Import a small real sample of a catalogue into a throwaway database and check it end to end:
+# the real `pinakesd catalogue import` path, row counts, keys, labels, canonical links, a text
+# search through `/v1/search`, shared links joining their cards through `POST /v1/resolve`, an
+# update from a second sample that rewrites only the changed rows, and the catalogue switched off
+# leaving search at once.
+#
+# usage: scripts/catalogue-sample openalex|podcastindex|software|tranco [--keep]
+#
+# What each reads (about 300 MB at most per catalogue):
+#   openalex      the first 80 MB of three works files of the newest snapshot (two dates) and 40 MB
+#                 of a file of a later date for the update; their whole lines, gzipped again, with
+#                 a manifest naming them
+#   podcastindex  the first 300 MB of Podcast Index's database archive; the feeds that part holds
+#                 are copied into a whole database (scripts/catalogue/sqlite-head.py)
+#   software      the first 300 MB of the crates.io dump (its whole records, packed again), and
+#                 F-Droid's and Flathub's real catalogue files
+#   tranco        the real list, and at most 50 homepage reads in all (44, 1 in the update, 5 on the
+#                 official path)
+# The update reads a second sample made from the first: a few items changed and a few gone
+# (OpenAlex: the later file; Tranco: the list without a read site, its rows aged 40 days).
+# Last, each importer reads through its own download path from the official URLs where that
+# stays small: software's F-Droid index and Flathub catalogue (and the crates.io dump's version,
+# not the dump), Tranco's list of the day, OpenAlex's manifest (no works file). Podcast Index's
+# official archive (1.9 GB, no ranged requests) is not read.
+#
+# Environment:
+#   PINAKESD        the pinakesd binary (default: target/release/pinakesd)
+#   PGHOST, PGPORT  the PostgreSQL server the database is created on (libpq's own variables)
+#   SAMPLE_DB       the database name (default: catalogue_sample_<catalogue>); it must not exist
+#   SAMPLE_DIR      where the downloads and the daemon's files go (default: a new temporary dir)
+#   PINAKES__HTTP__CONTACT  the operator's contact, sent in the User-Agent (needed for Tranco)
+# Every pinakesd it runs gets only PATH, HOME and TMPDIR from the environment (`env -i`): no
+# PINAKES__ override reaches it. The daemon it starts for the checks runs without a contact and
+# with every other catalogue off, so no importer starts in it (the script fails if one ran);
+# every import is the script's own `pinakesd catalogue import`, with the contact.
+# Needs curl, gzip, GNU tar, psql, createdb, dropdb and python3.
+set -euo pipefail
+
+catalogue=${1:-}
+usage="usage: $0 openalex|podcastindex|software|tranco [--keep]"
+case $catalogue in openalex|podcastindex|software|tranco) ;; *) echo "$usage" >&2; exit 2 ;; esac
+shift
+keep=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --keep) keep=1 ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
+  shift
+done
+root=$(cd "$(dirname "$0")/../.." && pwd)
+pinakesd=${PINAKESD:-$root/target/release/pinakesd}
+db=${SAMPLE_DB:-catalogue_sample_$catalogue}
+work=${SAMPLE_DIR:-$(mktemp -d)}
+mkdir -p "$work"
+contact=${PINAKES__HTTP__CONTACT:-}
+ua="pinakes-catalogue-sample (+https://pubky.app${contact:+; $contact})"
+report=$work/report.json
+echo '{}' > "$report"
+note() { python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d[sys.argv[2]]=json.loads(sys.argv[3]); json.dump(d,open(p,"w"),indent=1)' "$report" "$1" "$2"; }
+fail() { echo "FAILED: $*" >&2; exit 1; }
+daemon_pid=
+created=0
+cleanup() {
+  [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null && wait "$daemon_pid" 2>/dev/null || true
+  if [ $keep = 0 ]; then
+    # Only the database this run created.
+    [ $created = 1 ] && dropdb "$db" 2>/dev/null || true
+    rm -rf "$work/sample" "$work/sample2" "$work/run"
+  fi
+}
+trap cleanup EXIT
+# The database must not exist: this script never touches one it did not create.
+if [ "$(echo "SELECT count(*) FROM pg_database WHERE datname = :'name'" | command psql -X -At -d postgres -v name="$db")" != 0 ]; then
+  fail "database $db exists: choose another SAMPLE_DB"
+fi
+# A command's wall time (s) and peak memory (KB) into "$1", its output to the terminal.
+measure() {
+  local out=$1; shift
+  python3 -I -c 'import resource, subprocess, sys, time
+t = time.time(); code = subprocess.call(sys.argv[2:])
+r = resource.getrusage(resource.RUSAGE_CHILDREN)
+open(sys.argv[1], "w").write(f"{r.ru_maxrss} {time.time() - t:.1f}\n"); sys.exit(code)' "$out" "$@"
+}
+downloaded=0
+fetch() { # $1 URL, $2 file, [$3 bytes]: the whole file, or its first bytes (a range, else a cut stream)
+  if [ -n "${3:-}" ]; then
+    (curl -sSfL -A "$ua" -r "0-$(($3 - 1))" "$1" || true) | head -c "$3" > "$2"
+  else
+    curl -sSfL -A "$ua" --max-filesize $((512 * 1024 * 1024)) "$1" -o "$2"
+  fi
+  [ -s "$2" ] || fail "nothing read from $1"
+  downloaded=$((downloaded + $(stat -c %s "$2")))
+}
+mkdir -p "$work/sample" "$work/sample2"
+s=$work/sample s2=$work/sample2
+
+# --- The samples ------------------------------------------------------------------------------
+case $catalogue in
+openalex)
+  bucket=https://openalex.s3.amazonaws.com
+  fetch "$bucket/data/jsonl/manifest.json" "$s/manifest.full.json"
+  # Three files of the newest dates but one (two dates), and one of the newest date for the update.
+  mapfile -t picked < <(python3 -I - "$s/manifest.full.json" <<'EOF'
+import json, sys
+m = json.load(open(sys.argv[1]))
+files = sorted(f["url"] for e in m["entities"] if e["entity"] == "works" for f in e["files"])
+days = sorted({f.split("updated_date=")[1].split("/")[0] for f in files})
+a, b, c = days[-3], days[-2], days[-1]
+pick = [f for f in files if a in f][:2] + [f for f in files if b in f][:1] + [f for f in files if c in f][:1]
+print(m["date"])
+for f in pick: print(f)
+EOF
+)
+  snapshot=${picked[0]}
+  cut() { # $1 s3 URL, $2 bytes, $3 out dir: the whole lines of the file's first bytes, gzipped again
+    local path=${1#s3://openalex/}
+    # Only the bucket's own works path shape, as the importer's manifest check takes it.
+    [[ $path =~ ^data/jsonl/works/updated_date=[0-9]{4}-[0-9]{2}-[0-9]{2}/part_[0-9]{1,8}\.gz$ ]] || fail "a manifest path of another shape: $path"
+    mkdir -p "$3/$(dirname "$path")"
+    fetch "$bucket/$path" "$3/$path.part" "$2"
+    # This runs in a subshell: what it read and the records it kept are added up in files.
+    stat -c %s "$3/$path.part" >> "$work/openalex-bytes"
+    (gzip -dc < "$3/$path.part" 2>/dev/null || true) | head -n -1 | tee >(wc -l >> "$work/openalex-records") | gzip -1 > "$3/$path"
+    rm -f "$3/$path.part"
+    echo "$path"
+  }
+  manifest() { # $1 dir, $2 date, then paths
+    local dir=$1 date=$2; shift 2
+    python3 -I - "$dir" "$date" "$@" <<'EOF'
+import json, os, sys
+d, date, paths = sys.argv[1], sys.argv[2], sys.argv[3:]
+files = [{"url": "s3://openalex/" + p, "meta": {"content_length": os.path.getsize(os.path.join(d, p)), "record_count": 0}} for p in paths]
+os.makedirs(os.path.join(d, "data/jsonl"), exist_ok=True)
+json.dump({"date": date, "entities": [{"entity": "works", "files": files}]}, open(os.path.join(d, "data/jsonl/manifest.json"), "w"))
+EOF
+  }
+  p1=$(cut "${picked[1]}" $((80 * 1024 * 1024)) "$s")
+  p2=$(cut "${picked[2]}" $((80 * 1024 * 1024)) "$s")
+  p3=$(cut "${picked[3]}" $((80 * 1024 * 1024)) "$s")
+  # The update's snapshot: the same files, and one of a later date.
+  manifest "$s" "$snapshot" "$p1" "$p2" "$p3"
+  p4=$(cut "${picked[4]}" $((40 * 1024 * 1024)) "$s")
+  later=$(date -u -d "$snapshot + 30 days" +%F)
+  for p in "$p1" "$p2" "$p3" "$p4"; do mkdir -p "$s2/$(dirname "$p")"; ln -sf "$s/$p" "$s2/$p"; done
+  manifest "$s2" "$later" "$p1" "$p2" "$p3" "$p4"
+  from=("--from" "$s") from2=("--from" "$s2")
+  downloaded=$((downloaded + $(paste -sd+ "$work/openalex-bytes")))
+  sleep 1
+  note records_read "$(( $(paste -sd+ "$work/openalex-records") ))"
+  rm -f "$work/openalex-bytes" "$work/openalex-records"
+  ;;
+podcastindex)
+  fetch https://public.podcastindex.org/podcastindex_feeds.db.tgz "$s/head.tgz" $((300 * 1024 * 1024))
+  (gzip -dc < "$s/head.tgz" 2>/dev/null || true) | (tar -xOf - 2>/dev/null || true) > "$s/cut.db"
+  rm -f "$s/head.tgz"
+  python3 -I "$root/scripts/catalogue/sqlite-head.py" "$s/cut.db" podcasts "$s/podcastindex_feeds.db" > /dev/null
+  rm -f "$s/cut.db"
+  # The update: ten feeds renamed, ten gone.
+  cp "$s/podcastindex_feeds.db" "$s2/podcastindex_feeds.db"
+  python3 -I - "$s2/podcastindex_feeds.db" <<'EOF'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+ids = [r[0] for r in c.execute("SELECT id FROM podcasts WHERE dead=0 ORDER BY id LIMIT 20")]
+c.executemany("UPDATE podcasts SET title=title||' (renamed)' WHERE id=?", [(i,) for i in ids[:10]])
+c.executemany("DELETE FROM podcasts WHERE id=?", [(i,) for i in ids[10:]])
+c.commit()
+EOF
+  touch -d '+1 minute' "$s2/podcastindex_feeds.db"
+  from=("--from" "$s/podcastindex_feeds.db") from2=("--from" "$s2/podcastindex_feeds.db")
+  ;;
+software)
+  fetch https://static.crates.io/db-dump.tar.gz "$s/head.tar.gz" $((300 * 1024 * 1024))
+  # The whole files and the whole records of the file the head cuts, packed again.
+  python3 -I - "$s/head.tar.gz" "$s/db-dump.tar.gz" "$s2/db-dump.tar.gz" <<'EOF'
+import csv, io, sys, tarfile, tempfile, zlib
+# Streams: the head is decompressed in pieces, each file's bytes go to a temporary file, and the
+# cut crates.csv is read record by record, so memory stays small whatever the head holds.
+src, out, out2 = sys.argv[1:4]
+csv.field_size_limit(1 << 30)
+d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+def chunks():
+    with open(src, "rb") as f:
+        while True:
+            c = f.read(1 << 20)
+            if not c:
+                return
+            try:
+                yield d.decompress(c)
+            except zlib.error:
+                return
+buf = bytearray(); it = chunks()
+def need(n):
+    while len(buf) < n:
+        c = next(it, None)
+        if c is None:
+            return False
+        buf.extend(c)
+    return True
+files = []  # (name, temp file, the update's temp file or None)
+while need(512):
+    h = bytes(buf[:512])
+    if h == b"\0" * 512:
+        break
+    name = h[:100].rstrip(b"\0").decode()
+    size = int(h[124:136].rstrip(b"\0 ") or b"0", 8)
+    del buf[:512]
+    body = tempfile.TemporaryFile()
+    left = size
+    while left > 0:
+        if not buf and not need(1):
+            break
+        take = min(left, len(buf))
+        body.write(buf[:take]); del buf[:take]; left -= take
+    whole = left == 0
+    pad = (512 - size % 512) % 512 if whole else 0
+    if whole:
+        need(pad); del buf[:pad]
+    body.seek(0)
+    regular = h[156:157] in (b"0", b"\0")
+    if name.endswith("/crates.csv"):
+        # Whole records only (the last one may be cut), and the update's copy: five crates gone,
+        # five descriptions changed.
+        a_out, b_out = tempfile.TemporaryFile(), tempfile.TemporaryFile()
+        ta = io.TextIOWrapper(a_out, "utf-8", newline="")
+        tb = io.TextIOWrapper(b_out, "utf-8", newline="")
+        wa, wb = csv.writer(ta, lineterminator="\n"), csv.writer(tb, lineterminator="\n")
+        reader = csv.reader(io.TextIOWrapper(body, "utf-8", errors="replace", newline=""))
+        prev, n, desc = None, 0, None
+        try:
+            for row in reader:
+                if prev is not None:
+                    if n == 0:
+                        desc = prev.index("description")
+                    wa.writerow(prev)
+                    if not (6 <= n <= 10):
+                        if 1 <= n <= 5:
+                            prev = list(prev); prev[desc] += " (changed)"
+                        wb.writerow(prev)
+                    n += 1
+                prev = row
+        except csv.Error:
+            pass
+        if whole and prev is not None:
+            wa.writerow(prev); wb.writerow(prev)
+        ta.flush(); tb.flush(); ta.detach(); tb.detach()
+        files.append((name, a_out, b_out))
+        if not whole:
+            break
+        continue
+    if regular and whole:
+        files.append((name, body, None))
+    if not whole:
+        break
+# The files a dump holds after crates.csv that the head did not reach come header-only (the
+# sample's crates then have no labels).
+prefix = files[-1][0].rsplit("/", 1)[0]
+for name, header in (("keywords.csv", "crates_cnt,created_at,id,keyword"), ("crates_categories.csv", "category_id,crate_id"), ("crates_keywords.csv", "crate_id,keyword_id")):
+    if not any(n.endswith("/" + name) for n, _, _ in files):
+        t = tempfile.TemporaryFile(); t.write((header + "\n").encode()); files.append((f"{prefix}/{name}", t, None))
+def pack(path, second):
+    with tarfile.open(path, "w:gz", compresslevel=1) as t:
+        for name, a_file, b_file in files:
+            f = b_file if (second and b_file is not None) else a_file
+            f.seek(0, 2); size = f.tell(); f.seek(0)
+            i = tarfile.TarInfo(name); i.size = size; t.addfile(i, f)
+pack(out, False)
+pack(out2, True)
+print(len(files))
+EOF
+  rm -f "$s/head.tar.gz"
+  fetch https://f-droid.org/repo/entry.json "$s/entry.json"
+  # The index the entry names, as a plain file name only (the importer reads it next to the entry).
+  index=$(python3 -I -c 'import json,re,sys; n=json.load(open(sys.argv[1]))["index"]["name"].lstrip("/"); print(n if re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}", n) else "")' "$s/entry.json")
+  [ -n "$index" ] || fail "F-Droid's entry names no plain index file"
+  fetch "https://f-droid.org/repo/$index" "$s/$index"
+  fetch https://dl.flathub.org/repo/appstream/x86_64/appstream.xml.gz "$s/appstream.xml.gz"
+  cp "$s/entry.json" "$s/appstream.xml.gz" "$s/$index" "$s2/"
+  touch -d '+1 minute' "$s2/db-dump.tar.gz"
+  from=("--from" "crates.io=$s/db-dump.tar.gz" "--from" "f-droid=$s/entry.json" "--from" "flathub=$s/appstream.xml.gz")
+  from2=("--from" "crates.io=$s2/db-dump.tar.gz" "--from" "f-droid=$s2/entry.json" "--from" "flathub=$s2/appstream.xml.gz")
+  ;;
+tranco)
+  [ -n "$contact" ] || fail "set PINAKES__HTTP__CONTACT: homepages are read with the operator's contact"
+  id=$(curl -sSf -A "$ua" https://tranco-list.eu/top-1m-id)
+  [[ $id =~ ^[A-Za-z0-9]{1,16}$ ]] || fail "no list ID"
+  fetch "https://tranco-list.eu/download/$id/1000000" "$s/list.csv"
+  touch -d "$(curl -sSfI -A "$ua" "https://tranco-list.eu/download/$id/1000000" | sed -n 's/^last-modified: //Ip' | tr -d '\r')" "$s/list.csv" 2>/dev/null || true
+  from=("--from" "$s/list.csv" "--limit" "44") from2=("--from" "$s2/list.csv" "--limit" "1")
+  ;;
+esac
+note downloaded_bytes "$downloaded"
+echo "sample read: $downloaded bytes"
+
+# --- A daemon configuration over the throwaway database ----------------------------------------
+run=$work/run
+mkdir -p "$run/catalogues" "$run/dumps"
+createdb "$db"
+created=1
+url=$(python3 -I -c 'import os,sys,urllib.parse as u
+h=os.environ.get("PGHOST",""); p=os.environ.get("PGPORT","")
+q={k:v for k,v in (("host",h),("port",p)) if v}
+print("postgresql:///"+sys.argv[1]+("?"+u.urlencode(q) if q else ""))' "$db")
+port() { python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+listen=$(port) admin=$(port)
+config() { # $1: whether the catalogue is on
+  cat > "$run/pinakes.toml" <<EOF
+database_url = "$url"
+listen = "127.0.0.1:$listen"
+admin_listen = "127.0.0.1:$admin"
+nexus_url = "http://127.0.0.1:9"
+[pubky]
+enabled = false
+[canary]
+enabled = false
+[osm]
+dump_dir = "$run/dumps"
+[search]
+index_dir = "$run/search-index"
+[catalogues]
+dir = "$run/catalogues"
+[catalogues.$catalogue]
+enabled = $1
+EOF
+  # Every other catalogue is off: the daemon started for the checks runs none of their importers
+  # (and Tranco's reads do not wait for the large catalogues' first imports).
+  for other in wikidata musicbrainz osm openalex podcastindex software tranco; do
+    [ $other = $catalogue ] || printf '[catalogues.%s]\nenabled = false\n' "$other" >> "$run/pinakes.toml"
+  done
+}
+config true
+# pinakesd with only what the run needs (`env -i`): no PINAKES__ override of the configuration (a
+# database URL or a contact exported for another instance) reaches it; the operator's contact goes
+# only to the imports (`import`, below).
+pk() { env -i PATH="$PATH" HOME="$HOME" ${TMPDIR:+TMPDIR="$TMPDIR"} "$pinakesd" "$@"; }
+pk --config "$run/pinakes.toml" --migrate
+psql() { command psql -X -q -v ON_ERROR_STOP=1 -At -d "$db" "$@"; }
+# A query with one value bound as :'v' (read from stdin, where psql interpolates).
+psqlv() { printf '%s\n' "$2" | command psql -X -q -v ON_ERROR_STOP=1 -At -d "$db" -v v="$1"; }
+# The import (the contact only for Tranco's homepage reads), timed, with its peak memory.
+import() { # $1 log, then the arguments
+  local log=$1; shift
+  measure "$run/time" env -i PATH="$PATH" HOME="$HOME" ${TMPDIR:+TMPDIR="$TMPDIR"} PINAKES__HTTP__CONTACT="$contact" "$pinakesd" --config "$run/pinakes.toml" catalogue import "$catalogue" "$@" > "$log"
+  tail -12 "$log"
+}
+import "$run/import.log" "${from[@]}"
+read -r rss secs < "$run/time"
+note import "{\"seconds\": $secs, \"peak_rss_kb\": $rss}"
+cards=$(psql -c "SELECT count(*) FROM catalogue_card WHERE catalogue='$catalogue'")
+[ "$cards" -gt 0 ] || fail "no cards imported"
+note cards "$cards"
+note by_source "$(psql -c "SELECT json_object_agg(source, n) FROM (SELECT source, count(*) n FROM catalogue_card GROUP BY source) x")"
+note by_type "$(psql -c "SELECT json_object_agg(type, n) FROM (SELECT type, count(*) n FROM catalogue_card GROUP BY type) x")"
+note table_bytes "$(psql -c "SELECT pg_total_relation_size('catalogue_card')")"
+note with_labels "$(psql -c "SELECT count(*) FROM catalogue_card WHERE labels<>'{}'")"
+note keys "$(psql -c "SELECT json_object_agg(kind, n) FROM (SELECT split_part(k,':',1) kind, count(*) n FROM catalogue_card, unnest(keys) k GROUP BY 1) x")"
+# Every card: its labels tag labels, its link and its own key as its catalogue makes them.
+bad=$(psql -c "SELECT count(*) FROM catalogue_card WHERE EXISTS(SELECT 1 FROM unnest(labels) l WHERE l<>lower(l) OR l ~ '[ ,:]' OR char_length(l)>20)")
+[ "$bad" = 0 ] || fail "$bad cards with labels that are no tag labels"
+case $catalogue in
+  openalex) rule="NOT ('openalex:'||source_id = ANY(keys)) OR NOT (uri LIKE 'doi:%' OR uri='https://openalex.org/'||source_id)" ;;
+  podcastindex) rule="NOT (uri LIKE 'http%') OR NOT (EXISTS(SELECT 1 FROM unnest(keys) k WHERE k LIKE 'url:%'))" ;;
+  software) rule="NOT ((source='crates.io' AND uri='https://crates.io/crates/'||substr(source_id,11) AND 'crate:'||replace(lower(substr(source_id,11)),'_','-') = ANY(keys)) OR (source='f-droid' AND uri='https://f-droid.org/packages/'||substr(source_id,9) AND 'android:'||substr(source_id,9) = ANY(keys)) OR (source='flathub' AND uri='https://flathub.org/apps/'||substr(source_id,9) AND 'flathub:'||substr(source_id,9) = ANY(keys)))" ;;
+  tranco) rule="uri<>'https://'||source_id||'/' OR NOT ('homepage:'||regexp_replace(source_id,'^www\.','') = ANY(keys))" ;;
+esac
+bad=$(psql -c "SELECT count(*) FROM catalogue_card WHERE $rule")
+[ "$bad" = 0 ] || fail "$bad cards without their canonical link or own key"
+if [ $catalogue = tranco ]; then
+  note sites "$(psql -c "SELECT count(*) FROM catalogue_site")"
+  note reads "$(psql -c "SELECT json_object_agg(coalesce(outcome,'unread'), n) FROM (SELECT outcome, count(*) n FROM catalogue_site GROUP BY 1) x")"
+  read_n=$(psql -c "SELECT count(*) FROM catalogue_site WHERE read_at IS NOT NULL")
+  [ "$read_n" -le 44 ] || fail "$read_n homepages read, more than 44"
+fi
+echo "imported $cards cards in $secs s (peak RSS $rss KB)"
+
+# The best known card, and the links that should join it.
+mapfile -t picked < <(python3 -I - "$db" "$catalogue" <<'EOF'
+import subprocess, sys
+db, cat = sys.argv[1], sys.argv[2]
+def q(sql):
+    return subprocess.run(['psql', '-X', '-At', '-d', db, '-c', sql], check=True, capture_output=True, text=True).stdout.strip()
+where = {"openalex": "uri LIKE 'doi:%' AND EXISTS(SELECT 1 FROM unnest(keys) k WHERE k LIKE 'pmid:%')",
+         "podcastindex": "true", "software": "source='crates.io'", "tranco": "true"}[cat]
+row = q(f"SELECT source_id||chr(9)||uri||chr(9)||name FROM catalogue_card WHERE catalogue='{cat}' AND {where} AND name ~ '^[[:alnum:] ]{{4,60}}$' ORDER BY fame DESC, source_id LIMIT 1")
+sid, uri, name = row.split('\t', 2)
+# A DOI root (`doi:…`, as the card stores its DOI link) is shared as its doi.org page.
+links = ['https://doi.org/' + uri[4:] if uri.startswith('doi:') else uri]
+if cat == "openalex":
+    pmid = q(f"SELECT substr(k,6) FROM catalogue_card, unnest(keys) k WHERE catalogue='openalex' AND source_id='{sid}' AND k LIKE 'pmid:%' LIMIT 1")
+    links += [f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", f"https://openalex.org/{sid}"]
+if cat == "software":
+    links += [f"https://docs.rs/{sid[len('crates.io/'):]}"]
+if cat == "tranco":
+    links += [f"http://www.{sid}/"]
+print(sid); print(name.replace('\n', ' ')); print(uri)
+for l in links: print(l)
+EOF
+)
+item=${picked[0]} name=${picked[1]} stored=${picked[2]} links=("${picked[@]:3}")
+[ -n "$item" ] || fail "no card to check"
+echo "checking $item ($name): ${links[*]}"
+
+daemon() {
+  # Without the operator's contact no importer starts in it (every import is this script's own).
+  # Started as itself (`env -i` runs it in its own place), so `$!` is the daemon's pid.
+  env -i PATH="$PATH" HOME="$HOME" ${TMPDIR:+TMPDIR="$TMPDIR"} "$pinakesd" --config "$run/pinakes.toml" > "$run/daemon.log" 2>&1 &
+  daemon_pid=$!
+  for _ in $(seq 1 120); do
+    curl -sf "http://127.0.0.1:$admin/healthz" > /dev/null && return
+    kill -0 "$daemon_pid" 2>/dev/null || fail "the daemon stopped: $(tail -5 "$run/daemon.log")"
+    sleep 0.5
+  done
+  fail "the daemon did not come up"
+}
+stop_daemon() {
+  kill "$daemon_pid" || fail "the check daemon (pid $daemon_pid) was gone before its stop"
+  wait "$daemon_pid" 2>/dev/null || true
+  ! kill -0 "$daemon_pid" 2>/dev/null || fail "the check daemon (pid $daemon_pid) did not stop"
+  daemon_pid=
+  # No importer ran in it: no other catalogue has a state row with a run or an import, and this
+  # catalogue's own row is the script's import's.
+  ran=$(psql -c "SELECT count(*) FROM catalogue_state WHERE catalogue<>'$catalogue' AND (run IS NOT NULL OR last_import_at IS NOT NULL OR phase NOT IN ('idle','disabled'))")
+  [ "$ran" = 0 ] || fail "the check daemon ran another catalogue's importer ($ran state rows)"
+}
+search() { curl -sf --get "http://127.0.0.1:$listen/v1/search" --data-urlencode "q=$1"; }
+found() { # stdin: a search answer; $1: a uri
+  python3 -I -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(i.get("uri")==sys.argv[1] for i in d["items"]) else 1)' "$1"
+}
+daemon
+# Search lists the card by the link it stores.
+uri=$stored
+answer=""
+# The text index takes the import within a few seconds of the daemon's start (its first pass).
+for _ in $(seq 1 60); do
+  answer=$(search "$name")
+  echo "$answer" | found "$uri" && break
+  sleep 1
+done
+echo "$answer" | found "$uri" || fail "search for \"$name\" does not list $uri"
+note search "{\"q\": $(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$name"), \"found\": true}"
+# Shared links join their card: built from it, or (Podcast Index) in its group.
+for link in "${links[@]}"; do
+  body=$(python3 -I -c 'import json,sys; print(json.dumps({"uri": sys.argv[1]}))' "$link")
+  code=$(curl -s -o "$run/resolve.json" -w '%{http_code}' -H 'content-type: application/json' \
+    --data-binary "$body" "http://127.0.0.1:$listen/v1/resolve")
+  [[ $code =~ ^20[02]$ ]] || fail "POST /v1/resolve $link answered $code"
+  id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$run/resolve.json")
+  if [ $catalogue = podcastindex ]; then
+    key=$(psqlv "$id" "SELECT key FROM resource_key WHERE resource_id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=:'v'),:'v') AND key LIKE 'catalogue:podcastindex:%'")
+    [ "$key" = "catalogue:podcastindex:$item" ] || fail "$link is not in $item's group (got '$key')"
+  else
+    backed=$(psqlv "$id" "SELECT c.source_id FROM resource r JOIN catalogue_card c ON c.id=r.catalogue_card WHERE r.id=coalesce((SELECT root_id FROM resource_alias WHERE alias_id=:'v'),:'v')")
+    [ "$backed" = "$item" ] || fail "$link is not built from $item (got '$backed')"
+  fi
+  echo "joined: $link -> $item"
+done
+note joins "$(python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${links[@]}")"
+stop_daemon
+
+# --- The update: only rows whose content changed are written -----------------------------------
+if [ $catalogue = tranco ]; then
+  # A list without the site checked above, every site last listed 40 days ago: that site goes
+  # with its card (the others are on the new list). A list's own day is never ahead of now.
+  grep -v -F ",$item" "$s/list.csv" > "$s2/list.csv" || true
+  psql -c "UPDATE catalogue_site SET listed_on=listed_on-40"
+  # A day passed since the list was looked up (an update looks it up once a day).
+  psql -c "UPDATE catalogue_state SET position=position-'checked' WHERE catalogue='tranco'"
+fi
+psql -c "CREATE TABLE sample_before AS SELECT source_id, content_hash, xmin::text AS version FROM catalogue_card WHERE catalogue='$catalogue'"
+import "$run/update.log" --update "${from2[@]}"
+read -r rss secs < "$run/time"
+counts=$(psql -c "SELECT json_build_object(
+  'unchanged', count(*) FILTER (WHERE b.source_id IS NOT NULL AND c.source_id IS NOT NULL AND b.content_hash=c.content_hash),
+  'changed', count(*) FILTER (WHERE b.source_id IS NOT NULL AND c.source_id IS NOT NULL AND b.content_hash<>c.content_hash),
+  'inserted', count(*) FILTER (WHERE b.source_id IS NULL),
+  'removed', count(*) FILTER (WHERE c.source_id IS NULL),
+  'unchanged_rewritten', count(*) FILTER (WHERE b.content_hash=c.content_hash AND b.version<>c.xmin::text))
+  FROM sample_before b FULL JOIN (SELECT source_id, content_hash, xmin FROM catalogue_card WHERE catalogue='$catalogue') c USING (source_id)")
+echo "update: $counts"
+note update "{\"seconds\": $secs, \"peak_rss_kb\": $rss, \"rows\": $counts}"
+field() { python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$counts" "$1"; }
+[ "$(field unchanged_rewritten)" = 0 ] || fail "$(field unchanged_rewritten) unchanged cards were written by the update"
+case $catalogue in
+  podcastindex|software) [ "$(field changed)" -ge 1 ] && [ "$(field removed)" -ge 1 ] || fail "the update changed or removed nothing" ;;
+  openalex) [ "$(($(field changed) + $(field inserted)))" -ge 1 ] || fail "the update wrote nothing" ;;
+  tranco) [ "$(field removed)" -ge 1 ] || fail "the site off the list kept its card" ;;
+esac
+psql -c "DROP TABLE sample_before"
+
+# Switched off: gone from search at once. A card the update kept, found with the catalogue on,
+# then not found with it off.
+mapfile -t kept < <(psql -c "SELECT uri||chr(9)||name FROM catalogue_card WHERE catalogue='$catalogue' AND name ~ '^[[:alnum:] ]{4,60}$' ORDER BY fame DESC, source_id LIMIT 1" | tr '\t' '\n')
+[ ${#kept[@]} = 2 ] || fail "no card left to check the switch-off with"
+uri_now=${kept[0]} name=${kept[1]}
+daemon
+listed=0
+for _ in $(seq 1 60); do
+  search "$name" | found "$uri_now" && { listed=1; break; }
+  sleep 1
+done
+[ $listed = 1 ] || fail "search for \"$name\" does not list $uri_now with the catalogue on"
+stop_daemon
+config false
+daemon
+search "$name" | found "$uri_now" && fail "search lists $uri_now with the catalogue off"
+note switched_off_hidden true
+stop_daemon
+
+# --- The official download paths ---------------------------------------------------------------
+config true
+position() { psql -c "SELECT position::text FROM catalogue_state WHERE catalogue='$catalogue'"; }
+case $catalogue in
+software)
+  # F-Droid's and Flathub's files from their hosts, through the importer's client and download
+  # (a version not read yet, so both are read again); the crates.io dump's version from its host,
+  # set as the one read so that its 2.3 GB are not downloaded.
+  # The dump's host redirects (to cloudfront-static.crates.io, as the importer follows it): the
+  # last answer's ETag.
+  etag=$(curl -sSfIL -A "$ua" https://static.crates.io/db-dump.tar.gz | sed -n 's/^etag: //Ip' | tr -d '\r' | tail -1)
+  [ -n "$etag" ] || fail "no ETag for the crates.io dump"
+  psqlv "$etag" "UPDATE catalogue_state SET position=jsonb_set(jsonb_set(position,'{crates.io,version}',to_jsonb(:'v'::text)),'{f-droid,version}','\"none\"') WHERE catalogue='software'"
+  before=$(psql -c "SELECT count(*) FROM catalogue_card WHERE catalogue='software' AND source IN ('f-droid','flathub')")
+  import "$run/official.log" --update --from crates.io=https://static.crates.io/db-dump.tar.gz \
+    --from f-droid=https://f-droid.org/repo/entry.json \
+    --from flathub=https://dl.flathub.org/repo/appstream/x86_64/appstream.xml.gz
+  after=$(psql -c "SELECT count(*) FROM catalogue_card WHERE catalogue='software' AND source IN ('f-droid','flathub')")
+  [ "$after" -gt 0 ] || fail "no F-Droid or Flathub card after the official read"
+  [ "$(psqlv "$etag" "SELECT position->'crates.io'->>'version'=:'v' FROM catalogue_state WHERE catalogue='software'")" = t ] || fail "the crates.io version was not the official one"
+  [ "$(psql -c "SELECT position->'flathub'->>'version' LIKE '\"%' FROM catalogue_state WHERE catalogue='software'")" = t ] || fail "Flathub's version is not its ETag"
+  note official "{\"f_droid_and_flathub_cards\": {\"before\": $before, \"after\": $after}, \"crates_io_version\": true}"
+  ;;
+tranco)
+  # The day's list ID, then the list, from tranco-list.eu; five homepage reads. A day passed
+  # since the update's lookup (an update looks the list up once a day).
+  psql -c "UPDATE catalogue_state SET position=position-'checked' WHERE catalogue='tranco'"
+  import "$run/official.log" --update --limit 5
+  list=$(psql -c "SELECT position->>'list' FROM catalogue_state WHERE catalogue='tranco'")
+  [[ $list =~ ^[A-Za-z0-9]{1,16}$ ]] || fail "the official list was not read (position: $(position))"
+  sites=$(psql -c "SELECT count(*) FROM catalogue_site")
+  [ "$sites" -gt 500000 ] || fail "the official list holds $sites sites"
+  note official "{\"list\": \"$list\", \"sites\": $sites}"
+  # The whole run's homepage reads: at most 50.
+  read_n=$(psql -c "SELECT count(*) FROM catalogue_site WHERE read_at IS NOT NULL")
+  [ "$read_n" -le 50 ] || fail "$read_n homepages read in all, more than 50"
+  note homepages_read "$read_n"
+  ;;
+openalex)
+  # The real manifest from the bucket; no works file is newer than the last date read (set far
+  # ahead), so none is read.
+  psql -c "UPDATE catalogue_state SET position=jsonb_set(position,'{through}','\"9999-12-31\"') WHERE catalogue='openalex'"
+  import "$run/official.log" --update
+  read_snapshot=$(psql -c "SELECT position->>'snapshot' FROM catalogue_state WHERE catalogue='openalex'")
+  [ "$read_snapshot" = "$snapshot" ] || fail "the official manifest was not read (position: $(position))"
+  note official "{\"snapshot\": \"$read_snapshot\"}"
+  ;;
+podcastindex)
+  note official '"not read: the official archive is 1.9 GB and its server answers no ranged request"'
+  ;;
+esac
+note db_bytes "$(psql -c "SELECT pg_database_size(current_database())")"
+echo "ALL OK"
+cat "$report"

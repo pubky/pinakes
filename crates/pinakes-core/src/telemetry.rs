@@ -69,8 +69,9 @@ pub struct Metrics {
     /// Resources nothing ever referenced (only previewed), each kept for the preview grace; not
     /// derived children or venues.
     pub preview_backlog: IntGauge,
-    /// The catalogue joins (`joins`, `catalogue_join_due`) and extras (`extras`,
-    /// `catalogue_extras`) due now, and how long the oldest of each has been due.
+    /// The catalogue joins (`joins`, `catalogue_join_due`), extras (`extras`,
+    /// `catalogue_extras`) and Tranco homepage reads (`homepages`, `catalogue_site`, counted up
+    /// to 100,000 per scrape) due now, and how long the oldest of each has been due.
     pub catalogue_backlog: IntGaugeVec,
     pub catalogue_backlog_age: IntGaugeVec,
     pub ingest_lag: IntGauge,
@@ -99,7 +100,9 @@ pub struct Metrics {
     pub catalogue_turn: IntGaugeVec,
     /// Whether the catalogue's importer refused the dump it waits behind: `refused` in its
     /// position, newer than the version applied (or before any), until a dump is applied. A
-    /// refusal of an older dump (a trial by hand) is not what the importer waits for.
+    /// refusal of an older dump (a trial by hand) is not what the importer waits for. For the
+    /// file catalogues (OpenAlex, Podcast Index, software, Tranco): `refused_file` in its
+    /// position, until a newer file is read or a full import finishes.
     pub catalogue_refused: IntGaugeVec,
     /// Whether each catalogue's updates catch up after a full import (its position says so).
     pub catalogue_catching_up: IntGaugeVec,
@@ -207,7 +210,7 @@ impl Metrics {
         let catalogue_backlog = IntGaugeVec::new(
             Opts::new(
                 "pinakes_catalogue_backlog",
-                "Catalogue join checks (joins) and extras reads (extras) due now",
+                "Catalogue join checks (joins), extras reads (extras) and Tranco homepage reads (homepages) due now",
             ),
             &["queue"],
         )?;
@@ -215,12 +218,12 @@ impl Metrics {
         let catalogue_backlog_age = IntGaugeVec::new(
             Opts::new(
                 "pinakes_catalogue_backlog_age_seconds",
-                "How long the oldest due catalogue join check (joins) or extras read (extras) has been due (0: none)",
+                "How long the oldest due catalogue join check (joins), extras read (extras) or Tranco homepage read (homepages) has been due (0: none)",
             ),
             &["queue"],
         )?;
         registry.register(Box::new(catalogue_backlog_age.clone()))?;
-        for queue in ["joins", "extras"] {
+        for queue in ["joins", "extras", "homepages"] {
             catalogue_backlog.with_label_values(&[queue]);
             catalogue_backlog_age.with_label_values(&[queue]);
         }
@@ -230,6 +233,11 @@ impl Metrics {
         registry.register(Box::new(AFTER_SAVE_FAILURES.clone()))?;
         registry.register(Box::new(CATALOGUE_JOINS.clone()))?;
         registry.register(Box::new(CATALOGUE_JOIN_ERRORS.clone()))?;
+        registry.register(Box::new(CATALOGUE_HOMEPAGE_READS.clone()))?;
+        for result in HOMEPAGE_RESULTS {
+            CATALOGUE_HOMEPAGE_READS.with_label_values(&[result]);
+        }
+        registry.register(Box::new(CATALOGUE_HOMEPAGE_WAITING.clone()))?;
         for stage in ["referenced", "before_fetch", "drain", "extras"] {
             CATALOGUE_JOIN_ERRORS.with_label_values(&[stage]);
         }
@@ -539,7 +547,7 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version'))::int,0)::bigint AS refused,(CASE WHEN jsonb_typeof(position->'import')='boolean' AND position->>'import'='true' THEN 1 ELSE 0 END)::bigint AS catching_up FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce(((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version')) OR position ? 'refused_file')::int,0)::bigint AS refused,(CASE WHEN jsonb_typeof(position->'import')='boolean' AND position->>'import'='true' THEN 1 ELSE 0 END)::bigint AS catching_up FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
@@ -551,7 +559,7 @@ impl Metrics {
                 .with_label_values(&[queue])
                 .set(index_queues.try_get(queue)?);
         }
-        let backlog = sqlx::query("SELECT (SELECT count(*) FROM catalogue_join_due WHERE due_at<=now()) AS joins,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_join_due WHERE due_at<=now()) AS joins_age,(SELECT count(*) FROM catalogue_extras WHERE due_at<=now()) AS extras,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_extras WHERE due_at<=now()) AS extras_age").fetch_one(pool).await?;
+        let backlog = sqlx::query("SELECT (SELECT count(*) FROM catalogue_join_due WHERE due_at<=now()) AS joins,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_join_due WHERE due_at<=now()) AS joins_age,(SELECT count(*) FROM catalogue_extras WHERE due_at<=now()) AS extras,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_extras WHERE due_at<=now()) AS extras_age,(SELECT count(*) FROM (SELECT 1 FROM catalogue_site WHERE due_at<=now() LIMIT 100000) due) AS homepages,(SELECT coalesce(extract(epoch FROM now()-min(due_at)),0)::bigint FROM catalogue_site WHERE due_at<=now()) AS homepages_age").fetch_one(pool).await?;
         let previews: i64 = sqlx::query_scalar("SELECT count(*) FROM resource r WHERE r.orphaned_at IS NOT NULL AND r.orphaned_at=r.created_at AND NOT EXISTS(SELECT 1 FROM resource_derivation d WHERE d.child_id=r.id) AND NOT EXISTS(SELECT 1 FROM resource v WHERE v.venue_id=r.id) AND NOT EXISTS(SELECT 1 FROM occurrence o WHERE o.venue_id=r.id)")
             .fetch_one(pool)
             .await?;
@@ -655,7 +663,7 @@ impl Metrics {
         }
         self.group_key_conflicts.set(groups.try_get("conflicts")?);
         self.preview_backlog.set(previews);
-        for queue in ["joins", "extras"] {
+        for queue in ["joins", "extras", "homepages"] {
             self.catalogue_backlog
                 .with_label_values(&[queue])
                 .set(backlog.try_get(queue)?);
@@ -1058,6 +1066,58 @@ pub fn background_failures(name: &str) -> u64 {
 /// When background loop `name` last finished a pass without an error (0 before it has).
 pub fn background_success(name: &str) -> i64 {
     BACKGROUND_SUCCESS.with_label_values(&[name]).get()
+}
+/// The results of the Tranco catalogue's homepage reads (`catalogue::tranco::Homepage`).
+pub const HOMEPAGE_RESULTS: [&str; 9] = [
+    "ok",
+    "robots",
+    "wall",
+    "not_html",
+    "status",
+    "busy",
+    "unreached",
+    "deferred",
+    "other",
+];
+/// The Tranco catalogue's homepage reads, by result: `ok` (a card), `robots` (its robots.txt
+/// says no), `wall`, `not_html`, `status` (a 4xx), `busy` (a 429 or 5xx), `unreached`,
+/// `deferred` (no egress turn in time: not read) and `other` (a redirect off the site, or no
+/// name).
+static CATALOGUE_HOMEPAGE_READS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock::new(
+    || {
+        IntCounterVec::new(
+        Opts::new(
+            "pinakes_catalogue_homepage_reads_total",
+            "Tranco catalogue homepage reads, by result (ok, robots, wall, not_html, status, busy, unreached, deferred, other)",
+        ),
+        &["result"],
+    )
+    .expect("static metric")
+    },
+);
+pub fn homepage_read(result: &'static str) {
+    CATALOGUE_HOMEPAGE_READS.with_label_values(&[result]).inc();
+}
+/// The homepage reads counted for `result` so far.
+pub fn homepage_reads(result: &'static str) -> u64 {
+    CATALOGUE_HOMEPAGE_READS.with_label_values(&[result]).get()
+}
+/// Whether the Tranco catalogue's homepage reads wait for a large catalogue's first or running
+/// full import (1) or not (0), as its last run found; with the `homepages` backlog's age it tells
+/// a wait by design from a stall.
+static CATALOGUE_HOMEPAGE_WAITING: std::sync::LazyLock<IntGauge> = std::sync::LazyLock::new(|| {
+    IntGauge::new(
+        "pinakes_catalogue_homepage_reads_waiting",
+        "Whether Tranco homepage reads wait for a large catalogue's full import (1) or not (0)",
+    )
+    .expect("static metric")
+});
+pub fn homepage_reads_waiting(waiting: bool) {
+    CATALOGUE_HOMEPAGE_WAITING.set(i64::from(waiting));
+}
+/// What [`homepage_reads_waiting`] last set.
+pub fn homepage_reads_waiting_now() -> i64 {
+    CATALOGUE_HOMEPAGE_WAITING.get()
 }
 pub fn after_save_failure(resolver: &str) {
     AFTER_SAVE_FAILURES.with_label_values(&[resolver]).inc();

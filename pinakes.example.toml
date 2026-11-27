@@ -311,14 +311,20 @@ enabled = true
 enabled = true
 region = "planet" # Or a region of Geofabrik's extracts, e.g. "europe/switzerland". The planet is a 96 GB download and a 115 GB node index: a small instance takes a region.
 [catalogues.openalex]
+# Works of OpenAlex's snapshot cited more than min_citations times
+# (docs/sources/openalex_catalogue.md).
 enabled = true
 min_citations = 50 # Works cited more than this many times.
 [catalogues.podcastindex]
+# Every live feed of Podcast Index's weekly database (docs/sources/podcastindex_catalogue.md).
 enabled = true
 [catalogues.tranco]
+# The homepages of Tranco's top million sites, read in the background
+# (docs/sources/tranco_catalogue.md).
 enabled = true
 [catalogues.software]
-enabled = true # crates.io, F-Droid and Flathub.
+# Every crate, F-Droid app and Flathub application (docs/sources/software_catalogue.md).
+enabled = true
 
 [api]
 # Applied to every public route (/v1, the agents' guide and /mcp) per client address.

@@ -160,13 +160,21 @@ pub trait Importer: Send + Sync + 'static {
 }
 
 /// The registered importers. `pinakesd` starts those of the catalogues that are on
-/// ([`to_start`]).
-pub fn importers(config: &Config) -> Vec<Arc<dyn Importer>> {
-    super::musicbrainz::importer(config)
-        .into_iter()
-        .chain(super::osm::importer(config))
-        .chain(super::wikidata::importer(config))
-        .collect()
+/// ([`to_start`]). `egress` is the daemon's own: the Tranco importer reads homepages through it,
+/// under the same rules and per-host pace as every fetch.
+pub fn importers(
+    config: &Config,
+    egress: &crate::resolver::egress::Egress,
+) -> Vec<Arc<dyn Importer>> {
+    let mut importers: Vec<Arc<dyn Importer>> = Vec::new();
+    importers.extend(super::musicbrainz::importer(config));
+    importers.extend(super::osm::importer(config));
+    importers.extend(super::wikidata::importer(config));
+    importers.extend(super::openalex::importer(config));
+    importers.extend(super::podcastindex::importer(config));
+    importers.extend(super::tranco::importer(config, egress));
+    importers.extend(super::software::importer(config));
+    importers
 }
 
 /// What a run writes through: its catalogue, generation, resume point, position, work directory
@@ -363,6 +371,14 @@ impl<'a> Job<'a> {
     /// What the run has written so far.
     pub fn report(&self) -> WriteReport {
         self.report
+    }
+    /// Count cards an update read and found unchanged without writing them (`diff::Sink`).
+    pub fn count_unchanged(&mut self, n: u64) {
+        self.report.unchanged += n;
+    }
+    /// Count cards an update refused before writing (`Card::checked`, `diff::Sink`).
+    pub fn count_rejected(&mut self, n: u64) {
+        self.report.rejected += n;
     }
     /// Write `cards` ([`store::upsert`]) and save `cursor` with them: a run cut off after this
     /// resumes from `cursor`.
@@ -588,31 +604,47 @@ pub enum Next {
     Wait(Duration),
 }
 
-/// The catalogues whose importer needs `http.contact`, with whether `config` leaves one that is
-/// on without it and what `waiting` says then.
-pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); 3] {
-    [
-        (
-            Catalogue::Musicbrainz,
-            super::musicbrainz::needs_contact(config),
-            super::musicbrainz::NEEDS_CONTACT,
-        ),
-        (
-            Catalogue::Osm,
-            super::osm::needs_contact(config),
-            super::osm::NEEDS_CONTACT,
-        ),
-        (
-            Catalogue::Wikidata,
-            super::wikidata::needs_contact(config),
-            super::wikidata::NEEDS_CONTACT,
-        ),
-    ]
+/// The catalogues with an importer in this build, in the order they start; each starts only
+/// with `http.contact` set.
+pub const WITH_IMPORTER: [Catalogue; 7] = [
+    Catalogue::Musicbrainz,
+    Catalogue::Osm,
+    Catalogue::Wikidata,
+    Catalogue::Openalex,
+    Catalogue::Podcastindex,
+    Catalogue::Tranco,
+    Catalogue::Software,
+];
+/// What `catalogue status` shows as the `waiting` of a file catalogue (OpenAlex, Podcast Index,
+/// software, Tranco) that is on but has no importer task for want of `http.contact`
+/// (MusicBrainz, OpenStreetMap and Wikidata say it in their own words: their `NEEDS_CONTACT`).
+pub const NEEDS_CONTACT: &str =
+    "needs http.contact: the importer asks for its files with the operator's contact";
+/// The catalogues whose importer needs `http.contact` (every one of [`WITH_IMPORTER`]), with
+/// whether `config` leaves one that is on without it and what `waiting` says then.
+pub fn contact_needs(config: &Config) -> [(Catalogue, bool, &'static str); WITH_IMPORTER.len()] {
+    WITH_IMPORTER.map(|catalogue| {
+        let (needs, note) = match catalogue {
+            Catalogue::Musicbrainz => (
+                super::musicbrainz::needs_contact(config),
+                super::musicbrainz::NEEDS_CONTACT,
+            ),
+            Catalogue::Osm => (super::osm::needs_contact(config), super::osm::NEEDS_CONTACT),
+            Catalogue::Wikidata => (
+                super::wikidata::needs_contact(config),
+                super::wikidata::NEEDS_CONTACT,
+            ),
+            _ => (
+                config.catalogues.enabled(catalogue) && config.egress.contact.is_empty(),
+                NEEDS_CONTACT,
+            ),
+        };
+        (catalogue, needs, note)
+    })
 }
-/// Say in the state rows why a catalogue that is on has no importer task: MusicBrainz,
-/// OpenStreetMap or Wikidata without `http.contact` (their `NEEDS_CONTACT` in `waiting`). Started with its
-/// contact, or with the catalogue off, the text goes (a task that starts clears any at its first
-/// step).
+/// Say in the state rows why a catalogue that is on has no importer task: one without
+/// `http.contact` (its note from [`contact_needs`] in `waiting`). Started with its contact, or
+/// with the catalogue off, the text goes (a task that starts clears any at its first step).
 pub async fn note_unstarted(pool: &PgPool, config: &Config) -> Result<()> {
     for (catalogue, needs, note) in contact_needs(config) {
         if needs {

@@ -166,7 +166,11 @@ of it is fetched link by link ([catalogues](../operations.md#catalogues)).
 | Catalogue | Imports | Credentials |
 | --- | --- | --- |
 | [`musicbrainz`](musicbrainz_catalogue.md) | Every artist, release group and recording of MusicBrainz's JSON dumps | None |
+| [`openalex`](openalex_catalogue.md) | Works cited more than 50 times, from OpenAlex's snapshot | None |
 | [`osm`](osm_catalogue.md) | OpenStreetMap's named places and useful points, from the planet file or a region's extract | None |
+| [`podcastindex`](podcastindex_catalogue.md) | Every live podcast feed, from Podcast Index's weekly database | None |
+| [`software`](software_catalogue.md) | Every crate on crates.io, app on F-Droid and application on Flathub, from their catalogue files | None |
+| [`tranco`](tranco_catalogue.md) | The homepages of Tranco's top million sites that answer with a page | None |
 | [`wikidata`](catalogue_wikidata.md) | Every item with a Wikipedia article, from the weekly JSON dump, kept current from the recent changes | None (the operator's contact) |
 
 ## Also on

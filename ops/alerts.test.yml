@@ -180,6 +180,70 @@ tests:
           - exp_labels: {severity: warning, instance: a, job: pinakes, queue: joins}
             exp_annotations:
               summary: "The oldest catalogue join check has been due for over six hours: links wait for their catalogue card or to go back to fetching; pinakes_catalogue_join_errors_total says whether checks fail"
+  # Homepage reads over nine hours: on a every read is deferred (no page read at all) while
+  # sites are due: it fires; b reads pages through a long first pass (900,000 due); c's reads
+  # wait for a large import; d's catalogue is off; e is past its first pass, a few sites falling
+  # due between runs and read as they do (the run wakes for them: a page about every ten
+  # minutes). Only a fires.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",result="ok"}'
+        values: '100x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",result="deferred"}'
+        values: '0+50x540'
+      - series: 'pinakes_catalogue_backlog{instance="a",job="pinakes",queue="homepages"}'
+        values: '500x540'
+      - series: 'pinakes_catalogue_homepage_reads_waiting{instance="a",job="pinakes"}'
+        values: '0x540'
+      - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="tranco"}'
+        values: '1x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",result="ok"}'
+        values: '0+6x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",result="deferred"}'
+        values: '0+50x540'
+      - series: 'pinakes_catalogue_backlog{instance="b",job="pinakes",queue="homepages"}'
+        values: '900000x540'
+      - series: 'pinakes_catalogue_homepage_reads_waiting{instance="b",job="pinakes"}'
+        values: '0x540'
+      - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="tranco"}'
+        values: '1x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",result="ok"}'
+        values: '100x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",result="deferred"}'
+        values: '0+50x540'
+      - series: 'pinakes_catalogue_backlog{instance="c",job="pinakes",queue="homepages"}'
+        values: '500x540'
+      - series: 'pinakes_catalogue_homepage_reads_waiting{instance="c",job="pinakes"}'
+        values: '1x540'
+      - series: 'pinakes_catalogue_enabled{instance="c",job="pinakes",catalogue="tranco"}'
+        values: '1x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",result="ok"}'
+        values: '100x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",result="deferred"}'
+        values: '0+50x540'
+      - series: 'pinakes_catalogue_backlog{instance="d",job="pinakes",queue="homepages"}'
+        values: '500x540'
+      - series: 'pinakes_catalogue_homepage_reads_waiting{instance="d",job="pinakes"}'
+        values: '0x540'
+      - series: 'pinakes_catalogue_enabled{instance="d",job="pinakes",catalogue="tranco"}'
+        values: '0x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",result="ok"}'
+        values: '0+0.1x540'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",result="deferred"}'
+        values: '0x540'
+      - series: 'pinakes_catalogue_backlog{instance="e",job="pinakes",queue="homepages"}'
+        values: '3x540'
+      - series: 'pinakes_catalogue_homepage_reads_waiting{instance="e",job="pinakes"}'
+        values: '0x540'
+      - series: 'pinakes_catalogue_enabled{instance="e",job="pinakes",catalogue="tranco"}'
+        values: '1x540'
+    alert_rule_test:
+      - eval_time: 8h
+        alertname: CatalogueHomepageReadsStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes}
+            exp_annotations:
+              summary: "No Tranco homepage read has found a page for six hours while sites are due and the reads do not wait for a large import: every read is deferred (the egress gives them no turn) or fails; pinakes_catalogue_homepage_reads_total and pinakesd catalogue status say which"
   # Joins fail twenty times an hour on a, five on b; extras failures don't count.
   - interval: 1m
     input_series:
@@ -445,6 +509,25 @@ tests:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: wikidata}
             exp_annotations:
               summary: "The wikidata catalogue is on and has finished no import in two days: pinakesd catalogue status shows why it waits (free disk, the large-import turn, http.contact)"
+  # The file catalogues have importers too: software on a with no finished import for two days
+  # fires; Tranco on b with one finished does not.
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="software"}'
+        values: '1x3100'
+      - series: 'pinakes_catalogue_last_import_timestamp_seconds{instance="a",job="pinakes",catalogue="software"}'
+        values: '0x3100'
+      - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="tranco"}'
+        values: '1x3100'
+      - series: 'pinakes_catalogue_last_import_timestamp_seconds{instance="b",job="pinakes",catalogue="tranco"}'
+        values: '1795000000x3100'
+    alert_rule_test:
+      - eval_time: 50h
+        alertname: CatalogueFirstImportStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: software}
+            exp_annotations:
+              summary: "The software catalogue is on and has finished no import in two days: pinakesd catalogue status shows why it waits (free disk, the large-import turn, http.contact)"
   # A changed item left as it was (its answer over the API cap) on a; nothing skipped on b.
   - interval: 1m
     input_series:

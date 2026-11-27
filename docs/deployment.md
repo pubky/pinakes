@@ -110,8 +110,8 @@ To run a command, put it after the image name, with the same mounts and environm
 - `--config /etc/pinakes/pinakes.toml reextract all`, with the daemon stopped
 - `--config /etc/pinakes/pinakes.toml reindex`, with the daemon stopped
 - `--config /etc/pinakes/pinakes.toml catalogue status`, beside the daemon
-- `--config /etc/pinakes/pinakes.toml catalogue import musicbrainz`, with the daemon stopped or
-  the catalogue off there
+- `--config /etc/pinakes/pinakes.toml catalogue import <name>`, with the catalogue off in the
+  running daemon (or the daemon stopped)
 
 ## CI and image publishing
 
@@ -410,6 +410,18 @@ Measured on a 150,000-card sample of the real dump; full-size figures are estima
 
 With `catalogues.wikidata.limit` the dump is read as a stream and nothing is downloaded to disk;
 the stream is read only up to the limit.
+
+### OpenAlex, Podcast Index, software and Tranco
+
+What each importer needs (measured on samples, see each catalogue's page; the full numbers are
+estimates):
+
+| Catalogue | Free disk it waits for (`catalogues.dir`) | Memory while it reads | Read | Cards, database |
+| --- | --- | --- | --- | --- |
+| `openalex` | 32 GB for a full import, 4 GB for an update (nothing is downloaded to disk; the cards' database share) | Up to 16 files' kept cards (50,000 cards each at most: 1-2 GB at worst, a few hundred MB as a rule) and the IDs with a card (64-bit numbers, about 250-500 MB at full size) | 675 GB from S3 in each full import; a new snapshot's newer files after | ~15M cards, ~26 GB |
+| `podcastindex` | 20 GB (the unpacked database, 5 GB today, while a run reads it, and the cards) | Under 1 GB | 1.9 GB a week | ~4.8M cards, ~8 GB (1.7 KB a card measured) |
+| `software` | 1 GB (streamed) | The crates of the dump, without READMEs, and their downloads, categories and keywords: at most 1 GiB as counted (about 150 MB today) | ~0.6 GB a day (the part of the crates.io dump read, F-Droid's 75 MB index, Flathub's 11 MB) | ~0.4M cards, ~0.4 GB |
+| `tranco` | 1 GB | Up to about 250 MB while a list loads (195-219 MB measured); 16 reads after, and the robots.txt rules kept for deferred pages (about 33 MiB at most: 2,000 origins, 16 KiB each counted with every rule's own memory) | The 22 MB list a day; then each homepage and robots.txt once per 90 days (about 140 GB in all at first, estimate) | ~0.65M cards, ~1.1 GB (1.65 KB a card measured) |
 
 ## Network and secrets
 

@@ -1090,6 +1090,8 @@ async fn the_links_a_key_names_name_the_key_back(pool: PgPool) {
         "android:org.fdroid.fdroid",
         "flathub:org.gnome.Maps",
         "homepage:example.org",
+        "pmid:23903748",
+        "podcast:apple:1200361736",
     ];
     for key in keys {
         let links: Vec<String> =
@@ -1113,6 +1115,7 @@ async fn the_links_a_key_names_name_the_key_back(pool: PgPool) {
         "upc:0602537347865",
         "url:00000000000000000000000000000000",
         "mb:work:x",
+        "podcast:guid:ead4c236-bf58-58c6-a2c6-a6b28d128cb6",
     ] {
         let links: Option<Vec<String>> = sqlx::query_scalar("SELECT catalogue_key_links($1)")
             .bind(key)
