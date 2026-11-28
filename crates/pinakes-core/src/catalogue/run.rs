@@ -913,9 +913,9 @@ pub async fn run(importer: Arc<dyn Importer>, ctx: Context, mut shutdown: watch:
             next = stepped => next,
         };
         // Why the step waits, from the state row it wrote: `pinakes_catalogue_waiting_seconds`,
-        // from the wait's start kept with the row. A failed step keeps the start, so a wait broken
-        // by failures in between still counts from its beginning; while another process holds
-        // the lock and the row, this task neither writes nor shows a wait.
+        // from the wait's start kept with the row. A step that fails before its run starts keeps
+        // the start (a run that starts removes it: [`step`]); while another process holds the
+        // lock and the row, this task neither writes nor shows a wait.
         match &next {
             Ok(Next::Wait(_)) if lock.is_some() => {
                 let reason = waiting_reason(&ctx.pool, catalogue).await;
@@ -1044,8 +1044,9 @@ impl Waited {
         self.show(shown);
         shown
     }
-    /// After a step that failed: the kept wait goes on from its start (a run that fails is tried
-    /// again, and waits again for the same reason); nothing is written.
+    /// After a step that failed: a wait kept goes on from its start (a step that fails before its
+    /// run starts, such as a database error, ends no wait); a run that started removed it, so
+    /// none is shown. Nothing is written.
     async fn failed(&self, pool: &PgPool) -> Option<(&'static str, u64)> {
         let shown = self.stored(pool).await;
         self.show(shown);
@@ -1191,24 +1192,30 @@ pub async fn step(importer: &dyn Importer, ctx: &Context) -> Result<Next> {
         }
         return Ok(Next::Wait(ctx.pace.disk));
     }
-    // Start the run, or take it up again: a new full import begins a new generation.
+    // Start the run, or take it up again: a new full import begins a new generation. The wait
+    // before it is over: `waiting` and the wait's kept start go, and the gauge shows no wait
+    // while the run goes on (one that fails after this counts no wait from before it).
     let (generation, cursor) = if resumed.is_some() {
-        sqlx::query(
-            "UPDATE catalogue_state SET phase=$2,waiting=NULL,updated_at=now() WHERE catalogue=$1",
-        )
+        sqlx::query(&format!(
+            "UPDATE catalogue_state SET phase=$2,waiting=NULL,position={},updated_at=now() WHERE catalogue=$1",
+            store::POSITION_WITHOUT_WAIT
+        ))
         .bind(catalogue.name())
         .bind(run.name())
         .execute(pool)
         .await?;
         (state.generation, state.cursor.clone())
     } else {
-        let generation: i64 = sqlx::query_scalar("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,generation=generation+($2='import')::int,generation_cards=CASE WHEN $2='import' THEN 0 ELSE generation_cards END,updated_at=now() WHERE catalogue=$1 RETURNING generation")
+        let generation: i64 = sqlx::query_scalar(&format!("UPDATE catalogue_state SET run=$2,phase=$2,cursor=NULL,waiting=NULL,position={},generation=generation+($2='import')::int,generation_cards=CASE WHEN $2='import' THEN 0 ELSE generation_cards END,updated_at=now() WHERE catalogue=$1 RETURNING generation", store::POSITION_WITHOUT_WAIT))
             .bind(catalogue.name())
             .bind(run.name())
             .fetch_one(pool)
             .await?;
         (generation, None)
     };
+    for reason in crate::telemetry::CATALOGUE_WAIT_REASONS {
+        crate::telemetry::catalogue_waiting(catalogue.name(), reason, 0);
+    }
     // Tranco's updates run each time homepages fall due (often every few minutes): their start
     // and end are debug lines.
     let quiet = catalogue == Catalogue::Tranco && run == Run::Update;

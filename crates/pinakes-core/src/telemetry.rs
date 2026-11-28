@@ -878,7 +878,8 @@ pub fn catalogue_items_skipped(catalogue: &'static str, reason: &'static str, n:
 /// turn (`turn`), free disk under `catalogues.dir` (`disk`) or anything else its run needs (`other`,
 /// a setting). Set by the task at each step (`catalogue::run::run`), from when it began waiting for
 /// that reason as its state row keeps it (`catalogue::store::WAITING_SINCE`: across restarts; a
-/// failed step between two waits keeps it going); 0 while it doesn't wait.
+/// step that fails before its run starts keeps it going; a run that starts ends it); 0 while it
+/// doesn't wait.
 static CATALOGUE_WAITING: std::sync::LazyLock<IntGaugeVec> = std::sync::LazyLock::new(|| {
     IntGaugeVec::new(
         Opts::new(

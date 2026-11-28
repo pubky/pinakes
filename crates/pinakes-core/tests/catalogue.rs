@@ -1858,6 +1858,73 @@ async fn the_waiting_gauge_counts_how_long_a_task_waits(pool: PgPool) {
     assert_eq!(left, 0);
 }
 
+/// A wait kept from before (here a week of free-disk waits) and a run that starts.
+async fn a_stored_wait_then_a_run(pool: &PgPool) -> (Arc<Fixture>, Arc<Notify>, Context, TempDir) {
+    let (ctx, dir) = context(pool, plenty());
+    store::ensure_state(pool, Catalogue::Podcastindex)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET position=jsonb_build_object('waiting_since',jsonb_build_object('reason','disk','at',now()-interval '7 days')) WHERE catalogue='podcastindex'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut fixture = Fixture::new(Catalogue::Podcastindex, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    fixture.fail_at_gate.store(true, Ordering::SeqCst);
+    (Arc::new(fixture), gate, ctx, dir)
+}
+
+/// A run that starts ends the wait before it: while it runs, the waiting gauge shows no wait,
+/// whatever the last step showed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_starts_shows_no_wait(pool: PgPool) {
+    use pinakes_core::telemetry::{catalogue_waiting, catalogue_waiting_seconds as waited};
+    let _tasks = TASKS.lock().await;
+    let (fixture, gate, ctx, _dir) = a_stored_wait_then_a_run(&pool).await;
+    catalogue_waiting("podcastindex", "disk", 7 * 86400);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(waited("podcastindex", "disk"), 0);
+    gate.notify_one();
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// A run that starts removes the wait kept before it: one that then fails (and is tried again)
+/// shows no wait, not the age of the wait before the run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_starts_and_fails_leaves_no_stale_wait(pool: PgPool) {
+    use pinakes_core::telemetry::catalogue_waiting_seconds as waited;
+    let _tasks = TASKS.lock().await;
+    let (fixture, gate, ctx, _dir) = a_stored_wait_then_a_run(&pool).await;
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    gate.notify_one();
+    until("the failed run", || async {
+        state(&pool, Catalogue::Podcastindex).await.error_count == 1
+    })
+    .await;
+    // The task has shown the failed step.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(waited("podcastindex", "disk"), 0);
+    let left: bool = sqlx::query_scalar(
+        "SELECT coalesce(position ? 'waiting_since',false) FROM catalogue_state WHERE catalogue='podcastindex'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!left);
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
 /// A run by hand that waits (here for free disk) watches its lock while it waits and checks it
 /// before each step: once the lock's session has ended, it stops and says the lock was lost
 /// instead of stepping on, and runs nothing more.

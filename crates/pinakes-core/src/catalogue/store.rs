@@ -95,8 +95,8 @@ impl State {
 /// The key of `catalogue_state.position` under which an importer's task keeps when it began
 /// waiting and why (`{"reason": "disk", "at": <time>}`), so `pinakes_catalogue_waiting_seconds`
 /// counts a wait across daemon restarts (`run::run`). Only the task writes it, and it goes when
-/// the wait ends, when a run ends (its position is written then), and when the catalogue is off
-/// at a start. A [`State`] never holds it: importers never see it.
+/// the wait ends: when a run starts (`run::step`), when a step finds nothing due, and when the
+/// catalogue is off at a start. A [`State`] never holds it: importers never see it.
 pub const WAITING_SINCE: &str = "waiting_since";
 /// `position` without [`WAITING_SINCE`]: none when the key was all it held.
 pub(crate) const POSITION_WITHOUT_WAIT: &str = "CASE WHEN position ? 'waiting_since' THEN nullif(position-'waiting_since','{}'::jsonb) ELSE position END";
