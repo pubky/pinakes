@@ -2677,3 +2677,79 @@ async fn a_tranco_list_with_no_site_is_refused(pool: PgPool) {
     assert!(failed.to_string().contains("empty (list"), "{failed}");
     assert_eq!(count(&pool, "tranco", None).await, 2);
 }
+
+/// A site whose card a run's reads remove past a tenth of the cards and past ten (under the floor
+/// of 100) is read again within a week, so a blanket non-page answer costs a small instance its
+/// cards for a week at most; one removed within them waits for the usual re-read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_sites_removed_past_a_tenth_are_read_again_within_a_week(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=60).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 60);
+    // Days until each site is due again.
+    let due_in = |host: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT extract(epoch FROM due_at-now())::float8/86400 FROM catalogue_site WHERE host=$1",
+            )
+            .bind(host)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Two sites answer 404 (within a tenth): their cards go, read again at the usual 90 days.
+    for host in &hosts[..2] {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    sqlx::query("UPDATE catalogue_site SET due_at=now() WHERE host=ANY($1)")
+        .bind(&hosts[..2])
+        .execute(&pool)
+        .await
+        .unwrap();
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 58);
+    assert!(due_in(hosts[0].clone()).await > 80.0);
+    // Every other site answers 404 (a blanket answer): their cards go (under the floor), each read
+    // again within a week.
+    for host in &hosts[2..] {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    sqlx::query("UPDATE catalogue_site SET due_at=now() WHERE host=ANY($1)")
+        .bind(&hosts[2..])
+        .execute(&pool)
+        .await
+        .unwrap();
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 0);
+    // The run's first removals, within ten and a tenth, may wait the usual 90 days.
+    let mut soon = 0;
+    for host in &hosts[2..] {
+        if due_in(host.clone()).await <= 7.01 {
+            soon += 1;
+        }
+    }
+    assert!(soon >= 48, "{soon} of 58 due within a week");
+    assert!(due_in(hosts[0].clone()).await > 80.0);
+}

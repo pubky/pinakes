@@ -98,8 +98,11 @@ list it has); a new list is loaded, and sites off the list for a month
 names no site (an empty or garbage body) is refused (`empty`) in every run, a full import asked
 for too: nothing moves. A run never removes more than a tenth of the cards: a list that would
 leave more than that (and more than ten) off it, or a round of homepage reads that would take the
-run's removals past it (and past 100 cards: a small instance's sites that stopped answering go;
-every read failing on a larger catalogue does not), is refused (`refused`, nothing of the list's removals or of that round written, its sites due again,
+run's removals past it (and past 100 cards: a small instance's sites that stopped answering go,
+each read again within a week once the run's removals pass a tenth and ten, so a blanket
+non-page answer costs those cards a week at most; every read failing on a larger catalogue does
+not), is refused (`refused`, nothing of the list's removals or of that round written, its sites
+due again,
 [a refused dump or file](../operations.md#a-refused-dump-or-file)), and nothing is read until the
 next day's list, or `pinakesd catalogue clear-refusal tranco` (which checks again). A full import
 asked for (`pinakesd catalogue import tranco --request`) has no such cap: it removes what its list
