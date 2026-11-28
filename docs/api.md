@@ -1260,13 +1260,15 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   `bbox` or `tags`, those of the twice `limits.search_text_candidates` best known cards that pass
   every filter; when they are fewer, with `tags` also those holding the labels among each
   catalogue's best known (a common label), and the best known of the first 20 times
-  `limits.search_text_candidates` cards holding the labels that the labels index gives (every
-  card of a rare label; of a label on more cards, those read first), else the best known
-  of the twice `limits.search_text_candidates` cards nearest to the circle's centre (or to each
-  box's centre) inside it, and with `type`, `host` or `exclude_type` also the best known of each
-  type (or host) let in that are inside it. With `type` or `exclude_type`, a catalogue none of
-  whose cards' types the filter lets in is not read at all (`exclude_type=Thing` lists no card),
-  and the others are read by the types let in. With `type` or `exclude_type`, each catalogue's
+  `limits.search_text_candidates` cards holding the labels that the labels index gives, the place
+  and every other filter checked on those alone (every card of a rare label; of a label on more
+  cards, those read first); with `near` or `bbox` also the best known of the twice
+  `limits.search_text_candidates` cards nearest to the circle's centre (or to each box's centre)
+  inside it; and with `type`, `host` or `exclude_type` also the best known of each type (or host)
+  let in that are inside it. With `exclude_type`, or with more `type` values than 64 type
+  branches across the catalogues, a catalogue none of whose cards' types the filter lets in is
+  not read at all (`exclude_type=Thing` lists no card), and the others are read by the types let
+  in; a few `type` values are read type by type in every catalogue that is on. With `type` or `exclude_type`, each catalogue's
   best known of each type let in (a host is checked on them); with `host` alone, each
   catalogue's best known of each host. A read whose index does not serve every filter looks at
   no more than 20 times `limits.search_text_candidates` cards in all (at least twice it per

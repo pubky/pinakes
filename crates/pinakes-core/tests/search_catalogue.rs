@@ -1957,6 +1957,9 @@ async fn a_common_label_without_text_reads_a_bounded_number_of_cards(pool: PgPoo
 /// change: a card of a new type written after a search is listed by the next one.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_types_read_follow_a_write_of_the_catalogue(pool: PgPool) {
+    store::ensure_state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap();
     import(
         &pool,
         Catalogue::Wikidata,
@@ -2024,4 +2027,113 @@ async fn a_common_label_lists_its_best_known_cards(pool: PgPool) {
     let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
     assert_eq!(page.len(), 20, "{page:?}");
     assert!(page.iter().all(|n| n.starts_with("Star")), "{page:?}");
+}
+
+/// A common label in a small place is read from a bounded number of cards: the labels index's
+/// first cards holding it are checked against the place, and the nearest cards to the place are
+/// read too, so the label's cards in the place are listed without reading every card holding it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_common_label_in_a_small_place_reads_a_bounded_number_of_cards(pool: PgPool) {
+    // 4,000 cards with the label far away (written first, so the labels index gives them first),
+    // then 20 with it in a small box near 46,7.
+    let mut cards: Vec<Card> = (0..4000)
+        .map(|n| {
+            card(
+                10_000 + n,
+                &format!("Far {n}"),
+                "Restaurant",
+                &["common-tag"],
+                Some((-30.0 + (n % 50) as f64, 100.0 + (n / 50) as f64 * 0.1)),
+                0.5,
+            )
+        })
+        .collect();
+    cards.extend((0..20).map(|n| {
+        card(
+            n + 1,
+            &format!("Near {n}"),
+            "Restaurant",
+            &["common-tag"],
+            Some((46.0 + 0.001 * n as f64, 7.0)),
+            0.01,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(
+        &common::get(
+            &app,
+            "/v1/search?tags=common-tag&bbox=6.9,45.9,7.1,46.1&limit=20",
+        )
+        .await,
+    );
+    let read = card_heap_rows_read(&api::card_read_plans());
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("Near")), "{page:?}");
+    assert!(read <= 1_200, "{read} card rows read from the table");
+}
+
+/// The types a catalogue's cards have are read once and kept: a second search with excluded
+/// types reads no type again; while a run writes the catalogue, its batches don't make the next
+/// search read them again either.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_types_read_are_kept_between_searches_and_a_run_s_batches(pool: PgPool) {
+    // The catalogue's state row, as a daemon keeps one for each catalogue.
+    store::ensure_state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap();
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[
+            card(1, "Ada", "Person", &[], None, 0.9),
+            card(2, "Mont Blanc", "Mountain", &[], None, 0.8),
+        ],
+    )
+    .await;
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    // A probe of the types is the recursive read of the type index.
+    let probes = || {
+        api::card_read_plans()
+            .iter()
+            .filter(|p| p.to_string().contains("Recursive Union"))
+            .count()
+    };
+    api::record_card_read_plans();
+    common::get(&app, "/v1/search?exclude_type=Person").await;
+    assert_eq!(probes(), 1);
+    api::record_card_read_plans();
+    common::get(&app, "/v1/search?exclude_type=Person").await;
+    assert_eq!(probes(), 0, "a second search reads the types again");
+    // A run's batch moves the state row; the types read stay.
+    sqlx::query("UPDATE catalogue_state SET run='update' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        1,
+        &[card(3, "Matterhorn", "Mountain", &[], None, 0.7)],
+        None,
+    )
+    .await
+    .unwrap();
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?exclude_type=Person").await);
+    assert_eq!(
+        probes(),
+        0,
+        "a run's batch makes the next search read the types again"
+    );
+    assert_eq!(page, ["Mont Blanc", "Matterhorn"]);
 }

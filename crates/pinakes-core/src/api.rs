@@ -2850,18 +2850,20 @@ fn each_by_fame(
 /// the filters let in, at most `cap`. Each read stops after a bounded number of rows, and reads
 /// catalogue by catalogue, so the cards of a catalogue switched off but not dropped are never
 /// read:
-/// - With a type or excluded types: first the types each catalogue's cards have (one probe of
-///   the `(catalogue, type, fame, id)` index per type, [`catalogue_types`]); a catalogue none of
-///   whose types the filters let in is not read, and the others are read by the types let in.
+/// - With excluded types, or more types than one read has branches across the catalogues: first
+///   the types each catalogue's cards have (one probe of the `(catalogue, type, fame, id)` index
+///   per type, [`catalogue_types`]); a catalogue none of whose types the filters let in is not
+///   read, and the others are read by the types let in. A few types are read type by type in
+///   every catalogue (a branch of a type a catalogue lacks reads nothing).
 /// - With `near`, `bbox` or `tags`: the [`FAMOUS_PROBE`] times `cap` best known cards (the
 ///   `(catalogue, fame, id)` index in order) and those of them through every filter kept, the
 ///   whole answer when they are `cap`. When they are fewer: with `tags`, also those holding the
 ///   labels among each catalogue's best known (its fame index, a bounded number of cards: a
-///   common label) and the best known of at most [`CARD_SCAN`] times `cap` cards holding them read
-///   through the labels index (a rare label's every card); else the [`NEAREST_CARDS`] times
-///   `cap` cards nearest to the circle's or each box's centre in it (the `point` indexes), and
-///   with a type or host filter also the best known of each type (or host) let in, kept in the
-///   place; the best known of all. With `sort=distance` and `near`, the `cap` nearest.
+///   common label) and the best known of the first [`CARD_SCAN`] times `cap` cards holding them
+///   the labels index gives, the place and the other filters checked on those alone (a rare
+///   label's every card); with a place, the [`NEAREST_CARDS`] times `cap` cards nearest to the
+///   circle's or each box's centre in it (the `point` indexes); with a type or host filter, the
+///   best known of each type (or host) let in, kept in the place; the best known of all. With `sort=distance` and `near`, the `cap` nearest.
 /// - With types (or excluded types): each catalogue's type let in, in the `(catalogue, type,
 ///   fame, id)` index's order, [`CARD_BRANCHES`] branches a read.
 /// - With hosts: each catalogue's host in the `(catalogue, catalogue_card_host(uri), fame, id)`
@@ -3173,29 +3175,42 @@ async fn best_known_cards(
                     // Fewer: a common label's cards among each catalogue's best known (its fame
                     // index in order, looking at a bounded number of cards), in the place.
                     rows.extend(branch_reads(each.clone(), false, false, true).await?);
-                    // And a rare label's cards, through the labels index alone, at most
-                    // [`CARD_SCAN`] times `cap` of them before they are ordered: a label on more
-                    // cards gives the best known of those it reads first, never all of them.
+                    // And a rare label's cards, through the labels index alone: the first
+                    // [`CARD_SCAN`] times `cap` cards holding the labels it gives, the place and
+                    // every other filter checked on those alone, so a common label in a small place
+                    // looks at no more (a label on more cards gives the best known of those read
+                    // first, never all of them). The index still lists every holder before the
+                    // limit: its bitmap grows with the label's cards (`stepF` PERF).
                     rows.extend(
                         read_cards::<FamedCard>(pool, Plan::KeyIndex, deadline, |sql| {
-                            sql.push("SELECT * FROM (SELECT ")
+                            sql.push("SELECT ")
                                 .push(CARD_READ_COLUMNS)
+                                .push(" FROM (SELECT ")
+                                .push(SCAN_COLUMNS)
                                 .push(" FROM catalogue_card c WHERE c.catalogue=ANY(")
                                 .push_bind(read_from.clone())
-                                .push(")");
+                                .push(")")
+                                .push(if all_labels {
+                                    " AND c.labels@>"
+                                } else {
+                                    " AND c.labels&&"
+                                })
+                                .push_bind(tags.to_vec())
+                                .push(" LIMIT ")
+                                .push_bind((CARD_SCAN * cap) as i64)
+                                .push(") c WHERE true");
                             filters(sql, false, false);
                             place(sql);
-                            sql.push(" LIMIT ")
-                                .push_bind((CARD_SCAN * cap) as i64)
-                                .push(") b ORDER BY b.fame DESC,b.id LIMIT ")
+                            sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
                                 .push_bind(cap as i64);
                         })
                         .await?,
                     );
-                } else {
+                }
+                if spatial.near.is_some() || spatial.bbox.is_some() {
                     // Fewer: the nearest to the circle's centre, or to each box's, in it too (in the
                     // index's nearest-first order: at equal distances at the end, either may be
-                    // read).
+                    // read), those through every filter among a bounded number of them.
                     let nearest = (NEAREST_CARDS * cap) as i64;
                     rows.extend(
                         read_cards::<FamedCard>(pool, Plan::Nearest, deadline, |sql| {
@@ -3205,11 +3220,11 @@ async fn best_known_cards(
                         })
                         .await?,
                     );
-                    // With a type or host filter, also the best known of each type (or host) let
-                    // in, kept in the place: a rare type in an area dense with others.
-                    if let Some(branches) = typed.clone().or_else(|| host_branches.clone()) {
-                        rows.extend(branch_reads(branches, false, false, true).await?);
-                    }
+                }
+                // With a type or host filter, also the best known of each type (or host) let in,
+                // kept in the place: a rare type in an area dense with others.
+                if let Some(branches) = typed.clone().or_else(|| host_branches.clone()) {
+                    rows.extend(branch_reads(branches, false, false, true).await?);
                 }
             }
             rows
@@ -3242,29 +3257,33 @@ async fn catalogue_types(
     deadline: Option<std::time::Instant>,
 ) -> Result<Vec<Option<Vec<String>>>, ApiError> {
     // Each catalogue's state row moves (`updated_at`) with every write of its cards: the types
-    // read for the same row are read again only after it moved.
-    let marks: Vec<(String, String, DateTime<Utc>)> =
+    // read for the same row are read again only after it moved; while a run writes the
+    // catalogue (each of its batches moves the row), only after [`CATALOGUE_TYPES_FRESH`].
+    let marks: Vec<(String, String, DateTime<Utc>, bool)> =
         read_cards(pool, Plan::Ordered, deadline, |sql| {
-            sql.push("SELECT current_database()::text,s.catalogue,s.updated_at FROM catalogue_state s WHERE s.catalogue=ANY(")
+            // A catalogue without a state row (never run) as at the epoch, until it has one.
+            sql.push("SELECT current_database()::text,c.name,coalesce(s.updated_at,'epoch'),coalesce(s.run IS NOT NULL,false) FROM unnest(")
                 .push_bind(catalogues.to_vec())
-                .push(")");
+                .push("::text[]) AS c(name) LEFT JOIN catalogue_state s ON s.catalogue=c.name");
         })
         .await?;
     let mark = |catalogue: &str| {
         marks
             .iter()
-            .find(|(_, c, _)| c == catalogue)
-            .map(|(db, c, at)| ((db.clone(), c.clone()), *at))
+            .find(|(_, c, _, _)| c == catalogue)
+            .map(|(db, c, at, running)| ((db.clone(), c.clone()), *at, *running))
     };
     let mut known: Vec<Option<Option<Vec<String>>>> = catalogues
         .iter()
         .map(|c| {
-            let (key, at) = mark(c)?;
+            let (key, at, running) = mark(c)?;
             let cache = CATALOGUE_TYPES.lock().ok()?;
             cache
                 .get(&key)
-                .filter(|(read_at, _)| *read_at == at)
-                .map(|(_, types)| types.clone())
+                .filter(|(read_at, read, _)| {
+                    *read_at == at || (running && read.elapsed() < CATALOGUE_TYPES_FRESH)
+                })
+                .map(|(_, _, types)| types.clone())
         })
         .collect();
     let unknown: Vec<String> = catalogues
@@ -3281,11 +3300,11 @@ async fn catalogue_types(
                 continue;
             }
             let Some((_, types)) = read.next() else { break };
-            if let (Some((key, at)), Ok(mut cache)) = (mark(catalogue), CATALOGUE_TYPES.lock()) {
+            if let (Some((key, at, _)), Ok(mut cache)) = (mark(catalogue), CATALOGUE_TYPES.lock()) {
                 if cache.len() >= CATALOGUE_TYPES_KEPT {
                     cache.clear();
                 }
-                cache.insert(key, (at, types.clone()));
+                cache.insert(key, (at, std::time::Instant::now(), types.clone()));
             }
             *slot = Some(types);
         }
@@ -3294,9 +3313,12 @@ async fn catalogue_types(
 }
 /// How many (database, catalogue) entries [`CATALOGUE_TYPES`] keeps before it starts over.
 const CATALOGUE_TYPES_KEPT: usize = 256;
+/// How long the types read while a run writes the catalogue are kept ([`catalogue_types`]): a
+/// type new to the catalogue in that run is read by the next search after it.
+const CATALOGUE_TYPES_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 /// The types [`catalogue_types`] read, by database and catalogue, with the state row's
-/// `updated_at` they were read at.
-type TypesRead = (DateTime<Utc>, Option<Vec<String>>);
+/// `updated_at` they were read at and when.
+type TypesRead = (DateTime<Utc>, std::time::Instant, Option<Vec<String>>);
 static CATALOGUE_TYPES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<(String, String), TypesRead>>,
 > = std::sync::LazyLock::new(Default::default);
@@ -7021,6 +7043,33 @@ pub async fn uncurate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A statement cancelled by its `statement_timeout` is a busy search (503, counted as
+    /// `budget`) only when the read had a turn's deadline; without one (a read of the pool's own
+    /// timeout) it stays an internal error and counts nothing.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_cancelled_read_is_busy_only_with_a_deadline(pool: PgPool) {
+        let cancelled = || async {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("SET LOCAL statement_timeout = '10ms'")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("SELECT pg_sleep(1)")
+                .execute(&mut *tx)
+                .await
+                .unwrap_err()
+        };
+        let spent = crate::telemetry::search_index_busy_count("budget");
+        let error = card_read_error(cancelled().await, None);
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!is_card_read_busy(&error));
+        assert_eq!(crate::telemetry::search_index_busy_count("budget"), spent);
+        let deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        let error = card_read_error(cancelled().await, deadline);
+        assert!(is_card_read_busy(&error));
+        assert!(crate::telemetry::search_index_busy_count("budget") > spent);
+    }
 
     /// The trending window is `{n}h` or `{n}d`; any other text, whatever its last character,
     /// is refused and never panics.
