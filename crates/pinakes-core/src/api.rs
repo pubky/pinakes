@@ -97,6 +97,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(pool: PgPool, mut config: Config) -> anyhow::Result<Self> {
         config.queue.catalogues = crate::catalogue::join::joinable(&config.catalogues);
+        config.queue.osm_catalogue = config.catalogues.enabled(crate::catalogue::Catalogue::Osm);
         let config_catalogues = config.catalogues.enabled_names();
         let mut cursor_key = [0; 32];
         getrandom::fill(&mut cursor_key).context("cursor key entropy unavailable")?;
@@ -2474,6 +2475,7 @@ async fn with_replacers(
     pool: &PgPool,
     catalogues: &[String],
     mut units: CardUnits,
+    deadline: Option<std::time::Instant>,
 ) -> Result<CardUnits, ApiError> {
     if units.units.is_empty() {
         return Ok(units);
@@ -2484,11 +2486,16 @@ async fn with_replacers(
         .filter(|c| c.as_str() != crate::catalogue::Catalogue::Osm.name())
         .cloned()
         .collect();
+    let mut tx = begin_read(pool, deadline).await?;
     let pairs: Vec<(i64, String)> = sqlx::query_as(REPLACERS)
         .bind(&ids)
         .bind(&joinable)
-        .fetch_all(pool)
-        .await?;
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| card_read_error(e, deadline))?;
+    tx.commit()
+        .await
+        .map_err(|e| card_read_error(e, deadline))?;
     for (card, resource) in pairs {
         // The row of the card's own link is the card's own unit (`card_unit`): where it is listed
         // the page lists it once already (`DISTINCT ON (unit_id)`, the resource first), and where
@@ -2511,6 +2518,7 @@ async fn with_replacers(
 async fn ambiguous_keys(
     pool: &PgPool,
     rows: &[CardRow],
+    deadline: Option<std::time::Instant>,
 ) -> Result<std::collections::HashSet<(String, String)>, ApiError> {
     let mut by_key: std::collections::HashMap<&str, std::collections::BTreeSet<&str>> =
         std::collections::HashMap::new();
@@ -2536,7 +2544,7 @@ async fn ambiguous_keys(
     // key: a key held once is one index entry however many cards the catalogue holds, and a key
     // many cards of the catalogue hold costs two of them. Another catalogue's check of that key
     // goes once through its holders (the key index does not tell catalogues apart).
-    let ambiguous: Vec<(String, String)> = read_cards(pool, Plan::KeyIndex, |sql| {
+    let ambiguous: Vec<(String, String)> = read_cards(pool, Plan::KeyIndex, deadline, |sql| {
         sql.push("SELECT p.k,p.catalogue FROM unnest(")
             .push_bind(keys.clone())
             .push("::text[],")
@@ -2631,8 +2639,8 @@ async fn card_units(
     let at: std::collections::HashMap<i64, usize> =
         ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
     rows.sort_by_key(|row| at.get(&row.0).copied().unwrap_or(usize::MAX));
-    let ambiguous = ambiguous_keys(pool, &rows).await?;
-    with_replacers(pool, catalogues, units_of(rows, &ambiguous)).await
+    let ambiguous = ambiguous_keys(pool, &rows, None).await?;
+    with_replacers(pool, catalogues, units_of(rows, &ambiguous), None).await
 }
 /// How many times `cap` of the best known cards a place search without text reads first, keeping
 /// those in its circle or box ([`best_known_cards`]).
@@ -2640,8 +2648,8 @@ pub const FAMOUS_PROBE: usize = 2;
 /// How many times `cap` cards nearest to its place a search without text reads when the best
 /// known it read first hold fewer than `cap` in it ([`best_known_cards`]).
 pub const NEAREST_CARDS: usize = 2;
-/// The most branches (a catalogue's type or host) a search without text reads, each in its
-/// index's order ([`best_known_cards`]).
+/// The most branches (a catalogue's type or host) one card read without text reads, each in its
+/// index's order ([`best_known_cards`]): more go in several reads.
 const CARD_BRANCHES: usize = 64;
 thread_local! {
     /// Tests: the plans of the card reads without text this thread ran, while recorded.
@@ -2680,12 +2688,13 @@ enum Plan {
 async fn read_cards<T>(
     pool: &PgPool,
     plan: Plan,
+    deadline: Option<std::time::Instant>,
     build: impl Fn(&mut QueryBuilder<'static, Postgres>),
 ) -> Result<Vec<T>, ApiError>
 where
     T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
 {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin_read(pool, deadline).await?;
     // The settings in one statement, local to the transaction.
     sqlx::query(match plan {
         Plan::Ordered => "SELECT set_config('max_parallel_workers_per_gather','0',true)",
@@ -2693,11 +2702,16 @@ where
         Plan::KeyIndex => "SELECT set_config('max_parallel_workers_per_gather','0',true),set_config('enable_indexscan','off',true),set_config('enable_seqscan','off',true)",
     })
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| card_read_error(e, deadline))?;
     if CARD_READ_PLANS.with(|p| p.borrow().is_some()) {
         let mut sql = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
         build(&mut sql);
-        let plan: Value = sql.build_query_scalar().fetch_one(&mut *tx).await?;
+        let plan: Value = sql
+            .build_query_scalar()
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| card_read_error(e, deadline))?;
         CARD_READ_PLANS.with(|p| {
             if let Some(plans) = p.borrow_mut().as_mut() {
                 plans.push(plan);
@@ -2706,12 +2720,78 @@ where
     }
     let mut sql = QueryBuilder::<Postgres>::new("");
     build(&mut sql);
-    let rows = sql.build_query_as().fetch_all(&mut *tx).await?;
-    tx.commit().await?;
+    let rows = sql
+        .build_query_as()
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| card_read_error(e, deadline))?;
+    tx.commit()
+        .await
+        .map_err(|e| card_read_error(e, deadline))?;
     Ok(rows)
+}
+/// A transaction for a search's reads whose every statement stops at `deadline` (a
+/// `statement_timeout` of what is left of the search's turn budget, at least 1 ms): a read held
+/// up past it is cancelled in Postgres, not left running after the search answered. `None`: as
+/// the pool's connections are set.
+async fn begin_read(
+    pool: &PgPool,
+    deadline: Option<std::time::Instant>,
+) -> Result<sqlx::Transaction<'static, Postgres>, ApiError> {
+    if let Some(deadline) = deadline {
+        // Too little left for a read: busy at once, never a statement cancelled as it starts.
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left < std::time::Duration::from_millis(5) {
+            crate::telemetry::search_index_busy("budget");
+            return Err(card_read_busy());
+        }
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT set_config('statement_timeout',$1,true)")
+            .bind(format!("{}ms", left.as_millis()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| card_read_error(e, Some(deadline)))?;
+        return Ok(tx);
+    }
+    Ok(pool.begin().await?)
+}
+/// The error of a read that ran past its search's turn budget ([`begin_read`]): the search
+/// answers as a busy text search does, 503 with `Retry-After: 1` ([`text_search_busy`]).
+fn card_read_busy() -> ApiError {
+    ApiError(StatusCode::SERVICE_UNAVAILABLE, CARD_READ_BUSY.into())
+}
+/// The message of [`card_read_busy`].
+const CARD_READ_BUSY: &str = "text search is busy, try again shortly";
+/// Whether `error` is [`card_read_busy`]'s (no other 503).
+fn is_card_read_busy(error: &ApiError) -> bool {
+    error.0 == StatusCode::SERVICE_UNAVAILABLE && error.1 == CARD_READ_BUSY
+}
+/// `error` as a search read's error: cancelled by the `statement_timeout` of its turn's budget
+/// (`deadline`) it is [`card_read_busy`] (counted as `budget`); else (a read with no turn, or
+/// another error) an internal error.
+fn card_read_error(error: sqlx::Error, deadline: Option<std::time::Instant>) -> ApiError {
+    match &error {
+        sqlx::Error::Database(e) if deadline.is_some() && e.code().as_deref() == Some("57014") => {
+            crate::telemetry::search_index_busy("budget");
+            card_read_busy()
+        }
+        _ => error.into(),
+    }
 }
 /// One branch of a card read in fame order: a catalogue, and a column equal to a value in it.
 type Branch = (String, Option<(&'static str, String)>);
+/// The columns a branch's scanned rows keep for the conditions on them ([`each_by_fame`]).
+const SCAN_COLUMNS: &str = "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point,c.labels,c.name";
+/// How many times `cap` cards one filtered card read without text looks at in all, shared by its
+/// branches (each at least [`FAMOUS_PROBE`] times `cap`): a filter its index does not serve
+/// (a type in a host's branch, a place in a type's, a type near a place) turns away the rest
+/// unread, so no read walks a whole catalogue or every point of an area ([`best_known_cards`]).
+pub const CARD_SCAN: usize = 20;
+/// The rows each of `branches` looks at: [`CARD_SCAN`] times `cap` shared, at least
+/// [`FAMOUS_PROBE`] times `cap` each.
+fn scan_per_branch(cap: usize, branches: usize) -> usize {
+    (CARD_SCAN * cap / branches.max(1)).max(FAMOUS_PROBE * cap)
+}
 /// `branches`, each read in fame order with `columns` and the conditions `inner` adds (on `c`),
 /// merged in that order: at most `limit` rows in all, as `b`.
 fn by_fame(
@@ -2720,33 +2800,44 @@ fn by_fame(
     branches: &[Branch],
     inner: &dyn Fn(&mut QueryBuilder<'static, Postgres>),
     limit: usize,
+    scan: Option<usize>,
 ) {
-    each_by_fame(sql, columns, branches, inner, limit);
+    each_by_fame(sql, columns, branches, inner, limit, scan);
     sql.push(" ORDER BY b.fame DESC,b.id LIMIT ")
         .push_bind(limit as i64);
 }
-/// [`by_fame`] without the merged limit: each branch's `limit` rows, as `b`.
+/// [`by_fame`] without the merged limit: each branch's `limit` rows, as `b`. With `scan`, each
+/// branch looks at its `scan` best known cards alone (its index's order) and keeps those
+/// through `inner`.
 fn each_by_fame(
     sql: &mut QueryBuilder<'static, Postgres>,
     columns: &str,
     branches: &[Branch],
     inner: &dyn Fn(&mut QueryBuilder<'static, Postgres>),
     limit: usize,
+    scan: Option<usize>,
 ) {
     sql.push("SELECT * FROM (");
     for (i, (catalogue, extra)) in branches.iter().enumerate() {
         if i > 0 {
             sql.push(" UNION ALL ");
         }
-        sql.push("(SELECT ")
-            .push(columns)
-            .push(" FROM catalogue_card c WHERE c.catalogue=")
+        sql.push("(SELECT ").push(columns).push(" FROM ");
+        if scan.is_some() {
+            sql.push("(SELECT ").push(SCAN_COLUMNS).push(" FROM ");
+        }
+        sql.push("catalogue_card c WHERE c.catalogue=")
             .push_bind(catalogue.clone());
         if let Some((column, value)) = extra {
             sql.push(" AND ")
                 .push(*column)
                 .push("=")
                 .push_bind(value.clone());
+        }
+        if let Some(scan) = scan {
+            sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
+                .push_bind(scan as i64)
+                .push(") c WHERE true");
         }
         inner(sql);
         sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
@@ -2758,26 +2849,44 @@ fn each_by_fame(
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
 /// the filters let in, at most `cap`. Each read stops after a bounded number of rows, and reads
 /// catalogue by catalogue, so the cards of a catalogue switched off but not dropped are never
-/// read:
-/// - With `near` or `bbox`: the [`FAMOUS_PROBE`] times `cap` best known cards (the `(catalogue,
-///   fame, id)` index in order) and those of them in the place kept, the whole answer when they
-///   are `cap`; when they are fewer, also the [`NEAREST_CARDS`] times `cap` cards nearest to the
-///   circle's or each box's centre in it (the `point` indexes), and the best known of both. With
-///   `sort=distance` and `near`, the `cap` nearest.
+/// read, but for the labels index's read: there that catalogue's cards holding the labels count
+/// toward its [`CARD_SCAN`] times `cap` like any other (so dropping the catalogue, `pinakesd
+/// catalogue drop`, gives a rare label's cards that room back):
+/// - With excluded types, or more types than one read has branches across the catalogues: first
+///   the types each catalogue's cards have (one probe of the `(catalogue, type, fame, id)` index
+///   per type, [`catalogue_types`]); a catalogue none of whose types the filters let in is not
+///   read, and the others are read by the types let in. A few types are read type by type in
+///   every catalogue (a branch of a type a catalogue lacks reads nothing).
+/// - With `near`, `bbox` or `tags`: the [`FAMOUS_PROBE`] times `cap` best known cards (the
+///   `(catalogue, fame, id)` index in order) and those of them through every filter kept, the
+///   whole answer when they are `cap`. When they are fewer: with `tags`, also those holding the
+///   labels among each catalogue's best known (its fame index, a bounded number of cards: a
+///   common label) and the best known of the first [`CARD_SCAN`] times `cap` cards holding them
+///   the labels index gives, the place and the other filters checked on those alone (a rare
+///   label's every card); with a place, the [`NEAREST_CARDS`] times `cap` cards nearest to the
+///   circle's or each box's centre in it (the `point` indexes); with a type or host filter, the
+///   best known of each type (or host) let in, kept in the place (the types or hosts sharing
+///   [`CARD_SCAN`] times `cap` cards); the best known of all. Each of these follow-up reads runs
+///   only while fewer than `cap` cards were found. With `sort=distance` and `near`, the `cap` nearest.
+/// - With types (or excluded types): each catalogue's type let in, in the `(catalogue, type,
+///   fame, id)` index's order, [`CARD_BRANCHES`] branches a read.
 /// - With hosts: each catalogue's host in the `(catalogue, catalogue_card_host(uri), fame, id)`
 ///   index's order.
-/// - With types and no label: each catalogue's type (and subtype) in the `(catalogue, type, fame,
-///   id)` index's order.
 /// - Else each catalogue in the `(catalogue, fame, id)` index's order.
 ///
-/// The branches of one read are merged in their order, so it stops after `cap` rows. The nearest
-/// reads go one branch per catalogue in its own `point` index (partial, `WHERE catalogue=…`).
+/// A branch whose index does not serve every filter looks at a bounded number of its cards
+/// ([`CARD_SCAN`]); the nearest reads with a filter look at that many nearest. The branches of
+/// one read are merged in their order, so it stops after `cap` rows. The nearest reads go one
+/// branch per catalogue in its own `point` index (partial, `WHERE catalogue=…`).
 ///
 /// With `inside` (a text of one character found inside names, which the text index leaves to
 /// Postgres): only the [`FAMOUS_PROBE`] times `cap` best known cards of each catalogue are read
 /// (each catalogue's own, not of all together), in fame order, and those whose name holds the
 /// character kept (with every filter and the place); other names are not read, as a link's are
 /// not.
+///
+/// Every read stops at `deadline` (the search's turn budget, [`begin_read`]): past it the search
+/// answers 503 ([`card_read_busy`]).
 #[allow(clippy::too_many_arguments)]
 async fn best_known_cards(
     pool: &PgPool,
@@ -2788,6 +2897,7 @@ async fn best_known_cards(
     sort: Option<&str>,
     cap: usize,
     inside: Option<&str>,
+    deadline: Option<std::time::Instant>,
 ) -> Result<CardUnits, ApiError> {
     let types = q
         .type_name
@@ -2803,6 +2913,48 @@ async fn best_known_cards(
         .transpose()?;
     let hosts = q.host.as_deref().map(search_hosts).transpose()?;
     let all_labels = q.match_mode.as_deref() == Some("all");
+    // With a type filter or excluded types, each catalogue's types the filters let in, of those
+    // its cards have: a catalogue left with none is not read (`exclude_type=Thing` reads no card),
+    // and the others by those types. `None` for a catalogue of more types than are probed: read
+    // with the filters as they are.
+    let mut let_in: Vec<(String, Option<Vec<String>>)> = vec![];
+    // Probed only where it narrows the reads: with excluded types, or with more types than one
+    // read has branches across the catalogues; a few types are read type by type as they are.
+    let probe = excluded.is_some()
+        || types
+            .as_ref()
+            .is_some_and(|t| t.len() * catalogues.len() > CARD_BRANCHES);
+    if probe {
+        let wanted: Option<std::collections::HashSet<&String>> =
+            types.as_ref().map(|t| t.iter().collect());
+        let unwanted: std::collections::HashSet<&String> = excluded.iter().flatten().collect();
+        for (catalogue, present) in catalogues
+            .iter()
+            .zip(catalogue_types(pool, catalogues, deadline).await?)
+        {
+            match present {
+                Some(present) => {
+                    let kept: Vec<String> = present
+                        .into_iter()
+                        .filter(|t| wanted.as_ref().is_none_or(|w| w.contains(t)))
+                        .filter(|t| !unwanted.contains(t))
+                        .collect();
+                    if !kept.is_empty() {
+                        let_in.push((catalogue.clone(), Some(kept)));
+                    }
+                }
+                None => let_in.push((catalogue.clone(), None)),
+            }
+        }
+    } else {
+        let_in = catalogues.iter().map(|c| (c.clone(), None)).collect();
+    }
+    if let_in.is_empty() {
+        return Ok(CardUnits::default());
+    }
+    // The catalogues read: those whose cards the filters may let in.
+    let read_from: Vec<String> = let_in.iter().map(|(c, _)| c.clone()).collect();
+    let filtered = types.is_some() || excluded.is_some() || hosts.is_some() || !tags.is_empty();
     // Every filter but the place and the catalogue, on `c`: the types unless `one_type` (each
     // branch's own), the hosts unless `one_host`.
     let filters = |sql: &mut QueryBuilder<'static, Postgres>, one_type: bool, one_host: bool| {
@@ -2840,64 +2992,158 @@ async fn best_known_cards(
             .push_bind(radius)
             .push(")");
     };
+    // The place, on `c`.
+    let place = |sql: &mut QueryBuilder<'static, Postgres>| {
+        if let Some(near) = spatial.near {
+            circle(sql, near);
+        }
+        if let Some(bbox) = &spatial.bbox {
+            push_boxes(sql, &bbox.split());
+        }
+    };
     // Each catalogue's name as a literal: the planner matches it to that catalogue's partial
     // `point` indexes, which a bound value (a generic plan) would not.
-    let literals: Vec<String> = catalogues
+    let literals: Vec<String> = read_from
         .iter()
         .filter_map(|c| crate::catalogue::Catalogue::parse(c))
         .map(|c| format!("'{}'", c.name()))
         .collect();
-    // One branch per catalogue (and box), each its `limit` nearest to the centre in its own index.
+    let boxes: Vec<Option<[f64; 4]>> = match (&spatial.near, &spatial.bbox) {
+        (None, Some(bbox)) => bbox.split().into_iter().map(Some).collect(),
+        _ => vec![None],
+    };
+    // One branch per catalogue (and box), each its `limit` nearest to the centre in its own
+    // index; with a filter, of its `scan` nearest.
     let nearest_branches =
         |sql: &mut QueryBuilder<'static, Postgres>, columns: &str, limit: i64| {
+            let scan = filtered.then(|| scan_per_branch(cap, literals.len() * boxes.len()) as i64);
+            // Nearest first to the circle's centre, or to the box's.
+            let order = |sql: &mut QueryBuilder<'static, Postgres>, b: Option<[f64; 4]>| match (
+                spatial.near,
+                b,
+            ) {
+                (Some(near), _) => {
+                    sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
+                        .push_bind(near.1)
+                        .push(",")
+                        .push_bind(near.0)
+                        .push("),4326)::geography");
+                }
+                (None, Some(b)) => {
+                    sql.push(" ORDER BY c.point<->ST_SetSRID(ST_MakePoint(")
+                        .push_bind((b[0] + b[2]) / 2.0)
+                        .push(",")
+                        .push_bind((b[1] + b[3]) / 2.0)
+                        .push("),4326)");
+                }
+                (None, None) => {}
+            };
             let mut first = true;
             for literal in &literals {
-                let boxes: Vec<Option<[f64; 4]>> = match (&spatial.near, &spatial.bbox) {
-                    (None, Some(bbox)) => bbox.split().into_iter().map(Some).collect(),
-                    _ => vec![None],
-                };
-                for b in boxes {
+                for b in &boxes {
                     if !first {
                         sql.push(" UNION ALL ");
                     }
                     first = false;
-                    sql.push("(SELECT ")
-                        .push(columns)
-                        .push(" FROM catalogue_card c WHERE c.catalogue=")
+                    sql.push("(SELECT ").push(columns).push(" FROM ");
+                    if scan.is_some() {
+                        sql.push("(SELECT ").push(SCAN_COLUMNS).push(" FROM ");
+                    }
+                    sql.push("catalogue_card c WHERE c.catalogue=")
                         .push(literal.as_str());
-                    filters(sql, false, false);
+                    if scan.is_none() {
+                        filters(sql, false, false);
+                    }
                     match (spatial.near, b) {
                         (Some(near), _) => {
                             circle(sql, near);
                             if let Some(bbox) = &spatial.bbox {
                                 push_boxes(sql, &bbox.split());
                             }
-                            sql.push(" ORDER BY c.point::geography<->ST_SetSRID(ST_MakePoint(")
-                                .push_bind(near.1)
-                                .push(",")
-                                .push_bind(near.0)
-                                .push("),4326)::geography");
                         }
-                        (None, Some(b)) => {
-                            push_boxes(sql, std::slice::from_ref(&b));
-                            sql.push(" ORDER BY c.point<->ST_SetSRID(ST_MakePoint(")
-                                .push_bind((b[0] + b[2]) / 2.0)
-                                .push(",")
-                                .push_bind((b[1] + b[3]) / 2.0)
-                                .push("),4326)");
-                        }
+                        (None, Some(b)) => push_boxes(sql, std::slice::from_ref(b)),
                         (None, None) => {}
+                    }
+                    order(sql, *b);
+                    if let Some(scan) = scan {
+                        sql.push(" LIMIT ").push_bind(scan).push(") c WHERE true");
+                        filters(sql, false, false);
+                        order(sql, *b);
                     }
                     sql.push(" LIMIT ").push_bind(limit).push(")");
                 }
             }
         };
-    let each: Vec<Branch> = catalogues.iter().map(|c| (c.clone(), None)).collect();
-    let rows: Vec<FamedCard> =
+    let each: Vec<Branch> = read_from.iter().map(|c| (c.clone(), None)).collect();
+    // Each catalogue's type let in.
+    let typed: Option<Vec<Branch>> = (types.is_some() || excluded.is_some())
+        .then(|| {
+            let mut branches = vec![];
+            for (catalogue, kept) in &let_in {
+                let types = kept.clone().or_else(|| types.clone())?;
+                branches.extend(
+                    types
+                        .into_iter()
+                        .map(|t| (catalogue.clone(), Some(("c.type", t)))),
+                );
+            }
+            Some(branches)
+        })
+        .flatten();
+    // Each catalogue's host, each its own branch (at most 10 hosts of 7 catalogues).
+    let host_branches: Option<Vec<Branch>> = hosts.as_ref().map(|hosts| {
+        read_from
+            .iter()
+            .flat_map(|c| {
+                hosts
+                    .iter()
+                    .map(move |h| (c.clone(), Some(("catalogue_card_host(c.uri)", h.clone()))))
+            })
+            .collect()
+    });
+    // The best known of `branches` through every filter (and the place when `in_place`), each
+    // branch in its index's order looking at a bounded number of cards, [`CARD_BRANCHES`] a read.
+    // `shared`: the branches share [`CARD_SCAN`] times `cap` cards strictly (a follow-up read of
+    // many types or hosts after other reads, looking at a few cards of each), else each looks at
+    // its share and at least [`FAMOUS_PROBE`] times `cap`.
+    let branch_reads = |branches: Vec<Branch>,
+                        one_type: bool,
+                        one_host: bool,
+                        in_place: bool,
+                        shared: bool| async move {
+        let mut rows: Vec<FamedCard> = vec![];
+        for part in branches.chunks(CARD_BRANCHES) {
+            let scan = if shared {
+                (CARD_SCAN * cap / branches.len().max(1)).max(1)
+            } else {
+                scan_per_branch(cap, branches.len())
+            };
+            rows.extend(
+                read_cards::<FamedCard>(pool, Plan::Ordered, deadline, |sql| {
+                    by_fame(
+                        sql,
+                        CARD_READ_COLUMNS,
+                        part,
+                        &|sql| {
+                            filters(sql, one_type, one_host);
+                            if in_place {
+                                place(sql);
+                            }
+                        },
+                        cap,
+                        Some(scan),
+                    )
+                })
+                .await?,
+            );
+        }
+        Ok::<_, ApiError>(rows)
+    };
+    let mut rows: Vec<FamedCard> =
         if let (Some("distance"), Some(near), None) = (sort, spatial.near, inside) {
             // The nearest in the circle, each catalogue's in its own geography index, then in that
             // order with the card ID for equal distances.
-            read_cards(pool, Plan::Nearest, |sql| {
+            read_cards(pool, Plan::Nearest, deadline, |sql| {
                 sql.push("SELECT c.id,c.uri,c.type,c.catalogue,c.keys,c.fame FROM (");
                 nearest_branches(
                     sql,
@@ -2912,9 +3158,13 @@ async fn best_known_cards(
                     .push_bind(cap as i64);
             })
             .await?
-        } else if spatial.near.is_some() || spatial.bbox.is_some() || inside.is_some() {
+        } else if spatial.near.is_some()
+            || spatial.bbox.is_some()
+            || inside.is_some()
+            || !tags.is_empty()
+        {
             // The best known first, kept when in the place and through every filter.
-            let mut rows: Vec<FamedCard> = read_cards(pool, Plan::Ordered, |sql| {
+            let mut rows: Vec<FamedCard> = read_cards(pool, Plan::Ordered, deadline, |sql| {
                 sql.push("SELECT ").push(CARD_READ_COLUMNS).push(" FROM (");
                 // A place takes the best known of all catalogues together; one character each
                 // catalogue's own, so a catalogue of lesser known cards still lists its matches.
@@ -2923,107 +3173,219 @@ async fn best_known_cards(
                 } else {
                     by_fame
                 };
-                probe(
-                    sql,
-                    "c.id,c.uri,c.type,c.catalogue,c.keys,c.fame,c.point,c.labels,c.name",
-                    &each,
-                    &|_| {},
-                    FAMOUS_PROBE * cap,
-                );
+                probe(sql, SCAN_COLUMNS, &each, &|_| {}, FAMOUS_PROBE * cap, None);
                 sql.push(") c WHERE true");
                 filters(sql, false, false);
                 if let Some(text) = inside {
                     sql.push(" AND c.name ILIKE ")
                         .push_bind(like_anywhere(text));
                 }
-                if let Some(near) = spatial.near {
-                    circle(sql, near);
-                }
-                if let Some(bbox) = &spatial.bbox {
-                    push_boxes(sql, &bbox.split());
-                }
+                place(sql);
                 sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
                     .push_bind(cap as i64);
             })
             .await?;
             if rows.len() < cap && inside.is_none() {
-                // Fewer: the nearest to the circle's centre, or to each box's, in it too (in the index's
-                // nearest-first order: at equal distances at the end, either may be read).
-                let nearest = (NEAREST_CARDS * cap) as i64;
-                let near: Vec<FamedCard> = read_cards(pool, Plan::Nearest, |sql| {
-                    sql.push("SELECT * FROM (");
-                    nearest_branches(sql, CARD_READ_COLUMNS, nearest);
-                    sql.push(") b");
-                })
-                .await?;
-                rows.extend(near);
-                rows.sort_by(|a, b| b.5.total_cmp(&a.5).then(a.0.cmp(&b.0)));
-                rows.dedup_by_key(|r| r.0);
-                rows.truncate(cap);
+                if !tags.is_empty() {
+                    // Fewer: a common label's cards among each catalogue's best known (its fame
+                    // index in order, looking at a bounded number of cards), in the place.
+                    rows.extend(branch_reads(each.clone(), false, false, true, false).await?);
+                    // And a rare label's cards, through the labels index alone: the first
+                    // [`CARD_SCAN`] times `cap` cards holding the labels it gives, the place and
+                    // every other filter checked on those alone, so a common label in a small place
+                    // looks at no more (a label on more cards gives the best known of those read
+                    // first, never all of them). The index still lists every holder before the
+                    // limit: its bitmap grows with the label's cards (`stepF` PERF).
+                    rows.extend(
+                        read_cards::<FamedCard>(pool, Plan::KeyIndex, deadline, |sql| {
+                            sql.push("SELECT ")
+                                .push(CARD_READ_COLUMNS)
+                                .push(" FROM (SELECT ")
+                                .push(SCAN_COLUMNS)
+                                .push(" FROM catalogue_card c WHERE ")
+                                .push(if all_labels {
+                                    "c.labels@>"
+                                } else {
+                                    "c.labels&&"
+                                })
+                                .push_bind(tags.to_vec())
+                                .push(" LIMIT ")
+                                .push_bind((CARD_SCAN * cap) as i64)
+                                // The catalogues that are on are kept among those read, so the
+                                // cards of one switched off but not dropped count toward the
+                                // limit: they cost the read no more than any other card.
+                                .push(") c WHERE c.catalogue=ANY(")
+                                .push_bind(read_from.clone())
+                                .push(")");
+                            filters(sql, false, false);
+                            place(sql);
+                            sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
+                                .push_bind(cap as i64);
+                        })
+                        .await?,
+                    );
+                }
+                // The rows so far, each card once: the reads below run only while they are fewer
+                // than `cap`.
+                let full = |rows: &mut Vec<FamedCard>| {
+                    rows.sort_by(|a, b| b.5.total_cmp(&a.5).then(a.0.cmp(&b.0)));
+                    rows.dedup_by_key(|r| r.0);
+                    rows.len() >= cap
+                };
+                if (spatial.near.is_some() || spatial.bbox.is_some()) && !full(&mut rows) {
+                    // Fewer: the nearest to the circle's centre, or to each box's, in it too (in the
+                    // index's nearest-first order: at equal distances at the end, either may be
+                    // read), those through every filter among a bounded number of them.
+                    let nearest = (NEAREST_CARDS * cap) as i64;
+                    rows.extend(
+                        read_cards::<FamedCard>(pool, Plan::Nearest, deadline, |sql| {
+                            sql.push("SELECT * FROM (");
+                            nearest_branches(sql, CARD_READ_COLUMNS, nearest);
+                            sql.push(") b");
+                        })
+                        .await?,
+                    );
+                }
+                // Still fewer, with a type or host filter: also the best known of each type (or
+                // host) let in, kept in the place and through the labels: a rare type in an area
+                // dense with others. The branches share [`CARD_SCAN`] times `cap` cards.
+                if let Some(branches) = typed.clone().or_else(|| host_branches.clone()) {
+                    if !full(&mut rows) {
+                        rows.extend(branch_reads(branches, false, false, true, true).await?);
+                    }
+                }
             }
             rows
-        } else if let Some(hosts) = hosts
-            .as_ref()
-            .filter(|h| h.len() * catalogues.len() <= CARD_BRANCHES)
-        {
-            let branches: Vec<Branch> = catalogues
-                .iter()
-                .flat_map(|c| {
-                    hosts
-                        .iter()
-                        .map(move |h| (c.clone(), Some(("catalogue_card_host(c.uri)", h.clone()))))
-                })
-                .collect();
-            read_cards(pool, Plan::Ordered, |sql| {
-                by_fame(
-                    sql,
-                    CARD_READ_COLUMNS,
-                    &branches,
-                    &|sql| filters(sql, false, true),
-                    cap,
-                )
-            })
-            .await?
-        } else if let Some(types) = types
-            .as_ref()
-            .filter(|t| t.len() * catalogues.len() <= CARD_BRANCHES && tags.is_empty())
-        {
-            let branches: Vec<Branch> = catalogues
-                .iter()
-                .flat_map(|c| {
-                    types
-                        .iter()
-                        .map(move |t| (c.clone(), Some(("c.type", t.clone()))))
-                })
-                .collect();
-            read_cards(pool, Plan::Ordered, |sql| {
-                by_fame(
-                    sql,
-                    CARD_READ_COLUMNS,
-                    &branches,
-                    &|sql| filters(sql, true, false),
-                    cap,
-                )
-            })
-            .await?
+        } else if let Some(branches) = typed.clone() {
+            // Types (with a host as a filter of each type's branch).
+            branch_reads(branches, true, false, false, false).await?
+        } else if let Some(branches) = host_branches.clone() {
+            branch_reads(branches, false, true, false, false).await?
         } else {
-            read_cards(pool, Plan::Ordered, |sql| {
-                by_fame(
-                    sql,
-                    CARD_READ_COLUMNS,
-                    &each,
-                    &|sql| filters(sql, false, false),
-                    cap,
-                )
-            })
-            .await?
+            branch_reads(each.clone(), false, false, false, false).await?
         };
+    rows.sort_by(|a, b| b.5.total_cmp(&a.5).then(a.0.cmp(&b.0)));
+    rows.dedup_by_key(|r| r.0);
+    rows.truncate(cap);
     let rows: Vec<CardRow> = rows
         .into_iter()
         .map(|(id, uri, type_name, catalogue, keys, _)| (id, uri, type_name, catalogue, keys))
         .collect();
-    let ambiguous = ambiguous_keys(pool, &rows).await?;
-    with_replacers(pool, catalogues, units_of(rows, &ambiguous)).await
+    let ambiguous = ambiguous_keys(pool, &rows, deadline).await?;
+    with_replacers(pool, catalogues, units_of(rows, &ambiguous), deadline).await
+}
+/// The most types of one catalogue [`catalogue_types`] reads.
+const CATALOGUE_TYPES_MAX: i64 = 256;
+/// The types the cards of each of `catalogues` have: one probe of the `(catalogue, type, fame,
+/// id)` index per type (each the next type after the last), read again only after the
+/// catalogue's cards changed; `None` for a catalogue of more than [`CATALOGUE_TYPES_MAX`].
+async fn catalogue_types(
+    pool: &PgPool,
+    catalogues: &[String],
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<Option<Vec<String>>>, ApiError> {
+    // Each catalogue's state row moves (`updated_at`) with every write of its cards: the types
+    // read for the same row are read again only after it moved; while a run writes the
+    // catalogue (each of its batches moves the row), only after [`CATALOGUE_TYPES_FRESH`].
+    let marks: Vec<(String, String, DateTime<Utc>, bool)> =
+        read_cards(pool, Plan::Ordered, deadline, |sql| {
+            // A catalogue without a state row (never run) as at the epoch, until it has one.
+            sql.push("SELECT current_database()::text,c.name,coalesce(s.updated_at,'epoch'),coalesce(s.run IS NOT NULL,false) FROM unnest(")
+                .push_bind(catalogues.to_vec())
+                .push("::text[]) AS c(name) LEFT JOIN catalogue_state s ON s.catalogue=c.name");
+        })
+        .await?;
+    let mark = |catalogue: &str| {
+        marks
+            .iter()
+            .find(|(_, c, _, _)| c == catalogue)
+            .map(|(db, c, at, running)| ((db.clone(), c.clone()), *at, *running))
+    };
+    let mut known: Vec<Option<Option<Vec<String>>>> = catalogues
+        .iter()
+        .map(|c| {
+            let (key, at, running) = mark(c)?;
+            let cache = CATALOGUE_TYPES.lock().ok()?;
+            cache
+                .get(&key)
+                .filter(|(read_at, read, _)| {
+                    *read_at == at || (running && read.elapsed() < CATALOGUE_TYPES_FRESH)
+                })
+                .map(|(_, _, types)| types.clone())
+        })
+        .collect();
+    let unknown: Vec<String> = catalogues
+        .iter()
+        .zip(&known)
+        .filter(|(_, k)| k.is_none())
+        .map(|(c, _)| c.clone())
+        .collect();
+    if !unknown.is_empty() {
+        let read = probe_catalogue_types(pool, &unknown, deadline).await?;
+        let mut read = unknown.iter().zip(read);
+        for (catalogue, slot) in catalogues.iter().zip(known.iter_mut()) {
+            if slot.is_some() {
+                continue;
+            }
+            let Some((_, types)) = read.next() else { break };
+            if let (Some((key, at, _)), Ok(mut cache)) = (mark(catalogue), CATALOGUE_TYPES.lock()) {
+                if cache.len() >= CATALOGUE_TYPES_KEPT {
+                    cache.clear();
+                }
+                cache.insert(key, (at, std::time::Instant::now(), types.clone()));
+            }
+            *slot = Some(types);
+        }
+    }
+    Ok(known.into_iter().map(Option::flatten).collect())
+}
+/// How many (database, catalogue) entries [`CATALOGUE_TYPES`] keeps before it starts over.
+const CATALOGUE_TYPES_KEPT: usize = 256;
+/// How long the types read while a run writes the catalogue are kept ([`catalogue_types`]): a
+/// type new to the catalogue in that run is read by the next search after it.
+const CATALOGUE_TYPES_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+/// The types [`catalogue_types`] read, by database and catalogue, with the state row's
+/// `updated_at` they were read at and when.
+type TypesRead = (DateTime<Utc>, std::time::Instant, Option<Vec<String>>);
+static CATALOGUE_TYPES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String), TypesRead>>,
+> = std::sync::LazyLock::new(Default::default);
+/// [`catalogue_types`] read from the type index.
+async fn probe_catalogue_types(
+    pool: &PgPool,
+    catalogues: &[String],
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<Option<Vec<String>>>, ApiError> {
+    let found: Vec<(i32, String)> = read_cards(pool, Plan::Ordered, deadline, |sql| {
+        sql.push("WITH RECURSIVE ");
+        for (i, catalogue) in catalogues.iter().enumerate() {
+            if i > 0 {
+                sql.push(",");
+            }
+            sql.push(format!("t{i}(type) AS ((SELECT c.type FROM catalogue_card c WHERE c.catalogue="))
+                .push_bind(catalogue.clone())
+                .push(" ORDER BY c.type LIMIT 1) UNION ALL SELECT (SELECT c.type FROM catalogue_card c WHERE c.catalogue=")
+                .push_bind(catalogue.clone())
+                .push(format!(" AND c.type>t{i}.type ORDER BY c.type LIMIT 1) FROM t{i} WHERE t{i}.type IS NOT NULL)"));
+        }
+        for i in 0..catalogues.len() {
+            sql.push(if i > 0 { " UNION ALL " } else { " " })
+                .push(format!("(SELECT {i}::int4,type FROM t{i} WHERE type IS NOT NULL LIMIT "))
+                .push_bind(CATALOGUE_TYPES_MAX + 1)
+                .push(")");
+        }
+    })
+    .await?;
+    let mut types: Vec<Vec<String>> = vec![vec![]; catalogues.len()];
+    for (i, t) in found {
+        if let Some(list) = types.get_mut(i as usize) {
+            list.push(t);
+        }
+    }
+    Ok(types
+        .into_iter()
+        .map(|list| (list.len() as i64 <= CATALOGUE_TYPES_MAX).then_some(list))
+        .collect())
 }
 /// `AND` any of the boxes (west, south, east, north) holds `c.point`.
 fn push_boxes(sql: &mut QueryBuilder<'_, Postgres>, boxes: &[[f64; 4]]) {
@@ -3090,7 +3452,8 @@ fn not_hidden(set: &str, present: &str) -> String {
 }
 /// `read`, within a held text-search turn's budget (`deadline`; none: as it is): `None` when the
 /// budget ran out first (counted as `budget`). Every read a search makes while it holds a turn
-/// goes through here or a `statement_timeout` of what is left, so the turn is held no longer.
+/// goes through here and runs under a `statement_timeout` of what is left ([`begin_read`]), so
+/// the turn is held no longer and the statement does not run on after the search answered.
 async fn within_turn<T>(
     deadline: Option<std::time::Instant>,
     read: impl std::future::Future<Output = T>,
@@ -3745,8 +4108,16 @@ pub async fn search(
                 found.units.iter().filter(|c| c.card.is_some()).collect();
             card_units(&state.pool, &catalogues, &found).await?
         }
+        // Without text: under a turn of the text searches (their share per client and their
+        // budget), each read stopping with that budget.
         (None, true) if query_text(&q).is_none() && related.is_none() => {
-            best_known_cards(
+            let client = client.map(|axum::Extension(ClientAddr(ip))| ip);
+            let Ok((turn, deadline)) = state.search_index.card_read_turn(client).await else {
+                return Ok(text_search_busy());
+            };
+            _postgres_turn = Some(turn);
+            postgres_deadline = Some(deadline);
+            let read = best_known_cards(
                 &state.pool,
                 &q,
                 &tags,
@@ -3755,8 +4126,13 @@ pub async fn search(
                 sort,
                 state.config.search.text_candidates,
                 None,
-            )
-            .await?
+                postgres_deadline,
+            );
+            match within_turn(postgres_deadline, read).await {
+                Some(Err(error)) if is_card_read_busy(&error) => return Ok(text_search_busy()),
+                Some(units) => units?,
+                None => return Ok(text_search_busy()),
+            }
         }
         // One character found inside names, which the text index leaves to Postgres: the best
         // known cards that hold it.
@@ -3774,8 +4150,10 @@ pub async fn search(
                 sort,
                 state.config.search.text_candidates,
                 query_text(&q),
+                postgres_deadline,
             );
             match within_turn(postgres_deadline, read).await {
+                Some(Err(error)) if is_card_read_busy(&error) => return Ok(text_search_busy()),
                 Some(units) => units?,
                 None => return Ok(text_search_busy()),
             }
@@ -3786,11 +4164,21 @@ pub async fn search(
     // as a card's do (with cards listed, in the referenced branch beside them; else in the plain
     // read, `backed`).
     let backed = cards_allowed && card_units.units.is_empty() && {
-        let read = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM resource WHERE catalogue_card IS NOT NULL)",
-        )
-        .fetch_one(&state.pool);
+        let read = async {
+            let mut tx = begin_read(&state.pool, postgres_deadline).await?;
+            let backed = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM resource WHERE catalogue_card IS NOT NULL)",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| card_read_error(e, postgres_deadline))?;
+            tx.commit()
+                .await
+                .map_err(|e| card_read_error(e, postgres_deadline))?;
+            Ok::<bool, ApiError>(backed)
+        };
         match within_turn(postgres_deadline, read).await {
+            Some(Err(error)) if is_card_read_busy(&error) => return Ok(text_search_busy()),
             Some(backed) => backed?,
             None => return Ok(text_search_busy()),
         }
@@ -6092,7 +6480,7 @@ pub struct OsmDumpPlace {
     display_name: Option<String>,
     /// `ok` or `missing`.
     status: String,
-    fetched_at: chrono::DateTime<chrono::Utc>,
+    fetched_at: DateTime<Utc>,
     /// Every derived document served publicly, keyed by the version hash that change entries
     /// and pinned resource documents name.
     #[schema(value_type = Object)]
@@ -6144,7 +6532,7 @@ pub struct OsmDumpRename {
     category: Option<String>,
     /// The name that replaced it.
     new_name: String,
-    until: chrono::DateTime<chrono::Utc>,
+    until: DateTime<Utc>,
 }
 /// After the renames, while the OSM catalogue is on: a deleted OSM object's successor.
 #[derive(ToSchema)]
@@ -6159,7 +6547,7 @@ pub struct OsmDumpSuccessor {
     new_id: i64,
     /// `wikidata` or `changeset`.
     basis: String,
-    found_at: chrono::DateTime<chrono::Utc>,
+    found_at: DateTime<Utc>,
 }
 /// After the successors, while the OSM catalogue is on: a named OSM object an update removed (it
 /// was deleted), as its card last was.
@@ -6175,7 +6563,7 @@ pub struct OsmDumpRemoved {
     #[schema(required = true)]
     category: Option<String>,
     point: model::Point,
-    removed_at: chrono::DateTime<chrono::Utc>,
+    removed_at: DateTime<Utc>,
 }
 /// The public dump line format (see `OsmDumpPlace`); a new `osm_place` column is not exported
 /// until it is added here, to the schema and to docs/api.md.
@@ -6683,6 +7071,33 @@ pub async fn uncurate_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A statement cancelled by its `statement_timeout` is a busy search (503, counted as
+    /// `budget`) only when the read had a turn's deadline; without one (a read of the pool's own
+    /// timeout) it stays an internal error and counts nothing.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_cancelled_read_is_busy_only_with_a_deadline(pool: PgPool) {
+        let cancelled = || async {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("SET LOCAL statement_timeout = '10ms'")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query("SELECT pg_sleep(1)")
+                .execute(&mut *tx)
+                .await
+                .unwrap_err()
+        };
+        let spent = crate::telemetry::search_index_busy_count("budget");
+        let error = card_read_error(cancelled().await, None);
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!is_card_read_busy(&error));
+        assert_eq!(crate::telemetry::search_index_busy_count("budget"), spent);
+        let deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        let error = card_read_error(cancelled().await, deadline);
+        assert!(is_card_read_busy(&error));
+        assert!(crate::telemetry::search_index_busy_count("budget") > spent);
+    }
 
     /// The trending window is `{n}h` or `{n}d`; any other text, whatever its last character,
     /// is refused and never panics.

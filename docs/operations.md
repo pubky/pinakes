@@ -19,11 +19,12 @@ the procedures for running an instance. Related pages:
 | `pinakesd [--config PATH] --migrate` | Creates the schema on an empty database and exits. |
 | `pinakesd [--config PATH] reextract ROUTE…\|all\|also-on` | Reads stored links again after a parser, routing or source change. Run it with the daemon stopped ([re-extraction](#re-extraction)). |
 | `pinakesd [--config PATH] reindex` | Builds the text index from the database into a new generation and switches to it. Run it with the daemon stopped ([text index](#text-index)). |
-| `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, last import and update, wait and last error ([catalogues](#status-and-drop)). |
+| `pinakesd [--config PATH] catalogue status` | Prints each catalogue's switch, phase, cards, upstream version, last import and update, how current its cards are, wait and last error ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue drop NAME` | Deletes a catalogue that is off: its cards, its state and its directory. Runs beside the daemon ([catalogues](#status-and-drop)). |
-| `pinakesd [--config PATH] catalogue import NAME [--from FILE\|DIR\|URL]… [--limit N] [--update [--since TIME]] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop)). `musicbrainz`, `osm`, `wikidata`, `openalex`, `podcastindex`, `software` and `tranco` in this version ([run an import](#run-an-import)). |
+| `pinakesd [--config PATH] catalogue import NAME [--from FILE\|DIR\|URL]… [--limit N] [--reads N] [--update [--since TIME]] [--force]` | Runs one full import (or update) of a catalogue now, with the daemon's code, under the catalogue's lock ([catalogues](#status-and-drop), [run an import](#run-an-import)). |
 | `pinakesd [--config PATH] catalogue import NAME --request` | Asks the daemon running the catalogue's importer for a full import, beside it ([catalogues](#status-and-drop)). |
 | `pinakesd [--config PATH] catalogue allow-shrink NAME` | After a run that failed as `shrunk` (refused otherwise), lets the catalogue's next full import remove the cards it did not read, however many: it goes through at its next try, unless a run fails for another reason first. Runs beside the daemon ([catalogues](#a-full-import-that-shrinks-the-catalogue)). |
+| `pinakesd [--config PATH] catalogue clear-refusal NAME` | Clears what the catalogue's importer refused (a dump, a file, a change file, an update's window), so its next run reads it again; refused once more if it still can't be applied. Runs beside the daemon ([catalogues](#a-refused-dump-or-file)). |
 | `pinakesd [--config PATH] healthcheck` | Asks `GET /healthz` on the admin listener, for at most five seconds. Prints `healthy` and exits 0, or exits non-zero. |
 | `pinakesd --openapi` | Prints the OpenAPI document. |
 | `pinakesd --help` | Prints the usage line. |
@@ -170,7 +171,7 @@ A catalogue is on when both `catalogues.enabled` and its own `enabled` are true
 | `catalogues.enabled` | `true` | All catalogues. Off, Pinakes indexes only referenced links. |
 | `catalogues.dir` | `"catalogues"` | Downloads and temporary files of imports, one directory per catalogue (`catalogues/wikidata`), relative to the working directory. The container image sets `/var/lib/pinakes/catalogues`. |
 | `catalogues.<name>.enabled` | `true` | One catalogue: `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` or `software`. |
-| `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. Wikidata reads its dump as a stream up to the limit instead of downloading it, and its updates add new items only below the limit ([a part of Wikidata](sources/catalogue_wikidata.md#a-part-of-wikidata)). |
+| `catalogues.wikidata.limit`, `catalogues.musicbrainz.limit` | none | Import at most this many items, for a small instance. None imports all. Wikidata reads its dump as a stream up to the limit instead of downloading it, and its updates add new items only below the limit ([a part of Wikidata](sources/wikidata_catalogue.md#a-part-of-wikidata)). |
 | `catalogues.osm.region` | `"planet"` | `planet`, or a region of Geofabrik's OpenStreetMap extracts by its path (`europe/switzerland`). A change makes the next update a full import of the new region. |
 | `catalogues.openalex.min_citations` | `50` | Import works cited more than this many times, 0–1000000. |
 
@@ -1144,7 +1145,7 @@ routes) waits longer each time it answers the same:
 At the defaults an unchanged page is read after 7, 14, 28, 56 and then every 90 days. The last
 wait is the card's stored `ttl_secs`. Events (dated or not), calendars and feeds, podcast shows (a
 new episode is no change to the show's card), cards with a date, social content (within the hour),
-Pubky objects (their authors edit and delete them), a card that names when it changes,
+Nostr and ActivityPub profiles (and those links found gone) and Pubky objects (their authors edit and delete them), a card that names when it changes,
 OpenStreetMap objects and `geo:` points keep the schedule above. A first tier above
 `limits.refresh_max_secs` is the longest wait instead. A stored
 card keeps its next refresh time when the daemon is upgraded: each moves to the backoff at its own
@@ -1770,20 +1771,24 @@ most names hold of the first 20,000 per segment in dictionary order, while they 
 names in all), a text to 32 items, a phrase to its first 8 words (all of its words when every one
 is common or its rarest is in more than 50,000 names), and 64 three-letter pieces. A text of one
 character found inside names is left to Postgres, so no search reads the index's whole
-dictionary; it takes a turn as an index search does, and its Postgres read stops with what is left
-of the budget (`statement_timeout` for that read; past it `503`, counted as `budget`).
+dictionary; it takes a turn as an index search does, and so does a search without text while a
+catalogue is on (it reads the best known catalogue cards from Postgres). Their Postgres reads, the
+page's own read among them, stop with what is left of the budget (2 s by default, where other
+reads have the pool's 5 s): each runs under a `statement_timeout` of it, so Postgres cancels the
+statement too; past it `503`, counted as `budget`. With every catalogue off a search without text
+takes no turn.
 
 ## Catalogues
 
 A catalogue card is one item of an open catalogue, stored in `catalogue_card`. The catalogues are
 `wikidata`, `musicbrainz`, `osm`, `openalex`, `podcastindex`, `tranco` and `software` (crates.io,
 F-Droid and Flathub). An importer is the only writer of a catalogue's cards; they don't go
-through the fetch queue, the refresh tiers or the change journal. This version has importers for
+through the fetch queue, the refresh tiers or the change journal. Each catalogue has its page:
 [`musicbrainz`](sources/musicbrainz_catalogue.md), [`osm`](sources/osm_catalogue.md),
-[`wikidata`](sources/catalogue_wikidata.md), [`openalex`](sources/openalex_catalogue.md),
+[`wikidata`](sources/wikidata_catalogue.md), [`openalex`](sources/openalex_catalogue.md),
 [`podcastindex`](sources/podcastindex_catalogue.md), [`software`](sources/software_catalogue.md)
-and [`tranco`](sources/tranco_catalogue.md); a catalogue without one stays empty. Catalogues are
-on by default, so a daemon whose configuration has no `[catalogues]` section runs these importers:
+and [`tranco`](sources/tranco_catalogue.md). Catalogues are
+on by default, so a daemon whose configuration has no `[catalogues]` section runs their importers:
 with `http.contact` set and the disk they need, the Wikidata importer downloads its 104 GB dump;
 without a contact they ask nothing, and `catalogue status` says they wait for one. Set
 `[catalogues] enabled = false` for an instance that imports nothing.
@@ -1908,12 +1913,12 @@ catalogue off nothing is looked up.
 | Metric | Says |
 | --- | --- |
 | `pinakes_catalogue_joins_total{catalogue,outcome}` | Links built (`built`), given back (`released`) and not built for a card that makes no valid card (`invalid`) |
-| `pinakes_catalogue_homepage_reads_total{result}` | The Tranco catalogue's homepage reads by result: `ok` (a card), `robots` (a robots.txt on the way says no), `wall`, `not_html`, `status` (a 4xx), `busy` (a 429 or 5xx), `unreached`, `deferred` (the egress gave no turn within two seconds: nothing read) and `other` (a redirect off the site, or no name) ([Tranco](sources/tranco_catalogue.md)) |
+| `pinakes_catalogue_homepage_reads_total{outcome}` | The Tranco catalogue's homepage reads by outcome: `ok` (a card), `robots` (a robots.txt on the way says no), `wall`, `not_html`, `status` (a 4xx), `busy` (a 429 or 5xx), `unreached`, `deferred` (the egress gave no turn within two seconds: nothing read) and `other` (a redirect off the site, or no name) ([Tranco](sources/tranco_catalogue.md)) |
 | `pinakes_catalogue_homepage_reads_waiting` | Whether Tranco's homepage reads wait for a large catalogue's first or running full import (1) or not (0), as its last run found; `CatalogueHomepageReadsStalled` fires when no read has found a page for six hours while sites are due and this is 0 |
 | `pinakes_catalogue_join_errors_total{stage}` | Failed joins (`referenced`, `before_fetch`, `drain`) and extras reads (`extras`), each tried again; `CatalogueJoinErrors` past ten joins an hour for an hour |
 | `pinakes_catalogue_backlog{queue}`, `pinakes_catalogue_backlog_age_seconds{queue}` | Join checks (`joins`), extras reads (`extras`) and Tranco homepage reads (`homepages`) due now, and the oldest one's wait; `CatalogueJoinsBehind` past six hours of joins. Extras follow Wikipedia's pace (a request a second at most), so after a first import they lag for hours by design. Homepage reads wait for the large catalogues' first imports ([Tranco](sources/tranco_catalogue.md)) |
 | `pinakes_catalogue_join_errors_total{stage="extras"}` | Also counts a summary Wikipedia didn't answer. A check that keeps failing backs off (to an hour for joins, a day for extras) and waits outside the backlog |
-| `pinakes_catalogue_cards_total{catalogue,result}` | The cards each catalogue's writes read: `inserted`, `changed`, `unchanged` (stamped only), `rejected` (refused as invalid) and `removed`; `CatalogueCardsRejected` past a tenth refused in an hour, `CatalogueCardsRemoved` past a tenth of the catalogue removed in a day |
+| `pinakes_catalogue_cards_total{catalogue,outcome}` | The cards each catalogue's writes read: `inserted`, `changed`, `unchanged` (stamped only), `rejected` (refused as invalid) and `removed`; `CatalogueCardsRejected` past a tenth refused in an hour, `CatalogueCardsRemoved` past a tenth of the catalogue removed in a day |
 
 To see the queues: `SELECT count(*), count(*) FILTER (WHERE due_at<=now()) AS due, min(due_at),
 max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, whose rows without a
@@ -1924,11 +1929,12 @@ max(attempts) FROM catalogue_join_due` (and the same over `catalogue_extras`, wh
 ```sh
 pinakesd --config <path> catalogue status
 pinakesd --config <path> catalogue drop <name>
-pinakesd --config <path> catalogue import <name> [--from FILE|DIR|URL]… [--limit N] [--update [--since TIME]] [--force]
+pinakesd --config <path> catalogue import <name> [--from FILE|DIR|URL]… [--limit N] [--reads N] [--update [--since TIME]] [--force]
 pinakesd --config <path> catalogue import <name> --request
 ```
 
-`catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, when its
+`catalogue status` prints one line per catalogue: whether it is on, its phase, its cards, the
+upstream version it read (a dump's date, a file's version, Tranco's list and sites read), when its
 last full import and update finished, how current its cards are, a full import an update asked
 for (with its reason) and why it waits, and its last error.
 The last error stays after a later success; the metrics count every failure.
@@ -1943,15 +1949,23 @@ is) and prints the directory it removed, or that there was none. It refuses:
 - while a daemon runs the catalogue's importer, which holds the catalogue's advisory lock for as
   long as it runs. The drop takes the same lock, so it can run beside the daemon.
 
+The drop watches its lock while it deletes: when the lock's database session ends (a database
+restart), it stops, says the lock was lost and deletes nothing more, since an importer may hold
+the lock by then. It deletes the cards and the state row first, then checks the lock once more
+and removes the directory only while it still holds it. Run it again to finish.
+
 `catalogue import <name>` runs one full import of the catalogue now, or with `--update` one
 update, through the same code and state rows as the daemon's task: it takes the catalogue's lock
 (refused while a daemon runs the catalogue's importer), waits for the large-import turn and the
-disk as the task does (printing why), watches its lock, and prints the cards before and after and
-the status table when it has finished. A full import takes up one that was cut off, else begins a
-new one, and clears an update refused for removing too much. `--from`, `--limit`, `--since` and
+disk as the task does (printing why), and prints the cards before and after (the cards the run
+wrote: new, changed, unchanged, rejected as invalid, removed) and the status table when it has
+finished. It checks its lock before each step and watches it while a step runs and while it
+waits, and stops (the lock lost) once its session has ended. A full import takes up one that was cut off, else begins a
+new one, and clears an update refused for removing too much. `--from`, `--limit`, `--reads`, `--since` and
 `--force` are the importer's own ([`musicbrainz`](sources/musicbrainz_catalogue.md#run-it-by-hand),
-[Wikidata](sources/catalogue_wikidata.md#commands); the others [below](#run-an-import)). A failure is recorded as the
-task records it. `catalogue import <name> --request` needs no lock: it records that a full import
+[Wikidata](sources/wikidata_catalogue.md#run-it-by-hand); the others [below](#run-an-import)). A failure is recorded as the
+task records it, unless the lock's database session has ended by then: the command then says the
+lock was lost and records nothing. `catalogue import <name> --request` needs no lock: it records that a full import
 is asked for (`import_requested`). The process running the importer starts it after an update
 under way, or at its next step (MusicBrainz: within the hour when idle); a full import under way
 is the one asked for, and its end, or its abandonment, clears the request. The command says when no process holds the
@@ -1972,47 +1986,79 @@ registry for `software`):
 | `software` | `REGISTRY=FILE\|URL`, once per registry replaced: `crates.io=` the dump, `f-droid=` its `entry.json` (the index next to it), `flathub=` the AppStream `.xml.gz` |
 | `tranco` | A list file (`rank,site` lines) |
 
-`--limit N` is Tranco's: at most N homepages are read (MusicBrainz's is its card limit).
-`--force` is MusicBrainz's alone; the other catalogues refuse it. `catalogue import tranco` reads homepages through an egress of its own, apart from a running daemon's per-host pace: stop the daemon (or switch Tranco off there) first. A
-catalogue without an importer in this version is refused. Without `http.contact` (or
+A `--from` URL is read over `https` (`http` only on a loopback address); one with a user name, a
+password or a query is refused, and the error does not repeat it. `osm` takes a local file only.
+
+Every importer asks its upstreams the same way: directly (proxy variables in the environment are
+not used), with the operator's contact in the User-Agent, and following a redirect (at most 3) only
+to a host its catalogue names. A rate limit or a server error (429, 5xx) is asked again up to six
+times, waiting as its `Retry-After` says; one that asks for more than five minutes fails the run
+(`rate_limited`), and that host is not asked again until then (a day at most). A broken download
+resumes at the byte it reached, under `If-Range`: a file replaced meanwhile fails `dump_changed`,
+one gone `dump_gone`, and a server that brings less than 8 MB in ten minutes of waiting fails
+`download`.
+Without `http.contact` the daemon starts no importer and `catalogue status` shows `needs
+http.contact` for every catalogue alike; a daemon's run that finds none waits for it, as one short
+of disk does. `catalogue import` refuses without it unless it reads only local `--from` files
+(Wikidata and Tranco always ask upstream, so they are refused).
+
+`--reads N` is Tranco's: at most N homepages are read. `--limit N` (a card limit) and `--force` (a
+`--limit` below the cards stored) are MusicBrainz's and Wikidata's; every other catalogue refuses
+them, `osm` included (its scope is `catalogues.osm.region`). `catalogue import tranco` reads homepages through an egress of its own, apart from a running daemon's per-host pace: stop the daemon (or switch Tranco off there) first. Without `http.contact` (or
 `PINAKES__HTTP__CONTACT`) only local files are read, and Tranco not at all.
 
 ### Catalogue sample runs
 
-`scripts/catalogue-sample openalex|podcastindex|software|tranco [--keep]` checks an importer end to
-end against a small real sample read from the real source (at most about 300 MB): it creates a
-throwaway database (`SAMPLE_DB`, which must not exist), imports the sample with
-`pinakesd catalogue import`, checks the cards (counts, keys, labels, canonical links), starts a
-daemon on a private port to check that `/v1/search` finds a card and that its shared links join
-it through `POST /v1/resolve`, runs an update from a second sample and checks that only changed
-rows were written, checks that the catalogue switched off leaves search, then drops the database
-and the downloads. It prints a JSON report (bytes read, cards, time, peak memory, database size).
-`PINAKESD` names the binary (default `target/release/pinakesd`); `PGHOST` and `PGPORT` the server.
+`scripts/catalogue-sample NAME [--keep] [options]` checks a catalogue's importer end to end
+against a small real sample read from the real source:
+
+| NAME | What it reads | Its own options |
+| --- | --- | --- |
+| `musicbrainz` | The first megabytes of each file of the two newest dumps (160 MiB in all) | `--import-only` (the newest dump, no update), `--bytes ENTITY=N` (a file's bytes) |
+| `wikidata` | The first records of the newest dump, then the real recent changes | `--limit N` (cards, default 20,000), `--window MINUTES` (the update's, default 20), `--report FILE` |
+| `osm` | A Geofabrik extract a few days old, then the region's change files since | `--region R` (default `europe/liechtenstein`), `--pbf FILE`, `--days N` (default 3), `--port N` (default 18492), `--max-mb N` (one download's most, default 300) |
+| `openalex`, `podcastindex`, `software`, `tranco` | At most about 300 MB of each source; Tranco at most 50 homepages | |
+
+Each creates a throwaway database, imports the sample with `pinakesd catalogue import`, checks the
+cards (counts, keys, labels, canonical links), starts a daemon on a private port to check that
+`/v1/search` finds a card and that its shared links join it through `POST /v1/resolve`, runs an
+update and checks that only changed rows were written, checks that the catalogue switched off
+leaves search, then drops the database and the downloads (OSM's downloads stay in its directory).
+It prints a JSON report (bytes read, cards, time, peak memory, database size).
+`scripts/catalogue-sample NAME --help` describes a run. Every catalogue takes the same flag and
+environment:
+
+- `--keep` keeps the database and the downloads.
+- `PINAKESD` names the binary (default `target/release/pinakesd`).
+- `PGHOST` and `PGPORT` name the PostgreSQL server the database is created on.
+- `SAMPLE_DB` names the database (default `catalogue_sample_NAME`); a run refuses one that exists,
+  or a name of other than lower case letters, digits and `_`.
+- `SAMPLE_DIR` is where the downloads and the daemon's files go (default a new temporary directory).
+- `PINAKES__HTTP__CONTACT` is the operator's contact, sent in the User-Agent; when unset it is read
+  from `~/.config/pinakes/contact.env`, and it is never printed. Wikidata, OSM and Tranco refuse to
+  run without it.
 
 ### Importer rules
 
-Each catalogue with an importer (`musicbrainz`, `osm`, `wikidata`, `openalex`, `podcastindex`,
-`software` and `tranco` in this version) runs it as a background task of `pinakesd`, started only for a
+Each catalogue's importer runs as a background task of `pinakesd`, started only for a
 catalogue that is on and only with `http.contact` set (every request names the operator's contact; without it the daemon
-logs that the importer does not start). Catalogues are on by default: a daemon with
-`http.contact` set starts importing them at its first start with this version. To upgrade without
-importing, set `[catalogues] enabled = false` (or each one's `enabled`) before. It follows these
+logs that the importer does not start). It follows these
 rules:
 
 | Rule | What the task does |
 | --- | --- |
-| One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
-| What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump; Wikidata every 15 minutes, and at once while more than an hour behind). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
+| One importer per catalogue | Holds the catalogue's advisory lock for as long as it runs, and watches it between runs too: when its database session ends while the task waits for its next run, the task takes the lock again at once (and logs it), keeping its wait. A second daemon that finds the lock held waits and logs it once, leaving the state row to the importing daemon. |
+| What runs | A full import when none has finished, then an update once the importer's interval has passed since the last finished full import or update (a day; MusicBrainz instead reads its mirror's `LATEST` once an hour and updates when it names a newer dump; Wikidata every 15 minutes, and at once while more than an hour behind; OpenStreetMap looks for a new change file every hour, and runs a full import every 30 days, the planet every 90; Tranco at once while the last run left homepages due, ten minutes after one that stopped for a large import, else when the next site falls due, ten minutes to a day after the last run). An update that can't apply the changes (a change stream too far behind) ends without marking anything current and asks for a full import (`import_requested`), which then starts as any new full import does: it waits for the large-import turn and the disk, and holds no turn while it waits. |
 | How current | Each run states the upstream time of the data it leaves (a dump's date, the last change applied) as `current_as_of`; the update lag counts from it. An update that finds nothing new finishes without moving it, so a source that stops publishing shows as lag; Wikidata's update, which reads the changes by time, moves it to the end of the window it read even when the window held none (Wikidata changes many times a minute: the update logs a warning for a window of ten minutes or more without one). Each catalogue may lag as far as its source's publication rhythm allows (below). |
 | One large import at a time | A full import of Wikidata, MusicBrainz, OpenStreetMap or OpenAlex waits while another of them runs or waits to be resumed after a failure or a restart (one switched off doesn't count). When two wait to be resumed, the first in that order goes first. Updates and the small catalogues don't wait. |
-| Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs. While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
+| Free disk | Before a run starts or resumes, compares the free disk under `catalogues.dir/<name>` with what the run still needs there: its downloads and temporary files only (the cards' share of the database is sized apart, as it may be on another disk; OpenAlex and Tranco read streams and need none; software needs 512 MiB, for F-Droid's index while it is hashed). While it is short, waits and checks again every ten minutes, saying why in `waiting` and in the log (`catalogue import waits`). Nothing is started half. |
 | Writes | At most 1,000 cards per transaction; a card is rewritten only when its content changed. |
 | Progress | Saved with each write, so a run cut off by a restart or a failure resumes there. A failed run is recorded (`failed`, `last_error`, the error count) and tried again ten minutes later; so is one whose importer panicked. A run whose catalogue lock's database session has ended stops, is logged and resumes once the task holds the lock again; nothing about it is written to the state row, which another daemon may hold by then. So is a failure the run meets once that session has ended (a database restart ends every session).  Where the next update starts (a replication sequence, a time) is kept from one run to the next. |
-| Abandoned runs | An importer may abandon a run whose data can't be applied (MusicBrainz: a refused dump). The run is recorded as failed, but its cursor goes and no card is removed for it; what the importer keeps about the refusal stays in its position, and the task waits for something new rather than trying again. |
-| Requests | A finished full import clears `import_requested`, also one asked for while it ran. |
-| Failures | Stored and logged by class (`download`, `parse`, `disk`, `turn_lost`, `shrunk`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
-| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, the operator allows it (`catalogue allow-shrink`, [below](#a-full-import-that-shrinks-the-catalogue)), or the import's scope is narrower than the last finished one's (a lower `limit`, a higher `min_citations`; kept in `catalogue_state.scope`, else the limit the state's position records). `catalogue import --force` with a `--limit` below both the cards held and the stored limit (none stored: every card) says the drop is expected (without such a limit, `--force` leaves the floor in place). Another `region` is no narrower scope: it may be larger, so it needs the allowance. |
-| Updates that read a new file | An update writes a card only when its content hash differs from the stored one: an unchanged row is never touched. Podcast Index's weekly database and each software registry's file are read again whole, and the stored cards the file no longer names are removed at the end. An OpenAlex update reads the snapshot's newer files and removes the works in them that no longer qualify, at its end. An update that would remove more than a tenth of a scope's cards (the catalogue, or one registry of `software`), and more than ten, is refused (`removals`): nothing is removed: the run is abandoned and its failure recorded once, and the file is named in the position (`catalogue status`: `file … refused`). Later updates finish without reading that file or snapshot again until a newer one appears, or until a full import is asked for (`--request`) or run by hand ([run an import](#run-an-import)). A full import that reads no card at all fails (`parse` or `manifest`), before the shrink check. Tranco removes a card when its homepage read says so or its site has been off the list for a month ([Tranco](sources/tranco_catalogue.md)). |
+| Refusals | A run whose data can't be applied is refused ([below](#a-refused-dump-or-file)): it is recorded as failed once, its run and cursor go (freeing the large-import turn), no card is removed for it, and what it read is not read again until a newer version comes. |
+| Requests | A finished full import clears `import_requested`, also one asked for while it ran. A refused full import clears it only when it ran as the one asked for: a request that came while it ran stands. |
+| Failures | Stored and logged by class (`download`, `parse`, `disk`, `size` (over a cap), `empty` (a full import that read no record), `refused` (what a run read would remove too much, or failed too often), `turn_lost`, `shrunk`, `panic`, `timeout`, …), with the host of a fixed bulk file or a local path where the importer names one; a database error by its own text. Never the text of something an upstream sent. |
+| Removals | At the end of a full import, removes the cards it didn't read: an item removed upstream leaves with the next import that no longer finds it. An update removes the items its source says are gone (for MusicBrainz, those the new dump no longer has). A full import that read no record at all is refused (`empty`, [below](#a-refused-dump-or-file)), a first import too; one that read fewer than half the cards the catalogue holds removes nothing: it fails (`shrunk`), keeps its cursor and is tried again, so a cut-off dump or an empty answer never empties the catalogue. It goes through when the importer says the drop is expected, the operator allows it (`catalogue allow-shrink`, [below](#a-full-import-that-shrinks-the-catalogue)), or the import's scope is narrower than the last finished one's (a lower `limit`, a higher `min_citations`; kept in `catalogue_state.scope`, else the limit the state's position records). `catalogue import --force` with a `--limit` below both the cards held and the stored limit (none stored: every card) says the drop is expected (without such a limit, `--force` leaves the floor in place). Another `region` is no narrower scope: it may be larger, so it needs the allowance. |
+| Updates that read a new file | An update writes a card only when its content hash differs from the stored one: an unchanged row is never touched. Podcast Index's weekly database and each software registry's file are read again whole, and the stored cards the file no longer names are removed at the end. An OpenAlex update reads the snapshot's newer files and removes the works in them that no longer qualify, at its end. An update that would remove more than a tenth of a scope's cards (the catalogue, or one registry of `software`), and more than ten, is refused (`refused`, [below](#a-refused-dump-or-file)): nothing is removed. A full import that reads no record at all (no card written or kept, Tranco: no listed site) is refused (`empty`), a first import too, before the shrink check. Tranco removes a card when its homepage read says so or its site has been off the list for a month ([Tranco](sources/tranco_catalogue.md)). The updates that remove by change (OpenStreetMap's change files, Wikidata's changes, Tranco's runs) are refused the same way past a tenth of the cards (and ten). |
 
 ### Allowed update lag
 
@@ -2036,7 +2082,8 @@ catch-up that stopped still alerts.
 
 ### A full import that shrinks the catalogue
 
-A full import that read fewer than half the cards the catalogue holds fails as `shrunk`, removes
+A full import that read fewer than half the cards the catalogue holds (for software, also one
+registry's: `shrunk (<registry>: …)`) fails as `shrunk`, removes
 nothing and is tried again every ten minutes from its last cursor (`CatalogueImportFailed` fires;
 `catalogue status` shows `shrunk`). The catalogue's cards stay as they were.
 
@@ -2044,13 +2091,46 @@ nothing and is tried again every ten minutes from its last cursor (`CatalogueImp
    in the importer's log lines.
 2. If upstream really holds that few items, run `pinakesd --config <path> catalogue allow-shrink
    <name>`. It is refused unless the full import under way has failed and its last error is
-   `shrunk`. The next try removes the cards it did not read, and the allowance is used up; a run
+   `shrunk` (for software, `shrunk (<registry>: …)` too). The next try removes the cards it did not read, and the allowance is used up; a run
    that fails for any reason first takes it back.
 3. A narrower scope (a lower `limit`, a higher `min_citations`) needs no allowance: its first full
    import removes the rest on its own. `catalogue import NAME --limit N --force` runs one such
    import by hand: `--force` passes the floor only for a `--limit` below both the cards held and
    the limit the cards were read with (or the whole catalogue). A full import with `--force` keeps the floor;
    `allow-shrink` lets a real shrink through. Another `region` needs the allowance, as it may be larger.
+
+### A refused dump or file
+
+A run refuses what it read, and removes no card for it, when it can't be applied: an update that
+would remove more than a tenth of the cards (`refused`), a full import that read no record
+(`empty`), a dump or file that is broken (MusicBrainz: `checksum`, `parse`, `archive`, …; Podcast
+Index: `archive`, `size`, `database`, `schema`), a Wikidata dump that failed three times
+(`refused`). Each importer's page says which apply to it. The run is recorded once
+(`CatalogueImportFailed`, `last_error`), its run and cursor go, and the large-import turn is free
+for the others. The position names what was refused (`refused`), with where it was read
+(`refused_source`: null for the catalogue's own files, else what `--from` named) and the
+`limit` it was read with (`refused_limit`); `catalogue status` shows `refused: <version>` in
+`waiting`, and the failure and the log name it the same way: a date or a count as it is, any
+other version (a server's ETag or Last-Modified, a list's ID) by a digest (`#` and 12 hex digits),
+so no upstream's text reaches them (the position alone keeps the value); and
+`pinakes_catalogue_refused` is 1 while a refusal of the daemon's own source and `limit` stands
+(alert `CatalogueDumpRefused` after an hour).
+
+The importer then reads nothing while that version is the newest: each try (an hour apart) asks
+only for the version (a `HEAD`, the dump list, `LATEST`) and ends without a failure (Tranco reads
+no homepage either until its next list; software reads the other registries). The refusal goes
+when:
+
+- upstream publishes a newer version: the next run reads it, and its position replaces the
+  refusal;
+- a full import is asked for (`pinakesd catalogue import <name> --request` beside the daemon, or
+  `catalogue import <name>` with it stopped): it reads the refused version again, and removes
+  the cards it does not read as any full import (Tranco's caps on a run's removals don't apply
+  to it);
+- you clear it: `pinakesd --config <path> catalogue clear-refusal <name>`, beside the daemon. The
+  next run reads the refused version again, as an update when one is due (a checksum failure
+  while the mirror was still copying a file, say). If it still can't be applied, it is refused
+  again.
 
 ### A large import that keeps failing
 
@@ -2060,22 +2140,36 @@ large-import turn meanwhile: the other large catalogues' full imports wait for i
 in the others' `waiting` and shows its `last_error`. Fix the cause, or switch it off and restart
 (its cut-off import then no longer holds the turn; it resumes when it is on again), or drop it.
 
+### An import that keeps waiting
+
+An importer that waits says why in `waiting` (`pinakesd catalogue status`), and
+`pinakes_catalogue_waiting_seconds{reason}` counts how long (alert `CatalogueWaiting`):
+
+- `disk`: the run needs more free disk under `catalogues.dir/<name>` than there is (`waiting`
+  names both). Free disk there, or move `catalogues.dir`; the run starts at its next check, within
+  ten minutes.
+- `other`: a setting the run needs, such as `http.contact` for OpenStreetMap: set it and restart.
+- `turn`: another large catalogue's full import runs or waits to be resumed (`waiting` names it).
+  Check that it moves (its progress lines, `catalogue status`); one that keeps failing is
+  [a large import that keeps failing](#a-large-import-that-keeps-failing).
+
 ### A Wikidata import that keeps failing
 
 An import that never starts shows `waiting` in `pinakesd catalogue status`: `needs http.contact`
 (set it and restart), short disk, or the large-import turn. One that fails shows the class in
-`last_error` ([the Wikidata catalogue](sources/catalogue_wikidata.md#import)):
+`last_error` ([the Wikidata catalogue](sources/wikidata_catalogue.md#what-it-reads)):
 
 | `last_error` | What happened | What to do |
 | --- | --- | --- |
 | `disk (<path>)` | A work file could not be written (the disk is full, a link stands in its place) | Free disk, or remove what stands in the way. While free disk is short, before a run or before a download round (once the dump's size is known), the run waits instead (`waiting` says how much it needs) and goes on from its cursor |
-| `download`, `timeout`, `connect`, `api`, `read`, `not_found`, `oversized`, `rate_limited (…)` | The dumps host or the API did not answer, answered an error, a `--from` URL is not there, an answer was too large, or a wait over 5 minutes was asked; a dump read under 8 MB in ten minutes is `download`. After `rate_limited` nothing is asked of that host until the time it asked for (a day at most) has passed: the tries meanwhile fail at once | Nothing: the run resumes from its cursor every ten minutes. An update that fails `api` at the same position for hours (the log names the item an answer leaves out): `pinakesd catalogue import wikidata --request` reads a newer dump and loses nothing; `pinakesd catalogue import wikidata --update --since <a time past it>` (with the daemon's Wikidata off) is quicker but skips every item's changes up to that time (the progress line's `at` gives the time of the page reached) |
+| `download`, `timeout`, `connect`, `api`, `read`, `not_found`, `size`, `rate_limited (…)` | The dumps host or the API did not answer, answered an error, a `--from` URL is not there, an answer was too large, or a wait over 5 minutes was asked; a dump read under 8 MB in ten minutes is `download`. After `rate_limited` nothing is asked of that host until the time it asked for (a day at most) has passed: the tries meanwhile fail at once | Nothing: the run resumes from its cursor every ten minutes. An update that fails `api` at the same position for hours (the log names the item an answer leaves out): `pinakesd catalogue import wikidata --request` reads a newer dump and loses nothing; `pinakesd catalogue import wikidata --update --since <a time past it>` (with the daemon's Wikidata off) is quicker but skips every item's changes up to that time (the progress line's `at` gives the time of the page reached) |
 | `turn_lost` | The large-import lock was lost while the import ran | Nothing: it resumes from its cursor |
 | `cursor` | The stored cursor names no valid dump | `pinakesd catalogue drop wikidata`, then import again |
 | `no_dump (…)` | None of the newest dated directories lists the full JSON dump | Nothing: tried again in ten minutes |
 | `shrunk` | The import read under half the cards the catalogue holds; nothing was removed | [A full import that shrinks the catalogue](#a-full-import-that-shrinks-the-catalogue) |
-| `checksum`, `dump_changed`, `dump_gone`, `dump_missing`, `label_files`, `bz2_…`, `empty_dump`, `bad_dump` | The files were no good: they were deleted, and the next try reads the newest dump from its start (a local `--from` file is kept, and the import fails the same way) | Nothing, unless it repeats; for a local file, `pinakesd catalogue drop wikidata`, then import the fixed file |
-| `dump_rejected (…)` | The newest dump failed three times; the import waits for the next weekly dump and keeps the large-import turn meanwhile | Switch Wikidata off and restart to let another large import run, or wait for the next dump. If the catalogue really is smaller now, drop it and import again |
+| `checksum`, `dump_changed`, `dump_gone`, `dump_missing`, `label_files`, `bz2_…`, `bad_dump` | The files were no good: they were deleted, and the next try reads the newest dump from its start (a local `--from` file is kept, and the import fails the same way) | Nothing, unless it repeats; for a local file, `pinakesd catalogue drop wikidata`, then import the fixed file |
+| `refused (dump … failed 3 times (…))` | The newest dump failed three times: it is refused ([a refused dump or file](#a-refused-dump-or-file)), the import waits for the next weekly dump, and the large-import turn is free meanwhile | Wait for the next dump, or `pinakesd catalogue clear-refusal wikidata` to try this one again |
+| `empty (…)` | The dump gave no card: refused, as above | As above |
 | `other_import_under_way` | `catalogue import --from` named another file than the import under way | Let the import under way finish, or drop the catalogue |
 
 An update that leaves a changed item as it was, because its answer alone is over the API cap
@@ -2109,16 +2203,17 @@ setup, the alert rules (`ops/alerts.yml`) and the Grafana dashboard (`ops/grafan
 | `CursorReset` | info | A feed resync or [feed reset](#feed-resets). |
 | `PreviewCapacityReached` | warning | [New previews](#new-previews). |
 | `ProviderKeyRefused` | warning | The provider's key ([API keys](api-keys.md)). |
-| `CatalogueDumpRefused` | warning | `pinakesd catalogue status` (`waiting`: `dump <version> refused`, or `file <version> refused` for OpenAlex, Podcast Index and software; `last_error`); [MusicBrainz](sources/musicbrainz_catalogue.md#a-dump-that-is-refused), and each file catalogue's Updates section. A refusal that has stood an hour, until a dump or newer file is applied, or a full import (`--request`) finishes. |
+| `CatalogueDumpRefused` | warning | `pinakesd catalogue status` (`waiting`: `refused: <version>`, for software `refused: <registry> <version>, …`, each registry refused; `last_error`); [a refused dump or file](#a-refused-dump-or-file), [MusicBrainz](sources/musicbrainz_catalogue.md#a-dump-that-is-refused), and each other catalogue's page. A refusal of the daemon's own source and `limit` that has stood an hour, until a newer version is applied, a full import (`--request`) finishes, or `catalogue clear-refusal` clears it. |
 | `CatalogueImportFailed`, `CatalogueUpdateLag` | warning | `pinakesd catalogue status`; [importer rules](#importer-rules), [allowed update lag](#allowed-update-lag). Both only for catalogues that are on; `CatalogueImportFailed` also for a first import that fails or is refused, `CatalogueUpdateLag` only after a first finished import. A catalogue on without its importer (one with an importer but no `http.contact`) shows in `catalogue status` (`waiting`) and `pinakes_catalogue_needs_contact`. |
 | `CatalogueTurnBlocked` | warning | [A large import that keeps failing](#a-large-import-that-keeps-failing). |
+| `CatalogueWaiting` | warning | [An import that keeps waiting](#an-import-that-keeps-waiting): an importer has waited over six hours for free disk or a setting, or over a week for the large-import turn (`pinakes_catalogue_waiting_seconds`). |
 | `CatalogueJoinsBehind` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): the oldest join check has waited over six hours. |
 | `CatalogueHomepageReadsStalled` | warning | [Tranco](sources/tranco_catalogue.md): no homepage read has found a page for six hours while sites are due (`pinakes_catalogue_backlog{queue="homepages"}` above 0) and the reads do not wait for a large import (`pinakes_catalogue_homepage_reads_waiting` 0): every read deferred, or every read failing. |
 | `CatalogueItemsSkipped` | warning | [A Wikidata import that keeps failing](#a-wikidata-import-that-keeps-failing): an update left a changed item as it was (its answer over the API cap) within the last day. |
 | `CatalogueJoinErrors` | warning | [Shared links a catalogue holds](#shared-links-a-catalogue-holds): more than ten joins an hour fail, for an hour. |
 | `SearchIndexClosed`, `SearchIndexStalled` | warning | The [text index](#text-index) has not opened for 30 minutes (an unwritable `search.index_dir`, a failing build), or has not read its queue for 10 (counted from its open, so passes that fail from the start fire it too); the log says why. Text searches read Postgres alone, or miss newer changes. |
-| `TextSearchBusy` | warning | [Text index](#text-index): over ten text searches an instance answered 503 in ten minutes, for ten minutes. Raise `limits.search_index_searches` on a host with more cores, or find what makes searches slow. |
-| `CatalogueCardsRejected`, `CatalogueCardsRemoved` | warning | [Importer rules](#importer-rules): a catalogue's runs refused over a tenth of the cards they read in an hour (a dump format change, an importer bug: the debug log names the refused cards), or removed over a tenth of the catalogue in a day (check upstream; a full import under half its cards fails instead). |
+| `TextSearchBusy` | warning | [Text index](#text-index): over ten text searches an instance answered 503 in ten minutes, for ten minutes; with a catalogue on, the searches without text that read catalogue cards take the same turns and count there too. Raise `limits.search_index_searches` on a host with more cores, or find what makes searches slow. |
+| `CatalogueCardsRejected`, `CatalogueCardsRemoved` | warning | [Importer rules](#importer-rules): a catalogue's runs rejected over a tenth of the cards they read in an hour (a dump format change, an importer bug: the debug log names the rejected cards), or removed over a tenth of the catalogue in a day (check upstream; a full import under half its cards fails instead). |
 
 A new key needs a restart.
 

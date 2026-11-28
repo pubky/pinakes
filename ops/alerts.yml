@@ -143,7 +143,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue is on but its importer does not start: set http.contact (or PINAKES__HTTP__CONTACT), or switch the catalogue off"}
       - alert: CatalogueFirstImportStalled
-        expr: (pinakes_catalogue_enabled{catalogue=~"musicbrainz|osm|wikidata|openalex|podcastindex|software|tranco"} == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds == 0)
+        expr: (pinakes_catalogue_enabled == 1) and on (instance, job, catalogue) (pinakes_catalogue_last_import_timestamp_seconds == 0)
         for: 2d
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue is on and has finished no import in two days: pinakesd catalogue status shows why it waits (free disk, the large-import turn, http.contact)"}
@@ -151,7 +151,11 @@ groups:
         expr: (pinakes_catalogue_refused == 1) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1)
         for: 1h
         labels: {severity: warning}
-        annotations: {summary: "The {{ $labels.catalogue }} catalogue's importer refused the newest dump it read and waits for another: pinakesd catalogue status shows which and why; if the dump is right, ask for a full import of it"}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's importer refused the newest dump or file it read and waits for another: pinakesd catalogue status shows which and why; if it is right, ask for a full import of it or clear the refusal (pinakesd catalogue clear-refusal)"}
+      - alert: CatalogueWaiting
+        expr: ((pinakes_catalogue_waiting_seconds{reason!="turn"} > 21600) or (pinakes_catalogue_waiting_seconds{reason="turn"} > 604800)) and on (instance, job, catalogue) (pinakes_catalogue_enabled == 1)
+        labels: {severity: warning}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's importer has waited too long ({{ $labels.reason }}: over six hours for free disk or a setting, over a week for the large-import turn): pinakesd catalogue status says what it waits for; nothing is imported meanwhile"}
       - alert: CatalogueTurnBlocked
         expr: (pinakes_catalogue_waiting_for_turn == 1) and on (instance, job) (sum by (instance, job) (increase(pinakes_catalogue_import_errors_total{catalogue=~"wikidata|musicbrainz|osm|openalex"}[1h])) > 0)
         for: 6h
@@ -163,7 +167,7 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "The oldest catalogue join check has been due for over six hours: links wait for their catalogue card or to go back to fetching; pinakes_catalogue_join_errors_total says whether checks fail"}
       - alert: CatalogueHomepageReadsStalled
-        expr: (sum by (instance, job) (increase(pinakes_catalogue_homepage_reads_total{result="ok"}[6h])) == 0) and on (instance, job) (sum by (instance, job) (pinakes_catalogue_backlog{queue="homepages"}) > 0) and on (instance, job) (pinakes_catalogue_homepage_reads_waiting == 0) and on (instance, job) (pinakes_catalogue_enabled{catalogue="tranco"} == 1)
+        expr: (sum by (instance, job) (increase(pinakes_catalogue_homepage_reads_total{outcome="ok"}[6h])) == 0) and on (instance, job) (sum by (instance, job) (pinakes_catalogue_backlog{queue="homepages"}) > 0) and on (instance, job) (pinakes_catalogue_homepage_reads_waiting == 0) and on (instance, job) (pinakes_catalogue_enabled{catalogue="tranco"} == 1)
         for: 1h
         labels: {severity: warning}
         annotations: {summary: "No Tranco homepage read has found a page for six hours while sites are due and the reads do not wait for a large import: every read is deferred (the egress gives them no turn) or fails; pinakes_catalogue_homepage_reads_total and pinakesd catalogue status say which"}
@@ -182,10 +186,10 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue's cards are further behind upstream than its source's publication rhythm allows (pinakes_catalogue_max_update_lag_seconds): no import or update has brought newer data"}
       - alert: CatalogueCardsRejected
-        expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{result="rejected"}[1h])) > 100) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{result="rejected"}[1h])) > 0.1 * sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{result=~"inserted|changed|unchanged|rejected"}[1h])))
+        expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="rejected"}[1h])) > 100) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="rejected"}[1h])) > 0.1 * sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome=~"inserted|changed|unchanged|rejected"}[1h])))
         labels: {severity: warning}
-        annotations: {summary: "The {{ $labels.catalogue }} catalogue's runs refused over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the refused cards"}
+        annotations: {summary: "The {{ $labels.catalogue }} catalogue's runs rejected over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the rejected cards"}
       - alert: CatalogueCardsRemoved
-        expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{result="removed"}[1d])) > 1000) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{result="removed"}[1d])) > 0.1 * (sum by (instance, job, catalogue) (pinakes_catalogue_cards) + sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{result="removed"}[1d]))))
+        expr: (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d])) > 1000) and (sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d])) > 0.1 * (sum by (instance, job, catalogue) (pinakes_catalogue_cards) + sum by (instance, job, catalogue) (increase(pinakes_catalogue_cards_total{outcome="removed"}[1d]))))
         labels: {severity: warning}
         annotations: {summary: "The {{ $labels.catalogue }} catalogue removed over a tenth of its cards in a day: check that upstream removed them (pinakesd catalogue status; a full import under half its cards fails instead)"}

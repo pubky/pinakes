@@ -25,15 +25,19 @@ describes, and any object of an app no profile describes, which gets the general
 Why: posts, profiles, files and social events are Nexus's to describe. A second copy in Pinakes
 would drift from Nexus and could outlive a deleted post.
 
-### Nothing is watched; a card needs a reference
+### Nothing is watched; a stored card needs a reference
 
 Pinakes does not crawl the web and does not watch homeservers or other apps' namespaces. A link
-gets a card only when someone references it on Pubky or a client previews it with
+gets a stored card only when someone references it on Pubky or a client previews it with
 `POST /v1/resolve`, or when such a link derives it (a calendar's dates, an event page's organiser
-calendar). Search lists only links with at least one public reference.
+calendar). Search also lists the cards of the open catalogues that are on (bulk dumps of
+Wikidata, MusicBrainz, OpenStreetMap and others, read whole, not crawled), referenced or not;
+`referenced=true` lists only links with at least one public reference
+([catalogue cards in search](api.md#catalogue-cards-in-search)).
 
 Why: what people reference is the signal Pinakes indexes. Watching namespaces would make Pinakes
-index posts nobody pointed at, and would need a watcher per app.
+index posts nobody pointed at, and would need a watcher per app. A catalogue is a published
+dataset, read from its dump, with an off switch each.
 
 ## Identity and matching
 

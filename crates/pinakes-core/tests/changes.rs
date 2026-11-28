@@ -857,19 +857,35 @@ async fn ops_artifacts_reference_registered_metrics(pool: PgPool) {
         {
             assert!(names.contains(name), "unregistered alert metric {name}");
         }
-        // Every fetch outcome a rule matches is one the daemon records.
+        // Every outcome a rule matches is one its metric records: each metric with an `outcome`
+        // label has its own list, and a rule on one without a list here fails.
         let expr = rule["expr"].as_str().unwrap();
-        for matcher in expr.split("outcome=").skip(1) {
-            let value = matcher
+        let alert = rule["alert"].as_str().unwrap();
+        for (at, _) in expr.match_indices("outcome=") {
+            let metric = expr[..at]
+                .rsplit('{')
+                .nth(1)
+                .and_then(|before| {
+                    before
+                        .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .next()
+                })
+                .unwrap_or_default();
+            let known: &[&str] = match metric {
+                "pinakes_fetch_total" => telemetry::OUTCOMES,
+                "pinakes_catalogue_cards_total" => &telemetry::CATALOGUE_CARD_OUTCOMES,
+                "pinakes_catalogue_homepage_reads_total" => &telemetry::HOMEPAGE_RESULTS,
+                other => panic!("{alert}: no outcome list for {other:?} in this check"),
+            };
+            let value = expr[at + "outcome=".len()..]
                 .trim_start_matches('~')
                 .strip_prefix('"')
                 .and_then(|rest| rest.split('"').next())
                 .unwrap_or_else(|| panic!("an outcome matcher without a value in {expr}"));
             for outcome in value.split('|') {
                 assert!(
-                    telemetry::OUTCOMES.contains(&outcome),
-                    "{}: no fetch has the outcome {outcome}",
-                    rule["alert"].as_str().unwrap()
+                    known.contains(&outcome),
+                    "{alert}: {metric} has no outcome {outcome}"
                 );
             }
         }

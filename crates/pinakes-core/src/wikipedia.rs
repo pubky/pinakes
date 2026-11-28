@@ -65,11 +65,19 @@ pub fn parse(uri: &str) -> Option<Article> {
         || title
             .chars()
             .any(|c| c.is_control() || matches!(c, '#' | '<' | '>' | '[' | ']' | '{' | '}' | '|'))
+        // MediaWiki allows no title a URL reads otherwise: a relative path (`.`, `../x`,
+        // `a/./b`) or a percent-escape (`%41`).
+        || relative(&title)
+        || title
+            .as_bytes()
+            .windows(3)
+            .any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit())
     {
         return None;
     }
     let mut canonical = Url::parse(&format!("https://{lang}.wikipedia.org/")).ok()?;
-    canonical.set_path(&format!("/wiki/{title}"));
+    // A URL reads `\` as `/`: it is percent-encoded, so the link reads back as this title.
+    canonical.set_path(&format!("/wiki/{}", title.replace('\\', "%5C")));
     // `?` in a title is part of it, not a query.
     let canonical = canonical.as_str().replace('?', "%3F");
     Some(Article {
@@ -77,6 +85,11 @@ pub fn parse(uri: &str) -> Option<Article> {
         title,
         canonical,
     })
+}
+
+/// Whether a title is a relative path: `.` or `..`, or one of them as a `/`-separated part.
+fn relative(title: &str) -> bool {
+    title.split('/').any(|part| part == "." || part == "..")
 }
 
 /// The article's REST summary: its title, short description, first paragraph and thumbnail, a
@@ -415,8 +428,69 @@ mod tests {
             "https://en.wikipedia.org/wiki/A%7CB",
             "https://evil.wikipedia.org.example/wiki/X",
             "https://commons.wikimedia.org/wiki/X",
+            // Titles MediaWiki refuses, which a URL reads otherwise.
+            "https://en.wikipedia.org/wiki/%2E%2E",
+            "https://en.wikipedia.org/wiki/.%2Fx",
+            "https://en.wikipedia.org/wiki/a%2F..%2Fb",
+            "https://en.wikipedia.org/w/index.php?title=../Main_Page",
+            "https://en.wikipedia.org/wiki/100%2541",
         ] {
             assert!(parse(uri).is_none(), "{uri}");
+        }
+    }
+
+    /// A `\` in a title is percent-encoded in its canonical link (a URL reads `\` as `/`), so
+    /// the link reads back as the same article.
+    #[test]
+    fn a_backslash_in_a_title_reads_back() {
+        for (uri, title, canonical) in [
+            (
+                "https://en.wikipedia.org/wiki/..%5C",
+                "..\\",
+                "https://en.wikipedia.org/wiki/..%5C",
+            ),
+            (
+                "https://en.wikipedia.org/w/index.php?title=C:%5CWindows",
+                "C:\\Windows",
+                "https://en.wikipedia.org/wiki/C:%5CWindows",
+            ),
+        ] {
+            let a = parse(uri).unwrap_or_else(|| panic!("{uri}"));
+            assert_eq!((a.title.as_str(), a.canonical.as_str()), (title, canonical));
+            assert_eq!(parse(canonical), Some(a));
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig { cases: 3000, ..Default::default() })]
+        /// Property: an article's canonical link reads back as the same article, whatever its
+        /// title, given as a path or as `index.php?title=`; a plain title (letters, digits, `\`,
+        /// `.`, `/`, `?`, `%` with no escape after it) always names an article.
+        #[test]
+        fn a_canonical_link_reads_back_as_its_article(
+            title in "[^#<>\\[\\]{}|\\x00-\\x1f\\x7f-\\x9f]{1,40}",
+            plain in "[A-Za-z0-9][A-Za-z0-9\\\\.?/ _%-]{0,30}",
+        ) {
+            for title in [&title, &plain] {
+                let encoded = percent_encoding::utf8_percent_encode(title, percent_encoding::NON_ALPHANUMERIC);
+                for uri in [
+                    format!("https://en.wikipedia.org/wiki/{encoded}"),
+                    format!("https://de.m.wikipedia.org/w/index.php?title={encoded}"),
+                ] {
+                    if let Some(a) = parse(&uri) {
+                        let again = parse(&a.canonical);
+                        proptest::prop_assert_eq!(again.as_ref(), Some(&a), "{}", uri);
+                    }
+                }
+            }
+            let named_as = plain.trim().replace(' ', "_");
+            let named = !relative(&named_as)
+                && !named_as.as_bytes().windows(3).any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit());
+            if named {
+                let encoded = percent_encoding::utf8_percent_encode(&plain, percent_encoding::NON_ALPHANUMERIC);
+                let uri = format!("https://en.wikipedia.org/wiki/{encoded}");
+                proptest::prop_assert!(parse(&uri).is_some(), "{}", uri);
+            }
         }
     }
 

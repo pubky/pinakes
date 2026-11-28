@@ -45,11 +45,17 @@ fn app(pool: &PgPool, config: Config) -> axum::Router {
 fn off() -> Config {
     let mut config = Config::default();
     config.catalogues.osm.enabled = false;
+    config.queue.catalogues = pinakes_core::catalogue::join::joinable(&config.catalogues);
+    config.queue.osm_catalogue = false;
     config
 }
-/// `GET path` on the map clusters route as a client of its own (each call another address): the
-/// per-client share of turns never holds back a parallel test. Must answer 200.
+/// `GET path` on the map clusters route, one call at a time across this binary's tests (they share
+/// the route's four process-wide turns, `api::MAP_TURNS`), each as a client of its own (another
+/// address, so no client's share of turns is taken): a parallel test never holds back another's.
+/// Must answer 200.
 async fn clusters(app: &axum::Router, path: &str) -> Value {
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE_AT_A_TIME.lock().await;
     static PEER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     let n = PEER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let peer = format!("10.{}.{}.{}:1", (n >> 16) & 255, (n >> 8) & 255, n & 255);
@@ -142,8 +148,30 @@ async fn an_osm_card_nobody_shared_opens_by_its_link_and_its_id(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(rows, 0);
-    // With the catalogue off, it is an unknown link again.
-    let app = self::app(&pool, off());
+    // With the catalogue off, no search lists it, at once (the text index still holds it).
+    let on = AppState::new(pool.clone(), Config::default()).unwrap();
+    let index = on.search_index.clone();
+    let on = api::router(on);
+    let searches = [
+        "/v1/search?q=engel",
+        "/v1/search?tags=restaurant",
+        "/v1/search?bbox=9.5,47.13,9.54,47.15",
+        "/v1/search?q=engel&bbox=9.5,47.13,9.54,47.15&type=Restaurant",
+    ];
+    for path in searches {
+        let page = common::get(&on, path).await;
+        assert_eq!(page["items"][0]["id"], id_of(uri), "{path}: {page}");
+    }
+    index.settle();
+    assert!(index.holds_word("engel"));
+    let mut off_state = AppState::new(pool.clone(), off()).unwrap();
+    off_state.search_index = index.clone();
+    let app = api::router(off_state);
+    for path in searches {
+        let page = common::get(&app, path).await;
+        assert_eq!(page["items"], serde_json::json!([]), "{path}: {page}");
+    }
+    // And it is an unknown link again.
     let (status, _) = common::get_from(
         &app,
         "127.0.0.2:1",
@@ -614,17 +642,149 @@ async fn a_link_read_missing_after_its_successor_was_found_becomes_its_alias(poo
     .await
     .unwrap();
     assert_eq!(root, "https://www.openstreetmap.org/node/71");
-    // Off: no successor is followed.
-    sqlx::query("UPDATE catalogue_state SET phase='disabled' WHERE catalogue='osm'")
+}
+
+/// The OSM route reading every object as deleted.
+struct Gone;
+#[async_trait::async_trait]
+impl pinakes_core::resolver::Resolver for Gone {
+    fn refresh_after(&self, _: &ResourceMeta) -> std::time::Duration {
+        std::time::Duration::from_secs(86_400)
+    }
+    fn name(&self) -> &'static str {
+        "osm"
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, uri: &str) -> anyhow::Result<ResourceMeta> {
+        let id = pinakes_core::resolver::osm::parse_id(uri).unwrap();
+        let mut doc = ResourceMeta::new(&id.uri(), "osm", 86_400);
+        doc.set_type("Place");
+        doc.osm_id = Some(id.key());
+        doc.attribution = Some(pinakes_core::resolver::osm::ATTRIBUTION.into());
+        doc.status = pinakes_core::model::Status::Missing;
+        Ok(doc)
+    }
+}
+
+/// A link read missing follows its successor only while the configuration has the OSM catalogue
+/// on: with it off, a state row still `idle` (as a one-shot `catalogue import osm` with OSM off
+/// leaves it) follows none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_missing_link_follows_its_successor_only_with_the_catalogue_on(pool: PgPool) {
+    sqlx::query("INSERT INTO catalogue_state(catalogue,phase) VALUES('osm','idle')")
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(
-        pinakes_core::catalogue::osm::successor(&pool, "node", 70)
+    sqlx::query("INSERT INTO osm_successor(old_type,old_id,new_type,new_id,basis) VALUES('node',70,'node',71,'wikidata'),('node',72,'node',73,'changeset')").execute(&pool).await.unwrap();
+    for (config, old, followed) in [(off(), 70, false), (Config::default(), 72, true)] {
+        let id = pinakes_core::store::ensure_resource(
+            &pool,
+            &format!("https://www.openstreetmap.org/node/{old}"),
+        )
+        .await
+        .unwrap();
+        let job = pinakes_core::queue::claim(&pool, "osm", &config.queue)
             .await
-            .unwrap(),
-        None
-    );
+            .unwrap()
+            .expect("the link is due");
+        assert_eq!(job.id, id);
+        pinakes_core::queue::run_job(&pool, &Gone, &config.queue, &job)
+            .await
+            .unwrap();
+        let aliased: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resource_alias WHERE alias_id=$1)")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(aliased, followed, "node/{old}");
+    }
+}
+
+/// A deleted place an operator placed in a curated group hands its place to its successor:
+/// following the successor drops the old link's group unit, and the successor's next group run
+/// puts it in the curated group instead.
+#[sqlx::test(migrations = "../../migrations")]
+async fn following_a_successor_keeps_an_operators_curated_group(pool: PgPool) {
+    let cfg = pinakes_core::groups::GroupConfig::default();
+    sqlx::query("INSERT INTO catalogue_state(catalogue,phase) VALUES('osm','idle')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // An OSM link's card as the OSM route reads it, a web page's as the web route does.
+    let place = |uri: &str, name: &str| match pinakes_core::resolver::osm::parse_id(uri) {
+        Some(id) => {
+            let mut doc = ResourceMeta::new(&id.uri(), "osm", 86400);
+            doc.set_type("Restaurant");
+            doc.osm_id = Some(id.key());
+            doc.attribution = Some(pinakes_core::resolver::osm::ATTRIBUTION.into());
+            doc.name = Some(name.into());
+            doc.location = Some(Point {
+                lat: VADUZ.0,
+                lon: VADUZ.1,
+            });
+            doc
+        }
+        None => {
+            let mut doc = ResourceMeta::new(uri, "web", 86400);
+            doc.set_type("Restaurant");
+            doc.name = Some(name.into());
+            doc
+        }
+    };
+    let mut ids = vec![];
+    for (uri, name) in [
+        ("https://www.openstreetmap.org/node/70", "Löwen"),
+        ("https://loewen.example/", "Gasthaus Löwen"),
+    ] {
+        let id = pinakes_core::store::ensure_resource(&pool, uri)
+            .await
+            .unwrap();
+        pinakes_core::store::save_document(&pool, &id, 0, &place(uri, name))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    pinakes_core::groups::drain(&pool, &cfg, 100).await.unwrap();
+    let group = "c".repeat(32);
+    pinakes_core::groups::curate(
+        &pool,
+        &group,
+        serde_json::from_value(serde_json::json!({"members": ids.iter().map(|id| serde_json::json!({"resource_id": id})).collect::<Vec<_>>()})).unwrap(),
+        &cfg,
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO osm_successor(old_type,old_id,new_type,new_id,basis) VALUES('node',70,'node',71,'wikidata')").execute(&pool).await.unwrap();
+    pinakes_core::catalogue::osm::follow(&pool, "node/70", "node/71")
+        .await
+        .unwrap();
+    let successor = id_of("https://www.openstreetmap.org/node/71");
+    let uri = "https://www.openstreetmap.org/node/71";
+    pinakes_core::store::save_document(&pool, &successor, 0, &place(uri, "Löwen"))
+        .await
+        .unwrap();
+    pinakes_core::groups::drain(&pool, &cfg, 100).await.unwrap();
+    let placed: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT u.resource_id,u.group_id,o.group_id FROM group_unit u LEFT JOIN group_override o USING(unit_id) ORDER BY u.resource_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut want = vec![
+        (ids[1].clone(), Some(group.clone()), Some(group.clone())),
+        (successor.clone(), Some(group.clone()), Some(group.clone())),
+    ];
+    want.sort();
+    assert_eq!(placed, want);
+    let curated: bool = sqlx::query_scalar("SELECT curated FROM \"group\" WHERE id=$1")
+        .bind(&group)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(curated);
 }
 
 /// The per-cell totals (zoom 12 and below) and the card-by-card count (above) agree: a shared
@@ -1069,11 +1229,9 @@ async fn a_places_website_joins_its_group_unless_a_chain_shares_it(pool: PgPool)
         .await
         .unwrap();
     assert!(keys(chain).await.is_empty());
-    // Off: no OSM card is read for a website.
-    sqlx::query("UPDATE catalogue_state SET phase='disabled' WHERE catalogue='osm'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Off in the configuration: no OSM card is read for a website, though the state row still
+    // says `idle` (as a one-shot `catalogue import osm` with OSM off leaves it).
+    let config = off();
     sqlx::query("DELETE FROM catalogue_card WHERE source_id='node/43'")
         .execute(&pool)
         .await
@@ -1092,7 +1250,15 @@ async fn a_places_website_joins_its_group_unless_a_chain_shares_it(pool: PgPool)
         .execute(&pool)
         .await
         .unwrap();
-    join::sweep(&pool, &config.queue.catalogues).await.unwrap();
+    let phase: String =
+        sqlx::query_scalar("SELECT phase FROM catalogue_state WHERE catalogue='osm'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(phase, "idle");
+    join::sweep(&pool, &config.queue.catalogues, config.queue.osm_catalogue)
+        .await
+        .unwrap();
     assert!(keys(off.clone()).await.is_empty());
     let due: bool = sqlx::query_scalar(
         "SELECT next_attempt_at<now()+interval '2 days' FROM resource WHERE id=$1",
@@ -1255,19 +1421,37 @@ async fn the_website_sweep_spares_keys_a_card_holds(pool: PgPool) {
                 .unwrap()
         }
     };
-    let catalogues = join::joinable(&Config::default().catalogues);
-    // On: nothing is taken.
+    let again = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT resource_id FROM also_on_dirty ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
     sqlx::query("INSERT INTO catalogue_state(catalogue,phase) VALUES('osm','idle')")
         .execute(&pool)
         .await
         .unwrap();
-    join::sweep(&pool, &catalogues).await.unwrap();
-    assert_eq!(keys().await.len(), 2);
-    // Off: the website's key goes, the item's own stays.
-    sqlx::query("UPDATE catalogue_state SET phase='disabled' WHERE catalogue='osm'")
+    sqlx::query("DELETE FROM also_on_dirty")
         .execute(&pool)
         .await
         .unwrap();
-    join::sweep(&pool, &catalogues).await.unwrap();
+    // On in the configuration: nothing is taken.
+    let on = Config::default();
+    assert!(on.queue.osm_catalogue);
+    join::sweep(&pool, &on.queue.catalogues, on.queue.osm_catalogue)
+        .await
+        .unwrap();
+    assert_eq!(keys().await.len(), 2);
+    assert!(again().await.is_empty());
+    // Off in the configuration (the state row still `idle`): the website's key goes, the item's
+    // own stays, and the website's also-on sources run again (one may vouch for the key).
+    let off = off();
+    join::sweep(&pool, &off.queue.catalogues, off.queue.osm_catalogue)
+        .await
+        .unwrap();
     assert_eq!(keys().await, [(item.clone(), "osm:node/42".to_owned())]);
+    assert_eq!(again().await, std::slice::from_ref(&site));
 }

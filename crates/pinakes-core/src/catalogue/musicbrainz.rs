@@ -112,18 +112,10 @@ impl Source {
     pub fn official() -> Self {
         Self::Mirror(url::Url::parse(MIRROR).expect("a URL"))
     }
-    /// A mirror URL (`https://`, or `http://` on the loopback address) or a local directory
-    /// named after its dump.
+    /// A mirror URL ([`super::fetch::from_url`]'s rule) or a local directory named after its
+    /// dump.
     pub fn parse(from: &str) -> Result<Self> {
-        if from.starts_with("http://") || from.starts_with("https://") {
-            let mut url = url::Url::parse(from).context("not a URL")?;
-            let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-            if url.scheme() == "http" && !loopback {
-                bail!("a dump mirror is read over https");
-            }
-            if url.query().is_some() || !url.username().is_empty() || url.password().is_some() {
-                bail!("a dump mirror URL takes no query or credentials");
-            }
+        if let Some(mut url) = super::fetch::from_url(from)? {
             if !url.path().ends_with('/') {
                 url.set_path(&format!("{}/", url.path()));
             }
@@ -172,7 +164,7 @@ fn in_future(version: &str) -> bool {
 /// The MusicBrainz importer.
 pub struct MusicBrainz {
     source: Source,
-    client: reqwest::Client,
+    client: super::fetch::Client,
     /// Readers that parse lines in parallel.
     threads: usize,
     /// `[catalogues.musicbrainz] limit`, for the disk a run needs.
@@ -188,19 +180,9 @@ pub struct MusicBrainz {
 impl MusicBrainz {
     /// The importer of `source`, asking with the operator's contact in its User-Agent.
     pub fn new(source: Source, contact: &str) -> Result<Self> {
-        // A client of its own, outside `Egress`: it reads only the dump mirror the operator or
+        // The catalogues' client, outside `Egress`: it reads only the dump mirror the operator or
         // the build names, which no reference steers. It follows no redirect.
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            // The files are xz already; an answer the client unpacked would count other bytes than
-            // the ranges a resume asks for.
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .user_agent(crate::resolver::egress::user_agent(contact))
-            .connect_timeout(Duration::from_secs(30))
-            .build()?;
+        let client = super::fetch::client(contact, &[])?.first_wait(RETRY_WAIT);
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get() / 2)
             .clamp(1, 4);
@@ -249,33 +231,17 @@ impl MusicBrainz {
     /// The first wait before a broken download is asked for again.
     pub fn retry_wait(mut self, wait: Duration) -> Self {
         self.retry_wait = wait;
+        self.client = self.client.first_wait(wait);
         self
     }
 
     async fn get_text(&self, url: url::Url, cap: usize) -> Result<Option<String>> {
-        let failure = || Failure::new("download").at(self.source.at());
-        let response = tokio::time::timeout(Duration::from_secs(60), self.client.get(url).send())
-            .await
-            .map_err(|_| failure())?
-            .map_err(|_| failure())?;
-        match response.status().as_u16() {
-            200 => {}
-            404 => return Ok(None),
-            _ => bail!(failure()),
-        }
-        let mut body = vec![];
-        let mut response = response;
-        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(60), response.chunk())
-            .await
-            .map_err(|_| failure())?
-            .map_err(|_| failure())?
-        {
-            body.extend_from_slice(&chunk);
-            if body.len() > cap {
-                bail!(Failure::new("size").at(self.source.at()));
-            }
-        }
-        Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+        let body = self.client.small(url.as_str(), cap).await.map_err(|e| {
+            // The source's place, whatever failed (never the answer's text).
+            let class = e.downcast_ref::<Failure>().map_or("download", |f| f.class);
+            Failure::new(class).at(self.source.at())
+        })?;
+        Ok(body.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
     /// The newest dump's name.
     async fn latest(&self) -> Result<String> {
@@ -400,10 +366,9 @@ impl MusicBrainz {
         }
         // `LATEST` may name another dump than the one the run was planned on: a refused one is
         // read again only when a full import is asked for.
-        if resumed.is_none() && !job.asked() && self.refused(job.state(), &version) {
-            bail!(super::run::Abandoned(
-                Failure::new("refused").at(format!("dump {version} was refused before"))
-            ));
+        if resumed.is_none() && job.refused_before(&serde_json::json!(version)) {
+            let shown = super::run::shown_version(&serde_json::json!(version));
+            return Err(job.still_refused(format!("dump {shown}")));
         }
         // A run cut off whose dump the mirror no longer has, and that must read it again, starts
         // over on the newest dump.
@@ -433,8 +398,10 @@ impl MusicBrainz {
         let (source, limit) = (self.source_id(), job.limit());
         // A full import asked for (by hand, or by an update handing over for a changed limit)
         // removes what its dump no longer has, however much; one of the importer's own may
-        // remove at most a tenth. Kept in the cursor: a resumed import is still the one asked for.
-        let forced = resumed.as_ref().map_or(job.asked(), |c| c.forced);
+        // remove at most a tenth. Kept in the cursor: a resumed import is still the one asked for,
+        // and one asked for while it ran (`--request`) is asked for from then on.
+        let forced = resumed.as_ref().map_or(job.asked(), |c| c.forced) || job.asked();
+        job.reading(serde_json::json!(version));
         let cards_before = resumed
             .as_ref()
             .map_or(Some(job.state().cards.max(0) as u64), |c| c.cards_before);
@@ -479,17 +446,15 @@ impl MusicBrainz {
                 job.write_rows(&[], 0, cursor(Phase::Write, None, 0, as_of)?)
                     .await?;
             }
-            let cards = job.state().cards.max(0) as u64;
-            // A read that found no record, or a file that found none while cards of its kind are
-            // stored, never empties them, even in a run asked for (`catalogue drop` empties a
-            // catalogue): a file of one kind is a small share of the cards, below the removal
-            // check's tenth, and a `limit` has no removal check.
-            if cards > 0 {
-                if let Some(note) = self.empty_read(job, &done, &version).await? {
-                    return self
-                        .refuse(job, mode, &version, "empty", &note, &spill_dir)
-                        .await;
-                }
+            // A read that found no record (a first import too), or a file that found none while
+            // cards of its kind are stored, is refused before anything is written, even in a run
+            // asked for (`catalogue drop` empties a catalogue): a file of one kind is a small
+            // share of the cards, below the removal check's tenth, and a `limit` has no removal
+            // check.
+            if let Some(note) = self.empty_read(job, &done, &version).await? {
+                return self
+                    .refuse(job, mode, &version, "empty", &note, &spill_dir)
+                    .await;
             }
             if mode == Run::Update {
                 // The first pass, or (a run cut off after it) the tally it kept: checked again
@@ -504,7 +469,7 @@ impl MusicBrainz {
                 };
                 if let Some(note) = tally.too_many(job.limit(), "gone", &version) {
                     return self
-                        .refuse(job, mode, &version, "removals", &note, &spill_dir)
+                        .refuse(job, mode, &version, "refused", &note, &spill_dir)
                         .await;
                 }
             }
@@ -554,7 +519,7 @@ impl MusicBrainz {
                 }
                 if let Some(note) = tally.too_many(None, "not", &version) {
                     return self
-                        .refuse(job, mode, &version, "removals", &note, &spill_dir)
+                        .refuse(job, mode, &version, "refused", &note, &spill_dir)
                         .await;
                 }
             }
@@ -579,7 +544,7 @@ impl MusicBrainz {
                 .too_many(job.limit(), "gone or refused", &version);
                 if let Some(note) = note {
                     return self
-                        .refuse(job, mode, &version, "removals", &note, &spill_dir)
+                        .refuse(job, mode, &version, "refused", &note, &spill_dir)
                         .await;
                 }
             }
@@ -606,10 +571,11 @@ impl MusicBrainz {
     }
 
     /// Refuse the dump `version` (`class`, with our own `note`): its runs are removed and the run
-    /// is abandoned ([`super::run::Abandoned`]: no card removed for it, the failure recorded,
-    /// the run cleared), and the position remembers the dump and its source (`refused`,
-    /// `refused_source`), so the dump is read again only when `LATEST` names another, or a full
-    /// import is asked for.
+    /// is abandoned ([`Job::refuse`]: no card removed for it, the failure recorded once, the run
+    /// cleared), and the position remembers the dump with its source and limit (`refused`,
+    /// `refused_source`, `refused_limit`), so the dump is read again only when `LATEST` names
+    /// another, a full import is asked for, or the refusal is cleared (`catalogue
+    /// clear-refusal`).
     async fn refuse(
         &self,
         job: &mut Job<'_>,
@@ -619,29 +585,9 @@ impl MusicBrainz {
         note: &str,
         dir: &Path,
     ) -> Result<()> {
-        tracing::warn!(
-            catalogue = "musicbrainz",
-            version,
-            class,
-            note,
-            "musicbrainz dump refused: it waits for another dump, or `pinakesd catalogue import musicbrainz --request` asks for a full import"
-        );
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(job.dir().join(format!("removals-{version}")));
-        let failure = Failure::new(class).at(note.to_owned());
-        let mut position = job
-            .state()
-            .position
-            .clone()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(p) = position.as_object_mut() {
-            p.insert("refused".into(), version.into());
-            p.insert("refused_source".into(), self.source_id().into());
-            p.insert("refused_limit".into(), job.limit().into());
-        }
-        job.set_position(position);
-        bail!(super::run::Abandoned(failure));
+        Err(job.refuse(serde_json::json!(version), class, note))
     }
 
     /// The dump read into sorted runs under `dir` and merged down to at most the fan-in: the
@@ -1418,7 +1364,7 @@ fn failure_note(error: &anyhow::Error) -> String {
 /// What a read needs.
 struct ReadPlan {
     source: Source,
-    client: reqwest::Client,
+    client: super::fetch::Client,
     handle: tokio::runtime::Handle,
     version: String,
     sums: BTreeMap<String, String>,
@@ -1438,13 +1384,12 @@ impl ReadPlan {
         match &self.source {
             Source::Mirror(base) => {
                 let url = base.join(&format!("{}/{file}", self.version))?;
-                Ok(Box::new(bulk::Download::open(
-                    self.client.clone(),
-                    self.handle.clone(),
-                    url,
-                    FILE_CAP,
-                    self.retry_wait,
-                )?))
+                Ok(Box::new(
+                    bulk::Download::new(self.client.clone(), self.handle.clone(), url, FILE_CAP)
+                        .retry_wait(self.retry_wait)
+                        .stop(self.stop.clone())
+                        .start()?,
+                ))
             }
             Source::Dir(dir) => {
                 let path = dir.join(file);
@@ -1620,6 +1565,8 @@ fn read_dump(plan: ReadPlan) -> Result<Done> {
         done.lines += read.lines;
         done.bad_lines += read.bad_lines;
         done.too_long += read.too_long;
+        crate::telemetry::catalogue_items_skipped("musicbrainz", "bad_line", read.bad_lines);
+        crate::telemetry::catalogue_items_skipped("musicbrainz", "oversized_line", read.too_long);
         done.cut += read.cut;
         done.records += read.records;
         done.files.insert(file.to_owned(), read.records);
@@ -1666,7 +1613,8 @@ fn read_file(
             BufReader::with_capacity(1 << 20, &mut hashed),
             XZ_THREADS,
             XZ_MEMORY,
-        )?;
+        )?
+        .stop(plan.stop.clone());
         let mut tar = Tar::new(decoded);
         let wanted = format!("mbdump/{file}");
         loop {
@@ -2079,21 +2027,6 @@ fn position_limit(state: &State) -> Option<u64> {
 fn cursor_of(state: &State) -> Option<Cursor> {
     serde_json::from_value(state.cursor.clone()?).ok()
 }
-/// The dump a run refused and the source it read it from (`refused`, `refused_source` in the
-/// position; `refused_limit` the limit it read with).
-fn position_refused(state: &State) -> (String, String) {
-    let get = |name: &str| {
-        state
-            .position
-            .as_ref()
-            .and_then(|p| p.get(name))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    (get("refused"), get("refused_source"))
-}
-
 impl MusicBrainz {
     /// Why a read can't be applied as it is: no record at all, or none from a file whose kind of
     /// card the catalogue holds (`None`: it can).
@@ -2136,22 +2069,28 @@ async fn holds_kind(pool: &sqlx::PgPool, prefix: &str) -> Result<bool> {
     Ok(first.is_some_and(|id| id.starts_with(prefix)))
 }
 impl MusicBrainz {
-    /// Whether `latest` is the dump a run refused from this source with this limit: not read
-    /// again (another limit reads it once more, as a new subset).
+    /// What a run refused from this source with this limit ([`run::refusal`]): not read again
+    /// (another limit reads it once more, as a new subset).
+    fn refusal<'s>(&self, state: &'s State) -> Option<&'s serde_json::Value> {
+        super::run::refusal(
+            state.position.as_ref(),
+            self.source().as_deref(),
+            self.limit,
+        )
+    }
+    /// Whether `latest` is the dump a run refused from this source with this limit.
     fn refused(&self, state: &State, latest: &str) -> bool {
-        let (version, source) = position_refused(state);
-        let limit = state
-            .position
-            .as_ref()
-            .and_then(|p| p.get("refused_limit"))
-            .and_then(|v| v.as_u64());
-        version == latest && source == self.source_id() && limit == self.limit
+        self.refusal(state).and_then(|v| v.as_str()) == Some(latest)
     }
 }
 #[async_trait]
 impl Importer for MusicBrainz {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Musicbrainz
+    }
+    /// A directory or another mirror (`--from`).
+    fn source(&self) -> Option<String> {
+        (self.source != Source::official()).then(|| self.source_id())
     }
     /// A read's disk ([`DISK_NEED`], or what a `limit` takes), less what the catalogue's
     /// directory already holds (a cut-off run's runs, which it reuses or removes first); a run
@@ -2181,7 +2120,7 @@ impl Importer for MusicBrainz {
     async fn plan(&self, state: &State) -> Result<Plan> {
         let never = state.current_at().is_none();
         // A first import whose dump was refused waits for another, as an update does.
-        if never && position_refused(state).0.is_empty() {
+        if never && self.refusal(state).is_none() {
             return Ok(Plan::Run(Run::Import));
         }
         {
@@ -2216,15 +2155,14 @@ impl Importer for MusicBrainz {
     /// different subset is a new import, not a change of the old one).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         if job.cursor().is_none() {
             let latest = self.latest().await?;
             if self.refused(job.state(), &latest) {
                 // Only a run by hand asks for it (the task's plan waits): it reads nothing.
-                bail!(super::run::Abandoned(
-                    Failure::new("refused").at(format!("dump {latest} was refused before"))
-                ));
+                let shown = super::run::shown_version(&serde_json::json!(latest));
+                return Err(job.still_refused(format!("dump {shown}")));
             }
             if position_limit(job.state()) != job.limit() {
                 return Ok(UpdateEnd::NeedsImport("the limit changed"));
@@ -2239,16 +2177,6 @@ impl Importer for MusicBrainz {
         Ok(UpdateEnd::Done)
     }
 }
-/// The reason a full import asked for by hand is recorded under (`import_requested`).
-pub const REQUESTED: &str = "asked for by pinakesd catalogue import --request";
-
-/// Whether the catalogue is on but its importer does not start: it needs `http.contact`.
-pub fn needs_contact(config: &crate::config::Config) -> bool {
-    config.catalogues.enabled(Catalogue::Musicbrainz) && config.egress.contact.is_empty()
-}
-/// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
-pub const NEEDS_CONTACT: &str =
-    "needs http.contact: the importer asks the mirror with the operator's contact";
 /// The importer `pinakesd` runs: the official mirror; none without the operator's contact
 /// (`http.contact`), which every request to the mirror names.
 pub fn importer(config: &crate::config::Config) -> Option<Arc<dyn Importer>> {

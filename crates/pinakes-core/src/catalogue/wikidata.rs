@@ -10,8 +10,9 @@
 //! `[catalogues.wikidata] limit` the file is read as a stream over HTTP instead, and only up to
 //! the limit. The read resumes from its last written batch ([`pipeline::Position`]). The
 //! downloaded file is deleted when the import finishes. A dump that fails its checksum, changed
-//! or went upstream, reads as empty or broken, or whose work files were lost, starts the import
-//! over from the newest dump (at most [`RESTARTS`] times for one dump).
+//! or went upstream, reads as broken, or whose work files were lost, starts the import over
+//! from the newest dump; one that fails so [`RESTARTS`] times is refused (`run::REFUSED`), as
+//! is one that makes no card (the runner's `empty`), and the import waits for the next dump.
 //!
 //! **Labels:** a card's labels are the English labels of its genres and classes. The dump holds
 //! those items too, but often after the cards that name them, so their labels are collected as
@@ -27,6 +28,7 @@
 //! [`LONGEST_GAP`] ago (the daemon was down) is not caught up change by change: the next weekly
 //! dump is imported instead, once one newer than the imported one is out.
 use super::failure::Failure;
+use super::fetch;
 use super::run::{Importer, Job, Plan, Run, UpdateEnd};
 use super::store::State;
 use super::{Card, Catalogue};
@@ -60,7 +62,7 @@ pub const RESTARTS: u32 = 3;
 /// The most items whose labels the end of an import asks the API for.
 pub const LABEL_LOOKUPS: usize = 50_000;
 /// The most labels of classes and genres kept (an entry is a few dozen bytes).
-pub const LABELS_CAP: usize = 16_000_000;
+pub const LABEL_MAP_CAP: usize = 16_000_000;
 /// The most cards listed as waiting for labels.
 pub const PENDING_CAP: u64 = 10_000_000;
 /// Items per `wbgetentities` request (the API's limit for a client that is not a bot).
@@ -102,20 +104,9 @@ pub enum From {
     Url(String),
 }
 impl From {
-    /// What `--from` names: an `https://` URL without credentials or a query, else a local
-    /// file.
+    /// What `--from` names: a URL ([`fetch::from_url`]'s rule), else a local file.
     pub fn parse(text: &str) -> Result<Self> {
-        if text.starts_with("http://") {
-            anyhow::bail!("--from takes an https:// URL (or a local file)");
-        }
-        if text.starts_with("https://") {
-            let url = url::Url::parse(text).context("--from is not a URL")?;
-            // The URL is stored in the import's cursor until it ends: no credential in it, nor
-            // a query (a signed link's token).
-            anyhow::ensure!(
-                url.username().is_empty() && url.password().is_none() && url.query().is_none(),
-                "--from takes a URL without credentials or a query"
-            );
+        if let Some(url) = fetch::from_url(text)? {
             return Ok(From::Url(url.to_string()));
         }
         let path = std::path::absolute(text).context("--from names no file")?;
@@ -133,8 +124,6 @@ pub struct Wikidata {
     pub limit: Option<u64>,
     /// The read's threads (decoders, parsers): `pipeline::threads` by default.
     pub threads: (usize, usize),
-    /// Plain HTTP allowed (the tests' local server); HTTPS only otherwise.
-    pub http: bool,
     /// Bytes one round of the download reads per connection before the cursor is saved.
     pub download_round: u64,
     /// Cards written per cursor.
@@ -157,7 +146,6 @@ impl Wikidata {
             from: None,
             limit: None,
             threads: pipeline::threads(),
-            http: false,
             download_round: 512 << 20,
             write_cards: super::store::BATCH_ROWS,
             api_cap: net::API_CAP,
@@ -204,6 +192,14 @@ impl Source {
         match self {
             Source::Download { dump } | Source::Stream { dump, .. } => Some(dump),
             Source::File { .. } => None,
+        }
+    }
+    /// What a refusal of what it reads names (`run::REFUSED`): the dump's date, or the local
+    /// file's path.
+    fn version(&self) -> serde_json::Value {
+        match self {
+            Source::Download { dump } | Source::Stream { dump, .. } => dump.date.clone().into(),
+            Source::File { path, .. } => path.display().to_string().into(),
         }
     }
     fn since(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -277,6 +273,10 @@ struct Restarted {
     /// The command line's limit the import that starts over kept.
     #[serde(default)]
     limit: Option<u64>,
+    /// The import that starts over has its generation already: a try that failed before it
+    /// read anything keeps the marker, and the next one takes no other.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    generation_taken: bool,
 }
 /// Where an update resumes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,15 +302,8 @@ fn seconds(at: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(at.timestamp(), 0).unwrap_or(at)
 }
 
-/// Whether the catalogue is on but its importer does not start for want of `http.contact`.
-pub fn needs_contact(config: &Config) -> bool {
-    config.catalogues.enabled(Catalogue::Wikidata) && config.egress.contact.is_empty()
-}
-/// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
-pub const NEEDS_CONTACT: &str =
-    "needs http.contact: the importer asks Wikimedia with the operator's contact";
 /// The importer `pinakesd` runs; none without the operator's contact (`http.contact`), which
-/// every request to Wikimedia names: the state row says why ([`NEEDS_CONTACT`]).
+/// every request to Wikimedia names: the state row says why (`run::NEEDS_CONTACT`).
 pub fn importer(config: &Config) -> Option<std::sync::Arc<dyn Importer>> {
     if config.egress.contact.is_empty() {
         if config.catalogues.enabled(Catalogue::Wikidata) {
@@ -325,10 +318,11 @@ pub fn importer(config: &Config) -> Option<std::sync::Arc<dyn Importer>> {
 }
 
 fn contact(job: &Job<'_>) -> Result<String> {
-    let contact = job.config().http.contact.trim().to_owned();
+    let contact = job.config().egress.contact.trim().to_owned();
     if contact.is_empty() {
-        // Wikimedia asks every client for a contact; without one nothing is asked.
-        return Err(Failure::new("no_contact").into());
+        // Wikimedia asks every client for a contact; without one nothing is asked, and the run
+        // waits for one as every importer does.
+        return Err(super::run::Waits(super::run::NEEDS_CONTACT.into()).into());
     }
     Ok(contact)
 }
@@ -530,6 +524,13 @@ impl Importer for Wikidata {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Wikidata
     }
+    /// The dump `--from` names.
+    fn source(&self) -> Option<String> {
+        self.from.as_ref().map(|from| match from {
+            From::File(path) => path.display().to_string(),
+            From::Url(url) => url.clone(),
+        })
+    }
     fn disk_need(&self, run: Run, state: &State) -> u64 {
         disk_need(run, state, self.from.is_some() || self.limit.is_some())
     }
@@ -595,23 +596,35 @@ impl Importer for Wikidata {
                             count: 0,
                             after: String::new(),
                             limit: Some(limit),
+                            generation_taken: false,
                         },
                     };
                     job.write(&[], serde_json::to_value(keep)?).await?;
                 }
                 // An import that starts over after one that failed has a generation of its own:
                 // the cards the abandoned attempt wrote and this one doesn't read leave at its end,
-                // and the shrink floor counts only this one's. The marker goes back with it.
-                if let Some(r) = restarted.as_ref().filter(|r| r.count > 0) {
-                    let marker = Restart { restart: r.clone() };
+                // and the shrink floor counts only this one's. The marker goes back with it, saying
+                // so: the tries after one that fails before it reads anything (the dumps host
+                // down) go on in that generation.
+                if let Some(r) = restarted
+                    .as_ref()
+                    .filter(|r| r.count > 0 && !r.generation_taken)
+                {
+                    let marker = Restart {
+                        restart: Restarted {
+                            generation_taken: true,
+                            ..r.clone()
+                        },
+                    };
                     job.new_generation_keeping(serde_json::to_value(marker)?)
                         .await?;
                 }
-                let client = net::client(&contact(job)?, false, self.http)?;
+                let client = fetch::client(&contact(job)?, &[])?;
                 self.start(job, &client, restarted.as_ref()).await?
             }
         };
-        let client = net::client(&contact(job)?, false, self.http)?;
+        job.reading(cursor.source.version());
+        let client = fetch::client(&contact(job)?, &[])?;
         match self.run_import(job, &client, &mut cursor).await {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -630,6 +643,12 @@ impl Importer for Wikidata {
                     _ => 1,
                 };
                 remove_files(job.dir(), &cursor.source);
+                if count >= RESTARTS {
+                    // The dump failed as often as one may: refused, it waits for the next one,
+                    // and the large-import turn is free meanwhile.
+                    let note = format!("dump {date} failed {count} times ({class})");
+                    return Err(job.refuse(cursor.source.version(), "refused", note));
+                }
                 tracing::warn!(
                     catalogue = "wikidata",
                     class,
@@ -643,6 +662,7 @@ impl Importer for Wikidata {
                         count,
                         after: class.to_owned(),
                         limit: cursor.sticky,
+                        generation_taken: false,
                     },
                 };
                 job.write(&[], serde_json::to_value(restart)?).await?;
@@ -652,7 +672,7 @@ impl Importer for Wikidata {
     }
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         let contact = contact(job)?;
-        let client = net::client(&contact, true, self.http)?;
+        let client = fetch::api_client(&contact, &[])?;
         let Some(position) = job
             .position()
             .cloned()
@@ -672,8 +692,10 @@ impl Importer for Wikidata {
         if (!position.import && gap > LONGEST_GAP) || gap > RECENT_CHANGES_REACH {
             let latest = net::latest_dump(&client, &self.endpoints.dumps).await?;
             let imported = job.state().upstream_version.clone().unwrap_or_default();
+            // A dump refused before is no newer dump to import.
             if latest.date.as_str() > imported.as_str()
                 && latest.time().is_some_and(|t| t > position.time)
+                && job.refused() != Some(&serde_json::Value::from(latest.date.clone()))
             {
                 return Ok(UpdateEnd::NeedsImport(
                     "the changes are more than five days behind; a newer dump is imported",
@@ -704,6 +726,14 @@ impl Importer for Wikidata {
         };
         if cursor.end <= position.time {
             return Ok(UpdateEnd::Done);
+        }
+        // The changes after a position refused before (they would remove too much) are not read
+        // again: the updates wait there, and the gap rule above imports a newer dump in time.
+        let window = serde_json::to_value(position.time)?;
+        if job.refused_before(&window) {
+            return Err(
+                job.still_refused(format!("the changes after {}", position.time.to_rfc3339()))
+            );
         }
         let limit = job.limit().or(position.limit);
         let files = LabelFiles::new(job.dir());
@@ -834,6 +864,18 @@ impl Importer for Wikidata {
                     .within_limit(job, keep, limit, gone.len() as u64)
                     .await?;
             }
+            // A broken answer never empties the catalogue: the update's removals stay within a
+            // tenth of the cards (and past ten, `diff::too_many`); past it the update is refused
+            // before this page is written.
+            let held = job.state().cards.max(0) as u64;
+            let removing = job.report().removed + gone.len() as u64;
+            if super::diff::too_many(removing, held) {
+                let note = format!(
+                    "the changes after {} would remove {removing} of {held} cards",
+                    position.time.to_rfc3339()
+                );
+                return Err(job.refuse(window, "refused", note));
+            }
             // The page's cards first, with the cursor of this page; then its removals, with the
             // next page's: a run cut off between the two reads this page again.
             let this = serde_json::to_value(&cursor)?;
@@ -885,7 +927,7 @@ fn inherited_limit(state: &State) -> Option<u64> {
     let asked = state
         .import_requested
         .as_ref()
-        .filter(|r| r.as_str() != super::musicbrainz::REQUESTED)
+        .filter(|r| r.as_str() != super::run::REQUESTED)
         .and_then(|_| state.position.clone())
         .and_then(|p| serde_json::from_value::<UpdatePosition>(p).ok())
         .and_then(|p| p.limit);
@@ -934,8 +976,7 @@ fn starts_over(class: &str, source: &Source) -> bool {
     let local = matches!(source, Source::File { .. });
     match class {
         "checksum" | "dump_changed" | "dump_gone" | "label_files" | "dump_missing" => !local,
-        "bz2_header" | "bz2_block" | "bz2_truncated" | "bz2_oversized" | "empty_dump"
-        | "bad_dump" => !local,
+        "bz2_header" | "bz2_block" | "bz2_truncated" | "bz2_oversized" | "bad_dump" => !local,
         _ => false,
     }
 }
@@ -986,7 +1027,7 @@ fn room(job: &Job<'_>, need: u64) -> Result<()> {
 }
 /// The downloaded dump against its listed SHA-1 (none listed: the blocks' own CRCs check it as
 /// it is read).
-async fn verify(client: &reqwest::Client, dump: &net::Dump, path: &Path) -> Result<()> {
+async fn verify(client: &fetch::Client, dump: &net::Dump, path: &Path) -> Result<()> {
     let Some(want) = net::dump_sha1(client, dump).await? else {
         tracing::info!(
             catalogue = "wikidata",
@@ -1023,7 +1064,7 @@ async fn verify(client: &reqwest::Client, dump: &net::Dump, path: &Path) -> Resu
 /// Ask the API for the labels of `items` (at most [`LABEL_LOOKUPS`]), 50 per request; each is
 /// added to `labels` and its file.
 async fn look_up_labels(
-    client: &reqwest::Client,
+    client: &fetch::Client,
     api: &str,
     items: BTreeSet<u32>,
     labels: &mut Labels,
@@ -1048,6 +1089,15 @@ async fn look_up_labels(
     }
     Ok(items.len())
 }
+/// Whether a dump of `lines` lines with `bad` that are no entity (or over the line cap) is broken:
+/// more than 100 of them, and more than one in a thousand, as for every catalogue.
+fn too_bad(bad: u64, lines: u64) -> bool {
+    bad > 100 && bad.saturating_mul(1000) > lines
+}
+/// A refused version as a message names it.
+fn shown(version: &serde_json::Value) -> String {
+    super::run::shown_version(version)
+}
 /// The day a dump's file name names (`wikidata-20261123-all.json.bz2`), as a time.
 fn named_date(name: &str) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
     let date = name
@@ -1063,7 +1113,7 @@ impl Wikidata {
     async fn start(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         restarted: Option<&Restarted>,
     ) -> Result<ImportCursor> {
         // The command line's limit is kept; an import an update asked for, or one that starts
@@ -1071,13 +1121,10 @@ impl Wikidata {
         let sticky = self.cli_limit.or_else(|| inherited_limit(job.state()));
         let limit = job.limit().or(sticky);
         let source = self.source(client, limit).await?;
-        if let (Some(r), Some(dump)) = (restarted, source.dump()) {
-            if r.date == dump.date && r.count >= RESTARTS {
-                // The newest dump failed again and again: wait for the next one.
-                return Err(Failure::new("dump_rejected")
-                    .at(net::host(&dump.url))
-                    .into());
-            }
+        // A dump refused before (it failed again and again, or read no record) waits for the
+        // next one; a full import asked for reads it again.
+        if job.refused_before(&source.version()) {
+            return Err(job.still_refused(format!("dump {}", shown(&source.version()))));
         }
         let files = LabelFiles::new(job.dir());
         for path in [&files.labels, &files.pending] {
@@ -1085,8 +1132,14 @@ impl Wikidata {
         }
         let step = match &source {
             Source::Download { dump } => {
+                // A dump over the cap is refused, not tried again every ten minutes: the import
+                // waits for the next one.
                 if dump.size > DUMP_SIZE_MAX {
-                    return Err(Failure::new("oversized").at(net::host(&dump.url)).into());
+                    let note = format!(
+                        "dump {} of {} bytes, over the {DUMP_SIZE_MAX} a dump may take",
+                        dump.date, dump.size
+                    );
+                    return Err(job.refuse(source.version(), "size", note));
                 }
                 room(job, dump.size + dump.size / 25)?;
                 preallocate(&job.dir().join(dump.file_name()), dump.size)?;
@@ -1118,7 +1171,7 @@ impl Wikidata {
     async fn run_import(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         if let Some(dump) = cursor.source.dump() {
@@ -1207,7 +1260,7 @@ impl Wikidata {
 
     /// The dump a new import reads, and how: `--from`, else the newest dump, as a stream with a
     /// limit, else downloaded.
-    async fn source(&self, client: &reqwest::Client, limit: Option<u64>) -> Result<Source> {
+    async fn source(&self, client: &fetch::Client, limit: Option<u64>) -> Result<Source> {
         // The changes since a dump whose date is unknown are read from a week before it was
         // written: the dumps are weekly.
         let week = chrono::Duration::days(7);
@@ -1270,7 +1323,7 @@ impl Wikidata {
     async fn download(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         let Source::Download { dump } = cursor.source.clone() else {
@@ -1339,7 +1392,7 @@ impl Wikidata {
     async fn read(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         let files = LabelFiles::new(job.dir());
@@ -1362,14 +1415,11 @@ impl Wikidata {
                 )
             }
             Source::File { path, .. } => Box::new(open_at(path, first_byte)?),
-            Source::Stream { dump, .. } => Box::new(net::stream(
-                client.clone(),
-                dump.url.clone(),
-                dump.validator.clone(),
-                first_byte,
-                dump.size,
-                self.slow_window,
-            )),
+            // Read ahead of the decoders, as many reads as Wikimedia's chunks were before.
+            Source::Stream { dump, .. } => Box::new(
+                net::stream(client, dump, first_byte, None, self.slow_window)?
+                    .read_ahead(net::READ_AHEAD),
+            ),
         };
         let mut pipeline = pipeline::start(source, cursor.at, self.threads);
         // The limit the import started with, also when it resumes after the configuration
@@ -1462,13 +1512,10 @@ impl Wikidata {
                 .await?;
         }
         ended?;
-        // A dump that gave nothing, or mostly lines that are not entities, is not a dump: no
-        // card is removed for it.
+        // A dump of mostly lines that are not entities is not a dump: no card is removed for it.
+        // One that gave no card at all is refused by the runner (`empty`).
         let c = cursor.counts;
-        if c.lines == 0 || cursor.kept == 0 {
-            return Err(Failure::new("empty_dump").into());
-        }
-        if c.bad + c.oversized > (c.lines / 100).max(100) {
+        if too_bad(c.bad + c.oversized, c.lines) {
             return Err(Failure::new("bad_dump").into());
         }
         cursor.labels_len = label_file.sync()?;
@@ -1487,7 +1534,7 @@ impl Wikidata {
     async fn fix_labels(
         &self,
         job: &mut Job<'_>,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         cursor: &mut ImportCursor,
     ) -> Result<()> {
         let files = LabelFiles::new(job.dir());
@@ -1598,7 +1645,7 @@ impl Wikidata {
     /// run (`api`), as nothing is known of it.
     async fn fetch(
         &self,
-        client: &reqwest::Client,
+        client: &fetch::Client,
         chunk: &[String],
         props: &str,
         mut take: impl FnMut(net::Entities) -> Result<()>,
@@ -1624,12 +1671,12 @@ impl Wikidata {
                     }
                     take(got)?;
                 }
-                Err(e) if class(&e) == Some("oversized") && part.len() > 1 => {
+                Err(e) if class(&e) == Some("size") && part.len() > 1 => {
                     let (a, b) = part.split_at(part.len() / 2);
                     todo.push(b);
                     todo.push(a);
                 }
-                Err(e) if class(&e) == Some("oversized") => {
+                Err(e) if class(&e) == Some("size") => {
                     skipped += 1;
                     crate::telemetry::catalogue_items_skipped("wikidata", "over_cap", 1);
                     tracing::warn!(
@@ -1695,9 +1742,9 @@ impl Wikidata {
 /// One batch read, in order: its labels into the map and its file, its cards resolved against
 /// every label known now (those still waiting listed in the pending file), up to the limit.
 /// Whether the label map takes item `n`'s label: one it holds already, or a new one under
-/// [`LABELS_CAP`] (the import, the updates and the lookups alike).
+/// [`LABEL_MAP_CAP`] (the import, the updates and the lookups alike).
 fn room_for_label(labels: &Labels, n: u32) -> bool {
-    labels.len() < LABELS_CAP || labels.contains_key(&n)
+    labels.len() < LABEL_MAP_CAP || labels.contains_key(&n)
 }
 /// Whether the limit is reached.
 fn take_batch(
@@ -1923,7 +1970,7 @@ mod tests {
         asked.import_requested = None;
         assert_eq!(disk_need(Run::Import, &asked, false), DUMP_SIZE + SPARE);
         // One the operator asked for reads the whole dump.
-        asked.import_requested = Some(super::super::musicbrainz::REQUESTED.into());
+        asked.import_requested = Some(super::super::run::REQUESTED.into());
         assert_eq!(disk_need(Run::Import, &asked, false), DUMP_SIZE + SPARE);
     }
 
@@ -1956,6 +2003,16 @@ mod tests {
         assert_eq!(w.plan(&s).await.unwrap(), Plan::Run(Run::Update));
     }
 
+    /// More than 100 bad lines, and more than one in a thousand, break a dump.
+    #[test]
+    fn a_dump_breaks_on_one_bad_line_in_a_thousand() {
+        assert!(!too_bad(100, 100));
+        assert!(too_bad(101, 101));
+        assert!(too_bad(200, 100_000));
+        assert!(!too_bad(200, 200_000));
+        assert!(!too_bad(u64::MAX / 2, u64::MAX));
+    }
+
     #[test]
     fn which_failures_start_the_import_over() {
         let download = Source::Download { dump: dump(1) };
@@ -1970,7 +2027,6 @@ mod tests {
             "label_files",
             "dump_missing",
             "bz2_block",
-            "empty_dump",
             "bad_dump",
         ] {
             assert!(starts_over(class, &download), "{class}");
@@ -1981,8 +2037,8 @@ mod tests {
             "timeout",
             "api",
             "disk",
-            "no_contact",
             "rate_limited",
+            "empty",
         ] {
             assert!(!starts_over(class, &download), "{class}");
         }

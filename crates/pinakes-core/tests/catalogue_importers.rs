@@ -402,16 +402,18 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert!(
+        failed.to_string().contains("refused (crates.io file"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "software", Some("crates.io")).await, 66);
     let state = state_of(&pool, Catalogue::Software).await;
     assert_eq!((state.run.as_deref(), state.cursor.as_ref()), (None, None));
     assert_eq!(state.error_count, 1);
     let position = state.position.clone().unwrap();
-    assert_eq!(
-        position["refused_file"]["crates.io"], "\"c2\"",
-        "{position}"
-    );
+    assert_eq!(position["refused"]["crates.io"], "\"c2\"", "{position}");
+    // Read from the test's files, not the registries' own.
+    assert!(position["refused_source"].is_string(), "{position}");
     // The registries' versions are kept: the next update starts from them.
     assert_eq!(position["crates.io"]["version"], "\"c1\"", "{position}");
     // The task's next step: an update that reads nothing, finishes and fails nothing.
@@ -422,7 +424,7 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     assert_eq!(state.error_count, 1);
     assert!(state.last_update_at.is_some());
     assert_eq!(
-        state.position.as_ref().unwrap()["refused_file"]["crates.io"],
+        state.position.as_ref().unwrap()["refused"]["crates.io"],
         "\"c2\""
     );
     // And the next day's too.
@@ -438,12 +440,7 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     assert_eq!(count(&pool, "software", Some("crates.io")).await, 61);
     let state = state_of(&pool, Catalogue::Software).await;
     assert_eq!(state.run, None);
-    assert!(state
-        .position
-        .as_ref()
-        .unwrap()
-        .get("refused_file")
-        .is_none());
+    assert!(state.position.as_ref().unwrap().get("refused").is_none());
     // F-Droid and Flathub were left as they were.
     assert_eq!(count(&pool, "software", Some("f-droid")).await, 3);
     // Refused again (15 of 61 crates gone); then a full import asked for while the refusal
@@ -455,12 +452,12 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
         .await
         .position
         .unwrap()
-        .get("refused_file")
+        .get("refused")
         .is_some());
     run::request_import(
         &pool,
         Catalogue::Software,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -468,16 +465,12 @@ async fn a_software_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     assert_eq!(count(&pool, "software", Some("crates.io")).await, 46);
     let state = state_of(&pool, Catalogue::Software).await;
     assert!(state.import_requested.is_none());
-    assert!(state
-        .position
-        .as_ref()
-        .unwrap()
-        .get("refused_file")
-        .is_none());
+    assert!(state.position.as_ref().unwrap().get("refused").is_none());
     assert_eq!(state.run, None);
 }
 
-/// A full import of a registry whose file holds no card fails and removes nothing.
+/// A full import of a registry whose file holds no card is refused (`empty`) and removes
+/// nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_software_import_that_reads_no_card_fails(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -494,13 +487,38 @@ async fn a_software_import_that_reads_no_card_fails(pool: PgPool) {
         gzip(
             b"<?xml version=\"1.0\"?><components version=\"0.16\" origin=\"flathub\"></components>",
         ),
-        "f2",
+        "f2 CANARY-etag-text",
     );
     let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("parse"), "{failed}");
+    assert!(
+        failed.to_string().contains("empty (flathub file #")
+            && !failed.to_string().contains("CANARY"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
+    // Refused: the file is named in the position, with the others' versions.
+    let position = state_of(&pool, Catalogue::Software).await.position.unwrap();
+    assert_eq!(
+        position["refused"]["flathub"], "\"f2 CANARY-etag-text\"",
+        "{position}"
+    );
+    assert!(position.get("crates.io").is_some(), "{position}");
+    // A full import of the importer's own (none finished, as the task plans one) finds the refused
+    // file still the newest and ends at once: its text, which the CLI and the log show, names the
+    // file by a digest, never by the server's ETag.
+    sqlx::query("UPDATE catalogue_state SET last_import_at=NULL,last_update_at=NULL WHERE catalogue='software'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let again = run::step(&*importer, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    let text = again.to_string();
+    assert!(
+        text.contains("the flathub file #") && !text.contains("CANARY"),
+        "{text}"
+    );
 }
 
 // --- Podcast Index -------------------------------------------------------------------------------
@@ -626,8 +644,9 @@ fn edited_db(dir: &std::path::Path, name: &str, sql: &str) -> Vec<u8> {
 
 /// A Podcast Index update that would remove every feed is refused once: nothing is removed, the
 /// unpacked database is deleted, and the task's next update does not download that archive
-/// again; a full import asked for then runs, and fails (`parse`) on a database with no live feed,
-/// removing nothing; a newer archive is then imported.
+/// again (it ends at once, recording nothing); a full import asked for then reads it, and is
+/// refused (`empty`) on a database with no live feed, removing nothing; a newer archive is then
+/// read by the next update.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -648,11 +667,21 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
     age(&pool, Catalogue::Podcastindex).await;
     let empty = edited_db(dir.path(), "empty.db", "UPDATE podcasts SET dead=1");
-    files.put("/podcastindex_feeds.db.tgz", podcast_archive(&empty), "p2");
+    // An ETag with text of the server's own: it never reaches the failure, `last_error`, the
+    // log or `catalogue status`; the position alone keeps it.
+    files.put(
+        "/podcastindex_feeds.db.tgz",
+        podcast_archive(&empty),
+        "p2 CANARY-upstream-text",
+    );
     let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert!(
+        failed.to_string().contains("refused (database #")
+            && !failed.to_string().contains("CANARY"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
     let work = ctx.config.catalogues.work_dir(Catalogue::Podcastindex);
     assert!(
@@ -661,33 +690,47 @@ async fn a_podcast_index_update_that_removes_too_much_is_refused_once(pool: PgPo
     );
     let state = state_of(&pool, Catalogue::Podcastindex).await;
     assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
-    assert_eq!(state.position.as_ref().unwrap()["refused_file"], "\"p2\"");
+    assert!(!state.last_error.as_deref().unwrap().contains("CANARY"));
+    let position = state.position.clone().unwrap();
+    assert_eq!(position["refused"], "\"p2 CANARY-upstream-text\"");
+    assert_eq!(
+        position["refused_source"],
+        format!("{base}/podcastindex_feeds.db.tgz")
+    );
     let table = store::status_table(&ctx.config.catalogues, std::slice::from_ref(&state));
-    assert!(table.contains("file \"p2\" refused"), "{table}");
+    assert!(
+        table.contains("refused: #") && !table.contains("CANARY"),
+        "{table}"
+    );
     // The task's next update: no download, no failure.
     let gets = files.gets("/podcastindex_feeds.db.tgz");
-    run::step(&*importer, &ctx).await.unwrap();
+    let again = run::step(&*importer, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
     assert_eq!(files.gets("/podcastindex_feeds.db.tgz"), gets);
     assert_eq!(
         state_of(&pool, Catalogue::Podcastindex).await.error_count,
         1
     );
-    // A full import asked for: it runs, finds no live feed and fails, removing nothing.
+    // A full import asked for: it runs, finds no live feed and is refused, removing nothing.
     run::request_import(
         &pool,
         Catalogue::Podcastindex,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
     let failed = run::step(&*importer, &ctx).await.unwrap_err();
     assert!(
-        pinakes_core::catalogue::failure::shown(&failed).contains("parse"),
+        pinakes_core::catalogue::failure::shown(&failed).starts_with("empty"),
         "{failed}"
     );
     assert_eq!(count(&pool, "podcastindex", None).await, 11);
     assert_eq!(files.gets("/podcastindex_feeds.db.tgz"), gets + 1);
-    // A newer archive, one feed gone: the import under way takes it.
+    assert!(state_of(&pool, Catalogue::Podcastindex)
+        .await
+        .import_requested
+        .is_none());
+    // A newer archive, one feed gone: the next update takes it.
     let fewer = edited_db(dir.path(), "fewer.db", "DELETE FROM podcasts WHERE id=4");
     files.put("/podcastindex_feeds.db.tgz", podcast_archive(&fewer), "p3");
     run::step(&*importer, &ctx).await.unwrap();
@@ -886,8 +929,8 @@ async fn openalex_imports_the_newest_copy_and_updates_by_date(pool: PgPool) {
 }
 
 /// An OpenAlex update whose newer files would remove more than a tenth of the cards is refused:
-/// nothing is removed and its failure counted once; the task's next update finishes without
-/// reading that snapshot; a full import asked for (`--request`) applies it.
+/// nothing is removed and its failure counted once; the task's next update ends at once without
+/// reading that snapshot, recording nothing; a full import asked for (`--request`) applies it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -921,27 +964,32 @@ async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) 
     let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("removals"), "{failed}");
+    assert!(
+        failed
+            .to_string()
+            .contains("refused (snapshot 2026-11-14: 15 cards gone"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "openalex", None).await, 40);
     let state = state_of(&pool, Catalogue::Openalex).await;
     assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
     let position = state.position.unwrap();
-    assert_eq!(position["refused_file"], "2026-11-14");
+    assert_eq!(position["refused"], "2026-11-14");
     assert_eq!(position["snapshot"], "2026-10-14");
     // The task's next update reads nothing (the newer file is gone from disk: reading it would
     // fail) and fails nothing.
     let newer = snap.path().join("data/jsonl/works/updated_date=2026-11-01");
     std::fs::rename(&newer, snap.path().join("aside")).unwrap();
-    run::step(&*importer, &ctx).await.unwrap();
+    let again = run::step(&*importer, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
     let state = state_of(&pool, Catalogue::Openalex).await;
-    assert_eq!(state.error_count, 1);
-    assert!(state.last_update_at.is_some());
+    assert_eq!((state.error_count, state.run), (1, None));
     std::fs::rename(snap.path().join("aside"), &newer).unwrap();
     // A full import asked for: the task runs it and takes the snapshot as it is.
     run::request_import(
         &pool,
         Catalogue::Openalex,
-        pinakes_core::catalogue::musicbrainz::REQUESTED,
+        pinakes_core::catalogue::run::REQUESTED,
     )
     .await
     .unwrap();
@@ -949,12 +997,12 @@ async fn an_openalex_update_that_removes_too_much_is_refused_once(pool: PgPool) 
     assert_eq!(count(&pool, "openalex", None).await, 25);
     let state = state_of(&pool, Catalogue::Openalex).await;
     assert!(state.import_requested.is_none());
-    assert!(state.position.unwrap().get("refused_file").is_none());
+    assert!(state.position.unwrap().get("refused").is_none());
 }
 
 /// A new snapshot 180 days after the last full import is read by a full import, which removes
 /// the works the snapshot no longer lists (merged or deleted upstream); before that, an update
-/// keeps them. A full import whose manifest lists no works file fails and removes nothing.
+/// keeps them. A full import whose manifest lists no works file is refused and removes nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn openalex_imports_in_full_again_after_180_days(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();
@@ -1003,12 +1051,17 @@ async fn openalex_imports_in_full_again_after_180_days(pool: PgPool) {
     assert_eq!(count(&pool, "openalex", None).await, 5);
     assert!(versions(&pool, "openalex").await.contains_key("W1"));
     assert!(state.last_import_at.unwrap() > chrono::Utc::now() - chrono::Duration::minutes(5));
-    // An empty manifest: the import fails, every card stays.
+    // An empty manifest: the import is refused (`empty`), every card stays.
     snapshot(snap.path(), "2026-12-15", &[]);
     let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
         .await
         .unwrap_err();
-    assert!(failed.to_string().contains("manifest"), "{failed}");
+    assert!(
+        failed
+            .to_string()
+            .contains("empty (no record read in 2026-12-15)"),
+        "{failed}"
+    );
     assert_eq!(count(&pool, "openalex", None).await, 5);
 }
 
@@ -1151,6 +1204,171 @@ async fn one_openalex_card_holds_a_shared_doi(pool: PgPool) {
         .await
         .unwrap();
     assert!(reindexed >= 1);
+}
+
+/// An update cut off between its removals and the DOI pass (the holder of a shared DOI removed,
+/// the twin not yet given the DOI back) ends, when it is taken up, with a pass over every card's
+/// DOIs: the twin takes the DOI back though the files read again name neither work.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_openalex_update_cut_off_after_its_removals_shares_dois_again(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let original = with(&w[0], |v| v["cited_by_count"] = 900.into());
+    let twin = with(&w[0], |v| {
+        v["id"] = "https://openalex.org/W2".into();
+        v["cited_by_count"] = 60.into();
+    });
+    let first = ("2026-10-14", vec![original, twin]);
+    snapshot(snap.path(), "2026-10-14", std::slice::from_ref(&first));
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let doi_key = "doi:10.1016/j.kint.2022.02.042";
+    let (held_uri, _, _, _, _, _) = row(&pool, "openalex", "W4225145323").await;
+    let (_, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert!(!keys.contains(&doi_key.to_owned()), "{keys:?}");
+    // The update as it stood when it was cut off: the holder, fallen below the threshold in a
+    // newer file, removed with the update's cursor; the DOI pass not run.
+    let fallen = with(&w[0], |v| v["cited_by_count"] = 10.into());
+    snapshot(
+        snap.path(),
+        "2026-11-14",
+        &[first, ("2026-11-01", vec![fallen])],
+    );
+    sqlx::query(
+        "UPDATE catalogue_state SET run='update',phase='update' WHERE catalogue='openalex'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store::remove(
+        &pool,
+        Catalogue::Openalex,
+        &["W4225145323".to_owned()],
+        Some(&serde_json::json!({"snapshot": "2026-11-14", "phase": "removing"})),
+    )
+    .await
+    .unwrap();
+    let (state, _) = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.run, None);
+    let (uri, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert_eq!(uri, held_uri);
+    assert!(keys.contains(&doi_key.to_owned()), "{keys:?}");
+}
+
+/// An update taken up after its removals and cut off again while it reads (before its DOI pass)
+/// still ends, when it is taken up once more, with the pass over every DOI: each cursor it saves
+/// keeps saying the removals began.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_openalex_update_cut_off_twice_after_its_removals_shares_dois_again(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let w = works();
+    let original = with(&w[0], |v| v["cited_by_count"] = 900.into());
+    let twin = with(&w[0], |v| {
+        v["id"] = "https://openalex.org/W2".into();
+        v["cited_by_count"] = 60.into();
+    });
+    let first = ("2026-10-14", vec![original, twin]);
+    snapshot(snap.path(), "2026-10-14", std::slice::from_ref(&first));
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let doi_key = "doi:10.1016/j.kint.2022.02.042";
+    let (held_uri, _, _, _, _, _) = row(&pool, "openalex", "W4225145323").await;
+    // The update's files: the holder fallen below the threshold and a new work in the first, a
+    // long file of works under the threshold after it (so the run is still reading when it is
+    // cut off again).
+    let fallen = with(&w[0], |v| v["cited_by_count"] = 10.into());
+    let new_work = with(&w[3], |v| {
+        v["id"] = "https://openalex.org/W5".into();
+        v["doi"] = "https://doi.org/10.5555/new.5".into();
+    });
+    let long: Vec<String> = (0..300_000)
+        .map(|n| format!("{{\"id\":\"https://openalex.org/W8{n:07}\",\"cited_by_count\":1}}"))
+        .collect();
+    snapshot(
+        snap.path(),
+        "2026-11-14",
+        &[
+            first,
+            ("2026-11-01", vec![fallen, new_work]),
+            ("2026-11-02", long),
+        ],
+    );
+    // Cut off the first time after its removals: the holder removed, no DOI pass.
+    sqlx::query(
+        "UPDATE catalogue_state SET run='update',phase='update' WHERE catalogue='openalex'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store::remove(
+        &pool,
+        Catalogue::Openalex,
+        &["W4225145323".to_owned()],
+        Some(&serde_json::json!({"snapshot": "2026-11-14", "phase": "removing"})),
+    )
+    .await
+    .unwrap();
+    // Taken up, and cut off again (a restart) once it saved a cursor of its own.
+    let running = tokio::spawn({
+        let (importer, ctx) = (importer.clone(), ctx.clone());
+        async move { run::run_once(importer, &ctx, Run::Update, |_| {}).await }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let cursor: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT cursor FROM catalogue_state WHERE catalogue='openalex'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if cursor.as_ref().is_some_and(|c| c.get("done").is_some()) {
+            break;
+        }
+        assert!(
+            !running.is_finished(),
+            "the update ended before it was cut off"
+        );
+        assert!(std::time::Instant::now() < deadline, "no cursor saved");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    running.abort();
+    let _ = running.await;
+    let state = state_of(&pool, Catalogue::Openalex).await;
+    assert_eq!(
+        state.run.as_deref(),
+        Some("update"),
+        "cut off while reading"
+    );
+    let (_, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert!(!keys.contains(&doi_key.to_owned()), "{keys:?}");
+    // Taken up once more (its catalogue lock goes with the cut-off run's connection).
+    let ended = loop {
+        match run::run_once(importer.clone(), &ctx, Run::Update, |_| {}).await {
+            Ok(ended) => break ended,
+            Err(error) if error.to_string().contains("lock is held") => {
+                assert!(std::time::Instant::now() < deadline, "{error}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("{error}"),
+        }
+    };
+    assert_eq!(ended.0.run, None);
+    let (uri, _, keys, _, _, _) = row(&pool, "openalex", "W2").await;
+    assert_eq!(uri, held_uri);
+    assert!(keys.contains(&doi_key.to_owned()), "{keys:?}");
 }
 
 // --- Tranco --------------------------------------------------------------------------------------
@@ -1491,6 +1709,101 @@ async fn tranco_reads_homepages_by_the_rules(pool: PgPool) {
             "{link}"
         );
     }
+}
+
+/// A listed site that is itself a public suffix (`github.io`, `blogspot.com`) is read on its own
+/// host: a redirect on that host is followed and its page becomes the site's card; a redirect to
+/// one of its subdomains (another person's site) makes none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tranco_site_that_is_a_public_suffix_reads_on_its_own_host(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,github.io\n2,blogspot.com\n").unwrap();
+    let sites = Sites::default();
+    sites.redirect("https://github.io/", "https://github.io/home");
+    sites.page("https://github.io/home", "GitHub Pages");
+    sites.redirect("https://blogspot.com/", "https://someone.blogspot.com/");
+    sites.page("https://someone.blogspot.com/", "Someone's blog");
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    let cards: Vec<String> = versions(&pool, "tranco").await.into_keys().collect();
+    assert_eq!(cards, ["github.io"]);
+    let (uri, name, keys, _, _, _) = row(&pool, "tranco", "github.io").await;
+    assert_eq!(
+        (uri.as_str(), name.as_str()),
+        ("https://github.io/", "GitHub Pages")
+    );
+    assert!(keys.contains(&"homepage:github.io".to_owned()), "{keys:?}");
+    assert_eq!(sites.asked("https://someone.blogspot.com/"), 0);
+    let outcomes = outcomes(&pool).await;
+    assert_eq!(outcomes["blogspot.com"].as_deref(), Some("other"));
+}
+
+/// `catalogue status` shows the list's sites and how many have been read: counted when a list
+/// is loaded, and between loads carried from the last run with each run's first reads (a run
+/// does not count the table).
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_counts_its_sites_when_a_list_loads(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,a.example\n2,b.example\n3,c.example\n").unwrap();
+    let sites = Sites::default();
+    for host in ["a", "b", "c", "d"] {
+        sites.page(&format!("https://{host}.example/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    let shown = || async {
+        let version: String = sqlx::query_scalar(
+            "SELECT upstream_version FROM catalogue_state WHERE catalogue='tranco'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        version
+            .rsplit_once(", ")
+            .map_or(String::new(), |(head, read)| {
+                format!("{}, {read}", head.rsplit_once(", ").unwrap().1)
+            })
+    };
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(shown().await, "3 sites, 3 read)");
+    // Between loads the stored count is carried, not the table counted.
+    sqlx::query("UPDATE catalogue_state SET position=position||'{\"sites\":100,\"read\":40}' WHERE catalogue='tranco'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    make_due(&pool, "a.example").await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(sites.asked("https://a.example/"), 2);
+    assert_eq!(shown().await, "100 sites, 40 read)");
+    // A site read for the first time counts.
+    sqlx::query("UPDATE catalogue_site SET read_at=NULL,due_at=now() WHERE host='b.example'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(shown().await, "100 sites, 41 read)");
+    // A new list is counted again.
+    std::fs::write(
+        &list,
+        "1,a.example\n2,b.example\n3,c.example\n4,d.example\n",
+    )
+    .unwrap();
+    a_day_passed(&pool).await;
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(shown().await, "4 sites, 4 read)");
 }
 
 /// A card stays through two transient failures in a row (no answer, a server error) and goes
@@ -1861,13 +2174,9 @@ async fn a_requested_import_takes_over_an_update_under_way(pool: PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        run::request_import(
-            &pool,
-            catalogue,
-            pinakes_core::catalogue::musicbrainz::REQUESTED,
-        )
-        .await
-        .unwrap();
+        run::request_import(&pool, catalogue, pinakes_core::catalogue::run::REQUESTED)
+            .await
+            .unwrap();
         let gets = (
             files.gets("/db-dump.tar.gz"),
             podcasts.gets("/podcastindex_feeds.db.tgz"),
@@ -1991,4 +2300,456 @@ async fn tranco_plans_from_its_stored_position(pool: PgPool) {
     }))
     .await;
     assert!(minutes(plan) > 59.0, "{plan:?}");
+}
+
+/// The free-disk check counts the files a run writes under `catalogues.dir` only: OpenAlex and
+/// Tranco write none there (they read streams; their cards' share of the database is sized
+/// apart), software only F-Droid's index while it is hashed (at most 512 MiB); Podcast Index needs
+/// room for its unpacked database alone, less what a kept one holds, and a local `.db` none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_file_catalogues_ask_disk_for_their_own_files_only(pool: PgPool) {
+    use pinakes_core::catalogue::run::Importer;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let state = store::ensure_state(&pool, Catalogue::Openalex)
+        .await
+        .unwrap();
+    let url = |u: &str| Input::Url(url::Url::parse(u).unwrap());
+    let openalex = openalex::OpenAlex::new(url(openalex::BUCKET), "test@example.org").unwrap();
+    let software =
+        software::Software::new(software::Sources::official(), "test@example.org").unwrap();
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,example.org\n").unwrap();
+    let tranco = tranco_over(&list, &Sites::default(), &[]);
+    for run in [Run::Import, Run::Update] {
+        assert_eq!(openalex.disk_need(run, &state), 0);
+        // F-Droid's index, at most 512 MiB, is written while it is hashed.
+        assert_eq!(software.disk_need(run, &state), 512 << 20);
+        assert_eq!(tranco.disk_need(run, &state), 0);
+    }
+    let podcasts = podcastindex::PodcastIndex::new(url(podcastindex::DATABASE), "test@example.org")
+        .unwrap()
+        .configured(&ctx.config);
+    // Room for the database at its cap (12 GiB).
+    assert_eq!(podcasts.disk_need(Run::Import, &state), 12 << 30);
+    let work = ctx.config.catalogues.work_dir(Catalogue::Podcastindex);
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("podcastindex_feeds.db"), vec![0u8; 4096]).unwrap();
+    assert_eq!(podcasts.disk_need(Run::Update, &state), (12 << 30) - 4096);
+    let local = podcastindex::PodcastIndex::new(
+        Input::File(dir.path().join("feeds.db")),
+        "test@example.org",
+    )
+    .unwrap();
+    assert_eq!(local.disk_need(Run::Import, &state), 0);
+}
+
+/// Tranco removes at most a tenth of its cards (or ten) in a run: a list that leaves more off it
+/// for a month is refused (nothing removed, the list named in the position, nothing read within
+/// the day), and so is the rest of a run whose homepage reads would remove more (every read
+/// failing).
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_removes_at_most_a_tenth_in_a_run(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=12).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 12);
+    let newer = || {
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&list)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    };
+    // A new list leaves eleven sites off it for over a month: refused, nothing removed.
+    sqlx::query("UPDATE catalogue_site SET listed_on=listed_on-60")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(&list, "1,site1.example\n").unwrap();
+    newer();
+    a_day_passed(&pool).await;
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("off the list"), "{failed}");
+    assert_eq!(count(&pool, "tranco", None).await, 12);
+    let position = state_of(&pool, Catalogue::Tranco).await.position.unwrap();
+    assert!(position["refused"].is_string(), "{position}");
+    // Within the day nothing is read.
+    let again = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    // The sites are listed again, the refusal cleared; every homepage now answers 404 (no card):
+    // a small instance's sites that stopped answering go (the reads' floor is 100 cards), with no
+    // `--request`.
+    store::clear_refusal(&pool, Catalogue::Tranco)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_site SET listed_on=current_date,due_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for host in &hosts {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 0);
+}
+
+/// The shrink floor holds per registry: a full import reading a short Flathub file (one app of
+/// three) fails `shrunk` and removes none of Flathub's cards, though the catalogue as a whole
+/// read most of its cards; `allow-shrink` lets the next try through.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_short_registry_file_meets_its_own_floor(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let files = Files::default();
+    let sources = software_server(&files, 60).await;
+    let importer = Arc::new(software::Software::new(sources, "test@example.org").unwrap());
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
+    let full = String::from_utf8(fixture("software", "flathub-appstream.xml")).unwrap();
+    let second = full.match_indices("<component ").nth(1).unwrap().0;
+    let short = format!("{}</components>\n", &full[..second]);
+    files.put("/appstream.xml.gz", gzip(short.as_bytes()), "f2");
+    let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains("shrunk (flathub: 1 of 3 cards read)"),
+        "{failed}"
+    );
+    assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
+    assert_eq!(
+        store::allow_shrink(&pool, Catalogue::Software)
+            .await
+            .unwrap(),
+        store::Allowance::Allowed
+    );
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "software", Some("flathub")).await, 1);
+}
+
+/// `pinakes_catalogue_items_skipped_total` of `catalogue` for `reason` (a counter of the process,
+/// which other tests may move too: compare a rise).
+fn skipped(catalogue: &str, reason: &str) -> f64 {
+    let text = pinakes_core::telemetry::Metrics::new()
+        .unwrap()
+        .encode()
+        .unwrap();
+    let series = format!(
+        r#"pinakes_catalogue_items_skipped_total{{catalogue="{catalogue}",reason="{reason}"}} "#
+    );
+    text.lines()
+        .find_map(|l| l.strip_prefix(series.as_str()))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// OpenAlex counts the works it passes over (a line that doesn't parse) in
+/// `pinakes_catalogue_items_skipped_total`, as it logs them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn openalex_counts_the_lines_it_passes_over(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), |_| {});
+    let mut lines = works();
+    lines.push(r#"{"id":"https://openalex.org/W9","cited_by_count":99,"#.to_owned());
+    snapshot(snap.path(), "2026-10-14", &[("2026-10-14", lines)]);
+    let before = skipped("openalex", "bad_line");
+    let importer = Arc::new(
+        openalex::OpenAlex::new(Input::File(snap.path().to_owned()), "test@example.org").unwrap(),
+    );
+    run::run_once(importer, &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "openalex", None).await, 5);
+    assert!(skipped("openalex", "bad_line") >= before + 1.0);
+}
+
+/// A Tranco refusal never wedges the catalogue: a full import asked for (`--request`) has no cap
+/// on a run's removals, so a list that leaves most sites off it for good goes through.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tranco_refusal_gives_way_to_a_full_import_asked_for(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=12).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_site SET listed_on=listed_on-60")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(&list, "1,site1.example\n").unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&list)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    a_day_passed(&pool).await;
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("off the list"), "{failed}");
+    assert_eq!(count(&pool, "tranco", None).await, 12);
+    // A day on, the list can't be looked up: with the refusal standing nothing is read, and the
+    // refusal stays (no position without it is written).
+    a_day_passed(&pool).await;
+    std::fs::rename(&list, dir.path().join("aside.csv")).unwrap();
+    let again = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    assert!(state_of(&pool, Catalogue::Tranco)
+        .await
+        .position
+        .unwrap()
+        .get("refused")
+        .is_some());
+    std::fs::rename(dir.path().join("aside.csv"), &list).unwrap();
+    // Asked for, the task's next step is a full import that removes the sites off the list.
+    run::request_import(
+        &pool,
+        Catalogue::Tranco,
+        pinakes_core::catalogue::run::REQUESTED,
+    )
+    .await
+    .unwrap();
+    run::step(&*importer, &ctx).await.unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 1);
+    let state = state_of(&pool, Catalogue::Tranco).await;
+    assert!(state.import_requested.is_none());
+    assert!(state.position.unwrap().get("refused").is_none());
+}
+
+/// A round of homepage reads that would take the run's removals past the cap writes nothing of
+/// itself: every site is either as its round left it (the rounds before, applied whole) or as it
+/// was before the run (its card, its last outcome and read), never half. (A site whose read was
+/// still in flight keeps its claim's hour, as in any run cut off.)
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_round_of_homepage_reads_writes_nothing_of_it(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=150).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 150);
+    let rows = || async {
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >("SELECT host,outcome,read_at FROM catalogue_site ORDER BY host")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    sqlx::query("UPDATE catalogue_site SET due_at=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = rows().await;
+    for host in &hosts {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("homepage reads"), "{failed}");
+    let carded: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT source_id FROM catalogue_card WHERE catalogue='tranco'")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+    // Past the floor (100) and a tenth of the cards: refused, the rounds before applied.
+    assert!(carded.len() >= 50, "{}", carded.len());
+    for (row, was) in rows().await.into_iter().zip(before) {
+        if carded.contains(&row.0) {
+            assert_eq!(row, was, "a site of the refused round is as it was");
+        } else {
+            assert_eq!(row.1.as_deref(), Some("status"), "{row:?}");
+        }
+    }
+}
+
+/// A Tranco list that names no site (an empty or garbage body) is refused (`empty`) in an update
+/// and in a full import, one asked for too: nothing moves (the position, the cards' time, the
+/// cards).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_tranco_list_with_no_site_is_refused(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    std::fs::write(&list, "1,example.org\n2,other.example\n").unwrap();
+    let sites = Sites::default();
+    for host in ["example.org", "other.example"] {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 2);
+    let before = state_of(&pool, Catalogue::Tranco).await;
+    std::fs::write(&list, "<html>not a list</html>\n").unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&list)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    a_day_passed(&pool).await;
+    let failed = run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("empty (list"), "{failed}");
+    let after = state_of(&pool, Catalogue::Tranco).await;
+    assert_eq!(after.current_as_of, before.current_as_of);
+    let position = after.position.unwrap();
+    assert_eq!(position["list"], before.position.as_ref().unwrap()["list"]);
+    assert!(position["refused"].is_string(), "{position}");
+    // A full import by hand (asked for) refuses it too, and keeps the cards.
+    let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap_err();
+    assert!(failed.to_string().contains("empty (list"), "{failed}");
+    assert_eq!(count(&pool, "tranco", None).await, 2);
+}
+
+/// A site whose card a run's reads remove past a tenth of the cards and past ten (under the floor
+/// of 100) is read again once within a week, so after a blanket non-page answer its card can come
+/// back at that read; one removed within them waits for the usual re-read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tranco_sites_removed_past_a_tenth_are_read_again_within_a_week(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(&pool, dir.path(), without_large);
+    let list = dir.path().join("list.csv");
+    let hosts: Vec<String> = (1..=60).map(|n| format!("site{n}.example")).collect();
+    let text: String = hosts
+        .iter()
+        .enumerate()
+        .map(|(i, h)| format!("{},{h}\n", i + 1))
+        .collect();
+    std::fs::write(&list, text).unwrap();
+    let sites = Sites::default();
+    for host in &hosts {
+        sites.page(&format!("https://{host}/"), host);
+    }
+    let importer = Arc::new(tranco_over(&list, &sites, &[]));
+    run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 60);
+    // Days until each site is due again.
+    let due_in = |host: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT extract(epoch FROM due_at-now())::float8/86400 FROM catalogue_site WHERE host=$1",
+            )
+            .bind(host)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Two sites answer 404 (within a tenth): their cards go, read again at the usual 90 days.
+    for host in &hosts[..2] {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    sqlx::query("UPDATE catalogue_site SET due_at=now() WHERE host=ANY($1)")
+        .bind(&hosts[..2])
+        .execute(&pool)
+        .await
+        .unwrap();
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 58);
+    assert!(due_in(hosts[0].clone()).await > 80.0);
+    // Every other site answers 404 (a blanket answer): their cards go (under the floor), each read
+    // again within a week.
+    for host in &hosts[2..] {
+        sites.set(&format!("https://{host}/"), 404, "text/plain", vec![]);
+    }
+    sqlx::query("UPDATE catalogue_site SET due_at=now() WHERE host=ANY($1)")
+        .bind(&hosts[2..])
+        .execute(&pool)
+        .await
+        .unwrap();
+    run::run_once(importer.clone(), &ctx, Run::Update, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "tranco", None).await, 0);
+    // The run's first removals, within ten and a tenth, may wait the usual 90 days.
+    let mut soon = 0;
+    for host in &hosts[2..] {
+        if due_in(host.clone()).await <= 7.01 {
+            soon += 1;
+        }
+    }
+    assert!(soon >= 48, "{soon} of 58 due within a week");
+    assert!(due_in(hosts[0].clone()).await > 80.0);
 }

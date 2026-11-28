@@ -3,7 +3,9 @@
 Pinakes is the Pubky index of external resources: the web pages, places, events, feeds, media and
 records that people reference on Pubky. It reads each referenced link into a small typed card,
 joins the same thing across services, and serves one search over all of them: text, type, map
-area, time, tags, identifiers and reach.
+area, time, tags, identifiers and reach. Open catalogues (Wikidata, MusicBrainz, OpenStreetMap
+and others, read from their dumps) add the cards of things nobody referenced yet; each has an off
+switch.
 
 ## Who is this for?
 

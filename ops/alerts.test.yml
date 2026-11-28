@@ -138,7 +138,7 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: musicbrainz}
             exp_annotations:
-              summary: "The musicbrainz catalogue's importer refused the newest dump it read and waits for another: pinakesd catalogue status shows which and why; if the dump is right, ask for a full import of it"
+              summary: "The musicbrainz catalogue's importer refused the newest dump or file it read and waits for another: pinakesd catalogue status shows which and why; if it is right, ask for a full import of it or clear the refusal (pinakesd catalogue clear-refusal)"
       - eval_time: 4h
         alertname: CatalogueImportFailed
         exp_alerts: []
@@ -161,6 +161,41 @@ tests:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: osm}
             exp_annotations:
               summary: "The osm catalogue has waited six hours for the large-import turn while a large catalogue's import keeps failing: pinakesd catalogue status shows which; fix it, switch it off or drop it"
+  # The importer waits: on a, Podcast Index for free disk (fires past six hours) and OpenStreetMap
+  # for the large-import turn for two days (a large import runs: no alert); on b, Podcast Index
+  # for free disk with the catalogue off (no alert) and Wikidata for the turn for over a week
+  # (fires).
+  - interval: 1m
+    input_series:
+      - series: 'pinakes_catalogue_waiting_seconds{instance="a",job="pinakes",catalogue="podcastindex",reason="disk"}'
+        values: '0+60x500'
+      - series: 'pinakes_catalogue_waiting_seconds{instance="a",job="pinakes",catalogue="osm",reason="turn"}'
+        values: '172800+60x500'
+      - series: 'pinakes_catalogue_waiting_seconds{instance="b",job="pinakes",catalogue="podcastindex",reason="disk"}'
+        values: '0+60x500'
+      - series: 'pinakes_catalogue_waiting_seconds{instance="b",job="pinakes",catalogue="wikidata",reason="turn"}'
+        values: '604000+60x500'
+      - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="podcastindex"}'
+        values: '1x500'
+      - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="osm"}'
+        values: '1x500'
+      - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="podcastindex"}'
+        values: '0x500'
+      - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="wikidata"}'
+        values: '1x500'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CatalogueWaiting
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: CatalogueWaiting
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: podcastindex, reason: disk}
+            exp_annotations:
+              summary: "The podcastindex catalogue's importer has waited too long (disk: over six hours for free disk or a setting, over a week for the large-import turn): pinakesd catalogue status says what it waits for; nothing is imported meanwhile"
+          - exp_labels: {severity: warning, instance: b, job: pinakes, catalogue: wikidata, reason: turn}
+            exp_annotations:
+              summary: "The wikidata catalogue's importer has waited too long (turn: over six hours for free disk or a setting, over a week for the large-import turn): pinakesd catalogue status says what it waits for; nothing is imported meanwhile"
   # Join checks have waited seven hours on a and one on b; extras wait seven hours on both
   # (Wikipedia's pace): only a's joins fire.
   - interval: 1m
@@ -182,14 +217,14 @@ tests:
               summary: "The oldest catalogue join check has been due for over six hours: links wait for their catalogue card or to go back to fetching; pinakes_catalogue_join_errors_total says whether checks fail"
   # Homepage reads over nine hours: on a every read is deferred (no page read at all) while
   # sites are due: it fires; b reads pages through a long first pass (900,000 due); c's reads
-  # wait for a large import; d's catalogue is off; e is past its first pass, a few sites falling
-  # due between runs and read as they do (the run wakes for them: a page about every ten
-  # minutes). Only a fires.
+  # wait for a large import; d's catalogue is off; e is past its first pass: no site falls due for
+  # hours (the backlog is 0 between runs, so no page is read in six hours), then one does and is
+  # read twenty minutes later, before the rule's hour. Only a fires.
   - interval: 1m
     input_series:
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",outcome="ok"}'
         values: '100x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="a",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="a",job="pinakes",queue="homepages"}'
         values: '500x540'
@@ -197,9 +232,9 @@ tests:
         values: '0x540'
       - series: 'pinakes_catalogue_enabled{instance="a",job="pinakes",catalogue="tranco"}'
         values: '1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",outcome="ok"}'
         values: '0+6x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="b",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="b",job="pinakes",queue="homepages"}'
         values: '900000x540'
@@ -207,9 +242,9 @@ tests:
         values: '0x540'
       - series: 'pinakes_catalogue_enabled{instance="b",job="pinakes",catalogue="tranco"}'
         values: '1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",outcome="ok"}'
         values: '100x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="c",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="c",job="pinakes",queue="homepages"}'
         values: '500x540'
@@ -217,9 +252,9 @@ tests:
         values: '1x540'
       - series: 'pinakes_catalogue_enabled{instance="c",job="pinakes",catalogue="tranco"}'
         values: '1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",result="ok"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",outcome="ok"}'
         values: '100x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="d",job="pinakes",outcome="deferred"}'
         values: '0+50x540'
       - series: 'pinakes_catalogue_backlog{instance="d",job="pinakes",queue="homepages"}'
         values: '500x540'
@@ -227,17 +262,25 @@ tests:
         values: '0x540'
       - series: 'pinakes_catalogue_enabled{instance="d",job="pinakes",catalogue="tranco"}'
         values: '0x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",result="ok"}'
-        values: '0+0.1x540'
-      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",result="deferred"}'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",outcome="ok"}'
+        values: '100x420 101x120'
+      - series: 'pinakes_catalogue_homepage_reads_total{instance="e",job="pinakes",outcome="deferred"}'
         values: '0x540'
       - series: 'pinakes_catalogue_backlog{instance="e",job="pinakes",queue="homepages"}'
-        values: '3x540'
+        values: '0x400 1x19 0x121'
       - series: 'pinakes_catalogue_homepage_reads_waiting{instance="e",job="pinakes"}'
         values: '0x540'
       - series: 'pinakes_catalogue_enabled{instance="e",job="pinakes",catalogue="tranco"}'
         values: '1x540'
     alert_rule_test:
+      # At 7h e's site has been due for 20 minutes with no page read in six hours: under the
+      # rule's hour, so only a fires.
+      - eval_time: 7h
+        alertname: CatalogueHomepageReadsStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, job: pinakes}
+            exp_annotations:
+              summary: "No Tranco homepage read has found a page for six hours while sites are due and the reads do not wait for a large import: every read is deferred (the egress gives them no turn) or fails; pinakes_catalogue_homepage_reads_total and pinakesd catalogue status say which"
       - eval_time: 8h
         alertname: CatalogueHomepageReadsStalled
         exp_alerts:
@@ -312,13 +355,13 @@ tests:
   # Refused cards: on a, 300 of 1,000 read an hour (fires); on b, 150 of 10,000 (a few, fires not).
   - interval: 1m
     input_series:
-      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",result="rejected"}'
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",outcome="rejected"}'
         values: '0+5x90'
-      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",result="inserted"}'
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="musicbrainz",outcome="inserted"}'
         values: '0+11.67x90'
-      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",result="rejected"}'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",outcome="rejected"}'
         values: '0+2.5x90'
-      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",result="unchanged"}'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="musicbrainz",outcome="unchanged"}'
         values: '0+164x90'
     alert_rule_test:
       - eval_time: 80m
@@ -326,15 +369,15 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, instance: a, job: pinakes, catalogue: musicbrainz}
             exp_annotations:
-              summary: "The musicbrainz catalogue's runs refused over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the refused cards"
+              summary: "The musicbrainz catalogue's runs rejected over a tenth of the cards they read in the last hour (as invalid): a dump format change or an importer bug; the debug log names the rejected cards"
   # Removed cards: a removes 5,000 of 20,000 in a day (fires); b 2,000 of 1,000,000.
   - interval: 1h
     input_series:
-      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="tranco",result="removed"}'
+      - series: 'pinakes_catalogue_cards_total{instance="a",job="pinakes",catalogue="tranco",outcome="removed"}'
         values: '0 5000x30'
       - series: 'pinakes_catalogue_cards{instance="a",job="pinakes",catalogue="tranco"}'
         values: '20000 15000x30'
-      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="tranco",result="removed"}'
+      - series: 'pinakes_catalogue_cards_total{instance="b",job="pinakes",catalogue="tranco",outcome="removed"}'
         values: '0 2000x30'
       - series: 'pinakes_catalogue_cards{instance="b",job="pinakes",catalogue="tranco"}'
         values: '1000000 998000x30'

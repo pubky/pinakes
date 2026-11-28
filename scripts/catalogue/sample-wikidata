@@ -1,14 +1,10 @@
 #!/usr/bin/env -S python3 -I
-"""catalogue-sample-wikidata: import the first records of Wikidata's real dump into a throwaway
-database with `pinakesd`, and check what the catalogue gives.
+"""scripts/catalogue-sample wikidata [--keep] [--limit N] [--window MINUTES] [--report FILE]
 
-    PINAKESD=target/release/pinakesd DATABASE_URL=postgresql:///postgres?host=/run/postgresql \
-    PINAKES__HTTP__CONTACT=ops@example.org scripts/catalogue-sample-wikidata [--limit N] \
-      [--window MINUTES] [--db NAME] [--dir DIR] [--report FILE] [--keep]
-
-It runs the code the daemon runs:
-1. creates the database NAME (default `catalogue_sample_wikidata`; refused when it exists) on
-   DATABASE_URL's server, `pinakesd --migrate`;
+Imports the first records of Wikidata's real dump into a throwaway database with `pinakesd`, and
+checks what the catalogue gives. It runs the code the daemon runs:
+1. creates the database SAMPLE_DB (default `catalogue_sample_wikidata`; refused when it exists)
+   on the server of PGHOST and PGPORT, `pinakesd --migrate`;
 2. `pinakesd catalogue import wikidata --limit N` (default 20,000 cards): the newest dump read as
    a stream, stopped at the limit (a few hundred megabytes);
 3. counts the cards, keys, labels and canonical links, and the table's size;
@@ -21,12 +17,18 @@ It runs the code the daemon runs:
    changed;
 6. starts `pinakesd` again with the catalogue switched off and checks that search no longer finds
    the card;
-7. drops the database and the work directory (unless `--keep`; with `--dir` the directory stays,
-   without its `pinakes.toml`, which names the database).
+7. drops the database and the work directory (unless `--keep`; with SAMPLE_DIR the directory
+   stays, without its `pinakes.toml`, which names the database).
+`--report FILE` also writes the JSON report to FILE.
 
-Needs `psql`, `createdb`, `dropdb` (PostgreSQL with PostGIS and pg_trgm) and the operator's
-contact in PINAKES__HTTP__CONTACT (also read from ~/.config/pinakes/contact.env when unset),
-which is never printed. Prints a JSON report.
+Environment:
+  PINAKESD        the pinakesd binary (default: target/release/pinakesd)
+  PGHOST, PGPORT  the PostgreSQL server the database is created on (libpq's own variables)
+  SAMPLE_DB       the database name (default: catalogue_sample_wikidata); it must not exist
+  SAMPLE_DIR      where the daemon's files go (default: a new temporary dir)
+  PINAKES__HTTP__CONTACT  the operator's contact Wikimedia asks for (required; also read from
+                  ~/.config/pinakes/contact.env when unset), never printed
+Needs `psql`, `createdb`, `dropdb` (PostgreSQL with PostGIS and pg_trgm). Prints a JSON report.
 """
 import argparse, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
 import urllib.parse, urllib.request
@@ -35,7 +37,7 @@ API = "https://www.wikidata.org/w/api.php"
 
 
 def fail(message):
-    print(f"catalogue-sample-wikidata: {message}", file=sys.stderr)
+    print(f"catalogue-sample wikidata: {message}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -52,33 +54,10 @@ def contact():
     return value
 
 
-def server_env(url):
-    """libpq variables for the server of DATABASE_URL, so no URL (or password) is on a command line."""
-    u = urllib.parse.urlsplit(url)
-    q = urllib.parse.parse_qs(u.query)
-    env = dict(os.environ)
-    for var in ("DATABASE_URL",):
-        env.pop(var, None)
-    host = q.get("host", [u.hostname or ""])[0]
-    if host:
-        env["PGHOST"] = host
-    port = q.get("port", [str(u.port or "")])[0]
-    if port:
-        env["PGPORT"] = port
-    if u.username:
-        env["PGUSER"] = urllib.parse.unquote(u.username)
-    if u.password:
-        env["PGPASSWORD"] = urllib.parse.unquote(u.password)
-    # The URL's TLS settings hold for psql, createdb and dropdb too.
-    for key, var in (("sslmode", "PGSSLMODE"), ("sslrootcert", "PGSSLROOTCERT"), ("sslcert", "PGSSLCERT"), ("sslkey", "PGSSLKEY")):
-        if key in q:
-            env[var] = q[key][0]
-    return env
-
-
-def db_url(url, name):
-    u = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((u.scheme, u.netloc, "/" + name, u.query, ""))
+def db_url(name):
+    """The sample database's URL for pinakesd: the server of PGHOST and PGPORT, as libpq reads them."""
+    q = {k: v for k, v in (("host", os.environ.get("PGHOST", "")), ("port", os.environ.get("PGPORT", ""))) if v}
+    return f"postgresql:///{name}" + ("?" + urllib.parse.urlencode(q) if q else "")
 
 
 def psql(env, db, sql, *args):
@@ -204,53 +183,60 @@ def recent_titles(ua, since, until):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="scripts/catalogue-sample", usage="%(prog)s wikidata [--keep] [--limit N] [--window MINUTES] [--report FILE]",
+                                 description=__doc__.split("\n", 2)[2], formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("catalogue", choices=["wikidata"])
     ap.add_argument("--limit", type=int, default=20000)
     ap.add_argument("--window", type=int, default=20)
-    ap.add_argument("--db", default="catalogue_sample_wikidata")
-    ap.add_argument("--dir")
     ap.add_argument("--report")
     ap.add_argument("--keep", action="store_true")
     a = ap.parse_args()
-    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", a.db):
-        fail("--db must be a plain database name")
-    pinakesd = os.environ.get("PINAKESD", "target/release/pinakesd")
+    db = os.environ.get("SAMPLE_DB") or "catalogue_sample_wikidata"
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", db):
+        print("SAMPLE_DB must be a plain database name (a-z, 0-9, _)", file=sys.stderr)
+        sys.exit(2)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    pinakesd = os.environ.get("PINAKESD") or os.path.join(root, "target/release/pinakesd")
     if not os.access(pinakesd, os.X_OK):
         fail(f"no pinakesd at {pinakesd} (set PINAKESD)")
-    server = os.environ.get("DATABASE_URL") or fail("set DATABASE_URL (any database on the server to use)")
     who = contact()
-    env = server_env(server)
-    if psql(env, "postgres", "SELECT count(*) FROM pg_database WHERE datname = :'v1';", a.db) != "0":
-        fail(f"database {a.db} exists; drop it or name another with --db")
-    work = a.dir or tempfile.mkdtemp(prefix="catalogue-sample-wikidata-")
+    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+    count = subprocess.run(["psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-d", "postgres", "-v", f"v1={db}"],
+                           input="SELECT count(*) FROM pg_database WHERE datname = :'v1';", env=env, capture_output=True, text=True)
+    if count.returncode != 0:
+        fail("the PostgreSQL server (PGHOST, PGPORT) did not answer")
+    if count.stdout.strip() != "0":
+        fail(f"database {db} exists: choose another SAMPLE_DB")
+    given_dir = os.environ.get("SAMPLE_DIR")
+    work = given_dir or tempfile.mkdtemp(prefix="catalogue-sample-wikidata-")
     os.makedirs(work, exist_ok=True)
-    url = db_url(server, a.db)
-    run_env = dict(os.environ, DATABASE_URL=url, PINAKES__HTTP__CONTACT=who)
+    url = db_url(db)
+    run_env = dict(env, DATABASE_URL=url, PINAKES__HTTP__CONTACT=who)
     report = {"limit": a.limit}
     created = False
     try:
-        if subprocess.run(["createdb", a.db], env=env).returncode != 0:
+        if subprocess.run(["createdb", db], env=env).returncode != 0:
             fail("createdb failed")
         created = True
         listen, admin = free_port(), free_port()
         config = os.path.join(work, "pinakes.toml")
         write_config(config, url, os.path.join(work, "catalogues"), os.path.join(work, "index"), listen, admin, True, a.limit)
         run(pinakesd, config, ["--migrate"], run_env, os.path.join(work, "migrate.log"))
-        size0 = int(psql(env, a.db, "SELECT pg_total_relation_size('catalogue_card');"))
+        size0 = int(psql(env, db, "SELECT pg_total_relation_size('catalogue_card');"))
         # 2. The import, as the daemon's task runs it.
         secs, rss, log = run(pinakesd, config, ["catalogue", "import", "wikidata", "--limit", str(a.limit)], run_env, os.path.join(work, "import.log"))
         def logged(message):
             found = [json.loads(l) for l in log.splitlines() if l.startswith("{") and f'"{message}"' in l]
             return found[-1].get("fields", found[-1]) if found else {}
         fields = dict(logged("wikidata cards get the labels read after them"), **logged("wikidata dump read"))
-        report["import"] = {"seconds": secs, "peak_rss_kb": rss, "dump": psql(env, a.db, "SELECT upstream_version FROM catalogue_state WHERE catalogue='wikidata';"),
+        report["import"] = {"seconds": secs, "peak_rss_kb": rss, "dump": psql(env, db, "SELECT upstream_version FROM catalogue_state WHERE catalogue='wikidata';"),
                             **{k: fields.get(k) for k in ("lines", "kept", "no_article", "wikimedia_pages", "unusable", "other", "bad", "oversized", "compressed_bytes", "pending", "labels_unknown", "labels_asked")}}
         # The stream is read up to where the read stopped, and a few chunks beyond.
         report["import"]["downloaded_bytes_about"] = fields.get("compressed_bytes")
         lines = fields.get("lines") or 0
         report["import"]["records_per_second"] = round(lines / secs) if secs else None
         # 3. What the cards hold.
-        q = lambda sql: psql(env, a.db, sql)
+        q = lambda sql: psql(env, db, sql)
         report["cards"] = int(q("SELECT count(*) FROM catalogue_card WHERE catalogue='wikidata';"))
         report["state_cards"] = int(q("SELECT cards FROM catalogue_state WHERE catalogue='wikidata';"))
         report["db_bytes"] = int(q("SELECT pg_total_relation_size('catalogue_card');")) - size0
@@ -319,7 +305,7 @@ def main():
         if not until or until <= since:
             fail("the update did not move its position past --since")
         if not held_named:
-            print("catalogue-sample-wikidata: no sample card was named in the window; widen --window to test changed rows", file=sys.stderr)
+            print("catalogue-sample wikidata: no sample card was named in the window; widen --window to test changed rows", file=sys.stderr)
         # 6. Switched off: gone from search at once.
         write_config(config, url, os.path.join(work, "catalogues"), os.path.join(work, "index"), listen, admin, False, a.limit)
         daemon = serve(pinakesd, config, quiet_env, os.path.join(work, "serve-2.log"), listen, admin)
@@ -331,8 +317,8 @@ def main():
             stop(daemon)
     finally:
         if created and not a.keep:
-            subprocess.run(["dropdb", a.db], env=env)
-        if not a.keep and not a.dir:
+            subprocess.run(["dropdb", db], env=env)
+        if not a.keep and not given_dir:
             shutil.rmtree(work, ignore_errors=True)
         elif not a.keep:
             try:

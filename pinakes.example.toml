@@ -298,6 +298,8 @@ enabled = true
 # /var/lib/pinakes/catalogues instead.
 dir = "catalogues"
 [catalogues.wikidata]
+# Every Wikidata item with a Wikipedia article, from the weekly JSON dump
+# (docs/sources/wikidata_catalogue.md).
 enabled = true
 # Import at most this many items (a small instance): the dump is then read as a stream up to the
 # limit, nothing downloaded. Unset imports all (a 104 GB download into catalogues.dir).
@@ -308,6 +310,8 @@ enabled = true
 enabled = true
 # limit = 100000 # At most this many cards: the dump's first releases that fit.
 [catalogues.osm]
+# OpenStreetMap's named places and useful points, from the planet file or a region's extract
+# (docs/sources/osm_catalogue.md).
 enabled = true
 region = "planet" # Or a region of Geofabrik's extracts, e.g. "europe/switzerland". The planet is a 96 GB download and a 115 GB node index: a small instance takes a region.
 [catalogues.openalex]

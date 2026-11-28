@@ -24,12 +24,17 @@ pub const OUTCOMES: &[&str] = &[
     "error",
     "drift",
 ];
+/// Each catalogue's name with its configured `limit` ([`Metrics::catalogue_switches`]).
+type CatalogueLimits = Vec<(String, Option<i64>)>;
 #[derive(Clone)]
 pub struct Metrics {
     registry: Registry,
     refresh_lock: Arc<tokio::sync::Mutex<Option<Instant>>>,
     /// Whether a refresh ever succeeded, readable without waiting for one that runs.
     refreshed_once: Arc<std::sync::atomic::AtomicBool>,
+    /// Each catalogue's configured `limit` ([`Metrics::catalogue_switches`]): a refusal counts in
+    /// `pinakes_catalogue_refused` only when it was read with it.
+    catalogue_limits: Arc<std::sync::Mutex<CatalogueLimits>>,
     pub fetch: IntCounterVec,
     pub discovery: IntCounterVec,
     pub duration: HistogramVec,
@@ -98,11 +103,11 @@ pub struct Metrics {
     pub catalogue_lag: IntGaugeVec,
     pub catalogue_errors: IntCounterVec,
     pub catalogue_turn: IntGaugeVec,
-    /// Whether the catalogue's importer refused the dump it waits behind: `refused` in its
-    /// position, newer than the version applied (or before any), until a dump is applied. A
-    /// refusal of an older dump (a trial by hand) is not what the importer waits for. For the
-    /// file catalogues (OpenAlex, Podcast Index, software, Tranco): `refused_file` in its
-    /// position, until a newer file is read or a full import finishes.
+    /// Whether the catalogue's importer refused what it waits behind: `refused` in its position
+    /// (`catalogue::run::REFUSED`), read from the catalogue's own source (`refused_source` null)
+    /// with the configured `limit` (`refused_limit`), until a newer version is applied, a full
+    /// import reads it again or the refusal is cleared. A refusal of a run by hand from another
+    /// source or with another limit is not what the importer waits for.
     pub catalogue_refused: IntGaugeVec,
     /// Whether each catalogue's updates catch up after a full import (its position says so).
     pub catalogue_catching_up: IntGaugeVec,
@@ -275,9 +280,21 @@ impl Metrics {
             BACKGROUND_FAILURES.with_label_values(&[name]);
             BACKGROUND_SUCCESS.with_label_values(&[name]);
         }
+        registry.register(Box::new(CATALOGUE_WAITING.clone()))?;
+        for catalogue in crate::catalogue::Catalogue::ALL {
+            for reason in CATALOGUE_WAIT_REASONS {
+                CATALOGUE_WAITING.with_label_values(&[catalogue.name(), reason]);
+            }
+        }
         registry.register(Box::new(CATALOGUE_ITEMS_SKIPPED.clone()))?;
         for reason in CATALOGUE_SKIP_REASONS {
             CATALOGUE_ITEMS_SKIPPED.with_label_values(&["wikidata", reason]);
+        }
+        // MusicBrainz's and OpenAlex's dump lines.
+        for catalogue in ["musicbrainz", "openalex"] {
+            for reason in ["bad_line", "oversized_line"] {
+                CATALOGUE_ITEMS_SKIPPED.with_label_values(&[catalogue, reason]);
+            }
         }
         let out = Self {
             api_panics,
@@ -451,6 +468,7 @@ impl Metrics {
             registry,
             refresh_lock: Arc::default(),
             refreshed_once: Arc::default(),
+            catalogue_limits: Arc::default(),
             ingest_lag,
             ingest_success,
             ingest_resets,
@@ -497,6 +515,13 @@ impl Metrics {
                 .with_label_values(&[catalogue.name()])
                 .set(i64::from(config.enabled(catalogue)));
         }
+        *self.catalogue_limits.lock().expect("the limits") = crate::catalogue::Catalogue::ALL
+            .into_iter()
+            .map(|c| {
+                let limit = config.limit(c).and_then(|l| i64::try_from(l).ok());
+                (c.name().to_owned(), limit)
+            })
+            .collect();
     }
     /// Which catalogues that are on have no importer for want of `http.contact`
     /// (`pinakes_catalogue_needs_contact`).
@@ -547,7 +572,15 @@ impl Metrics {
         let sources=sqlx::query("SELECT *,coalesce(extract(epoch FROM last_success_at),0)::bigint AS success FROM source_state").fetch_all(pool).await?;
         let resources=sqlx::query("SELECT resolver,status,count(*) AS n FROM resource WHERE resolver IS NOT NULL GROUP BY resolver,status").fetch_all(pool).await?;
         let groups=sqlx::query("SELECT (SELECT count(*) FROM group_input WHERE parked_keys>0 AND NOT settled_stopped) AS parked,(SELECT count(*) FROM group_dirty WHERE last_error='work_budget') AS stopped,(SELECT count(*) FROM group_input WHERE settled_stopped) AS settled,(SELECT count(*) FROM group_input WHERE key_conflicts>0) AS conflicts").fetch_one(pool).await?;
-        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce(((position ? 'refused' AND (position->>'version' IS NULL OR position->>'refused'>position->>'version')) OR position ? 'refused_file')::int,0)::bigint AS refused,(CASE WHEN jsonb_typeof(position->'import')='boolean' AND position->>'import'='true' THEN 1 ELSE 0 END)::bigint AS catching_up FROM catalogue_state").bind(crate::catalogue::run::TURN).fetch_all(pool).await?;
+        // Each catalogue's configured limit, which a refusal the gauge counts was read with.
+        let (own_names, own_limits): (Vec<String>, Vec<Option<i64>>) = self
+            .catalogue_limits
+            .lock()
+            .expect("the limits")
+            .iter()
+            .cloned()
+            .unzip();
+        let catalogues=sqlx::query("SELECT catalogue,cards,error_count,coalesce(extract(epoch FROM last_import_at),0)::bigint AS import,coalesce(extract(epoch FROM last_update_at),0)::bigint AS update,CASE WHEN last_import_at IS NULL OR current_as_of IS NULL THEN 0 ELSE greatest(extract(epoch FROM now()-current_as_of),0)::bigint END AS lag,(coalesce(strpos(waiting,$1),0)>0)::int::bigint AS turn,coalesce((nullif(position->'refused','null'::jsonb) IS NOT NULL AND nullif(position->'refused_source','null'::jsonb) IS NULL AND nullif(position->'refused_limit','null'::jsonb) IS NOT DISTINCT FROM to_jsonb(own.lim))::int,0)::bigint AS refused,(CASE WHEN jsonb_typeof(position->'import')='boolean' AND position->>'import'='true' THEN 1 ELSE 0 END)::bigint AS catching_up FROM catalogue_state LEFT JOIN unnest($2::text[],$3::bigint[]) AS own(name,lim) ON own.name=catalogue").bind(crate::catalogue::run::TURN).bind(&own_names).bind(&own_limits).fetch_all(pool).await?;
         // A resource nothing ever referenced keeps the instant it was created as its orphan time;
         // a derived child and a venue are kept for their parent and event, not as previews. The
         // partial orphan index bounds the scan to orphans.
@@ -841,6 +874,35 @@ pub fn catalogue_items_skipped(catalogue: &'static str, reason: &'static str, n:
         .with_label_values(&[catalogue, reason])
         .inc_by(n);
 }
+/// How long each catalogue's importer task has waited for one reason, in seconds: the large-import
+/// turn (`turn`), free disk under `catalogues.dir` (`disk`) or anything else its run needs (`other`,
+/// a setting). Set by the task at each step (`catalogue::run::run`), from when it began waiting for
+/// that reason as its state row keeps it (`catalogue::store::WAITING_SINCE`: across restarts; a
+/// step that fails before its run starts keeps it going; a run that starts ends it); 0 while it
+/// doesn't wait.
+static CATALOGUE_WAITING: std::sync::LazyLock<IntGaugeVec> = std::sync::LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "pinakes_catalogue_waiting_seconds",
+            "How long each catalogue's importer has waited for one reason (turn, disk, other), in seconds; 0 while it doesn't wait",
+        ),
+        &["catalogue", "reason"],
+    )
+    .expect("static metric")
+});
+/// The reasons of [`catalogue_waiting`].
+pub const CATALOGUE_WAIT_REASONS: [&str; 3] = ["turn", "disk", "other"];
+pub fn catalogue_waiting(catalogue: &str, reason: &str, seconds: u64) {
+    CATALOGUE_WAITING
+        .with_label_values(&[catalogue, reason])
+        .set(i64::try_from(seconds).unwrap_or(i64::MAX));
+}
+/// What [`catalogue_waiting`] last set.
+pub fn catalogue_waiting_seconds(catalogue: &str, reason: &str) -> i64 {
+    CATALOGUE_WAITING
+        .with_label_values(&[catalogue, reason])
+        .get()
+}
 /// Resources built from a catalogue card (`built`: joined, or built again after the card
 /// changed) and given back to the fetch queue (`released`: the card went or its catalogue is
 /// off), by catalogue.
@@ -943,9 +1005,9 @@ static CATALOGUE_CARDS: std::sync::LazyLock<IntCounterVec> = std::sync::LazyLock
     IntCounterVec::new(
         Opts::new(
             "pinakes_catalogue_cards_total",
-            "Cards each catalogue's imports and updates wrote, by result: inserted, changed, unchanged (stamped only), rejected (refused as invalid) or removed",
+            "Cards each catalogue's imports and updates wrote, by outcome: inserted, changed, unchanged (stamped only), rejected (refused as invalid) or removed",
         ),
-        &["catalogue", "result"],
+        &["catalogue", "outcome"],
     )
     .expect("static metric")
 });
@@ -1079,7 +1141,7 @@ pub const HOMEPAGE_RESULTS: [&str; 9] = [
     "deferred",
     "other",
 ];
-/// The Tranco catalogue's homepage reads, by result: `ok` (a card), `robots` (its robots.txt
+/// The Tranco catalogue's homepage reads, by outcome: `ok` (a card), `robots` (its robots.txt
 /// says no), `wall`, `not_html`, `status` (a 4xx), `busy` (a 429 or 5xx), `unreached`,
 /// `deferred` (no egress turn in time: not read) and `other` (a redirect off the site, or no
 /// name).
@@ -1088,15 +1150,15 @@ static CATALOGUE_HOMEPAGE_READS: std::sync::LazyLock<IntCounterVec> = std::sync:
         IntCounterVec::new(
         Opts::new(
             "pinakes_catalogue_homepage_reads_total",
-            "Tranco catalogue homepage reads, by result (ok, robots, wall, not_html, status, busy, unreached, deferred, other)",
+            "Tranco catalogue homepage reads, by outcome (ok, robots, wall, not_html, status, busy, unreached, deferred, other)",
         ),
-        &["result"],
+        &["outcome"],
     )
     .expect("static metric")
     },
 );
-pub fn homepage_read(result: &'static str) {
-    CATALOGUE_HOMEPAGE_READS.with_label_values(&[result]).inc();
+pub fn homepage_read(outcome: &'static str) {
+    CATALOGUE_HOMEPAGE_READS.with_label_values(&[outcome]).inc();
 }
 /// The homepage reads counted for `result` so far.
 pub fn homepage_reads(result: &'static str) -> u64 {

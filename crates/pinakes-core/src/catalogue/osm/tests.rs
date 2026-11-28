@@ -400,13 +400,13 @@ async fn a_real_extract_part_imports(pool: PgPool) {
     .await
     .unwrap();
     assert!(!read.changed.is_empty() && read.latest.is_some());
-    // Held to a cap below what the file takes in memory: `too_large`.
+    // Held to a cap below what the file takes in memory: `size`.
     let failed = read_changes(std::fs::File::open(&changes).unwrap(), "fixture", 4096)
         .await
         .map(|_| ())
         .unwrap_err();
     assert!(
-        crate::catalogue::failure::shown(&failed).starts_with("too_large"),
+        crate::catalogue::failure::shown(&failed).starts_with("size"),
         "{failed:#}"
     );
     std::fs::remove_dir_all(dir).unwrap();
@@ -680,7 +680,7 @@ async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
     assert!(runner::to_start(runner::importers(&config, &egress), &config).is_empty());
     runner::note_unstarted(&pool, &config).await.unwrap();
     let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
-    assert_eq!(state.waiting.as_deref(), Some(NEEDS_CONTACT));
+    assert_eq!(state.waiting.as_deref(), Some(runner::NEEDS_CONTACT));
     config.egress.contact = "ops@example.org".into();
     let started = runner::to_start(runner::importers(&config, &egress), &config);
     assert_eq!(
@@ -701,7 +701,8 @@ async fn the_daemon_runs_the_importer_with_the_contact(pool: PgPool) {
 }
 
 /// A local mirror: each path's status, extra headers and body (`Content-Length` from the body
-/// unless given). Counts the requests by path.
+/// unless given). Counts the requests by path, but the `HEAD`s an import asks a file's version
+/// with.
 type Route = (&'static str, u16, Vec<(&'static str, String)>, Vec<u8>);
 async fn mirror(
     routes: Vec<Route>,
@@ -726,7 +727,9 @@ async fn mirror(
                 let n = socket.read(&mut buf).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..n]).to_string();
                 let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                *counted.lock().unwrap().entry(path.clone()).or_default() += 1;
+                if !request.starts_with("HEAD ") {
+                    *counted.lock().unwrap().entry(path.clone()).or_default() += 1;
+                }
                 let route = routes.iter().find(|r| r.0 == path);
                 let (status, headers, body) = match route {
                     Some((_, status, headers, body)) => (*status, headers.clone(), body.clone()),
@@ -847,7 +850,7 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
         "https://osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com/planet/replication/day/state.txt",
         "https://download.geofabrik.de/europe/liechtenstein-latest.osm.pbf",
     ] {
-        assert!(may_follow(&u(ok), HOSTS, true), "{ok}");
+        assert!(crate::catalogue::fetch::may_follow(&u(ok), HOSTS), "{ok}");
     }
     for refused in [
         "http://osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com/planet/x",
@@ -858,7 +861,10 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
         "https://planet.openstreetmap.org:8443/pbf/x",
         "https://user@download.geofabrik.de.evil.example/x",
     ] {
-        assert!(!may_follow(&u(refused), HOSTS, true), "{refused}");
+        assert!(
+            !crate::catalogue::fetch::may_follow(&u(refused), HOSTS),
+            "{refused}"
+        );
     }
     let dir = tempfile_dir();
     let cfg = with_contact(&dir);
@@ -896,7 +902,7 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
         ),
     ])
     .await;
-    let local = http_to(&cfg, &["127.0.0.1"], false).unwrap();
+    let local = crate::catalogue::fetch::client(&cfg.egress.contact, &["127.0.0.1"]).unwrap();
     let dest = dir.join("import.osm.pbf");
     assert!(
         download(&local, &format!("{a}/a.osm.pbf"), &dest, |_| Ok(()))
@@ -923,6 +929,149 @@ async fn redirects_go_only_to_the_bulk_file_hosts() {
     .is_err());
     assert_eq!(b_asked.lock().unwrap().get("/y"), Some(&1));
     assert_eq!(a_asked.lock().unwrap().get("/a.osm.pbf"), Some(&2));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A bulk file is checked against the MD5 published beside the file its answer came from
+/// (`<file>.md5`): one that differs, or a checksum file naming another file, is never used
+/// (`checksum`, no file left), one that matches is; with none published the download goes on.
+#[tokio::test]
+async fn a_file_whose_published_md5_differs_is_not_used() {
+    use md5::Digest as _;
+    let dir = tempfile_dir();
+    let cfg = with_contact(&dir);
+    let body = region();
+    let right: String = md5::Md5::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let wrong = "0".repeat(32);
+    let line = |hex: &str, name: &str| format!("{hex}  {name}\n").into_bytes();
+    let (base, asked) = mirror(vec![
+        ("/bad.osm.pbf", 200, vec![], body.clone()),
+        ("/bad.osm.pbf.md5", 200, vec![], line(&wrong, "bad.osm.pbf")),
+        // A `-latest` name redirects to the dated file, whose checksum is the one read.
+        (
+            "/x-latest.osm.pbf",
+            302,
+            vec![("Location", "/x-261126.osm.pbf".to_owned())],
+            vec![],
+        ),
+        (
+            "/x-latest.osm.pbf.md5",
+            200,
+            vec![],
+            line(&wrong, "x-latest.osm.pbf"),
+        ),
+        ("/x-261126.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/x-261126.osm.pbf.md5",
+            200,
+            vec![],
+            line(&right, "x-261126.osm.pbf"),
+        ),
+        ("/none.osm.pbf", 200, vec![], body.clone()),
+        ("/other.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/other.osm.pbf.md5",
+            200,
+            vec![],
+            line(&wrong, "another.osm.pbf"),
+        ),
+    ])
+    .await;
+    let client = crate::catalogue::fetch::client(&cfg.egress.contact, &["127.0.0.1"]).unwrap();
+    let dest = dir.join("import.osm.pbf");
+    let failed = download(&client, &format!("{base}/bad.osm.pbf"), &dest, |_| Ok(()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed.downcast_ref::<Failure>().map(|f| f.class),
+        Some("checksum")
+    );
+    assert!(!dest.exists() && !dir.join("import.osm.part").exists());
+    assert!(!dir.join("import.osm.done").exists());
+    // A checksum file that names another file: this one is not the file it lists.
+    let failed = download(&client, &format!("{base}/other.osm.pbf"), &dest, |_| Ok(()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed.downcast_ref::<Failure>().map(|f| f.class),
+        Some("checksum")
+    );
+    assert!(!dest.exists());
+    for file in ["x-latest", "none"] {
+        let _ = std::fs::remove_file(dir.join("import.osm.done"));
+        let _ = std::fs::remove_file(&dest);
+        assert!(
+            download(
+                &client,
+                &format!("{base}/{file}.osm.pbf"),
+                &dest,
+                |_| Ok(())
+            )
+            .await
+            .unwrap(),
+            "{file}"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "{file}");
+    }
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.get("/x-261126.osm.pbf.md5"), Some(&1));
+    assert_eq!(asked.get("/x-latest.osm.pbf.md5"), None);
+    assert_eq!(asked.get("/none.osm.pbf.md5"), Some(&1));
+    drop(asked);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An import whose file differs from its published MD5 fails as `checksum` and writes no card;
+/// with the right file the next run imports it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_import_of_a_file_that_fails_its_md5_writes_nothing(pool: PgPool) {
+    use md5::Digest as _;
+    let dir = tempfile_dir();
+    let body = region();
+    let right: String = md5::Md5::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let (bad, _) = mirror(vec![
+        ("/r.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/r.osm.pbf.md5",
+            200,
+            vec![],
+            format!("{}  r.osm.pbf\n", "f".repeat(32)).into_bytes(),
+        ),
+    ])
+    .await;
+    let (good, _) = mirror(vec![
+        ("/r.osm.pbf", 200, vec![], body.clone()),
+        (
+            "/r.osm.pbf.md5",
+            200,
+            vec![],
+            format!("{right} *r.osm.pbf\n").into_bytes(),
+        ),
+    ])
+    .await;
+    let cfg = with_contact(&dir);
+    let mut ctx = Context::new(pool.clone(), cfg.clone());
+    ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
+    let failing = region_importer(&cfg, format!("{bad}/r.osm.pbf"), format!("{bad}/updates"));
+    let failed = runner::step(&failing, &ctx).await.unwrap_err();
+    assert_eq!(
+        crate::catalogue::failure::shown(&failed),
+        "checksum (127.0.0.1)"
+    );
+    assert!(hashes(&pool).await.is_empty());
+    assert!(!dir.join("osm/import.osm.pbf").exists());
+    let fine = region_importer(&cfg, format!("{good}/r.osm.pbf"), format!("{good}/updates"));
+    assert_eq!(
+        runner::step(&fine, &ctx).await.unwrap(),
+        runner::Next::Again
+    );
+    assert_eq!(hashes(&pool).await.len(), 6);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1493,8 +1642,8 @@ async fn a_reimport_far_smaller_waits_for_the_allowance(pool: PgPool) {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A file that holds no place fails `empty_file` and is not read again: the next attempt starts
-/// over, on another file.
+/// A file that holds no place is refused (`empty`) and is not read again (asked again, the same
+/// file ends the run at once); the next attempt on another file starts over.
 #[sqlx::test(migrations = "../../migrations")]
 async fn an_empty_file_does_not_hold_up_the_next_one(pool: PgPool) {
     let dir = tempfile_dir();
@@ -1512,15 +1661,25 @@ async fn an_empty_file_does_not_hold_up_the_next_one(pool: PgPool) {
     let cfg = config(&dir);
     let mut ctx = Context::new(pool.clone(), cfg.clone());
     ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
-    let failed = runner::step(&files_importer(&cfg, vec![empty]), &ctx)
+    let failed = runner::step(&files_importer(&cfg, vec![empty.clone()]), &ctx)
         .await
         .unwrap_err();
     assert!(
-        crate::catalogue::failure::shown(&failed).starts_with("empty_file"),
+        crate::catalogue::failure::shown(&failed).starts_with("empty (no record read in "),
         "{failed:#}"
     );
     let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
     assert!(state.cursor.is_none(), "{:?}", state.cursor);
+    assert!(state.last_import_at.is_none());
+    let position = state.position.unwrap();
+    assert_eq!(
+        position["refused_source"],
+        json!(empty.display().to_string())
+    );
+    let again = runner::step(&files_importer(&cfg, vec![empty]), &ctx)
+        .await
+        .unwrap_err();
+    assert!(again.is::<runner::StillRefused>(), "{again:#}");
     assert_eq!(
         runner::step(&files_importer(&cfg, vec![full]), &ctx)
             .await
@@ -1554,15 +1713,12 @@ async fn a_way_newly_kept_without_its_nodes_has_no_geometry(pool: PgPool) {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A named place a full import sweeps, whose link someone shared, keeps its last card in
-/// `osm_removed`; read again by a later full import, it is no removed object.
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_swept_shared_place_is_removed_until_a_file_holds_it_again(pool: PgPool) {
-    let dir = tempfile_dir();
+/// The region imported, then a shared place the file does not hold (node 777, as if deleted
+/// since), and one it holds listed as removed (node 9). The file's path.
+async fn a_shared_place_gone(pool: &PgPool, dir: &Path) -> PathBuf {
     let pbf = dir.join("region.osm.pbf");
     std::fs::write(&pbf, region()).unwrap();
-    step(&pool, &dir, Run::Import, vec![pbf.clone()], false).await;
-    // A place the next file no longer holds, shared, and one it holds, listed as removed.
+    step(pool, dir, Run::Import, vec![pbf.clone()], false).await;
     let gone = place::read(
         "node",
         777,
@@ -1578,25 +1734,119 @@ async fn a_swept_shared_place_is_removed_until_a_file_holds_it_again(pool: PgPoo
     .unwrap();
     let generation: i64 =
         sqlx::query_scalar("SELECT generation FROM catalogue_state WHERE catalogue='osm'")
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .unwrap();
-    store::upsert(&pool, Catalogue::Osm, generation, &[gone], None)
+    store::upsert(pool, Catalogue::Osm, generation, &[gone], None)
         .await
         .unwrap();
-    crate::store::ensure_resource(&pool, "https://www.openstreetmap.org/node/777")
+    crate::store::ensure_resource(pool, "https://www.openstreetmap.org/node/777")
         .await
         .unwrap();
     sqlx::query("INSERT INTO osm_removed(osm_type,osm_id,name,category,point) VALUES('node',9,'Löwen','amenity/restaurant',ST_SetSRID(ST_MakePoint(9.54,47.14),4326))")
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
+    pbf
+}
+async fn removed(pool: &PgPool) -> Vec<(String, i64, String)> {
+    sqlx::query_as("SELECT osm_type,osm_id,name FROM osm_removed ORDER BY osm_id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// A named place a full import sweeps, whose link someone shared, keeps its last card in
+/// `osm_removed`; read again by a later full import, it is no removed object.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_swept_shared_place_is_removed_until_a_file_holds_it_again(pool: PgPool) {
+    let dir = tempfile_dir();
+    let pbf = a_shared_place_gone(&pool, &dir).await;
     step(&pool, &dir, Run::Import, vec![pbf], false).await;
-    let removed: Vec<(String, i64, String)> =
-        sqlx::query_as("SELECT osm_type,osm_id,name FROM osm_removed ORDER BY osm_id")
-            .fetch_all(&pool)
+    assert_eq!(
+        removed(&pool).await,
+        [("node".to_owned(), 777, "Sonne".to_owned())]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A full import of another region sweeps the last region's places, shared ones too, but records
+/// none as removed (nor does the ODbL dump list one): they still exist in OpenStreetMap.
+#[sqlx::test(migrations = "../../migrations")]
+async fn another_regions_import_records_no_removed_place(pool: PgPool) {
+    let dir = tempfile_dir();
+    let pbf = a_shared_place_gone(&pool, &dir).await;
+    let mut cfg = (*config(&dir)).clone();
+    cfg.catalogues.osm.region = "europe/switzerland".into();
+    let importer = files_importer(&cfg, vec![pbf]);
+    let mut ctx = Context::new(pool.clone(), Arc::new(cfg));
+    ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
+    runner::step(&importer, &ctx).await.unwrap();
+    assert_eq!(name(&pool, "node/777").await, None);
+    assert_eq!(removed(&pool).await, []);
+    let lines: Vec<Value> = sqlx::query_scalar(crate::api::OSM_DUMP_REMOVED_LINE)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lines, Vec::<Value>::new());
+    let scope: Value =
+        sqlx::query_scalar("SELECT scope FROM catalogue_state WHERE catalogue='osm'")
+            .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(removed, [("node".to_owned(), 777, "Sonne".to_owned())]);
+    assert_eq!(scope["region"], "europe/switzerland");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A change file whose removals would pass a tenth of the catalogue's cards (and ten) is refused
+/// before anything of it is applied: no card goes, the position names it, and the same file is
+/// not read again (asked again, the run ends at once).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_change_file_that_removes_too_much_is_refused(pool: PgPool) {
+    let dir = tempfile_dir();
+    let pbf = dir.join("region.osm.pbf");
+    std::fs::write(&pbf, region()).unwrap();
+    step(&pool, &dir, Run::Import, vec![pbf], false).await;
+    let node = |id: u32, action: &str| {
+        match action {
+        "create" => format!("<node id=\"{id}\" version=\"1\" changeset=\"200\" timestamp=\"2026-11-25T10:00:00Z\" lat=\"47.1{id}\" lon=\"9.5{id}\"><tag k=\"amenity\" v=\"restaurant\"/><tag k=\"name\" v=\"Place {id}\"/></node>"),
+        _ => format!("<node id=\"{id}\" version=\"2\" changeset=\"201\" timestamp=\"2026-11-26T10:00:00Z\"/>"),
+    }
+    };
+    let file = |action: &str, ids: std::ops::Range<u32>| {
+        let nodes: String = ids.map(|id| node(id, action)).collect();
+        format!("<?xml version='1.0' encoding='UTF-8'?><osmChange version=\"0.6\"><{action}>{nodes}</{action}></osmChange>")
+    };
+    let created = dir.join("created.osc.gz");
+    std::fs::write(&created, gz(&file("create", 100..120))).unwrap();
+    step(&pool, &dir, Run::Update, vec![created], false).await;
+    let before = hashes(&pool).await;
+    assert_eq!(before.len(), 26);
+    // Twelve of 26 deleted: refused.
+    let deleted = dir.join("deleted.osc.gz");
+    std::fs::write(&deleted, gz(&file("delete", 100..112))).unwrap();
+    let cfg = config(&dir);
+    let mut ctx = Context::new(pool.clone(), cfg.clone());
+    ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
+    let mut importer = files_importer(&cfg, vec![deleted.clone()]);
+    importer.force = Some(Run::Update);
+    let failed = runner::step(&importer, &ctx).await.unwrap_err();
+    assert!(
+        crate::catalogue::failure::shown(&failed).starts_with("refused (change file"),
+        "{failed:#}"
+    );
+    assert_eq!(hashes(&pool).await, before);
+    let state = store::state(&pool, Catalogue::Osm).await.unwrap().unwrap();
+    assert_eq!(
+        state.position.unwrap()["refused"],
+        json!(deleted.display().to_string())
+    );
+    let again = runner::step(&importer, &ctx).await.unwrap_err();
+    assert!(again.is::<runner::StillRefused>(), "{again:#}");
+    // Ten deleted (the floor): applied.
+    let ten = dir.join("ten.osc.gz");
+    std::fs::write(&ten, gz(&file("delete", 100..110))).unwrap();
+    step(&pool, &dir, Run::Update, vec![ten], false).await;
+    assert_eq!(hashes(&pool).await.len(), 16);
     std::fs::remove_dir_all(dir).unwrap();
 }

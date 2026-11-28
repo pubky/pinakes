@@ -132,13 +132,6 @@ pub fn parse_state(text: &str) -> Option<(u64, chrono::DateTime<chrono::Utc>)> {
     Some((sequence?, timestamp?))
 }
 
-/// Whether the catalogue is on without the operator's contact, which its downloads name.
-pub fn needs_contact(config: &crate::config::Config) -> bool {
-    config.catalogues.enabled(Catalogue::Osm) && config.egress.contact.trim().is_empty()
-}
-/// What `catalogue status` shows as the catalogue's `waiting` while [`needs_contact`].
-pub const NEEDS_CONTACT: &str =
-    "needs http.contact: the importer asks OpenStreetMap's file servers with the operator's contact";
 /// The importer `pinakesd` runs: the configured region's files; none without the operator's
 /// contact (`http.contact`), which every request to the bulk-file hosts names.
 pub fn importer(config: &crate::config::Config) -> Option<std::sync::Arc<dyn Importer>> {
@@ -164,7 +157,7 @@ pub struct OsmImporter {
     pub region: String,
     /// How many threads decode the file (at least one).
     pub threads: usize,
-    /// The run to make whatever is due (`pinakesd catalogue import|update`).
+    /// The run to make whatever is due (`pinakesd catalogue import osm [--update]`).
     pub force: Option<Run>,
     /// The node index's layout; none: by the region and the file's size.
     pub layout: Option<nodes::Layout>,
@@ -214,36 +207,10 @@ async fn read_header(file: &Path) -> Result<pbf::Header> {
     .map_err(|_| Failure::new("panic"))?
     .with_context(|| Failure::new("parse").at(file.display().to_string()))
 }
-fn http(config: &crate::config::Config) -> Result<reqwest::Client> {
-    http_to(config, HOSTS, true)
-}
-/// Whether a redirect may go to `url`: one of `hosts` by its exact name, over https unless
-/// `https_only` is false (a test's local servers).
-fn may_follow(url: &url::Url, hosts: &[&str], https_only: bool) -> bool {
-    (url.scheme() == "https" || !https_only)
-        && url.port().is_none_or(|_| !https_only)
-        && url.host_str().is_some_and(|h| hosts.contains(&h))
-}
-/// A client of its own, outside `Egress`: it reads only the fixed bulk-file hosts (`HOSTS`),
-/// following at most 5 redirects, only to them.
-fn http_to(
-    config: &crate::config::Config,
-    hosts: &'static [&'static str],
-    https_only: bool,
-) -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() < 5 && may_follow(attempt.url(), hosts, https_only) {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .user_agent(crate::resolver::egress::user_agent(&config.egress.contact))
-        .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(120))
-        .build()?)
+/// The catalogues' client, outside `Egress`: it reads only the fixed bulk-file hosts
+/// ([`HOSTS`]), following redirects only to them.
+fn http(config: &crate::config::Config) -> Result<super::fetch::Client> {
+    super::fetch::client(&config.egress.contact, HOSTS)
 }
 fn host_of(url: &str) -> String {
     url::Url::parse(url)
@@ -251,35 +218,31 @@ fn host_of(url: &str) -> String {
         .and_then(|u| u.host_str().map(str::to_owned))
         .unwrap_or_default()
 }
-/// Read a response's body into `out`, at most `cap` bytes.
-async fn body_to(
-    mut response: reqwest::Response,
-    cap: u64,
-    failed: impl Fn() -> Failure,
-    out: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<u64> {
-    use tokio::io::AsyncWriteExt;
-    let mut read = 0u64;
-    while let Some(chunk) = response.chunk().await.with_context(&failed)? {
-        read += chunk.len() as u64;
-        anyhow::ensure!(read <= cap, failed());
-        out.write_all(&chunk).await?;
-    }
-    Ok(read)
-}
 /// A small text file (a replication state): at most 64 KiB, or none when it is not there.
-async fn get_text(client: &reqwest::Client, url: &str) -> Result<Option<String>> {
-    let failed = || Failure::new("download").at(host_of(url));
-    let response = client.get(url).send().await.with_context(failed)?;
-    if response.status().as_u16() == 404 {
+async fn get_text(client: &super::fetch::Client, url: &str) -> Result<Option<String>> {
+    let body = client.small(url, 64 * 1024).await?;
+    Ok(body.map(|b| String::from_utf8_lossy(&b).into_owned()))
+}
+/// The MD5 OpenStreetMap's file servers publish beside a bulk file (`<file>.md5`: an `md5sum`
+/// line naming it), the planet's and Geofabrik's; none when none is published (a 404). One that
+/// names no MD5 of this file is a failure (`checksum`): the file is not the one it lists.
+async fn published_md5(client: &super::fetch::Client, file: &url::Url) -> Result<Option<String>> {
+    let Some(name) = file.path_segments().and_then(|mut s| s.next_back()) else {
         return Ok(None);
+    };
+    let mut sums = file.clone();
+    sums.set_path(&format!("{}.md5", file.path()));
+    let Some(text) = client.small(sums.as_str(), 4096).await? else {
+        return Ok(None);
+    };
+    let listed = super::bulk::sums(&String::from_utf8_lossy(&text), 32)
+        .into_iter()
+        .find(|(listed, _)| listed == name)
+        .map(|(_, hex)| hex);
+    match listed {
+        Some(hex) => Ok(Some(hex)),
+        None => Err(Failure::new("checksum").at(host_of(file.as_str())).into()),
     }
-    if !response.status().is_success() {
-        return Err(failed().into());
-    }
-    let mut body = vec![];
-    body_to(response, 64 * 1024, failed, &mut body).await?;
-    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
 }
 /// The largest bulk file read (the planet is about 96 GB).
 const MAX_FILE: u64 = 250_000_000_000;
@@ -294,7 +257,7 @@ const KEEP_DOWNLOAD: Duration = Duration::from_secs(7 * 86400);
 /// (the free-disk check). True when the file was downloaded now, false when an earlier
 /// attempt's file was used.
 async fn download(
-    client: &reqwest::Client,
+    client: &super::fetch::Client,
     url: &str,
     dest: &Path,
     room: impl Fn(u64) -> Result<()>,
@@ -315,18 +278,34 @@ async fn download(
         return Ok(false);
     }
     let _ = tokio::fs::remove_file(&done).await;
-    let (client, handle, parsed) = (
+    let (http, handle, parsed) = (
         client.clone(),
         tokio::runtime::Handle::current(),
         url::Url::parse(url)?,
     );
+    // A run cut off (this future dropped) stops the download's thread within a moment.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _stop = super::bulk::StopOnDrop(stop.clone());
     let opened = tokio::task::spawn_blocking(move || {
-        super::bulk::Download::open(client, handle, parsed, MAX_FILE, Duration::from_secs(5))
+        super::bulk::Download::new(http, handle, parsed, MAX_FILE)
+            .retry_wait(Duration::from_secs(5))
+            .stop(stop)
+            .start()
     })
     .await
     .map_err(|_| Failure::new("panic"))??;
     let length = opened.length();
     room(length)?;
+    // The checksum published for the file the answer came from (a `-latest` name redirects to
+    // the dated file), asked before its bytes are read.
+    let answered = opened
+        .final_url()
+        .cloned()
+        .unwrap_or_else(|| url::Url::parse(url).expect("parsed above"));
+    let want = published_md5(client, &answered).await?;
+    if want.is_none() {
+        tracing::warn!(catalogue = "osm", host = %host_of(answered.as_str()), "no checksum is published beside the file (no .md5); the download goes on, checked by TLS and its length only");
+    }
     tracing::info!(
         catalogue = "osm",
         bytes = length,
@@ -334,18 +313,23 @@ async fn download(
     );
     let part = dest.with_extension("part");
     let (to, failed_at) = (part.clone(), host_of(url));
-    let read = tokio::task::spawn_blocking(move || -> Result<u64> {
-        let mut body = opened;
+    let (read, got) = tokio::task::spawn_blocking(move || -> Result<(u64, String)> {
+        let mut body = super::bulk::Hashed::<_, md5::Md5>::with(opened);
         let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&to)?);
         let read = std::io::copy(&mut body, &mut out)
             .with_context(|| Failure::new("download").at(failed_at))?;
         std::io::Write::flush(&mut out)?;
         out.get_ref().sync_all()?;
-        Ok(read)
+        Ok((read, body.hex()))
     })
     .await
     .map_err(|_| Failure::new("panic"))??;
     anyhow::ensure!(read == length, Failure::new("download").at(host_of(url)));
+    if want.is_some_and(|want| want != got) {
+        // Not the file its publisher listed: never used, and downloaded again next time.
+        let _ = tokio::fs::remove_file(&part).await;
+        anyhow::bail!(Failure::new("checksum").at(host_of(answered.as_str())));
+    }
     tokio::fs::rename(&part, dest).await?;
     tokio::fs::write(&done, url).await?;
     tracing::info!(
@@ -356,6 +340,31 @@ async fn download(
     Ok(true)
 }
 
+/// A local file's version as a refusal names it: its path, size and modification time.
+fn local_version(file: &Path) -> Option<Value> {
+    let meta = std::fs::metadata(file).ok()?;
+    let modified = meta
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from)
+        .map_or(0, |t| t.timestamp());
+    Some(json!(format!(
+        "{}:{}:{modified}",
+        file.display(),
+        meta.len()
+    )))
+}
+/// A bulk file's version as its `HEAD` answer names it (a strong ETag, else Last-Modified), or
+/// none when the answer names none (or does not come): the file is then read as any.
+async fn remote_version(client: &super::fetch::Client, url: &str) -> Option<Value> {
+    let input = super::fetch::Input::Url(url::Url::parse(url).ok()?);
+    let (version, _) = input.version(client).await.ok()?;
+    Some(json!(version))
+}
+/// A version as a message names it.
+fn shown(version: &Value) -> String {
+    super::run::shown_version(version)
+}
 /// What one pass sends to be written: cards, removals, and the cursor saved with them.
 struct Batch {
     cards: Vec<Card>,
@@ -449,6 +458,15 @@ fn centre(b: [f64; 4]) -> Point {
     }
 }
 
+/// A pass's error as a `parse` failure of `file`, unless it already says its own (`disk`, `panic`).
+fn pass_failure(error: anyhow::Error, file: &Path) -> anyhow::Error {
+    let own = error.downcast_ref::<Failure>().is_some() || error.chain().any(|c| c.is::<Failure>());
+    if own {
+        return error;
+    }
+    error.context(Failure::new("parse").at(file.display().to_string()))
+}
+
 /// The first pass over the file from `cursor` (a blob boundary): nodes into the index, node and
 /// way cards sent to be written, kept relations set aside. Blocking work.
 #[allow(clippy::too_many_arguments)]
@@ -489,7 +507,6 @@ fn first_pass(
     let mut pending_len = pending_len;
     let mut reader: Option<nodes::Reader> = None;
     let mut cards = vec![];
-    let parse = || Failure::new("parse").at(file.display().to_string());
     pbf::read_blocks(file, offset, first, threads, |d| {
         let b = &d.block;
         // The index's disk, every 64 blocks of nodes too (a stretch without cards writes it).
@@ -584,7 +601,7 @@ fn first_pass(
         }
         Ok(true)
     })
-    .with_context(parse)?;
+    .map_err(|e| pass_failure(e, file))?;
     index.sync()?;
     nodes::check_room(&dir.join("nodes.idx"), room, &free)?;
     if let Some(r) = &reader {
@@ -644,7 +661,6 @@ fn second_pass(
     let index = nodes::Reader::open(&dir.join("nodes.idx"), layout)?;
     let mut boxes: Vec<(i64, [f64; 4])> = Vec::with_capacity(wanted.len());
     if !wanted.is_empty() {
-        let parse = || Failure::new("parse").at(file.display().to_string());
         pbf::read_blocks(file, ways_at, 0, threads, |d| {
             let b = &d.block;
             for w in &b.ways {
@@ -662,7 +678,7 @@ fn second_pass(
             // Relations follow the ways in a sorted file: the ways are all read.
             Ok(b.relations.is_empty() || !b.ways.is_empty())
         })
-        .with_context(parse)?;
+        .map_err(|e| pass_failure(e, file))?;
         boxes.sort_unstable_by_key(|b| b.0);
     }
     let mut cards = vec![];
@@ -792,33 +808,13 @@ pub async fn touch_shared(pool: &PgPool, source_ids: &[String]) -> Result<()> {
 
 impl OsmImporter {
     /// The end of a full import whose file was read whole (`cursor` at stage `done`, holding
-    /// what it needs): refuse a file that held no place, keep where the updates start, remove the
-    /// cards the file no longer holds and mark their shared links due, and remove the temporary
-    /// files.
+    /// what it needs): keep where the updates start, remove the temporary files, and after the
+    /// runner's checks ([`Job::check_shrink`]: a file that held no place is refused as `empty`,
+    /// and not downloaded again) remove the cards the file no longer holds and mark their shared
+    /// links due.
     async fn finish(&self, job: &mut Job<'_>, cursor: &Value) -> Result<()> {
         let pool = job.pool();
         let generation = job.generation();
-        // A file that holds no place is no import: removing every card for it would empty the
-        // catalogue. Counted over the whole run (its earlier attempts too).
-        let read: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM catalogue_card WHERE catalogue='osm' AND seen_generation=$1)",
-        )
-        .bind(generation)
-        .fetch_one(pool)
-        .await?;
-        if !read {
-            // Not this file again: the next attempt starts over, on a new download or another
-            // `--from` file.
-            job.new_generation().await?;
-            if cursor["downloaded"] == true {
-                if let Some(file) = cursor["file"].as_str() {
-                    let _ = tokio::fs::remove_file(Path::new(file).with_extension("done")).await;
-                }
-            }
-            return Err(Failure::new("empty_file")
-                .at(cursor["file"].as_str().unwrap_or_default().to_owned())
-                .into());
-        }
         let region = job.config().catalogues.osm.region.clone();
         let base = self.sources(&region).1;
         let header = &cursor["header"];
@@ -857,9 +853,18 @@ impl OsmImporter {
                 let _ = tokio::fs::remove_file(Path::new(file).with_extension("done")).await;
             }
         }
-        // Removing more than the shrink floor allows (a cut-off file, another region) waits for
-        // the operator's allowance, as any catalogue's full import does: nothing is removed.
+        // A file that held no place is refused; removing more than the shrink floor allows (a
+        // cut-off file, another region) waits for the operator's allowance, as any catalogue's
+        // full import does: nothing is removed.
         job.check_shrink().await?;
+        // A full import of another region than the last one's sweeps the places outside the new
+        // region: they still exist in OpenStreetMap, so none is recorded as removed.
+        let region = job.config().catalogues.scope(Catalogue::Osm);
+        let moved = job
+            .state()
+            .scope
+            .as_ref()
+            .is_some_and(|last| last.get("region") != region.get("region"));
         let mut after = String::new();
         loop {
             let gone: Vec<String> = sqlx::query_scalar(
@@ -874,7 +879,8 @@ impl OsmImporter {
             after = last.clone();
             // A shared link of a named place swept here reads missing next: the deleted-place
             // rule compares its card as it last was.
-            sqlx::query("INSERT INTO osm_removed(osm_type,osm_id,name,category,point) \
+            if !moved {
+                sqlx::query("INSERT INTO osm_removed(osm_type,osm_id,name,category,point) \
                  SELECT split_part(c.source_id,'/',1),split_part(c.source_id,'/',2)::bigint,c.name,c.details->>'category',c.point FROM catalogue_card c \
                  WHERE c.catalogue='osm' AND c.source_id=ANY($1) AND c.point IS NOT NULL AND c.details->>'category' IS NOT NULL AND NOT coalesce((c.details->>'unnamed')::boolean,false) \
                  AND EXISTS (SELECT 1 FROM resource r WHERE r.osm_type=split_part(c.source_id,'/',1) AND r.osm_id=split_part(c.source_id,'/',2)::bigint) \
@@ -882,6 +888,7 @@ impl OsmImporter {
                 .bind(&gone)
                 .execute(pool)
                 .await?;
+            }
             job.remove(&gone, cursor.clone()).await?;
             touch_shared(pool, &gone).await?;
         }
@@ -939,6 +946,13 @@ impl OsmImporter {
 impl Importer for OsmImporter {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Osm
+    }
+    /// The file `--from` names.
+    fn source(&self) -> Option<String> {
+        match &self.input {
+            Input::Files(files) => files.first().map(|f| f.display().to_string()),
+            Input::Region => None,
+        }
     }
     fn disk_need(&self, run: Run, state: &State) -> u64 {
         match run {
@@ -1025,16 +1039,28 @@ impl Importer for OsmImporter {
         // The file was read whole and its last part written (a run cut off after it, in the
         // runner's sweep or before): only the end is left, without the file.
         if cursor["stage"] == "done" {
+            if let Some(version) = cursor.get("version").filter(|v| !v.is_null()) {
+                job.reading(version.clone());
+            }
             return self.finish(job, &cursor).await;
+        }
+        // The file's version, before it is downloaded: one refused before (it held no place) is
+        // not downloaded again until the file changes; a full import asked for reads it.
+        let newest = match &given {
+            Some(file) => local_version(file),
+            None if job.config().egress.contact.trim().is_empty() => None,
+            None => remote_version(&http(job.config())?, &url).await,
+        };
+        if let Some(version) = &newest {
+            if job.refused_before(version) {
+                return Err(job.still_refused(format!("the file {}", shown(version))));
+            }
         }
         let (file, downloaded, url) = match given {
             Some(file) => (file, false, None),
             None => {
                 if job.config().egress.contact.trim().is_empty() {
-                    return Err(super::run::Waits(
-                        "http.contact is not set: bulk files are read only with the operator's contact in the User-Agent".into(),
-                    )
-                    .into());
+                    return Err(super::run::Waits(super::run::NEEDS_CONTACT.into()).into());
                 }
                 let file = dir.join("import.osm.pbf");
                 let client = http(job.config())?;
@@ -1102,6 +1128,15 @@ impl Importer for OsmImporter {
         }
         let size = std::fs::metadata(&file)?.len();
         let fresh = cursor["stage"].as_str().is_none();
+        // The version of the file read: a run taken up on its file keeps the one it began with.
+        let version = if fresh {
+            newest
+        } else {
+            cursor.get("version").filter(|v| !v.is_null()).cloned()
+        };
+        if let Some(version) = &version {
+            job.reading(version.clone());
+        }
         // The planet's index is dense (8 bytes per node ID); a region's is sparse (16 bytes per node).
         let layout = match cursor["layout"].as_str() {
             Some("dense") => nodes::Layout::Dense,
@@ -1124,6 +1159,7 @@ impl Importer for OsmImporter {
         }
         // What the end needs, kept in every cursor of the run (so a run at `done` needs no file).
         let fixed = json!({
+            "version": version,
             "file": file.display().to_string(),
             "downloaded": downloaded,
             "url": url,
@@ -1208,6 +1244,10 @@ impl Importer for OsmImporter {
         if let Input::Files(files) = &self.input {
             let mut latest = None;
             for file in files.clone() {
+                let name = json!(file.display().to_string());
+                if job.refused_before(&name) {
+                    return Err(job.still_refused(format!("change file {}", file.display())));
+                }
                 let changes = read_changes(
                     std::fs::File::open(&file)?,
                     &file.display().to_string(),
@@ -1215,7 +1255,7 @@ impl Importer for OsmImporter {
                 )
                 .await?;
                 latest = latest.max(changes.latest.clone());
-                apply(job, changes, json!({"files": true})).await?;
+                apply(job, changes, json!({"files": true}), name).await?;
             }
             if let Some(t) = latest.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()) {
                 job.set_current_as_of(t.with_timezone(&chrono::Utc));
@@ -1224,10 +1264,7 @@ impl Importer for OsmImporter {
         }
         let region = job.config().catalogues.osm.region.clone();
         if job.config().egress.contact.trim().is_empty() {
-            return Err(super::run::Waits(
-                "http.contact is not set: change files are read only with the operator's contact in the User-Agent".into(),
-            )
-            .into());
+            return Err(super::run::Waits(super::run::NEEDS_CONTACT.into()).into());
         }
         let position = job.position().cloned().unwrap_or(Value::Null);
         if position["region"].as_str() != Some(region.as_str()) {
@@ -1270,8 +1307,17 @@ impl Importer for OsmImporter {
         }
         let mut last_time = None;
         let end = state.0.min(applied + FILES_PER_UPDATE);
+        let stored_time = position["timestamp"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&chrono::Utc));
         while applied < end {
             let sequence = applied + 1;
+            // A change file refused before is not read again: the updates wait there until a
+            // full import (asked for, or once the files are 60 behind) or `clear-refusal`.
+            if job.refused_before(&json!(sequence)) {
+                return Err(job.still_refused(format!("change file {sequence}")));
+            }
             let path = sequence_path(sequence);
             let url = format!("{base}/{path}.osc.gz");
             let failed = || Failure::new("download").at(host_of(&base));
@@ -1283,8 +1329,13 @@ impl Importer for OsmImporter {
                 url::Url::parse(&url)?,
                 local.clone(),
             );
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _stop = super::bulk::StopOnDrop(stop.clone());
             let opened = tokio::task::spawn_blocking(move || {
-                super::bulk::Download::open(c, handle, at, MAX_CHANGES, Duration::from_secs(5))
+                super::bulk::Download::new(c, handle, at, MAX_CHANGES)
+                    .retry_wait(Duration::from_secs(5))
+                    .stop(stop)
+                    .start()
             })
             .await
             .map_err(|_| Failure::new("panic"))?;
@@ -1325,7 +1376,7 @@ impl Importer for OsmImporter {
             )
             .await?;
             let _ = tokio::fs::remove_file(&local).await;
-            let counts = apply(job, changes, json!({"applied": applied})).await?;
+            let counts = apply(job, changes, json!({"applied": applied}), json!(sequence)).await?;
             tracing::info!(
                 catalogue = "osm",
                 sequence,
@@ -1337,6 +1388,8 @@ impl Importer for OsmImporter {
             );
             applied = sequence;
             last_time = file_state.map(|s| s.1).or(last_time);
+            // Where a refusal of a later file leaves the next update: after this one.
+            job.set_position(json!({"region": region, "base": base, "sequence": applied, "timestamp": last_time.or(stored_time)}));
             // Saved with an empty write, so a run cut off after this file starts at the next.
             job.write(&[], json!({"applied": applied})).await?;
         }
@@ -1370,7 +1423,7 @@ pub struct Changes {
 }
 /// Read one change file, holding at most `cap` bytes of its changes in memory (every object's
 /// version, the changed nodes' locations and the kept changes; [`MAX_CHANGES_HELD`]): past it
-/// the file is `too_large`.
+/// the file is `size`.
 async fn read_changes(
     input: impl std::io::Read + Send + 'static,
     at: &str,
@@ -1422,7 +1475,7 @@ async fn read_changes(
                 kept.insert(key, c);
             }
             // What one file's changes may hold in memory, whatever it states.
-            anyhow::ensure!(held <= cap, Failure::new("too_large").at(at.clone()));
+            anyhow::ensure!(held <= cap, Failure::new("size").at(at.clone()));
             Ok(())
         })
         // A failure of its own (a cap) keeps its class; anything else is the file's `parse`.
@@ -1495,7 +1548,15 @@ fn stored_geometry(s: &Stored) -> place::Geometry {
 /// and renames. Applying a file again gives the same cards.
 /// What applying a change file did: cards written, removed, successors and renames found.
 type Applied = (usize, usize, usize, usize);
-async fn apply(job: &mut Job<'_>, changes: Changes, cursor: Value) -> Result<Applied> {
+/// Apply one change file (`refuse_as` names it: its sequence, or a `--from` file's path). One that
+/// would take the update's removals past a tenth of the catalogue's cards (and past ten:
+/// `diff::too_many`) is refused before anything of it is applied ([`Job::refuse`]).
+async fn apply(
+    job: &mut Job<'_>,
+    changes: Changes,
+    cursor: Value,
+    refuse_as: Value,
+) -> Result<Applied> {
     let pool = job.pool();
     let wikidata_on = job.config().catalogues.enabled(Catalogue::Wikidata);
     // What is stored of every object the file names with tags, and of the untagged ones that
@@ -1723,6 +1784,17 @@ async fn apply(job: &mut Job<'_>, changes: Changes, cursor: Value) -> Result<App
             successors.push((id.clone(), new, "changeset"));
         }
     }
+    // A broken change file never empties the catalogue: the removals an update makes, this
+    // file's with those of the files before it, stay within a tenth of the cards.
+    let held = job.state().cards.max(0) as u64;
+    let gone = job.report().removed + removed_set.len() as u64;
+    if super::diff::too_many(gone, held) {
+        let note = format!(
+            "change file {} would take the update's removals to {gone} of {held} cards",
+            shown(&refuse_as)
+        );
+        return Err(job.refuse(refuse_as, "refused", note));
+    }
     // An object that is back (a deletion undone) is no longer followed.
     let back: Vec<String> = cards.iter().map(|c| c.source_id.clone()).collect();
     // Recorded before the cards are written: a file applied again after a cut finds the old
@@ -1739,8 +1811,12 @@ async fn apply(job: &mut Job<'_>, changes: Changes, cursor: Value) -> Result<App
     job.remove(&removed, cursor.clone()).await?;
     touched.extend(removed.iter().cloned());
     touch_shared(pool, &touched).await?;
-    for (old, new, _) in &successors {
-        follow(pool, old, new).await?;
+    // Recorded either way; followed only while the catalogue is on (a one-shot import with it
+    // off leaves the shared links as they are).
+    if job.config().catalogues.enabled(Catalogue::Osm) {
+        for (old, new, _) in &successors {
+            follow(pool, old, new).await?;
+        }
     }
     Ok((cards.len(), removed.len(), successors.len(), renames.len()))
 }
@@ -1862,7 +1938,9 @@ async fn record(
 
 /// The shared links of a deleted object whose successor is known become aliases of the
 /// successor's link (`alias::source`: the change file is the evidence). The links stay as they
-/// were written; reads answer with the successor.
+/// were written; reads answer with the successor. A link an operator placed in a curated group
+/// hands that place to the successor (unless the successor has one of its own): becoming an
+/// alias drops the link's own group unit, and its place with it.
 pub async fn follow(pool: &PgPool, old: &str, new: &str) -> Result<()> {
     let Some((t, i)) = split(old) else {
         return Ok(());
@@ -1880,20 +1958,74 @@ pub async fn follow(pool: &PgPool, old: &str, new: &str) -> Result<()> {
             continue;
         };
         let mut tx = pool.begin().await?;
+        // The group writers' lock first, as curation and group runs take it: no group run reads
+        // the successor's unit while its curated place moves.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(crate::locks::GROUP)
+            .execute(&mut *tx)
+            .await?;
         crate::store::lock_writers(&mut tx, crate::store::WriteOrder::Shared).await?;
         crate::alias::lock(&mut tx).await?;
+        let curated: Option<String> = sqlx::query_scalar(
+            "SELECT o.group_id FROM group_override o JOIN group_unit u USING(unit_id) WHERE u.resource_id=$1 AND u.unit_id=u.resource_id",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await?;
         let line = crate::alias::assign(&mut tx, &id, &alias).await?;
+        if let Some(group) = curated {
+            hand_over_curation(&mut tx, &id, &group).await?;
+        }
         crate::alias::record(&mut tx, line.into_iter().collect()).await?;
         tx.commit().await?;
     }
     Ok(())
 }
 
-/// The successor recorded for a deleted object, when the evidence is exact.
+/// The curated group `group` the alias `id` was placed in, given to its root's own unit (a
+/// unit the root has in a curated group of its own stays there). The root groups again with it.
+async fn hand_over_curation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &str,
+    group: &str,
+) -> Result<()> {
+    let root: Option<String> =
+        sqlx::query_scalar("SELECT root_id FROM resource_alias WHERE alias_id=$1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some(root) = root else {
+        return Ok(());
+    };
+    // A resource's own unit has the resource's ID (`groups::sync`).
+    sqlx::query("INSERT INTO group_unit(unit_id,resource_id) VALUES($1,$1) ON CONFLICT DO NOTHING")
+        .bind(&root)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO group_override(unit_id,group_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+    )
+    .bind(&root)
+    .bind(group)
+    .execute(&mut **tx)
+    .await?;
+    // Its next group run reads it anew (nothing it read before is taken as unchanged).
+    sqlx::query("DELETE FROM group_input WHERE resource_id=$1")
+        .bind(&root)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO group_dirty(resource_id) VALUES($1) ON CONFLICT DO NOTHING")
+        .bind(&root)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// The successor recorded for a deleted object, when the evidence is exact. Read only while the
+/// catalogue is on (`QueueConfig::osm_catalogue`).
 pub async fn successor(pool: &PgPool, osm_type: &str, osm_id: i64) -> Result<Option<String>> {
     Ok(sqlx::query_scalar(
-        "SELECT new_type||'/'||new_id FROM osm_successor WHERE old_type=$1 AND old_id=$2 AND basis IN ('wikidata','changeset') \
-         AND EXISTS (SELECT 1 FROM catalogue_state WHERE catalogue='osm' AND phase<>'disabled')",
+        "SELECT new_type||'/'||new_id FROM osm_successor WHERE old_type=$1 AND old_id=$2 AND basis IN ('wikidata','changeset')",
     )
     .bind(osm_type)
     .bind(osm_id)

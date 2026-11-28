@@ -92,31 +92,46 @@ impl State {
     }
 }
 
+/// The key of `catalogue_state.position` under which an importer's task keeps when it began
+/// waiting and why (`{"reason": "disk", "at": <time>}`), so `pinakes_catalogue_waiting_seconds`
+/// counts a wait across daemon restarts (`run::run`). Only the task writes it, and it goes when
+/// the wait ends: when a run starts (`run::step`), when a step finds nothing due, and when the
+/// catalogue is off at a start. A [`State`] never holds it: importers never see it.
+pub const WAITING_SINCE: &str = "waiting_since";
+/// `position` without [`WAITING_SINCE`]: none when the key was all it held.
+pub(crate) const POSITION_WITHOUT_WAIT: &str = "CASE WHEN position ? 'waiting_since' THEN nullif(position-'waiting_since','{}'::jsonb) ELSE position END";
+/// A state row's columns as a [`State`] reads them.
+fn state_columns() -> String {
+    format!("catalogue,phase,run,generation,cursor,{POSITION_WITHOUT_WAIT} AS position,cards,upstream_version,last_import_at,last_update_at,current_as_of,import_requested,waiting,last_error,error_count,updated_at,scope,generation_cards,shrink_allowed")
+}
 /// The state row of `catalogue`, made when it has none: one statement, so a drop that deletes
 /// the row at the same time can't leave it missing between a write and a read.
 pub async fn ensure_state(pool: &PgPool, catalogue: Catalogue) -> Result<State> {
-    Ok(sqlx::query_as(
-        "INSERT INTO catalogue_state(catalogue) VALUES($1) ON CONFLICT (catalogue) DO UPDATE SET catalogue=excluded.catalogue RETURNING *",
-    )
+    Ok(sqlx::query_as(&format!(
+        "INSERT INTO catalogue_state(catalogue) VALUES($1) ON CONFLICT (catalogue) DO UPDATE SET catalogue=excluded.catalogue RETURNING {}",
+        state_columns()
+    ))
     .bind(catalogue.name())
     .fetch_one(pool)
     .await?)
 }
 pub async fn state(pool: &PgPool, catalogue: Catalogue) -> Result<Option<State>> {
-    Ok(
-        sqlx::query_as("SELECT * FROM catalogue_state WHERE catalogue=$1")
-            .bind(catalogue.name())
-            .fetch_optional(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(&format!(
+        "SELECT {} FROM catalogue_state WHERE catalogue=$1",
+        state_columns()
+    ))
+    .bind(catalogue.name())
+    .fetch_optional(pool)
+    .await?)
 }
 /// Every state row, by catalogue name.
 pub async fn states(pool: &PgPool) -> Result<Vec<State>> {
-    Ok(
-        sqlx::query_as("SELECT * FROM catalogue_state ORDER BY catalogue")
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(&format!(
+        "SELECT {} FROM catalogue_state ORDER BY catalogue",
+        state_columns()
+    ))
+    .fetch_all(pool)
+    .await?)
 }
 /// The `phase` of each catalogue's state row as the configuration the daemon starts with says:
 /// `disabled` for a catalogue that is off, and `idle` again for one turned back on. The run under
@@ -125,6 +140,11 @@ pub async fn states(pool: &PgPool) -> Result<Vec<State>> {
 pub async fn sync_switches(pool: &PgPool, config: &CataloguesConfig) -> Result<()> {
     let on = config.enabled_names();
     sqlx::query("UPDATE catalogue_state SET phase='disabled',waiting=NULL,updated_at=now() WHERE NOT catalogue=ANY($1) AND phase<>'disabled'")
+        .bind(&on)
+        .execute(pool)
+        .await?;
+    // A catalogue that is off waits for nothing: a wait it was counting ends.
+    sqlx::query(&format!("UPDATE catalogue_state SET position={POSITION_WITHOUT_WAIT} WHERE NOT catalogue=ANY($1) AND position ? 'waiting_since'"))
         .bind(&on)
         .execute(pool)
         .await?;
@@ -155,7 +175,7 @@ fn rows(catalogue: Catalogue, cards: &[Card]) -> (Vec<Row>, u64) {
                 // Its ID as far as a valid one goes: an over-long ID is one reason to refuse.
                 let mut shown: String = card.source_id.chars().take(128).collect();
                 shown.retain(|c| !c.is_control());
-                tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card refused");
+                tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card rejected");
             }
         }
     }
@@ -317,7 +337,7 @@ async fn write_part_counted(
     .fetch_one(&mut **tx)
     .await?;
     for id in &refused {
-        tracing::debug!(catalogue = catalogue.name(), source_id = %id, "catalogue card refused by the table's checks");
+        tracing::debug!(catalogue = catalogue.name(), source_id = %id, "catalogue card rejected by the table's checks");
     }
     let ids: Vec<&str> = part
         .iter()
@@ -403,7 +423,7 @@ pub async fn remove(
 /// reason first (`run::record_failure` takes the allowance back). Refused in any other state.
 pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<Allowance> {
     let state: Option<bool> = sqlx::query_scalar(
-        "UPDATE catalogue_state SET shrink_allowed=shrink_allowed OR coalesce(run='import' AND phase='failed' AND last_error='shrunk',false),updated_at=now() WHERE catalogue=$1 RETURNING shrink_allowed",
+        "UPDATE catalogue_state SET shrink_allowed=shrink_allowed OR coalesce(run='import' AND phase='failed' AND (last_error='shrunk' OR last_error LIKE 'shrunk (%'),false),updated_at=now() WHERE catalogue=$1 RETURNING shrink_allowed",
     )
     .bind(catalogue.name())
     .fetch_optional(pool)
@@ -413,6 +433,32 @@ pub async fn allow_shrink(pool: &PgPool, catalogue: Catalogue) -> Result<Allowan
         Some(false) => Allowance::NotShrunk,
         None => Allowance::NoState,
     })
+}
+/// Clear the refusal `catalogue`'s position holds (`run::REFUSED`, `pinakesd catalogue
+/// clear-refusal`): its importer reads the refused version again at its next run, an update as
+/// any. Needs no lock (a run under way that refuses again sets it again). What was refused, if
+/// anything.
+pub async fn clear_refusal(
+    pool: &PgPool,
+    catalogue: Catalogue,
+) -> Result<Option<serde_json::Value>> {
+    let mut tx = pool.begin().await?;
+    let refused: Option<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT position->'refused' FROM catalogue_state WHERE catalogue=$1 FOR UPDATE",
+    )
+    .bind(catalogue.name())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let refused = refused.flatten().filter(|v| !v.is_null());
+    if refused.is_some() {
+        sqlx::query("UPDATE catalogue_state SET position=position-$2::text[],updated_at=now() WHERE catalogue=$1")
+            .bind(catalogue.name())
+            .bind(&super::run::REFUSAL_KEYS[..])
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(refused)
 }
 /// What [`allow_shrink`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -582,23 +628,24 @@ async fn sweep(
     }
 }
 
-/// The table's `waiting` cell: a full import an update asked for, with its reason, a dump its
-/// importer refused (`refused` in its position), and why the importer waits.
+/// The table's `waiting` cell: a full import an update asked for, with its reason, what its
+/// importer refused (`refused` in its position: a version, or each registry's), and why the
+/// importer waits.
 fn waiting_cell(state: Option<&State>) -> String {
     let position = state.and_then(|s| s.position.as_ref());
-    let refused = position
-        .and_then(|p| p.get("refused"))
-        .and_then(|v| v.as_str())
-        .map(|v| format!("dump {v} refused"))
-        // A file catalogue's refused file: its version, or each registry's.
-        .or_else(|| match super::diff::refused_in(position)? {
-            serde_json::Value::String(v) => Some(format!("file {v} refused")),
-            serde_json::Value::Object(m) => Some(format!(
-                "{} file refused",
-                m.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
-            )),
-            _ => None,
-        })
+    let refused = match position.and_then(|p| p.get(super::run::REFUSED)) {
+        // Each version as `run::shown_version` shows it: a digest of an upstream's text.
+        Some(serde_json::Value::Object(m)) => Some(format!(
+            "refused: {}",
+            m.iter()
+                .map(|(k, v)| format!("{k} {}", super::run::shown_version(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Some(serde_json::Value::Null) | None => None,
+        Some(other) => Some(format!("refused: {}", super::run::shown_version(other))),
+    };
+    let refused = refused
         // Tranco's homepage reads that wait for a large catalogue's full import (its last run).
         .or_else(|| {
             let p = position?;
@@ -643,19 +690,21 @@ fn one_line(text: Option<&str>) -> String {
         _ => "-".into(),
     }
 }
-/// `pinakesd catalogue status`: one line per catalogue with its switch, phase, cards, the last
-/// full import and update, why it waits and its last error.
+/// `pinakesd catalogue status`: one line per catalogue with its switch, phase, cards, the upstream
+/// version it read (a dump's date, a list's ID), the last full import and update, how current its
+/// cards are, why it waits and its last error.
 pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
     let at = |t: Option<DateTime<Utc>>| {
         t.map_or("-".to_owned(), |t| {
             t.format("%Y-%m-%d %H:%M:%SZ").to_string()
         })
     };
-    let mut lines: Vec<[String; 9]> = vec![[
+    let mut lines: Vec<[String; 10]> = vec![[
         "catalogue".to_owned(),
         "enabled".into(),
         "phase".into(),
         "cards".into(),
+        "upstream version".into(),
         "last import".into(),
         "last update".into(),
         "current as of".into(),
@@ -674,6 +723,7 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             .into(),
             state.map_or("idle", |s| s.phase.as_str()).to_owned(),
             state.map_or(0, |s| s.cards).to_string(),
+            one_line(state.and_then(|s| s.upstream_version.as_deref())),
             at(state.and_then(|s| s.last_import_at)),
             at(state.and_then(|s| s.last_update_at)),
             at(state.and_then(|s| s.current_as_of)),
@@ -681,7 +731,7 @@ pub fn status_table(config: &CataloguesConfig, states: &[State]) -> String {
             one_line(state.and_then(|s| s.last_error.as_deref())),
         ]);
     }
-    let widths: Vec<usize> = (0..9)
+    let widths: Vec<usize> = (0..10)
         .map(|i| {
             lines
                 .iter()
@@ -746,6 +796,7 @@ mod tests {
                 "disabled",
                 "1234",
                 "2026-11-24",
+                "2026-11-24",
                 "10:00:00Z",
                 "-",
                 "2026-11-23",
@@ -758,7 +809,7 @@ mod tests {
         let wikidata: Vec<_> = lines[1].split_whitespace().collect();
         assert_eq!(
             wikidata,
-            ["wikidata", "yes", "idle", "0", "-", "-", "-", "-", "-"]
+            ["wikidata", "yes", "idle", "0", "-", "-", "-", "-", "-", "-"]
         );
         // A full import an update asked for shows with its reason, and why it waits.
         let mut requested = State {
@@ -825,7 +876,7 @@ mod tests {
             current_as_of: None,
             import_requested: None,
             waiting: Some("free disk 1.0 GB".into()),
-            last_error: Some("removals (8 of 17 cards gone)".into()),
+            last_error: Some("refused (8 of 17 cards gone)".into()),
             error_count: 1,
             updated_at: Utc::now(),
             scope: None,
@@ -840,18 +891,30 @@ mod tests {
                 .to_owned()
         };
         assert!(
-            row(&refused).contains("dump 20261125-001001 refused; free disk 1.0 GB"),
+            row(&refused).contains("refused: 20261125-001001; free disk 1.0 GB"),
             "{}",
             row(&refused)
         );
         refused.waiting = None;
         assert!(
-            row(&refused).contains("dump 20261125-001001 refused  removals"),
+            row(&refused).contains("refused: 20261125-001001  refused"),
+            "{}",
+            row(&refused)
+        );
+        // The software catalogue's: each registry's file.
+        refused.position =
+            Some(serde_json::json!({"refused": {"crates.io": "c2", "flathub": "f9"}}));
+        assert!(
+            row(&refused).contains(&format!(
+                "refused: crates.io {}, flathub {}",
+                super::super::run::shown_version(&serde_json::json!("c2")),
+                super::super::run::shown_version(&serde_json::json!("f9"))
+            )),
             "{}",
             row(&refused)
         );
         refused.position = Some(serde_json::json!({"version": "20261121-001001"}));
-        assert!(!row(&refused).contains("refused "), "{}", row(&refused));
+        assert!(!row(&refused).contains("refused:"), "{}", row(&refused));
     }
 
     /// The table's own checks refuse a row `Card::checked` let through (here a link over the

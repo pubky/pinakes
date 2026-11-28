@@ -22,7 +22,7 @@ use super::{
     diff::{self, Sink},
     failure::Failure,
     fetch::{self, Input},
-    run::{Importer, Job, Run, UpdateEnd},
+    run::{self, Importer, Job, Run, UpdateEnd},
     store::State,
     Card, Catalogue,
 };
@@ -109,7 +109,7 @@ impl Sources {
 
 /// The importer.
 pub struct Software {
-    client: reqwest::Client,
+    client: fetch::Client,
     sources: Sources,
 }
 impl Software {
@@ -173,19 +173,20 @@ impl Software {
                         anyhow::bail!(Failure::new("manifest").at(input.at()));
                     }
                 }
+                let spool = job.dir().join(FDROID_SPOOL);
                 fetch::batches(move |sink| {
                     let body = index.open(
                         &client,
                         &handle,
                         FDROID_INDEX_MAX.min(entry.index.size.saturating_add(1)),
                     )?;
-                    fdroid(body, &entry, &index.at(), sink)
+                    fdroid(body, &entry, &index.at(), &spool, sink)
                 })
             }
             Registry::Flathub => fetch::batches(move |sink| {
                 let body = input.open(&client, &handle, FLATHUB_MAX)?;
                 let xml = flate2::read::GzDecoder::new(body).take(FLATHUB_XML_MAX);
-                flathub(BufReader::new(xml), &input.at(), sink)
+                flathub(xml, &input.at(), sink)
             }),
         };
         let mut cards = 0u64;
@@ -204,10 +205,13 @@ impl Software {
             .unwrap_or_default()
     }
     /// The run: each registry whose file is new (every one in a full import) and not read in this
-    /// run already is read. An update refused for one registry's file leaves the others to be
-    /// read; the run then names the file refused in its position ([`diff::REFUSED`]: registry ->
-    /// version) and is abandoned ([`diff::refusal`], recorded once). The next updates read that
-    /// registry again only when it has a newer file; a full import reads every one.
+    /// run already is read. A registry's file that would remove more than a tenth of its cards in
+    /// an update (`refused`), or that makes no card in a full import (`empty`), is refused and
+    /// the others are read; the run then names the files refused in its position
+    /// ([`run::REFUSED`]: registry -> version) and is abandoned ([`Job::refuse`], recorded once).
+    /// The next updates read that registry again only when it has a newer file; a full import of
+    /// the importer's own waits while one of them is still the newest ([`Job::still_refused`]);
+    /// one asked for reads every one.
     async fn run(&self, job: &mut Job<'_>) -> Result<()> {
         let import = job.run() == Run::Import;
         let mut done = Self::done(job);
@@ -215,25 +219,45 @@ impl Software {
             .position()
             .and_then(|p| serde_json::from_value(p.clone()).ok())
             .unwrap_or_default();
-        // The files refused before (none count in a full import, which reads every registry).
-        let standing: BTreeMap<String, Value> = match position.remove(diff::REFUSED) {
-            Some(refused) if !import => serde_json::from_value(refused).unwrap_or_default(),
-            _ => BTreeMap::new(),
-        };
-        // The files this run refused (kept in its cursor, so a run taken up after another
-        // registry failed does not read them again).
-        let mut refused: BTreeMap<String, Value> = job
-            .cursor()
-            .and_then(|c| c.get("refused"))
-            .and_then(|d| serde_json::from_value(d.clone()).ok())
+        for key in run::REFUSAL_KEYS {
+            position.remove(key);
+        }
+        // The files refused before, by registry.
+        let standing: BTreeMap<String, Value> = job
+            .refused()
+            .and_then(|r| serde_json::from_value(r.clone()).ok())
+            .unwrap_or_default();
+        // A full import must read every registry: while a file refused before is still the
+        // newest, one of the importer's own reads nothing.
+        if import && !job.asked() {
+            for (name, version) in &standing {
+                let Some(registry) = Registry::parse(name) else {
+                    continue;
+                };
+                let (newest, _) = self.version(registry).await?;
+                if version.as_str() == Some(newest.as_str()) {
+                    let shown = run::shown_version(&json!(newest));
+                    return Err(job.still_refused(format!("the {name} file {shown}")));
+                }
+            }
+        }
+        // The files this run refused, and those of them that made no card (kept in its cursor,
+        // so a run taken up after another registry failed does not read them again).
+        let from_cursor = |key: &str| job.cursor().and_then(|c| c.get(key)).cloned();
+        let mut refused: BTreeMap<String, Value> = from_cursor("refused")
+            .and_then(|d| serde_json::from_value(d).ok())
+            .unwrap_or_default();
+        let mut empty: Vec<String> = from_cursor("empty")
+            .and_then(|d| serde_json::from_value(d).ok())
             .unwrap_or_default();
         // A registry that fails leaves the others to be read; the run then fails with the first
         // failure and is taken up again from its cursor (the registries done are not read again).
         let mut failed: Option<anyhow::Error> = None;
         let cursor = |done: &BTreeMap<String, Value>,
                       refused: &BTreeMap<String, Value>,
+                      empty: &[String],
                       reading: Option<&str>| {
-            let mut c = json!({"done": done, "refused": refused});
+            let mut c = json!({"done": done, "refused": refused, "empty": empty});
             if let Some(name) = reading {
                 c["reading"] = json!(name);
             }
@@ -260,24 +284,27 @@ impl Software {
                         return Ok(());
                     }
                     if same(standing.get(name)) {
-                        tracing::info!(catalogue = "software", registry = name, "this registry's file was refused before: it waits for a newer one, or a full import (--request)");
+                        tracing::debug!(catalogue = "software", registry = name, "this registry's file was refused before: it waits for a newer one, or a full import (--request)");
                         return Ok(());
                     }
                 }
-                let reading = cursor(&done, &refused, Some(name));
+                let reading = cursor(&done, &refused, &empty, Some(name));
                 let mut sink = Sink::new(job, Some(name));
                 let cards = self.read(job, &mut sink, registry, &reading).await?;
                 // A full import reading no card of a registry would remove all its cards.
-                if import && cards == 0 {
-                    anyhow::bail!(Failure::new("parse").at(registry.source().to_owned()));
-                }
-                if sink.finish(job, reading.clone()).await? == diff::Finished::Refused {
+                let refuse = if import && cards == 0 {
+                    empty.push(name.to_owned());
+                    true
+                } else {
+                    sink.finish(job, reading.clone()).await? == diff::Finished::Refused
+                };
+                if refuse {
                     refused.insert(name.to_owned(), json!(version));
-                    job.remove(&[], cursor(&done, &refused, None)).await?;
+                    job.remove(&[], cursor(&done, &refused, &empty, None)).await?;
                     return Ok(());
                 }
                 done.insert(name.to_owned(), entry);
-                job.remove(&[], cursor(&done, &refused, None)).await?;
+                job.remove(&[], cursor(&done, &refused, &empty, None)).await?;
                 job.upstream_version(&versions(&done)).await?;
                 Ok(())
             }
@@ -312,15 +339,53 @@ impl Software {
             .filter(|(name, _)| !done.contains_key(name))
             .collect();
         let refused_now = !refused.is_empty();
+        // Each registry's shrink floor, before the runner's sweep (which counts the catalogue
+        // whole): a short file of one registry never sweeps that registry's other cards.
+        if import && !refused_now {
+            let counted: Vec<(String, i64, i64)> = sqlx::query_as(
+                "SELECT source,count(*) FILTER (WHERE seen_generation=$2),count(*) FROM catalogue_card WHERE catalogue=$1 GROUP BY source ORDER BY source",
+            )
+            .bind(Catalogue::Software.name())
+            .bind(job.generation())
+            .fetch_all(job.pool())
+            .await?;
+            for (registry, read, held) in counted {
+                job.check_floor(held, read, &registry).await?;
+            }
+        }
+        let note = refused
+            .iter()
+            .map(|(name, version)| {
+                let why = if empty.contains(name) {
+                    "no card"
+                } else {
+                    "over a tenth of its cards gone"
+                };
+                format!("{name} file {}: {why}", super::run::shown_version(version))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let class = if refused.keys().all(|name| empty.contains(name)) {
+            "empty"
+        } else {
+            "refused"
+        };
         standing.extend(refused);
-        let mut kept = serde_json::to_value(kept)?;
-        if !standing.is_empty() {
-            kept = diff::refusing(Some(&kept), serde_json::to_value(standing)?);
-        }
-        job.set_position(kept);
+        let kept = serde_json::to_value(kept)?;
         if refused_now {
-            return Err(diff::refusal());
+            job.set_position(kept);
+            return Err(job.refuse(serde_json::to_value(standing)?, class, note));
         }
+        job.set_position(if standing.is_empty() {
+            kept
+        } else {
+            run::refusing(
+                Some(&kept),
+                serde_json::to_value(standing)?,
+                job.source(),
+                job.limit(),
+            )
+        });
         Ok(())
     }
 }
@@ -340,9 +405,27 @@ impl Importer for Software {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Software
     }
-    /// Everything is read as a stream; the cards take about 0.4 GB of the database.
+    /// The registries read from elsewhere than their own files (`REGISTRY=FILE|URL`).
+    fn source(&self) -> Option<String> {
+        let official = Sources::official();
+        let given: Vec<String> = Registry::ALL
+            .into_iter()
+            .filter(|r| self.sources.of(*r) != official.of(*r))
+            .map(|r| {
+                let at = match self.sources.of(r) {
+                    Input::Url(url) => url.to_string(),
+                    Input::File(file) => file.display().to_string(),
+                };
+                format!("{}={at}", r.source())
+            })
+            .collect();
+        (!given.is_empty()).then(|| given.join(" "))
+    }
+    /// F-Droid's index at its largest ([`FDROID_INDEX_MAX`]): it is written under `catalogues.dir`
+    /// while it is hashed; the other files are read as streams (the cards' 0.4 GB of the database
+    /// are sized apart).
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
-        1 << 30
+        FDROID_INDEX_MAX
     }
     async fn import(&self, job: &mut Job<'_>) -> Result<()> {
         self.run(job).await
@@ -350,7 +433,7 @@ impl Importer for Software {
     /// An update; a full import instead when one was asked for (`--request`).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         self.run(job).await?;
         Ok(UpdateEnd::Done)
@@ -841,23 +924,57 @@ impl Localized {
         .filter(|t| !t.is_empty())
     }
 }
-/// The cards of F-Droid's index: read whole (within its size), its SHA-256 and size checked
-/// against the entry, then its packages as cards.
+/// The file F-Droid's index is written to in the catalogue's directory while it is hashed: the
+/// name is unlinked as soon as it is opened, so the bytes go with the reader.
+const FDROID_SPOOL: &str = "fdroid-index.json.part";
+#[cfg(test)]
+thread_local! {
+    /// The F-Droid indexes this thread parsed (for the tests).
+    static FDROID_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// The cards of F-Droid's index: written whole (within its size) to `spool` while it is hashed,
+/// its SHA-256 and size checked against the entry, and only then parsed, its packages as cards.
+/// An index that is not the entry's is never parsed.
 fn fdroid<R: Read>(
     body: R,
     entry: &FdroidEntry,
     at: &str,
+    spool: &std::path::Path,
     sink: &mut dyn FnMut(Vec<Card>) -> bool,
 ) -> Result<()> {
+    use std::io::{Seek, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    let disk = || Failure::new("disk").at(spool.display().to_string());
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(spool)
+        .map_err(|_| disk())?;
+    let _ = std::fs::remove_file(spool);
     let mut hashed = bulk::Hashed::new(body);
-    let index: Result<FdroidIndex, _> = serde_json::from_reader(BufReader::new(&mut hashed));
-    // The rest, if any, counts for the digest.
-    std::io::copy(&mut hashed, &mut std::io::sink())?;
+    {
+        let mut out = std::io::BufWriter::new(&mut file);
+        std::io::copy(&mut hashed, &mut out).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::StorageFull {
+                anyhow::Error::from(disk())
+            } else {
+                anyhow::Error::from(e)
+            }
+        })?;
+        out.flush().map_err(|_| disk())?;
+    }
     if hashed.count() != entry.index.size || !hashed.hex().eq_ignore_ascii_case(&entry.index.sha256)
     {
         anyhow::bail!(Failure::new("checksum").at(at.to_owned()));
     }
-    let index = index.map_err(|_| Failure::new("parse").at(at.to_owned()))?;
+    file.rewind().map_err(|_| disk())?;
+    #[cfg(test)]
+    FDROID_PARSED.with(|n| n.set(n.get() + 1));
+    let index: FdroidIndex = serde_json::from_reader(BufReader::new(file))
+        .map_err(|_| Failure::new("parse").at(at.to_owned()))?;
     if index.packages.len() > PACKAGES_CAP {
         anyhow::bail!(Failure::new("size").at(at.to_owned()));
     }
@@ -958,9 +1075,12 @@ struct Component {
 }
 /// The cards of Flathub's AppStream catalogue, read as a stream of XML events: each
 /// application component's ID, name, summary, categories, keywords, homepage and source links,
-/// in the catalogue's own language (elements with an `xml:lang` are passed over).
-fn flathub<R: BufRead>(xml: R, at: &str, sink: &mut dyn FnMut(Vec<Card>) -> bool) -> Result<()> {
+/// in the catalogue's own language (elements with an `xml:lang` are passed over). One event (a
+/// tag, a text, a comment) of more than a megabyte fails the read (`parse`), as an OpenStreetMap
+/// change file's does ([`osc::MAX_TAG_BYTES`](super::osm::osc::MAX_TAG_BYTES)).
+fn flathub<R: Read>(xml: R, at: &str, sink: &mut dyn FnMut(Vec<Card>) -> bool) -> Result<()> {
     use quick_xml::events::Event;
+    let (xml, pulled) = super::osm::osc::bounded(xml);
     let mut reader = quick_xml::Reader::from_reader(xml);
     let config = reader.config_mut();
     config.trim_text(true);
@@ -976,7 +1096,9 @@ fn flathub<R: BufRead>(xml: R, at: &str, sink: &mut dyn FnMut(Vec<Card>) -> bool
     let failure = || Failure::new("parse").at(at.to_owned());
     loop {
         buf.clear();
-        match reader.read_event_into(&mut buf) {
+        let event = reader.read_event_into(&mut buf);
+        pulled.set(0);
+        match event {
             Err(_) => anyhow::bail!(failure()),
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
@@ -1340,12 +1462,31 @@ pub(crate) mod tests {
             },
         }
     }
-    /// F-Droid's index becomes cards once its digest and size are the entry's.
+    /// F-Droid's index read to a spool file in `dir` (gone again once it is read).
+    fn fdroid_in(
+        dir: &std::path::Path,
+        body: &[u8],
+        entry: &FdroidEntry,
+        sink: &mut dyn FnMut(Vec<Card>) -> bool,
+    ) -> Result<()> {
+        let spool = dir.join(FDROID_SPOOL);
+        let read = fdroid(body, entry, "test", &spool, sink);
+        assert!(std::fs::symlink_metadata(&spool).is_err(), "{spool:?} left");
+        read
+    }
+    fn parsed() -> usize {
+        FDROID_PARSED.with(|n| n.get())
+    }
+    /// F-Droid's index becomes cards once its digest and size are the entry's; one that is not
+    /// the entry's is never parsed, and the spool file never outlives the read.
     #[test]
     fn an_fdroid_index_becomes_cards_once_its_digest_holds() {
+        let dir = tempfile::tempdir().unwrap();
         let index = fixture("fdroid-index-v2.json");
         let entry = entry_for(&index);
-        let cards = cards_of(|sink| fdroid(&index[..], &entry, "test", sink)).unwrap();
+        let before = parsed();
+        let cards = cards_of(|sink| fdroid_in(dir.path(), &index[..], &entry, sink)).unwrap();
+        assert_eq!(parsed(), before + 1);
         assert!(cards.len() >= 2);
         let app = &cards[0];
         assert!(app.uri.starts_with("https://f-droid.org/packages/"));
@@ -1360,8 +1501,38 @@ pub(crate) mod tests {
         }
         let mut wrong = entry.clone();
         wrong.index.sha256 = "0".repeat(64);
-        let failed = cards_of(|sink| fdroid(&index[..], &wrong, "test", sink)).unwrap_err();
+        let failed = cards_of(|sink| fdroid_in(dir.path(), &index[..], &wrong, sink)).unwrap_err();
         assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "checksum");
+        // Bytes past the entry's size, or short of it, are not the entry's either.
+        let mut longer = index.clone();
+        longer.extend_from_slice(b"\n");
+        let failed = cards_of(|sink| fdroid_in(dir.path(), &longer, &entry, sink)).unwrap_err();
+        assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "checksum");
+        let failed =
+            cards_of(|sink| fdroid_in(dir.path(), &index[..10], &entry, sink)).unwrap_err();
+        assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "checksum");
+        assert_eq!(
+            parsed(),
+            before + 1,
+            "an index that is not the entry's was parsed"
+        );
+        // A link where the spool goes is not followed: the read fails and the link's target
+        // stays as it was.
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, b"kept").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(FDROID_SPOOL)).unwrap();
+        let failed = cards_of(|sink| {
+            fdroid(
+                &index[..],
+                &entry,
+                "test",
+                &dir.path().join(FDROID_SPOOL),
+                sink,
+            )
+        })
+        .unwrap_err();
+        assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "disk");
+        assert_eq!(std::fs::read(&target).unwrap(), b"kept");
         // An entry naming a file elsewhere is refused.
         let mut far = serde_json::json!({"timestamp": 1, "index": {"name": "/../x.json", "sha256": "0".repeat(64), "size": 1}});
         assert!(fdroid_entry(far.to_string().as_bytes()).is_none());
@@ -1399,6 +1570,42 @@ pub(crate) mod tests {
         assert!(cards.iter().all(|c| !c.source_id.contains("Platform")));
         // A broken file is a failure.
         assert!(cards_of(|sink| flathub(&b"<components><component>"[..], "t", sink)).is_err());
+    }
+
+    /// One XML event (a text, a comment, a tag) over a megabyte fails the read; a catalogue of
+    /// many smaller events, far over a megabyte in all, reads.
+    #[test]
+    fn a_flathub_event_over_a_megabyte_fails_the_read() {
+        use crate::catalogue::osm::osc::{MAX_TAG_BYTES, READ_BUFFER};
+        let over = MAX_TAG_BYTES + READ_BUFFER + 10;
+        let app = |id: &str, text: &str| {
+            format!("<component type=\"desktop-application\"><id>{id}</id><name>App</name>{text}</component>")
+        };
+        for big in [
+            app(
+                "org.example.App",
+                &format!("<summary>{}</summary>", "x".repeat(over)),
+            ),
+            app("org.example.App", &format!("<!--{}-->", "x".repeat(over))),
+            app(
+                "org.example.App",
+                &format!(
+                    "<url type=\"homepage\" a=\"{}\">https://example.org/</url>",
+                    "x".repeat(over)
+                ),
+            ),
+        ] {
+            let xml = format!("<components>{big}</components>");
+            let failed = cards_of(|sink| flathub(xml.as_bytes(), "t", sink)).unwrap_err();
+            assert_eq!(failed.downcast_ref::<Failure>().unwrap().class, "parse");
+        }
+        let many: String = (0..30_000)
+            .map(|n| app(&format!("org.example.App{n}"), "<summary>An app</summary>"))
+            .collect();
+        let xml = format!("<components>{many}</components>");
+        assert!(xml.len() > 2 * over);
+        let cards = cards_of(|sink| flathub(xml.as_bytes(), "t", sink)).unwrap();
+        assert_eq!(cards.len(), 30_000);
     }
 
     #[test]
@@ -1465,7 +1672,8 @@ pub(crate) mod tests {
         fn any_bytes_end_without_a_panic(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
             let _ = cards_of(|sink| crates(&bytes[..], "t", sink));
             let entry = entry_for(&bytes);
-            let _ = cards_of(|sink| fdroid(&bytes[..], &entry, "t", sink));
+            let dir = tempfile::tempdir().unwrap();
+            let _ = cards_of(|sink| fdroid_in(dir.path(), &bytes[..], &entry, sink));
             let _ = cards_of(|sink| flathub(&bytes[..], "t", sink));
         }
         /// Fuzz: a dump whose files hold arbitrary CSV reads without a panic.

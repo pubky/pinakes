@@ -57,6 +57,17 @@ const LISTED_REFRESH: i64 = 7;
 const LONGEST_WAIT: u64 = 7 * 86400;
 /// The most sites a list may name (1,000,000).
 pub const SITES_CAP: usize = 2_000_000;
+/// The cards a run's homepage reads may always remove, whatever their share: a small instance's
+/// sites that stopped answering for good go (a cap of ten would refuse them at every list), while
+/// a mass failure of the reads on a larger catalogue is still refused past a tenth of its cards.
+/// The sites whose cards go past the tenth are read again within [`REMOVED_REREAD`].
+pub const READ_REMOVAL_FLOOR: u64 = 100;
+/// How soon a site is read again whose card a run's reads removed past a tenth of the cards and
+/// past ten (`diff::too_many`), which only [`READ_REMOVAL_FLOOR`] let through: after a blanket
+/// non-page answer (a captive portal, a blanket 403) the cards come back at that read once the
+/// sites answer again. It is one read: a site that still fails then has no card, and waits the
+/// usual [`REREAD`].
+pub const REMOVED_REREAD: Duration = Duration::from_secs(7 * 86400);
 /// Reads that failed in a row (no answer, a server error) before the card goes.
 const FAILURES: i32 = 3;
 /// The least time between two runs that read what fell due ([`plan_after`]).
@@ -79,7 +90,7 @@ pub enum ListSource {
 
 /// The importer.
 pub struct Tranco {
-    client: reqwest::Client,
+    client: fetch::Client,
     egress: Egress,
     list: ListSource,
     /// At most this many homepages read per run (`--limit`; none: the time budget alone).
@@ -126,9 +137,18 @@ impl Tranco {
             }
         }
     }
-    /// Load the list into `catalogue_site`: new sites due now, a known site's rank and last
-    /// listed day moved when that day is more than a week old (a row is written at most weekly).
-    async fn load(&self, job: &mut Job<'_>, input: &Input, day: chrono::NaiveDate) -> Result<u64> {
+    /// Load the list (`version`) into `catalogue_site`: new sites due now, a known site's rank and
+    /// last listed day moved when that day is more than a week old (a row is written at most
+    /// weekly). A list that names no site (an empty or garbage body) is refused (`empty`) in every
+    /// run, a full import asked for too: it would move the position and the cards' time on
+    /// nothing, and leave every site to fall off the list.
+    async fn load(
+        &self,
+        job: &mut Job<'_>,
+        input: &Input,
+        day: chrono::NaiveDate,
+        version: &str,
+    ) -> Result<u64> {
         // The list (22 MB) is read whole: Tranco sends it without a length, so not as a download
         // that resumes.
         let body = input.read_small(&self.client, LIST_MAX).await?;
@@ -138,6 +158,15 @@ impl Tranco {
         })
         .await
         .map_err(|_| Failure::new("panic"))??;
+        if sites.is_empty() {
+            let shown = super::run::shown_version(&json!(version));
+            return Err(job.refuse(
+                json!(version),
+                "empty",
+                format!("list {shown} names no site"),
+            ));
+        }
+        job.count_read(sites.len() as u64);
         let pool = job.pool().clone();
         for part in sites.chunks(10_000) {
             let hosts: Vec<&str> = part.iter().map(|(h, _)| h.as_str()).collect();
@@ -156,10 +185,30 @@ impl Tranco {
         }
         Ok(sites.len() as u64)
     }
-    /// The sites off the list for [`OFF_LIST`] days (from `day`) lose their card and their row.
-    async fn drop_off_list(&self, job: &mut Job<'_>, day: chrono::NaiveDate) -> Result<u64> {
+    /// The sites off the list for [`OFF_LIST`] days (from `day`) lose their card and their row;
+    /// when their cards are more than a tenth of the catalogue's (and more than ten,
+    /// `diff::too_many`: a short list after weeks without one), the list `list` is refused instead
+    /// and nothing is removed ([`Job::refuse`]), unless a full import was asked for ([`forced`]).
+    async fn drop_off_list(
+        &self,
+        job: &mut Job<'_>,
+        day: chrono::NaiveDate,
+        list: &str,
+    ) -> Result<u64> {
         let pool = job.pool().clone();
         let limit = day - chrono::Duration::days(OFF_LIST + LISTED_REFRESH);
+        let gone: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM catalogue_card c JOIN catalogue_site s ON s.host=c.source_id WHERE c.catalogue='tranco' AND s.listed_on < $1",
+        )
+        .bind(limit)
+        .fetch_one(&pool)
+        .await?;
+        let held = job.state().cards.max(0) as u64;
+        if !forced(job) && super::diff::too_many(gone.max(0) as u64, held) {
+            let shown = super::run::shown_version(&json!(list));
+            let note = format!("list {shown}: {gone} of {held} cards' sites off the list");
+            return Err(job.refuse(json!(list), "refused", note));
+        }
         let mut removed = 0;
         loop {
             let hosts: Vec<String> = sqlx::query_scalar(
@@ -180,9 +229,10 @@ impl Tranco {
         Ok(removed)
     }
     /// Read due homepages until none is due, the budget is spent, or a large import starts;
-    /// what is next ([`Next`]), and the catalogue reads wait for. [`READS`] reads stay in flight:
-    /// sites are claimed [`CLAIM`] at a time as the reads need more, and written as they end.
-    async fn read_due(&self, job: &mut Job<'_>) -> Result<(Next, Option<String>)> {
+    /// what is next ([`Next`]), what the catalogue reads wait for, and how many sites were read
+    /// for the first time. [`READS`] reads stay in flight: sites are claimed [`CLAIM`] at a time
+    /// as the reads need more, and written as they end.
+    async fn read_due(&self, job: &mut Job<'_>, list: &str) -> Result<(Next, Option<String>, u64)> {
         let started = std::time::Instant::now();
         let pool = job.pool().clone();
         let config = job.config().clone();
@@ -210,8 +260,9 @@ impl Tranco {
                 let claim = limit.map_or(CLAIM, |n| CLAIM.min((n - claimed) as i64));
                 // A claim holds its sites for an hour, so another daemon (or a cut-off run)
                 // passes them over meanwhile.
-                let sites: Result<Vec<(String, i32)>, sqlx::Error> = sqlx::query_as(
-                    "UPDATE catalogue_site s SET due_at=now()+interval '1 hour' FROM (SELECT host FROM catalogue_site WHERE due_at<=now() ORDER BY due_at,rank LIMIT $1 FOR UPDATE SKIP LOCKED) d WHERE s.host=d.host RETURNING s.host,s.rank",
+                // With whether the site was never read (the claim leaves `read_at` as it was).
+                let sites: Result<Vec<(String, i32, bool)>, sqlx::Error> = sqlx::query_as(
+                    "UPDATE catalogue_site s SET due_at=now()+interval '1 hour' FROM (SELECT host FROM catalogue_site WHERE due_at<=now() ORDER BY due_at,rank LIMIT $1 FOR UPDATE SKIP LOCKED) d WHERE s.host=d.host RETURNING s.host,s.rank,s.read_at IS NULL",
                 )
                 .bind(claim)
                 .fetch_all(&pool)
@@ -235,22 +286,40 @@ impl Tranco {
                     })
                 })
                 .map(|site| async move {
-                    let (host, rank) = site?;
+                    let (host, rank, first) = site?;
                     let read = homepage(&self.egress, &host, &self.robots).await;
-                    Ok::<_, anyhow::Error>((host, rank, read))
+                    Ok::<_, anyhow::Error>((host, rank, first, read))
                 })
                 .buffer_unordered(READS)
                 .ready_chunks(CLAIM as usize),
         );
+        let mut first_reads = 0u64;
         while let Some(chunk) = reads.next().await {
-            let chunk: Vec<(String, i32, Homepage)> = chunk.into_iter().collect::<Result<_>>()?;
-            self.record(job, chunk).await?;
+            let chunk: Vec<(String, i32, bool, Homepage)> =
+                chunk.into_iter().collect::<Result<_>>()?;
+            // A deferred read is no read: the site's `read_at` stays empty.
+            first_reads += chunk
+                .iter()
+                .filter(|(_, _, first, read)| *first && !matches!(read, Homepage::Deferred(_)))
+                .count() as u64;
+            let chunk = chunk.into_iter().map(|(h, r, _, o)| (h, r, o)).collect();
+            self.record(job, chunk, list).await?;
         }
-        let stopped = stopped.lock().expect("the stop").clone();
-        Ok(stopped)
+        let (next, waits) = stopped.lock().expect("the stop").clone();
+        Ok((next, waits, first_reads))
     }
-    /// Keep what a round of reads found: the cards, the sites' outcomes and when each is due.
-    async fn record(&self, job: &mut Job<'_>, reads: Vec<(String, i32, Homepage)>) -> Result<()> {
+    /// Keep what a round of reads found: the cards, the sites' outcomes and when each is due. A
+    /// round whose removals take the run's past a tenth of the catalogue's cards and past
+    /// [`READ_REMOVAL_FLOOR`] (the egress or the network broken, every read failing) refuses the
+    /// list `list` instead of removing them ([`Job::refuse`]): nothing of the round is written,
+    /// its sites are due again, and the reads wait for the next list. A full import asked for
+    /// ([`forced`]) has no cap.
+    async fn record(
+        &self,
+        job: &mut Job<'_>,
+        reads: Vec<(String, i32, Homepage)>,
+        list: &str,
+    ) -> Result<()> {
         let pool = job.pool().clone();
         let mut cards = Vec::new();
         let mut gone = Vec::new();
@@ -319,6 +388,57 @@ impl Tranco {
                 gone.push(host.clone());
             }
         }
+        // The cards the round removes, decided before anything of it is written: the sites that
+        // make none, and those whose transient failure is their last allowed in a row.
+        if !forced(job) {
+            let failing: Vec<&str> = reads
+                .iter()
+                .filter(|(h, _, o)| transient(h, o))
+                .map(|(h, _, _)| h.as_str())
+                .collect();
+            let mut leaving = gone.clone();
+            if !failing.is_empty() {
+                leaving.extend(
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT host FROM catalogue_site WHERE host=ANY($1) AND failures+1>=$2",
+                    )
+                    .bind(&failing)
+                    .bind(FAILURES)
+                    .fetch_all(&pool)
+                    .await?,
+                );
+            }
+            let carded: i64 = if leaving.is_empty() {
+                0
+            } else {
+                sqlx::query_scalar(
+                    "SELECT count(*) FROM catalogue_card WHERE catalogue='tranco' AND source_id=ANY($1)",
+                )
+                .bind(&leaving)
+                .fetch_one(&pool)
+                .await?
+            };
+            let report = job.report();
+            let held = job.state().cards.max(0) as u64 + report.inserted;
+            let removing = report.removed + carded.max(0) as u64;
+            if carded > 0 && removing > READ_REMOVAL_FLOOR && super::diff::too_many(removing, held)
+            {
+                // The round's sites were claimed for an hour: they are due again as they were.
+                let claimed: Vec<&str> = reads
+                    .iter()
+                    .map(|(h, _, _)| h.as_str())
+                    .chain(deferred.iter().map(String::as_str))
+                    .collect();
+                sqlx::query("UPDATE catalogue_site SET due_at=now() WHERE host=ANY($1)")
+                    .bind(&claimed)
+                    .execute(&pool)
+                    .await?;
+                let shown = super::run::shown_version(&json!(list));
+                let note =
+                    format!("list {shown}: homepage reads would remove {removing} of {held} cards");
+                return Err(job.refuse(json!(list), "refused", note));
+            }
+        }
         job.write(&cards, json!({"phase": "reading"})).await?;
         // A transient failure keeps its card until it failed three times in a row; it is tried
         // again the next day, or after the site's `Retry-After`.
@@ -341,6 +461,27 @@ impl Tranco {
         .await?;
         gone.extend(failed.into_iter().flatten());
         if !gone.is_empty() {
+            let carded: Vec<String> = sqlx::query_scalar(
+                "SELECT source_id FROM catalogue_card WHERE catalogue='tranco' AND source_id=ANY($1)",
+            )
+            .bind(&gone)
+            .fetch_all(&pool)
+            .await?;
+            // Past what an update may remove (a tenth and ten, `diff::too_many`), which only the
+            // floor lets through, the sites about to lose their card are read again once within a
+            // week: their cards come back if they answer again. Set before the removal, so a run
+            // cut off between the two never leaves them at the usual re-read.
+            let report = job.report();
+            let held = job.state().cards.max(0) as u64 + report.inserted;
+            if !carded.is_empty()
+                && super::diff::too_many(report.removed + carded.len() as u64, held)
+            {
+                sqlx::query("UPDATE catalogue_site SET due_at=least(due_at,now()+make_interval(secs=>$2)) WHERE host=ANY($1)")
+                    .bind(&carded)
+                    .bind(REMOVED_REREAD.as_secs_f64())
+                    .execute(&pool)
+                    .await?;
+            }
             job.remove(&gone, json!({"phase": "reading"})).await?;
         }
         if !deferred.is_empty() {
@@ -360,12 +501,24 @@ impl Tranco {
     /// can't be looked up (tranco-list.eu down) reads the homepages due on the list it has.
     async fn run(&self, job: &mut Job<'_>) -> Result<()> {
         let mut position = job.position().cloned().unwrap_or_else(|| json!({}));
+        // A refusal is the run's to carry on (`Job::refuse`): a position this run writes holds none,
+        // since a run that goes on is not refused (a refusal that stands ends it below).
+        if let Some(p) = position.as_object_mut() {
+            for key in super::run::REFUSAL_KEYS {
+                p.remove(key);
+            }
+        }
         let checked = position
             .get("checked")
             .and_then(Value::as_str)
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&chrono::Utc));
         let fresh = checked.is_some_and(|t| chrono::Utc::now() - t < chrono::Duration::days(1));
+        // A refusal stands until the next list: within the day the list is not looked up again,
+        // so nothing is read.
+        if fresh && job.run() == Run::Update && job.refused().is_some() {
+            return Err(job.still_refused("the list (its removals)"));
+        }
         if job.run() == Run::Update && fresh {
             if let Some(waits) = reads_wait(job.config(), job.pool()).await? {
                 crate::telemetry::homepage_reads_waiting(true);
@@ -385,6 +538,10 @@ impl Tranco {
         let latest = match looked_up {
             None => None,
             Some(Ok(latest)) => Some(latest),
+            // While a refusal stands, a list that can't be looked up may be the refused one.
+            Some(Err(_)) if job.run() == Run::Update && job.refused().is_some() => {
+                return Err(job.still_refused("the list (its removals)"));
+            }
             Some(Err(error)) if job.run() == Run::Update && position.get("list").is_some() => {
                 let shown = super::failure::shown(&error);
                 tracing::warn!(catalogue = "tranco", error = %shown, "Tranco's list could not be looked up; the homepages due are read from the list loaded");
@@ -393,6 +550,12 @@ impl Tranco {
             Some(Err(error)) => return Err(error),
         };
         if let Some((version, input, at)) = latest {
+            // A list refused before is not loaded again, and no homepage is read on it.
+            if job.refused_before(&json!(version)) {
+                let shown = super::run::shown_version(&json!(version));
+                return Err(job.still_refused(format!("list {shown}")));
+            }
+            job.reading(json!(version));
             let known = position.get("list").and_then(Value::as_str) == Some(version.as_str());
             // A list's day is never ahead of now (a server clock or a file's time could say so,
             // and every site not on it would then count as off the list).
@@ -401,18 +564,23 @@ impl Tranco {
             let day = at.date_naive();
             position["checked"] = json!(now.to_rfc3339());
             if !known || job.run() == Run::Import {
-                self.load(job, &input, day).await?;
+                self.load(job, &input, day, &version).await?;
                 if job.run() == Run::Import {
                     stamp(job).await?;
                 }
-                self.drop_off_list(job, day).await?;
+                self.drop_off_list(job, day, &version).await?;
                 // As current as the list's own time (not its day's start: the lag would pass two
                 // days near the end of each day's cycle).
                 job.set_current_as_of(at);
                 position = json!({"list": version, "day": day, "checked": now.to_rfc3339()});
             }
         }
-        let (next, waits) = self.read_due(job).await?;
+        let on_list = position
+            .get("list")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let (next, waits, first_reads) = self.read_due(job, &on_list).await?;
         crate::telemetry::homepage_reads_waiting(next == Next::Large);
         position["next"] = json!(next.name());
         // When the next site falls due: the plan wakes then ([`plan_after`]).
@@ -436,11 +604,27 @@ impl Tranco {
                 }
             }
         }
-        // `catalogue status` shows the reads so far.
-        let (sites, read): (i64, i64) =
-            sqlx::query_as("SELECT count(*),count(read_at) FROM catalogue_site")
-                .fetch_one(job.pool())
-                .await?;
+        // `catalogue status` shows the reads so far: counted when a list was loaded (a new
+        // position holds no count), else the last count and this run's first reads, so a run
+        // does not scan the million sites.
+        let counted = position
+            .get("sites")
+            .and_then(Value::as_i64)
+            .zip(position.get("read").and_then(Value::as_i64));
+        let (sites, read): (i64, i64) = match counted {
+            Some((sites, read)) => (
+                sites,
+                read.saturating_add(i64::try_from(first_reads).unwrap_or(i64::MAX))
+                    .min(sites),
+            ),
+            None => {
+                sqlx::query_as("SELECT count(*),count(read_at) FROM catalogue_site")
+                    .fetch_one(job.pool())
+                    .await?
+            }
+        };
+        position["sites"] = json!(sites);
+        position["read"] = json!(read);
         let list = position
             .get("list")
             .and_then(Value::as_str)
@@ -454,6 +638,12 @@ impl Tranco {
         job.set_position(position);
         Ok(())
     }
+}
+/// Whether the caps on a run's removals are off: a full import asked for (`--request`, or by
+/// hand) removes what its list and reads say, however many, so a refusal never wedges the
+/// catalogue.
+fn forced(job: &Job<'_>) -> bool {
+    job.run() == Run::Import && job.asked()
 }
 /// What the next run of reads waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -508,7 +698,7 @@ pub async fn reads_wait(config: &Config, pool: &sqlx::PgPool) -> Result<Option<S
         .filter(|c| c.large())
         .map(Catalogue::name)
         .collect();
-    let first: Vec<&str> = super::run::WITH_IMPORTER
+    let first: Vec<&str> = Catalogue::ALL
         .into_iter()
         .filter(|c| c.large() && config.catalogues.enabled(*c) && !config.egress.contact.is_empty())
         .map(Catalogue::name)
@@ -613,9 +803,17 @@ impl Importer for Tranco {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Tranco
     }
-    /// The list and the cards take about 1 GB of the database.
+    /// A list file or URL given (`--from`).
+    fn source(&self) -> Option<String> {
+        match &self.list {
+            ListSource::Official => None,
+            ListSource::Given(input) => super::diff::source_of(input, LATEST_ID),
+        }
+    }
+    /// None: the list is read into memory, and nothing is written under `catalogues.dir` (the
+    /// list and the cards' 1.1 GB of the database are sized apart).
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
-        1 << 30
+        0
     }
     /// A full import first; then an update ([`plan_after`]): at once while the last run left
     /// homepages due, ten minutes after one that stopped for a large import, else when the next
@@ -647,7 +845,7 @@ impl Importer for Tranco {
     /// An update; a full import instead when one was asked for (`--request`).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         self.run(job).await?;
         Ok(UpdateEnd::Done)
@@ -722,9 +920,6 @@ pub fn list<R: BufRead>(body: R, at: &str) -> Result<Vec<(String, i32)>> {
             anyhow::bail!(Failure::new("size").at(at.to_owned()));
         }
         out.push((host, rank));
-    }
-    if out.is_empty() {
-        anyhow::bail!(Failure::new("parse").at(at.to_owned()));
     }
     Ok(out)
 }
@@ -882,7 +1077,6 @@ async fn read_homepage(
     fresh: &mut Vec<(String, Robots)>,
 ) -> Homepage {
     use crate::resolver::egress::FetchOptions;
-    let site = registrable(host);
     let mut url = match url::Url::parse(&format!("https://{host}/")) {
         Ok(url) => url,
         Err(_) => return Homepage::Other,
@@ -947,9 +1141,8 @@ async fn read_homepage(
                 && next
                     .host_str()
                     .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
-                    .and_then(|h| registrable(&h))
-                    == site;
-            if !on_site || site.is_none() {
+                    .is_some_and(|h| same_site(host, &h));
+            if !on_site {
                 return Homepage::Other;
             }
             url = next;
@@ -1001,7 +1194,17 @@ fn path_and_query(url: &url::Url) -> String {
 fn registrable(host: &str) -> Option<String> {
     psl::domain_str(host).map(str::to_owned)
 }
-/// The card of a homepage read at `at`; none when the page ended on another site or has no name.
+/// Whether `other` is on the listed site `host`: the same registrable domain, or, for a listed
+/// host that is itself a public suffix (`github.io`, `blogspot.com`, whose subdomains are other
+/// people's sites), that host itself.
+fn same_site(host: &str, other: &str) -> bool {
+    match registrable(host) {
+        Some(site) => registrable(other).as_deref() == Some(site.as_str()),
+        None => psl::suffix_str(host) == Some(host) && other == host,
+    }
+}
+/// The card of a homepage read at `at`; none when the page ended on another site ([`same_site`])
+/// or has no name.
 pub fn card(
     host: &str,
     rank: i32,
@@ -1014,7 +1217,7 @@ pub fn card(
         .host_str()?
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    if registrable(&landed)? != registrable(host)? {
+    if !same_site(host, &landed) {
         return None;
     }
     let name = name
@@ -1058,7 +1261,8 @@ mod tests {
                 ("xn--80ak6aa92e.com".to_owned(), 6)
             ]
         );
-        assert!(list(&b"nothing\n"[..], "t").is_err());
+        // A list of no site is read as one (a full import of it is refused, `empty`).
+        assert!(list(&b"nothing\n"[..], "t").unwrap().is_empty());
         // A rank past the cap is no list's.
         let sites = list(
             &b"2000001,big.example\n2147483647,bigger.example\n2,ok.example\n"[..],
@@ -1213,6 +1417,46 @@ mod tests {
         .is_none());
         assert!(card("example.org", 5, &None, None, "https://example.org/").is_none());
         assert!(rank_fame(1_000_000) < 0.01 && rank_fame(1000) > 0.4);
+    }
+
+    /// A listed site that is itself a public suffix (`github.io`, `blogspot.com`) gets a card
+    /// for its own host; its subdomains are other people's sites, so landing on one makes none,
+    /// and a redirect may go to that host only.
+    #[test]
+    fn a_site_that_is_a_public_suffix_is_its_own_host() {
+        for host in ["github.io", "blogspot.com"] {
+            let made = card(
+                host,
+                30,
+                &Some("Pages".into()),
+                None,
+                &format!("https://{host}/"),
+            )
+            .unwrap_or_else(|| panic!("{host}"));
+            let row = made.checked(Catalogue::Tranco).unwrap();
+            assert_eq!(row.uri, format!("https://{host}/"));
+            assert!(
+                row.keys.contains(&format!("homepage:{host}")),
+                "{:?}",
+                row.keys
+            );
+            assert!(card(
+                host,
+                30,
+                &Some("P".into()),
+                None,
+                &format!("https://someone.{host}/")
+            )
+            .is_none());
+            assert!(same_site(host, host));
+            assert!(!same_site(host, &format!("someone.{host}")));
+            assert!(!same_site(host, &format!("www.{host}")));
+        }
+        // A site's own subdomains stay on it; a public suffix is no site's subdomain.
+        assert!(same_site("example.co.uk", "www.example.co.uk"));
+        assert!(same_site("www.example.co.uk", "example.co.uk"));
+        assert!(!same_site("example.co.uk", "co.uk"));
+        assert!(!same_site("example.co.uk", "other.co.uk"));
     }
 
     #[test]

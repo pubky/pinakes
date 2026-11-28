@@ -2981,6 +2981,7 @@ dependencies = [
  "liblzma",
  "lz4_flex",
  "markup5ever",
+ "md-5",
  "memchr",
  "nostr",
  "percent-encoding",

@@ -387,7 +387,7 @@ async fn a_removed_card_or_a_catalogue_off_gives_the_link_back_to_fetching(pool:
     // once, due at times spread over the next day.
     let off = QueueConfig::default();
     let released = pinakes_core::telemetry::catalogue_joins("wikidata", "released");
-    assert_eq!(join::sweep(&pool, &off.catalogues).await.unwrap(), 2);
+    assert_eq!(join::sweep(&pool, &off.catalogues, false).await.unwrap(), 2);
     // At least these two (other tests in this binary count too).
     assert!(pinakes_core::telemetry::catalogue_joins("wikidata", "released") >= released + 2);
     let spread: Vec<f64> = sqlx::query_scalar(
@@ -1323,6 +1323,145 @@ async fn the_backoff_covers_a_304_and_official_cards_and_spares_shows_and_dates(
     assert_eq!(read(official).await, 4.0);
 }
 
+/// A resolver of one route whose read is the stored card asked again.
+struct Route(&'static str, Mutex<ResourceMeta>);
+#[async_trait::async_trait]
+impl Resolver for Route {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+    fn matches(&self, _: &str) -> bool {
+        true
+    }
+    async fn resolve(&self, _: &str) -> anyhow::Result<ResourceMeta> {
+        let mut doc = self.1.lock().unwrap().clone();
+        doc.fetched_at = chrono::Utc::now().timestamp_millis();
+        Ok(doc)
+    }
+    fn refresh_after(&self, doc: &ResourceMeta) -> Duration {
+        Duration::from_secs(doc.ttl_secs)
+    }
+}
+
+/// A Nostr or ActivityPub link found gone (a deleted profile answers with no type) is read again
+/// at the queue's missing interval, not after the backoff's 90 days, as a web link found gone is.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_gone_nostr_or_activitypub_link_is_not_put_off(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let read = |resolver: &'static dyn Resolver| {
+        let (pool, cfg) = (pool.clone(), cfg.clone());
+        async move {
+            due_now(&pool).await;
+            let job = queue::claim_sources(&pool, &[resolver.name()], &cfg, 1)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            queue::run_job(&pool, resolver, &cfg, &job).await.unwrap();
+            wait_days(&pool).await
+        }
+    };
+    for (route, uri) in [
+        ("nostr", "https://example.org/nostr-profile"),
+        ("activitypub", "https://example.org/@someone"),
+        ("web", "https://example.org/about-me"),
+    ] {
+        sqlx::query("DELETE FROM resource")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tagged(&pool, uri).await;
+        sqlx::query("UPDATE resource SET resolver=$1")
+            .bind(route)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut card = ResourceMeta::new(uri, route, 0);
+        card.set_type("Person");
+        card.name = Some("Someone".into());
+        let resolver: &'static Route = Box::leak(Box::new(Route(route, Mutex::new(card))));
+        read(resolver).await;
+        // Deleted: two reads, two hours apart, find it gone.
+        let mut gone = ResourceMeta::new(uri, route, 0);
+        gone.status = Status::Missing;
+        gone.http_status = Some(404);
+        *resolver.1.lock().unwrap() = gone;
+        read(resolver).await;
+        sqlx::query("UPDATE resource SET last_missing_at=now()-interval '2 hours'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let wait = read(resolver).await;
+        let status: String = sqlx::query_scalar("SELECT status FROM resource")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "missing", "{route}");
+        let missing_days = (cfg.missing_ttl_secs as f64 / 86400.0 * 100.0).round() / 100.0;
+        if route == "web" {
+            assert_eq!(wait, 90.0, "{route}");
+        } else {
+            assert!(wait <= missing_days.max(0.05), "{route}: {wait}");
+        }
+    }
+}
+
+/// A Nostr or ActivityPub profile is social content: one that answers the same keeps its weekly
+/// read (a deleted or edited profile is read again within a week), where an undated web card of
+/// a person waits longer each time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn nostr_and_activitypub_profiles_keep_their_weekly_read(pool: PgPool) {
+    let cfg = QueueConfig::default();
+    let read = |resolver: &'static dyn Resolver| {
+        let (pool, cfg) = (pool.clone(), cfg.clone());
+        async move {
+            due_now(&pool).await;
+            let job = queue::claim_sources(&pool, &[resolver.name()], &cfg, 1)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            queue::run_job(&pool, resolver, &cfg, &job).await.unwrap();
+            wait_days(&pool).await
+        }
+    };
+    for (route, uri, kind) in [
+        ("nostr", "https://example.org/nostr-profile", "Person"),
+        ("activitypub", "https://example.org/@someone", "Person"),
+        (
+            "activitypub",
+            "https://example.org/@a-group",
+            "Organization",
+        ),
+        ("web", "https://example.org/about-me", "Person"),
+    ] {
+        sqlx::query("DELETE FROM resource")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tagged(&pool, uri).await;
+        sqlx::query("UPDATE resource SET resolver=$1")
+            .bind(route)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut card = ResourceMeta::new(uri, route, 0);
+        card.set_type(kind);
+        card.name = Some("Someone".into());
+        let resolver: &'static Route = Box::leak(Box::new(Route(route, Mutex::new(card))));
+        let waits = [
+            read(resolver).await,
+            read(resolver).await,
+            read(resolver).await,
+        ];
+        if route == "web" {
+            assert_eq!(waits, [7.0, 14.0, 28.0], "{route} {kind}");
+        } else {
+            assert_eq!(waits, [7.0, 7.0, 7.0], "{route} {kind}");
+        }
+    }
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn opening_a_card_the_backoff_put_off_leaves_its_wait(pool: PgPool) {
     let id = tagged(&pool, "https://example.org/slow").await;
@@ -1649,7 +1788,7 @@ async fn a_start_with_the_catalogues_on_keeps_every_key(pool: PgPool) {
         catalogue_keys(&pool, &article).await,
         catalogue_keys(&pool, &site).await,
     );
-    assert_eq!(join::sweep(&pool, &cfg.catalogues).await.unwrap(), 0);
+    assert_eq!(join::sweep(&pool, &cfg.catalogues, false).await.unwrap(), 0);
     assert_eq!(
         (
             catalogue_keys(&pool, &article).await,
@@ -1678,7 +1817,7 @@ async fn a_start_with_the_catalogues_on_keeps_every_key(pool: PgPool) {
         .copied()
         .filter(|c| *c != "software")
         .collect();
-    assert_eq!(join::sweep(&pool, &without).await.unwrap(), 1);
+    assert_eq!(join::sweep(&pool, &without, false).await.unwrap(), 1);
     assert_eq!(
         pinakes_core::telemetry::catalogue_joins("software", "released"),
         released + 1
@@ -1916,7 +2055,7 @@ async fn a_taken_over_key_is_given_back_to_its_source(pool: PgPool) {
         ..Default::default()
     };
     import(&pool, Catalogue::Osm, &[osm]).await;
-    assert_eq!(join::sweep(&pool, &cfg.catalogues).await.unwrap(), 0);
+    assert_eq!(join::sweep(&pool, &cfg.catalogues, false).await.unwrap(), 0);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -2039,7 +2178,7 @@ async fn a_catalogue_off_shows_nothing_until_its_sweep_and_each_removal_is_a_cha
         .into_iter()
         .filter(|c| *c != "wikidata")
         .collect();
-    assert_eq!(join::sweep(&pool, &joinable).await.unwrap(), 1);
+    assert_eq!(join::sweep(&pool, &joinable, false).await.unwrap(), 1);
     assert_eq!(lines(pool.clone(), article.clone()).await, before + 1);
     assert_eq!(backed(&pool, &article).await.labels, None);
     // A first tier past the backoff's cap is a valid configuration: it is the longest wait.
@@ -2301,7 +2440,7 @@ async fn the_sweep_deletes_an_off_catalogue_s_related_keys_page_by_page(pool: Pg
         .await
         .unwrap();
     let before = join::sweep_keys_read();
-    join::sweep(&pool, &["musicbrainz"]).await.unwrap();
+    join::sweep(&pool, &["musicbrainz"], false).await.unwrap();
     let read = join::sweep_keys_read() - before;
     assert_eq!(read, 2600, "only the off catalogue's keys are read");
     let counts: Vec<(String, i64)> = sqlx::query_as(

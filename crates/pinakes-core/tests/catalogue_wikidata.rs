@@ -482,6 +482,7 @@ fn context(pool: &PgPool, limit: Option<u64>) -> (Context, Dir) {
     config.catalogues.dir = dir.to_string_lossy().into_owned();
     config.catalogues.wikidata.limit = limit;
     config.http.contact = "ops@example.org".into();
+    config.egress.contact = "ops@example.org".into();
     let mut ctx = Context::new(pool.clone(), Arc::new(config));
     ctx.free_disk = Arc::new(|_| Ok(u64::MAX));
     ctx.pace = Pace {
@@ -499,7 +500,6 @@ fn importer(base: &str) -> Arc<Wikidata> {
         api: format!("{base}/w/api.php"),
     };
     w.threads = (3, 2);
-    w.http = true;
     Arc::new(w)
 }
 
@@ -533,7 +533,6 @@ async fn import(_pool: &PgPool, ctx: &Context, base: &str) -> anyhow::Result<Onc
     let base_importer = importer(base);
     w.endpoints = base_importer.endpoints.clone();
     w.threads = base_importer.threads;
-    w.http = true;
     once(Arc::new(w), ctx, Run::Import).await
 }
 
@@ -989,13 +988,22 @@ async fn a_limited_catalogue_under_its_limit_fills_up_to_it(pool: PgPool) {
 }
 
 /// A position more than five days old is not caught up change by change: the update waits for
-/// a dump newer than the imported one, then asks for a full import.
+/// a dump newer than the imported one, then asks for a full import. The imported dump is dated
+/// the day before the run, so it is always newer than the position: only its being the imported
+/// one holds the update back.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_long_gap_waits_for_the_next_dump(pool: PgPool) {
     let m = mock();
+    let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%Y%m%d")
+        .to_string();
+    *m.dates.lock().unwrap() = vec![yesterday.clone()];
     let base = serve(m.clone()).await;
     let (ctx, _dir) = context(&pool, Some(3));
-    import(&pool, &ctx, &base).await.unwrap();
+    let Once::Finished(state) = import(&pool, &ctx, &base).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(state.upstream_version.as_deref(), Some(yesterday.as_str()));
     let old = (chrono::Utc::now() - chrono::Duration::days(6))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     sqlx::query("UPDATE catalogue_state SET position=jsonb_build_object('time',$1::text) WHERE catalogue='wikidata'")
@@ -1067,7 +1075,8 @@ async fn an_update_stuck_past_the_gap_is_dropped(pool: PgPool) {
     assert_eq!((state.run, state.cursor), (None, None));
 }
 
-/// Without the operator's contact nothing is asked of Wikimedia: the run fails at once.
+/// Without the operator's contact nothing is asked of Wikimedia: the run waits for one, as every
+/// importer's does, and `catalogue status` says why.
 #[sqlx::test(migrations = "../../migrations")]
 async fn no_contact_no_request(pool: PgPool) {
     let m = mock();
@@ -1075,16 +1084,19 @@ async fn no_contact_no_request(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut config = (*ctx.config).clone();
     config.http.contact = String::new();
+    config.egress.contact = String::new();
     let ctx = Context {
         config: Arc::new(config),
         ..ctx
     };
-    assert!(import(&pool, &ctx, &base).await.is_err());
+    let next = run::step(importer(&base).as_ref(), &ctx).await.unwrap();
+    assert!(matches!(next, run::Next::Wait(_)), "{next:?}");
     let state = store::state(&pool, Catalogue::Wikidata)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(state.last_error.as_deref(), Some("no_contact"));
+    assert_eq!(state.waiting.as_deref(), Some(run::NEEDS_CONTACT));
+    assert_eq!((state.last_error, state.error_count), (None, 0));
     assert!(m.ranges.lock().unwrap().is_empty() && m.api.lock().unwrap().is_empty());
 }
 
@@ -1118,7 +1130,6 @@ async fn a_download_cut_off_between_runs_resumes(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1156,7 +1167,6 @@ async fn a_resumed_import_keeps_the_limit_it_started_with(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1186,7 +1196,6 @@ async fn a_read_cut_off_between_runs_resumes_at_its_last_batch(pool: PgPool) {
     let (ctx, dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     // More than the dump holds: the only write before the break is the one the failure makes
     // of the cards parsed so far.
     w.write_cards = 10_000;
@@ -1251,7 +1260,7 @@ async fn a_dump_that_fails_its_checksum_is_downloaded_again(pool: PgPool) {
     assert!(state.cards > 20);
 }
 
-/// A dump that holds no entity is no import: it fails, and no card is removed. One that holds far
+/// A dump that holds no entity is no import: it is refused (`empty`), and no card is removed. One that holds far
 /// fewer cards than the catalogue meets the catalogue's shrink floor: it removes nothing until the
 /// operator allows it.
 #[sqlx::test(migrations = "../../migrations")]
@@ -1271,7 +1280,12 @@ async fn an_empty_dump_removes_nothing(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(state.last_error.as_deref(), Some("empty_dump"));
+    assert!(
+        state.last_error.as_deref().unwrap().starts_with("empty"),
+        "{:?}",
+        state.last_error
+    );
+    assert!(state.position.unwrap()["refused"].is_string());
     assert_eq!(rows(&pool).await.len(), held);
     // A whole dump with one item, where the catalogue holds dozens, is not taken either.
     let packed = fixture();
@@ -1347,7 +1361,6 @@ async fn an_import_that_starts_over_sweeps_what_the_abandoned_attempt_wrote(pool
     // One card a write, so the abandoned attempt has written its cards before it fails.
     let mut w = Wikidata::for_config(&ctx.config);
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.write_cards = 1;
     assert!(once(Arc::new(w), &ctx, Run::Import).await.is_err());
     assert_eq!(last_error(&pool).await.as_deref(), Some("bad_dump"));
@@ -1554,7 +1567,6 @@ async fn a_broken_stream_is_taken_up_where_it_broke(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.from = Some(pinakes_core::catalogue::wikidata::From::Url(format!(
         "{base}/dumps/{DATE}/wikidata-{DATE}-all.json.bz2"
     )));
@@ -1566,32 +1578,49 @@ async fn a_broken_stream_is_taken_up_where_it_broke(pool: PgPool) {
     assert_eq!(ids, kept_ids());
 }
 
-/// A dump that fails three times is not read a fourth: the import fails with `dump_rejected`
-/// without asking for the file, until a newer dump is out.
+/// A dump that fails three times is refused at the third: the run is cleared (the large-import
+/// turn is free) and the position names the dump; the task's next import does not ask for the
+/// file and records nothing, until a newer dump is out.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_dump_that_keeps_failing_is_rejected(pool: PgPool) {
     let m = mock();
     *m.sha1.lock().unwrap() = Some("0".repeat(40));
     let base = serve(m.clone()).await;
     let (ctx, _dir) = context(&pool, None);
-    for count in 1..=3 {
-        assert!(import(&pool, &ctx, &base).await.is_err());
-        let state = store::state(&pool, Catalogue::Wikidata)
+    let state = || async {
+        store::state(&pool, Catalogue::Wikidata)
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(state.cursor.as_ref().unwrap()["restart"]["count"], count);
+            .unwrap()
+    };
+    for count in 1..=2 {
+        assert!(import(&pool, &ctx, &base).await.is_err());
+        assert_eq!(
+            state().await.cursor.as_ref().unwrap()["restart"]["count"],
+            count
+        );
     }
-    m.ranges.lock().unwrap().clear();
-    assert!(import(&pool, &ctx, &base).await.is_err());
-    let state = store::state(&pool, Catalogue::Wikidata)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        state.last_error.as_deref(),
-        Some("dump_rejected (127.0.0.1)")
+    let failed = import(&pool, &ctx, &base).await.unwrap_err();
+    assert!(
+        failed.to_string().contains("failed 3 times (checksum)"),
+        "{failed}"
     );
+    let refused = state().await;
+    assert_eq!(
+        (refused.run.as_deref(), refused.cursor.as_ref()),
+        (None, None)
+    );
+    assert_eq!(refused.error_count, 3);
+    let position = refused.position.unwrap();
+    assert!(position["refused"].is_string(), "{position}");
+    m.ranges.lock().unwrap().clear();
+    let mut w = Wikidata::for_config(&ctx.config);
+    let base_importer = importer(&base);
+    w.endpoints = base_importer.endpoints.clone();
+    w.threads = base_importer.threads;
+    let again = run::step(&w, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    assert_eq!(state().await.error_count, 3);
     assert!(m.ranges.lock().unwrap().is_empty());
 }
 
@@ -1626,7 +1655,6 @@ async fn an_asked_import_keeps_its_limit_through_a_failed_try(pool: PgPool) {
     let mut w = Wikidata::for_config(&ctx.config);
     w.endpoints = importer(&base).endpoints.clone();
     w.threads = (3, 2);
-    w.http = true;
     w.cli_limit = Some(3);
     let Once::Finished(state) = once(Arc::new(w), &ctx, Run::Import).await.unwrap() else {
         panic!()
@@ -1657,6 +1685,39 @@ async fn an_asked_import_keeps_its_limit_through_a_failed_try(pool: PgPool) {
     assert_eq!(state.cards as usize, kept_ids().len());
 }
 
+/// While a restart's marker stands and the tries after it fail before they read anything (the
+/// dumps directory down), the import that starts over takes one generation, not one per try.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_takes_one_generation_however_many_tries_fail(pool: PgPool) {
+    let m = mock();
+    *m.sha1.lock().unwrap() = Some("0".repeat(40));
+    let base = serve(m.clone()).await;
+    let (ctx, _dir) = context(&pool, None);
+    let state = || async {
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    // The checksum fails: the files go, and the next try starts over from the newest dump.
+    assert!(import(&pool, &ctx, &base).await.is_err());
+    let failed = state().await;
+    assert_eq!(failed.cursor.as_ref().unwrap()["restart"]["count"], 1);
+    m.index_fails.store(true, Ordering::SeqCst);
+    for _ in 0..3 {
+        assert!(import(&pool, &ctx, &base).await.is_err());
+        assert_eq!(state().await.generation, failed.generation + 1);
+    }
+    // The tries after it go on in that generation, to its end.
+    m.index_fails.store(false, Ordering::SeqCst);
+    *m.sha1.lock().unwrap() = Some(sha1_hex(&m.dump.lock().unwrap()));
+    let Once::Finished(done) = import(&pool, &ctx, &base).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(done.generation, failed.generation + 1);
+    assert_eq!(done.cards as usize, kept_ids().len());
+}
+
 /// The restarts of a dump are counted across a try that failed for another reason in between.
 #[sqlx::test(migrations = "../../migrations")]
 async fn restarts_are_counted_across_other_failures(pool: PgPool) {
@@ -1666,7 +1727,6 @@ async fn restarts_are_counted_across_other_failures(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     let count = || async {
@@ -1808,6 +1868,8 @@ async fn a_long_retry_after_fails_the_run(pool: PgPool) {
         Some("rate_limited (127.0.0.1)")
     );
     assert_eq!(m.api.lock().unwrap().len(), asked);
+    // No hold is left behind for another test.
+    pinakes_core::catalogue::fetch::forget_hold(&base);
 }
 
 /// An answer that leaves out an item asked for is no answer: the run fails (`api`), and the item's
@@ -1859,7 +1921,6 @@ async fn an_answer_over_the_cap_is_asked_in_halves(pool: PgPool) {
     m.changes.lock().unwrap().push(("Q42".into(), at));
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.api_cap = 1_500;
     m.asked.lock().unwrap().clear();
     let Once::Finished(_) = once(Arc::new(w), &ctx, Run::Update).await.unwrap() else {
@@ -1888,7 +1949,6 @@ async fn a_dump_replaced_under_a_download_starts_over(pool: PgPool) {
     let (ctx, dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1919,7 +1979,6 @@ async fn a_dump_gone_under_a_download_starts_over(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -1954,11 +2013,34 @@ async fn redirects_and_oversized_dumps_are_refused(pool: PgPool) {
     m.index_redirects.store(false, Ordering::SeqCst);
     *m.head_size.lock().unwrap() = Some(600_000_000_000);
     assert!(import(&pool, &ctx, &base).await.is_err());
-    assert_eq!(
-        last_error(&pool).await.as_deref(),
-        Some("oversized (127.0.0.1)")
+    let shown = last_error(&pool).await.unwrap();
+    assert!(
+        shown.starts_with("size (dump ") && shown.contains("600000000000 bytes"),
+        "{shown}"
     );
     assert!(m.ranges.lock().unwrap().is_empty());
+    // Refused: the run is cleared (the large-import turn is free), and the task's next try ends
+    // at once, recording nothing.
+    let state = store::state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.run.as_deref(), state.error_count), (None, 2));
+    assert!(state.position.unwrap()["refused"].is_string());
+    let mut w = Wikidata::for_config(&ctx.config);
+    let base_importer = importer(&base);
+    w.endpoints = base_importer.endpoints.clone();
+    w.threads = base_importer.threads;
+    let again = run::step(&w, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    assert_eq!(
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .unwrap()
+            .error_count,
+        2
+    );
 }
 
 /// A dump of mostly broken lines is no dump: the run fails (`bad_dump`) and removes nothing.
@@ -2036,10 +2118,7 @@ async fn without_a_contact_the_importer_waits_for_one(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        state.waiting.as_deref(),
-        Some(pinakes_core::catalogue::wikidata::NEEDS_CONTACT)
-    );
+    assert_eq!(state.waiting.as_deref(), Some(run::NEEDS_CONTACT));
     assert_eq!(state.error_count, 0);
     let m = pinakes_core::telemetry::Metrics::new().unwrap();
     m.catalogue_contact(&config);
@@ -2104,7 +2183,6 @@ async fn a_cursor_naming_another_host_is_refused(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -2210,7 +2288,6 @@ async fn a_stream_taken_up_again_is_checked(pool: PgPool) {
         let (ctx, _dir) = context(&pool, None);
         let mut w = Wikidata::new();
         w.endpoints = importer(&base).endpoints.clone();
-        w.http = true;
         w.from = Some(pinakes_core::catalogue::wikidata::From::Url(format!(
             "{base}/dumps/{DATE}/wikidata-{DATE}-all.json.bz2"
         )));
@@ -2232,7 +2309,7 @@ async fn a_stream_taken_up_again_is_checked(pool: PgPool) {
 }
 
 /// A page answered in chunks without a `Content-Length` is read only up to its cap (4 MB): past
-/// it the run fails (`oversized`); under it the page is read as any other.
+/// it the run fails (`size`); under it the page is read as any other.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_page_without_its_length_is_read_only_up_to_the_cap(pool: PgPool) {
     let m = mock();
@@ -2240,10 +2317,7 @@ async fn a_page_without_its_length_is_read_only_up_to_the_cap(pool: PgPool) {
     let base = serve(m.clone()).await;
     let (ctx, _dir) = context(&pool, Some(3));
     assert!(import(&pool, &ctx, &base).await.is_err());
-    assert_eq!(
-        last_error(&pool).await.as_deref(),
-        Some("oversized (127.0.0.1)")
-    );
+    assert_eq!(last_error(&pool).await.as_deref(), Some("size (127.0.0.1)"));
     m.index_padding.store(1 << 20, Ordering::SeqCst);
     let Once::Finished(state) = import(&pool, &ctx, &base).await.unwrap() else {
         panic!()
@@ -2286,7 +2360,6 @@ async fn a_download_short_of_disk_on_the_way_waits(pool: PgPool) {
     let (ctx, _dir) = context(&pool, None);
     let mut w = Wikidata::new();
     w.endpoints = importer(&base).endpoints.clone();
-    w.http = true;
     w.download_round = 100_000;
     let w = Arc::new(w);
     assert!(once(w.clone(), &ctx, Run::Import).await.is_err());
@@ -2340,7 +2413,6 @@ async fn a_label_rewrite_cut_off_resumes_where_it_stopped(pool: PgPool) {
         let mut w = Wikidata::new();
         w.endpoints = importer(&base).endpoints.clone();
         w.threads = (3, 2);
-        w.http = true;
         // One card a write: the rewrite is cut after its first.
         w.write_cards = 1;
         Arc::new(w)
@@ -2496,7 +2568,6 @@ async fn a_dump_read_slower_than_its_floor_fails(pool: PgPool) {
         let (ctx, _dir) = context(&pool, limit);
         let mut w = Wikidata::for_config(&ctx.config);
         w.endpoints = importer(&base).endpoints.clone();
-        w.http = true;
         w.slow_window = Duration::from_millis(300);
         assert!(
             once(Arc::new(w), &ctx, Run::Import).await.is_err(),
@@ -2514,4 +2585,51 @@ async fn a_dump_read_slower_than_its_floor_fails(pool: PgPool) {
             .await
             .unwrap();
     }
+}
+
+/// An update whose removals would pass a tenth of the catalogue's cards (and ten: every item
+/// deleted, a broken answer) is refused at the page that would take it past: that page and the
+/// rest are not written, the position names the changes it read, and the next update does not
+/// read them again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_update_that_removes_too_much_is_refused(pool: PgPool) {
+    let m = mock();
+    let base = serve(m.clone()).await;
+    let (ctx, _dir) = context(&pool, None);
+    import(&pool, &ctx, &base).await.unwrap();
+    let before = rows(&pool).await;
+    assert!(before.len() > 20, "{}", before.len());
+    let now = chrono::Utc::now();
+    let at = |mins: i64| {
+        (now - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    {
+        let mut e = m.entities.lock().unwrap();
+        for id in before.keys() {
+            e.insert(id.clone(), Value::Null);
+        }
+    }
+    *m.changes.lock().unwrap() = before.keys().map(|id| (id.clone(), at(30))).collect();
+    sqlx::query("UPDATE catalogue_state SET position=jsonb_build_object('time',$1::text) WHERE catalogue='wikidata'")
+        .bind(at(60))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let failed = once(importer(&base), &ctx, Run::Update).await.unwrap_err();
+    assert!(
+        failed.to_string().contains("refused (the changes after"),
+        "{failed}"
+    );
+    // The pages before the one that would pass the cap are applied: at most ten removals.
+    assert!(rows(&pool).await.len() >= before.len() - 10);
+    let state = store::state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.run.as_deref(), state.error_count), (None, 1));
+    assert!(state.position.unwrap()["refused"].is_string());
+    m.asked_sitelinks.lock().unwrap().clear();
+    let again = once(importer(&base), &ctx, Run::Update).await.unwrap_err();
+    assert!(again.to_string().contains("was refused before"), "{again}");
+    assert!(m.asked_sitelinks.lock().unwrap().is_empty());
 }

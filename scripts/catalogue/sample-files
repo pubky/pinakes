@@ -5,7 +5,7 @@
 # update from a second sample that rewrites only the changed rows, and the catalogue switched off
 # leaving search at once.
 #
-# usage: scripts/catalogue-sample openalex|podcastindex|software|tranco [--keep]
+# usage: scripts/catalogue-sample openalex|podcastindex|software|tranco [--keep] [--help]
 #
 # What each reads (about 300 MB at most per catalogue):
 #   openalex      the first 80 MB of three works files of the newest snapshot (two dates) and 40 MB
@@ -29,7 +29,9 @@
 #   PGHOST, PGPORT  the PostgreSQL server the database is created on (libpq's own variables)
 #   SAMPLE_DB       the database name (default: catalogue_sample_<catalogue>); it must not exist
 #   SAMPLE_DIR      where the downloads and the daemon's files go (default: a new temporary dir)
-#   PINAKES__HTTP__CONTACT  the operator's contact, sent in the User-Agent (needed for Tranco)
+#   PINAKES__HTTP__CONTACT  the operator's contact, sent in the User-Agent (needed for Tranco;
+#                   scripts/catalogue-sample reads it from ~/.config/pinakes/contact.env when unset)
+# `--keep` keeps the database and the downloads.
 # Every pinakesd it runs gets only PATH, HOME and TMPDIR from the environment (`env -i`): no
 # PINAKES__ override reaches it. The daemon it starts for the checks runs without a contact and
 # with every other catalogue off, so no importer starts in it (the script fails if one ran);
@@ -38,20 +40,29 @@
 set -euo pipefail
 
 catalogue=${1:-}
-usage="usage: $0 openalex|podcastindex|software|tranco [--keep]"
+usage="usage: scripts/catalogue-sample openalex|podcastindex|software|tranco [--keep] [--help]"
 case $catalogue in openalex|podcastindex|software|tranco) ;; *) echo "$usage" >&2; exit 2 ;; esac
 shift
 keep=0
 while [ $# -gt 0 ]; do
   case $1 in
     --keep) keep=1 ;;
+    -h|--help) sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
     *) echo "$usage" >&2; exit 2 ;;
   esac
   shift
 done
+fail() { echo "FAILED: $*" >&2; exit 1; }
 root=$(cd "$(dirname "$0")/../.." && pwd)
 pinakesd=${PINAKESD:-$root/target/release/pinakesd}
 db=${SAMPLE_DB:-catalogue_sample_$catalogue}
+[[ $db =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || { echo "SAMPLE_DB must be a plain database name (a-z, 0-9, _)" >&2; exit 2; }
+[ -x "$pinakesd" ] || fail "no pinakesd at $pinakesd (set PINAKESD)"
+# The database must not exist: this script never touches one it did not create.
+# (psql interpolates :'name' in what it reads, not in -c.)
+n=$(echo "SELECT count(*) FROM pg_database WHERE datname = :'name'" | command psql -X -At -d postgres -v name="$db") ||
+  fail "the PostgreSQL server (PGHOST, PGPORT) did not answer"
+[ "$n" = 0 ] || fail "database $db exists: choose another SAMPLE_DB"
 work=${SAMPLE_DIR:-$(mktemp -d)}
 mkdir -p "$work"
 contact=${PINAKES__HTTP__CONTACT:-}
@@ -59,7 +70,6 @@ ua="pinakes-catalogue-sample (+https://pubky.app${contact:+; $contact})"
 report=$work/report.json
 echo '{}' > "$report"
 note() { python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d[sys.argv[2]]=json.loads(sys.argv[3]); json.dump(d,open(p,"w"),indent=1)' "$report" "$1" "$2"; }
-fail() { echo "FAILED: $*" >&2; exit 1; }
 daemon_pid=
 created=0
 cleanup() {
@@ -71,10 +81,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-# The database must not exist: this script never touches one it did not create.
-if [ "$(echo "SELECT count(*) FROM pg_database WHERE datname = :'name'" | command psql -X -At -d postgres -v name="$db")" != 0 ]; then
-  fail "database $db exists: choose another SAMPLE_DB"
-fi
 # A command's wall time (s) and peak memory (KB) into "$1", its output to the terminal.
 measure() {
   local out=$1; shift
@@ -287,7 +293,7 @@ tranco)
   [[ $id =~ ^[A-Za-z0-9]{1,16}$ ]] || fail "no list ID"
   fetch "https://tranco-list.eu/download/$id/1000000" "$s/list.csv"
   touch -d "$(curl -sSfI -A "$ua" "https://tranco-list.eu/download/$id/1000000" | sed -n 's/^last-modified: //Ip' | tr -d '\r')" "$s/list.csv" 2>/dev/null || true
-  from=("--from" "$s/list.csv" "--limit" "44") from2=("--from" "$s2/list.csv" "--limit" "1")
+  from=("--from" "$s/list.csv" "--reads" "44") from2=("--from" "$s2/list.csv" "--reads" "1")
   ;;
 esac
 note downloaded_bytes "$downloaded"
@@ -534,7 +540,7 @@ tranco)
   # The day's list ID, then the list, from tranco-list.eu; five homepage reads. A day passed
   # since the update's lookup (an update looks the list up once a day).
   psql -c "UPDATE catalogue_state SET position=position-'checked' WHERE catalogue='tranco'"
-  import "$run/official.log" --update --limit 5
+  import "$run/official.log" --update --reads 5
   list=$(psql -c "SELECT position->>'list' FROM catalogue_state WHERE catalogue='tranco'")
   [[ $list =~ ^[A-Za-z0-9]{1,16}$ ]] || fail "the official list was not read (position: $(position))"
   sites=$(psql -c "SELECT count(*) FROM catalogue_site")

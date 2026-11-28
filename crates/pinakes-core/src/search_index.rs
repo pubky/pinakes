@@ -1698,6 +1698,26 @@ impl SearchIndex {
             deadline: None,
         })
     }
+    /// A turn of the text searches for a search of `client` (its address) that reads catalogue
+    /// cards from Postgres without text, with the end of its budget: the same turns, share and
+    /// budget as a text search (`limits.search_index_searches`, `limits.search_index_budget_ms`),
+    /// so these reads too run a few at a time and one client never holds them all. No turn
+    /// within the budget is [`Busy`], counted by its reason.
+    pub async fn card_read_turn(
+        &self,
+        client: Option<std::net::IpAddr>,
+    ) -> Result<(Turn, std::time::Instant)> {
+        let (turns, budget) = self.bounds();
+        let deadline = std::time::Instant::now() + budget;
+        let turn = turns
+            .take(client, deadline.into())
+            .await
+            .map_err(|reason| {
+                crate::telemetry::search_index_busy(reason);
+                Busy
+            })?;
+        Ok((turn, deadline))
+    }
     /// Take one turn of the text searches for `client` (its address, counted as [`share_key`]
     /// counts it) now, whatever its share, and keep it until the guard is dropped (tests).
     #[doc(hidden)]
@@ -3952,7 +3972,8 @@ mod tests {
     }
 
     /// Property (fuzz): any text up to the API's 256 bytes (many words, phrases, `-`, `or` chains,
-    /// one character, symbols, scripts written without spaces) is searched over a seeded index:
+    /// one character, symbols, scripts written without spaces; and chains of `or` past MAX_ITEMS
+    /// items, after a `-word` or not, read whole) is searched over a seeded index:
     /// candidates, or `None` (Postgres reads it alone); never a panic, never more than the
     /// candidates asked for from each part. Each text holds at most MAX_ITEMS items, and each of
     /// its words' starts expands to at most PREFIX_TERMS words holding at most PREFIX_POSTINGS
@@ -3992,6 +4013,9 @@ mod tests {
         }
         let mut served = 0;
         let mut most_steps = 0;
+        // The texts read as one chain past MAX_ITEMS items.
+        let mut chains = 0;
+        let mut most_chain_steps = 0;
         // The ceiling of posting steps per search: with the fixed seed, about twice the most its
         // searches take (59,792, measured; the run prints its own), so a lost bound shows as many
         // times more; with another seed (`PINAKES_TEST_SEED`), every posting of the index once.
@@ -4017,6 +4041,14 @@ mod tests {
                     postings
                 })
                 .sum()
+        };
+        // A chain read whole is up to MAX_PIECES words: with the fixed seed its ceiling is about
+        // twice the most its texts take (125,286, measured); with another seed, the same as the
+        // others'.
+        let chain_ceiling: u64 = if std::env::var("PINAKES_TEST_SEED").is_err() {
+            250_000
+        } else {
+            step_ceiling
         };
         let pieces = [
             "or",
@@ -4048,8 +4080,22 @@ mod tests {
             "😀",
             "a-b",
         ];
-        for round in 0..300 {
+        // Chains: a `-word` or nothing, then words joined by ` or ` (17 or more words reach the
+        // whole-chain read past MAX_ITEMS items).
+        let words = [
+            "a", "ab", "an", "bo", "ca", "the", "ka", "lo", "x", "0", "é", "zürich",
+        ];
+        for round in 0..400 {
             let mut text = String::new();
+            if round >= 300 {
+                if gen.chance(2) {
+                    text.push_str(gen.pick(&["-ma ", "-x ", "\"\" ", "-\"ra st\" "]));
+                }
+                while text.len() < 256 {
+                    text.push_str(gen.pick(&words));
+                    text.push_str(gen.pick(&[" or ", " OR "]));
+                }
+            }
             while text.len() < 256 {
                 text.push_str(gen.pick(&pieces));
                 if gen.chance(3) {
@@ -4073,7 +4119,8 @@ mod tests {
                 ..Default::default()
             };
             let parts = items(&open.index, &text);
-            // MAX_ITEMS items, or one chain of `or`s read whole, up to MAX_PIECES words.
+            // MAX_ITEMS items, or one chain of `or`s read whole (with the `-word`s before it), up
+            // to MAX_PIECES words.
             let chain_words = parts
                 .iter()
                 .filter(|i| matches!(i, Item::Words(..)))
@@ -4083,9 +4130,12 @@ mod tests {
                     || (chain_words <= MAX_PIECES
                         && parts
                             .iter()
-                            .all(|i| matches!(i, Item::Words(..) | Item::Or))),
+                            .all(|i| matches!(i, Item::Words(..) | Item::Or | Item::Not(..)))),
                 "{round}: {text:?}"
             );
+            if parts.len() > MAX_ITEMS {
+                chains += 1;
+            }
             let searcher = open.reader.searcher();
             for word in text.split_whitespace().take(4) {
                 let word = word.to_lowercase();
@@ -4104,8 +4154,13 @@ mod tests {
             // The work, counted in posting steps of the budgeted leaves (no clock): far below what
             // reading every posting of the texts' parts would take.
             let steps = STEPS.with(|n| n.get()) - before;
-            most_steps = most_steps.max(steps);
-            assert!(steps <= step_ceiling, "{round}: {text:?}: {steps} steps");
+            if round < 300 {
+                most_steps = most_steps.max(steps);
+                assert!(steps <= step_ceiling, "{round}: {text:?}: {steps} steps");
+            } else {
+                most_chain_steps = most_chain_steps.max(steps);
+                assert!(steps <= chain_ceiling, "{round}: {text:?}: {steps} steps");
+            }
             match searched {
                 Ok(Some(found)) => {
                     served += 1;
@@ -4115,12 +4170,14 @@ mod tests {
                 Err(error) => panic!("{round}: {text:?}: {error}"),
             }
         }
-        // Near the measured count with the fixed seed (282; the run prints it): the index answers
+        // Near the measured count with the fixed seed (376; the run prints it): the index answers
         // every text but those of one character found inside names, which Postgres reads alone
         // (the `None` arm above accepts no other).
-        assert!(served >= 270, "{served} of 300 answered");
+        assert!(served >= 360, "{served} of 400 answered");
+        // The chain-shaped texts reach the whole-chain read.
+        assert!(chains >= 20, "{chains} texts read as one chain");
         eprintln!(
-            "most posting steps of one search: {most_steps} (ceiling {step_ceiling}); {served} of 300 answered"
+            "most posting steps of one search: {most_steps} (ceiling {step_ceiling}); of a chain-shaped text: {most_chain_steps} (ceiling {chain_ceiling}); {served} of 400 answered; {chains} read as one chain"
         );
     }
 

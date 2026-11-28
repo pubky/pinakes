@@ -48,6 +48,8 @@ rrule = "=0.14.0"
 roxmltree = "=0.21.1"
 # Streams a feed body cut off at the page cap, to complete it after its last whole item.
 quick-xml = "=0.37.5"
+# The MD5 OpenStreetMap's file servers publish beside each bulk file (`catalogue::osm`).
+md-5 = "=0.10.6"
 sha1 = "=0.10.7"
 sha2 = "=0.10.9"
 tzf-rs = { version = "=1.1.4", default-features = false }

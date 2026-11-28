@@ -56,6 +56,19 @@ struct Fixture {
     /// Start the next import over in a generation of its own, dropping a cut-off attempt's cursor
     /// (`Job::new_generation`, as an importer does for another dump).
     start_over: AtomicBool,
+    /// Refuse what the next import reads (`Job::refuse` of version `v1`), and end the imports
+    /// after it at once while `v1` is refused (`Job::still_refused`).
+    refuse: AtomicBool,
+    /// Ask for a full import (`--request`) while the next import runs.
+    request_during: AtomicBool,
+    /// The imports started.
+    imports: AtomicUsize,
+    /// Plan a full import at every step.
+    always_import: AtomicBool,
+    /// The backend that held the catalogue's lock as each run started.
+    lock_holders: Mutex<Vec<Option<i32>>>,
+    /// Ask for a full import at every step until one has finished (as importers do), not once.
+    import_until_done: AtomicBool,
     need: u64,
 }
 impl Fixture {
@@ -76,6 +89,12 @@ impl Fixture {
             fail_at_gate: AtomicBool::new(false),
             expect_shrink: AtomicBool::new(false),
             start_over: AtomicBool::new(false),
+            refuse: AtomicBool::new(false),
+            request_during: AtomicBool::new(false),
+            imports: AtomicUsize::new(0),
+            always_import: AtomicBool::new(false),
+            lock_holders: Mutex::default(),
+            import_until_done: AtomicBool::new(false),
             need: 1000,
         }
     }
@@ -88,7 +107,12 @@ impl Importer for Fixture {
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
         self.need
     }
-    async fn plan(&self, _state: &State) -> Result<Plan> {
+    async fn plan(&self, state: &State) -> Result<Plan> {
+        if self.always_import.load(Ordering::SeqCst)
+            || (self.import_until_done.load(Ordering::SeqCst) && state.last_import_at.is_none())
+        {
+            return Ok(Plan::Run(Run::Import));
+        }
         Ok(match self.next.lock().unwrap().take() {
             Some(run) => Plan::Run(run),
             None => Plan::Wait(Duration::from_secs(3600)),
@@ -99,6 +123,8 @@ impl Importer for Fixture {
             .lock()
             .unwrap()
             .push(job.cursor().cloned());
+        let holder = lock_holder(job.pool(), self.catalogue).await;
+        self.lock_holders.lock().unwrap().push(holder);
         if self.panic_once.swap(false, Ordering::SeqCst) {
             panic!("the fixture importer panicked");
         }
@@ -107,6 +133,17 @@ impl Importer for Fixture {
         }
         if self.start_over.swap(false, Ordering::SeqCst) {
             job.new_generation().await?;
+        }
+        self.imports.fetch_add(1, Ordering::SeqCst);
+        job.reading(json!("v1"));
+        if job.refused_before(&json!("v1")) {
+            return Err(job.still_refused("version v1"));
+        }
+        if self.request_during.swap(false, Ordering::SeqCst) {
+            run::request_import(job.pool(), self.catalogue, "asked for while it ran").await?;
+        }
+        if self.refuse.swap(false, Ordering::SeqCst) {
+            return Err(job.refuse(json!("v1"), "refused", "v1 can't be applied"));
         }
         let start = job.cursor().and_then(|c| c["next"].as_u64()).unwrap_or(0) as usize;
         let items = self.items.lock().unwrap().clone();
@@ -212,6 +249,10 @@ fn context(pool: &PgPool, free: Arc<AtomicU64>) -> (Context, TempDir) {
     };
     (ctx, dir)
 }
+/// The tests that run an importer's task (`run::run`) run one at a time: a task sets
+/// `pinakes_catalogue_waiting_seconds`, one gauge for the whole binary, which
+/// `the_waiting_gauge_counts_how_long_a_task_waits` reads. Every test that spawns a task holds it.
+static TASKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// How long a test waits for what a task does: long, so a loaded build slot doesn't fail it.
 const DEADLINE: Duration = Duration::from_secs(60);
 fn plenty() -> Arc<AtomicU64> {
@@ -361,6 +402,7 @@ async fn imports_rewrite_only_changed_cards_and_remove_unseen_ones(pool: PgPool)
 /// removes nothing a failed import did not read. The task records the failure and tries again.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_failed_import_resumes_from_its_cursor(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (ctx, _dir) = context(&pool, plenty());
     // A first import of 25 that breaks off after one batch.
     let fixture = Fixture::new(Catalogue::Tranco, cards(25));
@@ -415,6 +457,7 @@ async fn a_failed_import_resumes_from_its_cursor(pool: PgPool) {
 /// row; the next task resumes from there.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_cut_off_by_a_restart_resumes(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (ctx, _dir) = context(&pool, plenty());
     let mut fixture = Fixture::new(Catalogue::Osm, vec![]);
     *fixture.items.lock().unwrap() = cards(30)
@@ -479,6 +522,7 @@ async fn a_run_cut_off_by_a_restart_resumes(pool: PgPool) {
 /// free. The drop takes the same lock.
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_catalogue_lock_keeps_a_second_importer_out(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (ctx, _dir) = context(&pool, plenty());
     let other = SessionLock::try_take(&pool, Catalogue::Software.lock_key())
         .await
@@ -674,6 +718,53 @@ async fn a_drop_deletes_one_catalogue(pool: PgPool) {
     assert_eq!(state(&pool, Catalogue::Software).await.cards, 3);
 }
 
+/// A sweep reads the catalogue a page of `SWEEP_ROWS` at a time: past the first page, a full
+/// import's end removes every card it did not see, wherever its page, and keeps the others; a
+/// drop removes them all, page by page.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_sweep_goes_past_its_first_page(pool: PgPool) {
+    let n = 2 * store::SWEEP_ROWS as usize + 1;
+    let many: Vec<Card> = cards(n)
+        .into_iter()
+        .map(|c| Card { fame: 0.5, ..c })
+        .collect();
+    let report = store::upsert(&pool, Catalogue::Wikidata, 1, &many, None)
+        .await
+        .unwrap();
+    assert_eq!(report.inserted as usize, n);
+    // The next import saw two cards in three (on every page).
+    let seen: i64 = sqlx::query_scalar(
+        "WITH s AS (UPDATE catalogue_card SET seen_generation=2 WHERE catalogue='wikidata' AND substr(source_id,2)::int % 3 <> 0 RETURNING 1) SELECT count(*) FROM s",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(seen as usize, n - n.div_ceil(3));
+    assert!(seen > store::SWEEP_ROWS);
+    let removed = store::finish_import(&pool, Catalogue::Wikidata, 2)
+        .await
+        .unwrap();
+    assert_eq!(removed as usize, n - seen as usize);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, seen);
+    assert_eq!(state(&pool, Catalogue::Wikidata).await.cards, seen);
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM catalogue_card WHERE catalogue='wikidata' AND substr(source_id,2)::int % 3 = 0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+    // A drop: every page, its progress told per page.
+    let mut progress = vec![];
+    let dropped = store::drop_catalogue(&pool, Catalogue::Wikidata, |n| progress.push(n))
+        .await
+        .unwrap();
+    assert_eq!(dropped as i64, seen);
+    // Two pages of cards and the empty one that ends the walk.
+    assert!(progress.len() >= 3, "{progress:?}");
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 0);
+}
+
 /// The batch writer: parts of at most `BATCH_ROWS`, one row per source ID (the last wins),
 /// refused cards counted and left out, and the count in the state row.
 #[sqlx::test(migrations = "../../migrations")]
@@ -818,21 +909,39 @@ async fn catalogue_metrics_follow_the_state_and_the_switches(pool: PgPool) {
     // A refusal standing in the position (before any version was applied).
     assert_eq!(get(&metrics2.catalogue_refused, "wikidata"), 1);
     assert_eq!(get(&metrics2.catalogue_refused, "tranco"), 0);
-    // One of an older dump than the applied one (a trial by hand) is not the importer's wait.
+    // One of a trial by hand from another source (`--from`) is not the importer's wait.
     store::ensure_state(&pool, Catalogue::Osm).await.unwrap();
-    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"20261125-001001\",\"refused\":\"20261121-001001\"}' WHERE catalogue='osm'")
+    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"20261125-001001\",\"refused\":\"20261121-001001\",\"refused_source\":\"/srv/osm/old.osm.pbf\"}' WHERE catalogue='osm'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Nor one read with another limit than the configured one (bound per catalogue).
+    store::ensure_state(&pool, Catalogue::Musicbrainz)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"20261121-001001\",\"refused\":\"20261125-001001\",\"refused_source\":null,\"refused_limit\":5}' WHERE catalogue='musicbrainz'")
         .execute(&pool)
         .await
         .unwrap();
     let metrics3 = Metrics::new().unwrap();
+    metrics3.catalogue_switches(&config);
     metrics3.refresh(&pool).await.unwrap();
     assert_eq!(get(&metrics3.catalogue_refused, "osm"), 0);
+    assert_eq!(get(&metrics3.catalogue_refused, "musicbrainz"), 0);
     assert_eq!(get(&metrics3.catalogue_refused, "wikidata"), 1);
+    // With that limit configured, it is the importer's wait.
+    let mut limited = config.clone();
+    limited.musicbrainz.limit = Some(5);
+    let metrics5 = Metrics::new().unwrap();
+    metrics5.catalogue_switches(&limited);
+    metrics5.refresh(&pool).await.unwrap();
+    assert_eq!(get(&metrics5.catalogue_refused, "musicbrainz"), 1);
+    assert_eq!(get(&metrics5.catalogue_refused, "wikidata"), 1);
     // A file catalogue's refused file, until a newer file is read.
     store::ensure_state(&pool, Catalogue::Podcastindex)
         .await
         .unwrap();
-    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"a\",\"refused_file\":\"b\"}' WHERE catalogue='podcastindex'")
+    sqlx::query("UPDATE catalogue_state SET position='{\"version\":\"a\",\"refused\":\"b\"}' WHERE catalogue='podcastindex'")
         .execute(&pool)
         .await
         .unwrap();
@@ -1133,6 +1242,7 @@ async fn current_as_of_follows_upstream_and_an_update_can_ask_for_a_full_import(
 /// then), takes the lock again and resumes from the cursor.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (ctx, _dir) = context(&pool, plenty());
     let mut fixture = Fixture::new(Catalogue::Wikidata, cards(25));
     let gate = Arc::new(Notify::new());
@@ -1185,6 +1295,7 @@ async fn a_run_that_loses_its_lock_stops_and_resumes(pool: PgPool) {
 /// cursor once the lock is taken again.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_run_that_fails_after_its_lock_went_records_nothing(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (mut ctx, _dir) = context(&pool, plenty());
     // The watch checks only every 30 s: the failure comes first.
     ctx.pace.lock_check = Duration::from_secs(30);
@@ -1236,6 +1347,7 @@ async fn a_run_that_fails_after_its_lock_went_records_nothing(pool: PgPool) {
 /// and the run is tried again.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_panicking_importer_is_a_failed_run(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (ctx, _dir) = context(&pool, plenty());
     let fixture = Fixture::new(
         Catalogue::Tranco,
@@ -1270,6 +1382,7 @@ async fn a_panicking_importer_is_a_failed_run(pool: PgPool) {
 /// `last_error`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_failure_is_stored_by_its_class(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (ctx, _dir) = context(&pool, plenty());
     let fixture = Fixture::new(Catalogue::Tranco, vec![]);
     *fixture.items.lock().unwrap() = cards(25)
@@ -1432,22 +1545,15 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     run::note_unstarted(&pool, &config).await.unwrap();
     let notes = run::contact_needs(&config);
     let note = |c: Catalogue| notes.iter().find(|n| n.0 == c).map(|n| n.2);
-    assert_eq!(
-        note(Catalogue::Musicbrainz),
-        Some(pinakes_core::catalogue::musicbrainz::NEEDS_CONTACT)
-    );
+    // One text for every catalogue.
+    assert!(notes.iter().all(|n| n.2 == run::NEEDS_CONTACT));
     let waiting = |c: Catalogue| {
         let pool = pool.clone();
         async move { store::state(&pool, c).await.unwrap().map(|s| s.waiting) }
     };
-    for c in run::WITH_IMPORTER {
+    // Every catalogue has an importer, and each needs the contact.
+    for c in Catalogue::ALL {
         assert_eq!(waiting(c).await, Some(note(c).map(str::to_owned)), "{c}");
-    }
-    for c in Catalogue::ALL
-        .into_iter()
-        .filter(|c| !run::WITH_IMPORTER.contains(c))
-    {
-        assert_eq!(waiting(c).await.flatten(), None, "{c}");
     }
     let state = store::state(&pool, Catalogue::Musicbrainz)
         .await
@@ -1463,11 +1569,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
     for c in Catalogue::ALL {
-        assert_eq!(
-            needs(&metrics, c),
-            i64::from(run::WITH_IMPORTER.contains(&c)),
-            "{c}"
-        );
+        assert_eq!(needs(&metrics, c), 1, "{c}");
     }
     config.egress.contact = "ops@example.org".into();
     let metrics = Metrics::new().unwrap();
@@ -1477,7 +1579,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     }
     // Started with its contact, the note goes; another `waiting` stays.
     run::note_unstarted(&pool, &config).await.unwrap();
-    for c in run::WITH_IMPORTER {
+    for c in Catalogue::ALL {
         assert_eq!(waiting(c).await, Some(None), "{c}");
     }
     sqlx::query(
@@ -1498,7 +1600,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     let metrics = Metrics::new().unwrap();
     metrics.catalogue_contact(&config);
     assert_eq!(needs(&metrics, Catalogue::Musicbrainz), 0);
-    for c in run::WITH_IMPORTER
+    for c in Catalogue::ALL
         .into_iter()
         .filter(|c| *c != Catalogue::Musicbrainz)
     {
@@ -1506,7 +1608,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
     }
     config.catalogues.enabled = false;
     run::note_unstarted(&pool, &config).await.unwrap();
-    for c in run::WITH_IMPORTER {
+    for c in Catalogue::ALL {
         assert_ne!(waiting(c).await.flatten().as_deref(), note(c), "{c}");
     }
     let metrics = Metrics::new().unwrap();
@@ -1522,6 +1624,7 @@ async fn a_catalogue_without_its_contact_says_why_it_waits(pool: PgPool) {
 /// task takes the lock again and resumes from the cursor.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_failure_after_the_catalogue_lock_is_gone_is_not_recorded(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
     let (mut ctx, _dir) = context(&pool, plenty());
     // The lock's own watch checks rarely here: the failure comes first.
     ctx.pace.lock_check = Duration::from_secs(30);
@@ -1565,6 +1668,333 @@ async fn a_failure_after_the_catalogue_lock_is_gone_is_not_recorded(pool: PgPool
     assert_eq!((s.cards, s.error_count), (25, 0));
 }
 
+/// The backend that holds `catalogue`'s lock, if one does.
+async fn lock_holder(pool: &PgPool, catalogue: Catalogue) -> Option<i32> {
+    sqlx::query_scalar(
+        "SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND objid=($1::bigint)::oid AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+    )
+    .bind(catalogue.lock_key())
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+/// End the session that holds `catalogue`'s lock (as a database restart does).
+async fn end_lock_session(pool: &PgPool, catalogue: Catalogue) {
+    let pid = lock_holder(pool, catalogue).await.expect("a lock holder");
+    let ended: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1, 5000)")
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert!(ended);
+}
+
+/// The catalogue lock is watched between steps too: an importer whose lock's session ends while
+/// it waits for its next run takes the lock again then, without running before its time, so a
+/// `catalogue drop` can't take a lock the daemon believes it holds.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_importer_that_loses_its_lock_while_it_waits_takes_it_again(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
+    let (ctx, _dir) = context(&pool, plenty());
+    // After its import nothing is due for an hour.
+    let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(5)));
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    until("the import", || async {
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.last_import_at.is_some() && s.phase == "idle")
+    })
+    .await;
+    // The task has planned its next step (an hour away) and waits.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = lock_holder(&pool, Catalogue::Wikidata)
+        .await
+        .expect("the task holds its lock while it waits");
+    end_lock_session(&pool, Catalogue::Wikidata).await;
+    until("the lock taken again", || async {
+        lock_holder(&pool, Catalogue::Wikidata)
+            .await
+            .is_some_and(|pid| pid != before)
+    })
+    .await;
+    // Nothing ran meanwhile, and nothing was recorded.
+    assert_eq!(fixture.started_from.lock().unwrap().len(), 1);
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.last_error, s.cards), (0, None, 5));
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// A run by hand (`run_once`, `pinakesd catalogue import`) that fails once its catalogue lock's
+/// session has ended records nothing in the state row (another daemon may hold the row by then):
+/// it says the lock was lost, and the run resumes from its cursor at the next import.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_by_hand_that_fails_after_its_lock_went_records_nothing(pool: PgPool) {
+    let (mut ctx, _dir) = context(&pool, plenty());
+    // The lock's watch checks rarely here: the failure comes first.
+    ctx.pace.lock_check = Duration::from_secs(30);
+    let mut fixture = Fixture::new(Catalogue::Wikidata, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    fixture.fail_at_gate.store(true, Ordering::SeqCst);
+    let fixture = Arc::new(fixture);
+    let once = tokio::spawn({
+        let (fixture, ctx) = (fixture.clone(), ctx.clone());
+        async move { run::run_once(fixture, &ctx, Run::Import, |_| {}).await }
+    });
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    end_lock_session(&pool, Catalogue::Wikidata).await;
+    // The run fails now, with its catalogue lock gone.
+    gate.notify_one();
+    let err = tokio::time::timeout(DEADLINE, once)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("was lost"), "{err}");
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.last_error), (0, None));
+    assert_eq!(s.cursor, Some(json!({"next": 10})));
+}
+
+/// `pinakes_catalogue_waiting_seconds{catalogue,reason}` counts how long an importer's task has
+/// waited for one reason: free disk (`disk`), the large-import turn (`turn`). It goes back to 0
+/// once the task runs, and stays 0 for the reasons it does not wait for. The wait's start is
+/// kept with the state row: a task started again (a daemon restart) counts from it, and it is
+/// gone once the wait is over.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_waiting_gauge_counts_how_long_a_task_waits(pool: PgPool) {
+    use pinakes_core::telemetry::catalogue_waiting_seconds as waited;
+    let _tasks = TASKS.lock().await;
+    let free = Arc::new(AtomicU64::new(0));
+    let (ctx, _dir) = context(&pool, free.clone());
+    let turn = SessionLock::try_take(&pool, pinakes_core::locks::CATALOGUE_LARGE_IMPORT)
+        .await
+        .unwrap()
+        .unwrap();
+    let podcasts = Fixture::new(Catalogue::Podcastindex, cards(5));
+    let works = Fixture::new(Catalogue::Openalex, cards(5));
+    for waits in [&podcasts, &works] {
+        waits.import_until_done.store(true, Ordering::SeqCst);
+    }
+    let (podcasts, works) = (Arc::new(podcasts), Arc::new(works));
+    let (stop_podcasts, shutdown) = watch::channel(false);
+    let podcasts_task = tokio::spawn(run::run(podcasts.clone(), ctx.clone(), shutdown));
+    let (stop_works, shutdown) = watch::channel(false);
+    let works_task = tokio::spawn(run::run(works.clone(), ctx.clone(), shutdown));
+    until("a second of waiting", || async {
+        waited("podcastindex", "disk") >= 1 && waited("openalex", "turn") >= 1
+    })
+    .await;
+    for (catalogue, reason) in [
+        ("podcastindex", "turn"),
+        ("podcastindex", "other"),
+        ("openalex", "disk"),
+        ("openalex", "other"),
+    ] {
+        assert_eq!(waited(catalogue, reason), 0, "{catalogue} {reason}");
+    }
+    let disk = waited("podcastindex", "disk");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(waited("podcastindex", "disk") > disk);
+    // The importers never see the wait's start in the state.
+    assert_eq!(state(&pool, Catalogue::Openalex).await.position, None);
+    // OpenAlex's task stops, as a daemon does, eight days into its wait; started again, it counts
+    // from the wait's start.
+    stop_works.send(true).unwrap();
+    works_task.await.unwrap();
+    sqlx::query("UPDATE catalogue_state SET position=jsonb_set(position,'{waiting_since,at}',to_jsonb(now()-interval '8 days')) WHERE catalogue='openalex'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pinakes_core::telemetry::catalogue_waiting("openalex", "turn", 0);
+    let (stop_works, shutdown) = watch::channel(false);
+    let works_task = tokio::spawn(run::run(works.clone(), ctx.clone(), shutdown));
+    until("the stored wait", || async {
+        waited("openalex", "turn") >= 8 * 86400
+    })
+    .await;
+    // Room on the disk: Podcast Index runs; OpenAlex still waits for the turn.
+    free.store(u64::MAX, Ordering::SeqCst);
+    until("the podcast import", || async {
+        store::state(&pool, Catalogue::Podcastindex)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.last_import_at.is_some())
+    })
+    .await;
+    until("the disk wait over", || async {
+        waited("podcastindex", "disk") == 0
+    })
+    .await;
+    assert!(waited("openalex", "turn") >= 8 * 86400);
+    turn.release().await;
+    until("the works import", || async {
+        store::state(&pool, Catalogue::Openalex)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.last_import_at.is_some())
+    })
+    .await;
+    until("the turn wait over", || async {
+        waited("openalex", "turn") == 0
+    })
+    .await;
+    stop_podcasts.send(true).unwrap();
+    stop_works.send(true).unwrap();
+    podcasts_task.await.unwrap();
+    works_task.await.unwrap();
+    // No wait's start is left in either row.
+    let left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM catalogue_state WHERE position ? 'waiting_since'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(left, 0);
+}
+
+/// A wait kept from before (here a week of free-disk waits) and a run that starts.
+async fn a_stored_wait_then_a_run(pool: &PgPool) -> (Arc<Fixture>, Arc<Notify>, Context, TempDir) {
+    let (ctx, dir) = context(pool, plenty());
+    store::ensure_state(pool, Catalogue::Podcastindex)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalogue_state SET position=jsonb_build_object('waiting_since',jsonb_build_object('reason','disk','at',now()-interval '7 days')) WHERE catalogue='podcastindex'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut fixture = Fixture::new(Catalogue::Podcastindex, cards(25));
+    let gate = Arc::new(Notify::new());
+    fixture.gate = Some(gate.clone());
+    fixture.fail_at_gate.store(true, Ordering::SeqCst);
+    (Arc::new(fixture), gate, ctx, dir)
+}
+
+/// A run that starts ends the wait before it: while it runs, the waiting gauge shows no wait,
+/// whatever the last step showed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_starts_shows_no_wait(pool: PgPool) {
+    use pinakes_core::telemetry::{catalogue_waiting, catalogue_waiting_seconds as waited};
+    let _tasks = TASKS.lock().await;
+    let (fixture, gate, ctx, _dir) = a_stored_wait_then_a_run(&pool).await;
+    catalogue_waiting("podcastindex", "disk", 7 * 86400);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(waited("podcastindex", "disk"), 0);
+    gate.notify_one();
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// A run that starts removes the wait kept before it: one that then fails (and is tried again)
+/// shows no wait, not the age of the wait before the run.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_that_starts_and_fails_leaves_no_stale_wait(pool: PgPool) {
+    use pinakes_core::telemetry::catalogue_waiting_seconds as waited;
+    let _tasks = TASKS.lock().await;
+    let (fixture, gate, ctx, _dir) = a_stored_wait_then_a_run(&pool).await;
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    tokio::time::timeout(DEADLINE, fixture.entered.notified())
+        .await
+        .unwrap();
+    gate.notify_one();
+    until("the failed run", || async {
+        state(&pool, Catalogue::Podcastindex).await.error_count == 1
+    })
+    .await;
+    // The task has shown the failed step.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(waited("podcastindex", "disk"), 0);
+    let left: bool = sqlx::query_scalar(
+        "SELECT coalesce(position ? 'waiting_since',false) FROM catalogue_state WHERE catalogue='podcastindex'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!left);
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// A run by hand that waits (here for free disk) watches its lock while it waits and checks it
+/// before each step: once the lock's session has ended, it stops and says the lock was lost
+/// instead of stepping on, and runs nothing more.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_by_hand_that_waits_stops_once_its_lock_is_lost(pool: PgPool) {
+    let free = Arc::new(AtomicU64::new(0));
+    let (ctx, _dir) = context(&pool, free.clone());
+    let fixture = Fixture::new(Catalogue::Wikidata, cards(5));
+    fixture.import_until_done.store(true, Ordering::SeqCst);
+    let fixture = Arc::new(fixture);
+    let once = tokio::spawn({
+        let (fixture, ctx) = (fixture.clone(), ctx.clone());
+        async move { run::run_once(fixture, &ctx, Run::Import, |_| {}).await }
+    });
+    until("the disk wait", || async {
+        store::state(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap()
+            .is_some_and(|s| s.waiting.is_some())
+    })
+    .await;
+    end_lock_session(&pool, Catalogue::Wikidata).await;
+    let err = tokio::time::timeout(DEADLINE, once)
+        .await
+        .expect("the run stops once its lock is lost")
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("was lost"), "{err}");
+    assert!(fixture.started_from.lock().unwrap().is_empty());
+}
+
+/// What a run by hand does first (`catalogue import wikidata --update --since` moves the
+/// position) runs under the catalogue's lock, and the run after it under the same lock, never let
+/// go in between: no daemon can take the catalogue between the two. A first step that fails runs
+/// nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_by_hand_does_its_first_step_under_its_own_lock(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(5)));
+    let failing = async { Err(anyhow::anyhow!("the position does not move")) };
+    let err = run::run_once_with(fixture.clone(), &ctx, Run::Import, false, failing, |_| {})
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("does not move"), "{err}");
+    assert!(fixture.started_from.lock().unwrap().is_empty());
+    assert!(lock_holder(&pool, Catalogue::Wikidata).await.is_none());
+    let first_holder = Arc::new(Mutex::new(None));
+    let first = {
+        let (pool, holder) = (pool.clone(), first_holder.clone());
+        async move {
+            // Another process (a daemon's task, a drop) can't take the lock now.
+            anyhow::ensure!(
+                SessionLock::try_take(&pool, Catalogue::Wikidata.lock_key())
+                    .await?
+                    .is_none(),
+                "the lock is free during the first step"
+            );
+            *holder.lock().unwrap() = lock_holder(&pool, Catalogue::Wikidata).await;
+            Ok(())
+        }
+    };
+    let (state, _) = run::run_once_with(fixture.clone(), &ctx, Run::Import, false, first, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(state.cards, 5);
+    let first = first_holder.lock().unwrap().expect("a lock holder");
+    assert_eq!(fixture.lock_holders.lock().unwrap()[..], [Some(first)]);
+}
+
 /// A full import that reads under half the cards the catalogue holds (a dump cut at a clean
 /// boundary, an empty answer) removes nothing: it fails (`shrunk`) with its cursor kept, and the
 /// next try fails again. It goes through when the importer says the drop is expected, when the
@@ -1603,25 +2033,26 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
     );
     // Another scope (a `limit` now): 1 of 3 goes through too, and the new scope is kept.
     let mut config = (*ctx.config).clone();
-    config.catalogues.wikidata.limit = Some(1);
+    config.catalogues.wikidata.limit = Some(3);
     let limited = Context {
         config: Arc::new(config),
         ..ctx.clone()
     };
-    let one = Fixture::new(Catalogue::Wikidata, cards(1));
-    assert_eq!(run::step(&one, &limited).await.unwrap(), Next::Again);
-    assert_eq!(count(&pool, Catalogue::Wikidata).await, 1);
+    let three = Fixture::new(Catalogue::Wikidata, cards(3));
+    assert_eq!(run::step(&three, &limited).await.unwrap(), Next::Again);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 3);
     assert_eq!(
         state(&pool, Catalogue::Wikidata).await.scope,
-        Some(json!({"limit": 1}))
+        Some(json!({"limit": 3}))
     );
-    // A wider scope (no `limit` again) is no reason: an import reading nothing fails again.
-    let none = Fixture::new(Catalogue::Wikidata, vec![]);
+    // A wider scope (no `limit` again) is no reason: an import reading one of the three fails
+    // again.
+    let none = Fixture::new(Catalogue::Wikidata, cards(1));
     assert_eq!(
         pinakes_core::catalogue::failure::shown(&run::step(&none, &ctx).await.unwrap_err()),
         "shrunk"
     );
-    assert_eq!(count(&pool, Catalogue::Wikidata).await, 1);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 3);
     // The operator lets it through, once, and only a run whose last failure was `shrunk` (the run
     // loop records it).
     let allow = || store::allow_shrink(&pool, Catalogue::Wikidata);
@@ -1655,7 +2086,7 @@ async fn a_full_import_that_reads_under_half_the_cards_removes_nothing(pool: PgP
     assert_eq!(allow().await.unwrap(), store::Allowance::Allowed);
     assert!(state(&pool, Catalogue::Wikidata).await.shrink_allowed);
     assert_eq!(run::step(&none, &ctx).await.unwrap(), Next::Again);
-    assert_eq!(count(&pool, Catalogue::Wikidata).await, 0);
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 1);
     let s = state(&pool, Catalogue::Wikidata).await;
     assert!(!s.shrink_allowed, "cleared by the import it let through");
     assert_eq!(allow().await.unwrap(), store::Allowance::NotShrunk);
@@ -1715,9 +2146,16 @@ async fn a_forced_import_and_a_lower_limit_go_through_the_floor(pool: PgPool) {
     let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(25)));
     assert_eq!(run::step(&*fixture, &ctx).await.unwrap(), Next::Again);
     fixture.items.lock().unwrap().truncate(3);
-    let (state, _) = run::run_once_with(fixture.clone(), &ctx, Run::Import, true, |_| {})
-        .await
-        .unwrap();
+    let (state, _) = run::run_once_with(
+        fixture.clone(),
+        &ctx,
+        Run::Import,
+        true,
+        async { Ok(()) },
+        |_| {},
+    )
+    .await
+    .unwrap();
     assert_eq!(
         (state.cards, count(&pool, Catalogue::Wikidata).await),
         (3, 3)
@@ -1835,4 +2273,200 @@ async fn only_changed_cards_move_the_search_revision_and_every_write_is_counted(
         .await
         .unwrap();
     assert!(revision().await > changed);
+}
+
+/// What a run can't apply is refused once through `Job::refuse`: the failure is recorded once,
+/// the run and its cursor go (the large-import turn is free: another large catalogue's import
+/// starts), and the position names the version with its source and limit. The task's next tries
+/// find it refused (`Job::refused_before`) and end at once, recording nothing, until the refusal
+/// is cleared (`store::clear_refusal`): then it is read again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refusal_is_recorded_once_frees_the_turn_and_is_not_read_again(pool: PgPool) {
+    let _tasks = TASKS.lock().await;
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Arc::new(Fixture::new(Catalogue::Wikidata, cards(5)));
+    fixture.refuse.store(true, Ordering::SeqCst);
+    fixture.always_import.store(true, Ordering::SeqCst);
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    until("three tries after the refusal", || async {
+        fixture.imports.load(Ordering::SeqCst) >= 4
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    // One more try, whole (the stop may have cut one off): it ends at once, cleared.
+    let again = run::step(&*fixture, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(s.error_count, 1, "recorded once");
+    assert_eq!(
+        s.last_error.as_deref(),
+        Some("refused (v1 can't be applied)")
+    );
+    assert_eq!((s.run.as_deref(), s.cursor.as_ref()), (None, None));
+    assert!(s.last_import_at.is_none());
+    let position = s.position.clone().unwrap();
+    assert_eq!(
+        (
+            &position["refused"],
+            &position["refused_source"],
+            &position["refused_limit"]
+        ),
+        (&json!("v1"), &json!(null), &json!(null))
+    );
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 0);
+    // The turn is free: another large catalogue's first import runs to its end.
+    let other = Fixture::new(Catalogue::Musicbrainz, vec![]);
+    *other.items.lock().unwrap() = cards(2)
+        .into_iter()
+        .map(|c| Card {
+            uri: format!("https://musicbrainz.org/artist/{}", c.source_id),
+            r#type: "MusicGroup".into(),
+            ..c
+        })
+        .collect();
+    let waits = |s: &State| s.waiting.clone().unwrap_or_default();
+    let mut ran = false;
+    for _ in 0..50 {
+        match run::step(&other, &ctx).await.unwrap() {
+            Next::Again => {
+                ran = true;
+                break;
+            }
+            Next::Wait(_) => {
+                let s = state(&pool, Catalogue::Musicbrainz).await;
+                assert!(!waits(&s).contains("wikidata"), "{}", waits(&s));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    assert!(ran, "the other large import ran");
+    let (stop, shutdown) = watch::channel(false);
+    let task = tokio::spawn(run::run(fixture.clone(), ctx.clone(), shutdown));
+    // Cleared, the version is read again: the import finishes.
+    assert_eq!(
+        store::clear_refusal(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap(),
+        Some(json!("v1"))
+    );
+    until("the import after the refusal is cleared", || async {
+        state(&pool, Catalogue::Wikidata)
+            .await
+            .last_import_at
+            .is_some()
+    })
+    .await;
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!((s.error_count, s.cards), (1, 5));
+    assert!(s.position.unwrap_or_default().get("refused").is_none());
+    assert_eq!(
+        store::clear_refusal(&pool, Catalogue::Wikidata)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// A full import that reads no record at all is refused as `empty`, a first one too: nothing is
+/// removed, the import is not marked done, the version it named is remembered (and not read
+/// again), and the version shown stays the last applied one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_full_import_that_reads_no_record_is_refused(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    // A first import.
+    let first = Fixture::new(Catalogue::Openalex, vec![]);
+    let failed = run::step(&first, &ctx).await.unwrap_err();
+    assert_eq!(
+        pinakes_core::catalogue::failure::shown(&failed),
+        // The version a digest: it might be an upstream's text.
+        format!(
+            "empty (no record read in {})",
+            run::shown_version(&json!("v1"))
+        )
+    );
+    let s = state(&pool, Catalogue::Openalex).await;
+    assert_eq!((s.last_import_at, s.run.as_deref()), (None, None));
+    assert_eq!(s.position.unwrap()["refused"], json!("v1"));
+    // Asked again, the refused version ends the run at once.
+    *first.next.lock().unwrap() = Some(Run::Import);
+    let again = run::step(&first, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    // A re-import over stored cards.
+    let held = Fixture::new(Catalogue::Wikidata, cards(5));
+    assert_eq!(run::step(&held, &ctx).await.unwrap(), Next::Again);
+    sqlx::query("UPDATE catalogue_state SET upstream_version='applied' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = state(&pool, Catalogue::Wikidata).await;
+    held.items.lock().unwrap().clear();
+    *held.next.lock().unwrap() = Some(Run::Import);
+    let failed = run::step(&held, &ctx).await.unwrap_err();
+    assert!(
+        pinakes_core::catalogue::failure::shown(&failed).starts_with("empty"),
+        "{failed}"
+    );
+    let s = state(&pool, Catalogue::Wikidata).await;
+    assert_eq!(count(&pool, Catalogue::Wikidata).await, 5);
+    assert_eq!(
+        (s.cards, s.last_import_at, s.upstream_version.as_deref()),
+        (5, before.last_import_at, Some("applied"))
+    );
+    assert_eq!(s.position.unwrap()["refused"], json!("v1"));
+}
+
+/// A full import abandoned answers its request only when it was the import asked for: one asked
+/// for (`--request`) while an unasked import ran, which is then refused, stands.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_request_made_while_a_refused_import_ran_stands(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Fixture::new(Catalogue::Openalex, cards(5));
+    fixture.refuse.store(true, Ordering::SeqCst);
+    fixture.request_during.store(true, Ordering::SeqCst);
+    let failed = run::step(&fixture, &ctx).await.unwrap_err();
+    assert!(failed.is::<run::Abandoned>(), "{failed}");
+    let s = state(&pool, Catalogue::Openalex).await;
+    assert_eq!(
+        s.import_requested.as_deref(),
+        Some("asked for while it ran")
+    );
+    // The import asked for reads the refused version again (a full import asked for does), and
+    // its end answers the request.
+    assert_eq!(run::step(&fixture, &ctx).await.unwrap(), Next::Again);
+    let s = state(&pool, Catalogue::Openalex).await;
+    assert_eq!((s.import_requested, s.cards), (None, 5));
+}
+
+/// A try that finds its version refused before leaves the state row as it found it: no new
+/// generation, the same count, and the phase `failed` the refusal left (`catalogue status`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_try_that_finds_a_refusal_changes_nothing_in_the_state(pool: PgPool) {
+    let (ctx, _dir) = context(&pool, plenty());
+    let fixture = Fixture::new(Catalogue::Openalex, cards(5));
+    fixture.refuse.store(true, Ordering::SeqCst);
+    fixture.always_import.store(true, Ordering::SeqCst);
+    let failed = run::step(&fixture, &ctx).await.unwrap_err();
+    // As the task records it.
+    run::record_failure(
+        &pool,
+        Catalogue::Openalex,
+        &pinakes_core::catalogue::failure::shown(&failed),
+    )
+    .await
+    .unwrap();
+    let refused = state(&pool, Catalogue::Openalex).await;
+    assert_eq!(refused.phase, "failed");
+    for _ in 0..2 {
+        let again = run::step(&fixture, &ctx).await.unwrap_err();
+        assert!(again.is::<run::StillRefused>(), "{again}");
+        let s = state(&pool, Catalogue::Openalex).await;
+        assert_eq!(
+            (s.generation, s.generation_cards, s.phase.as_str(), s.run),
+            (refused.generation, refused.generation_cards, "failed", None)
+        );
+    }
 }

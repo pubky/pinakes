@@ -1,19 +1,20 @@
 //! Writing a catalogue that is read again in full on each new version of its file (Podcast
-//! Index's weekly database, the daily package catalogues and Tranco list, an OpenAlex snapshot's
-//! new parts): [`Sink`].
+//! Index's weekly database, the daily package catalogues, an OpenAlex snapshot's new parts):
+//! [`Sink`].
 //!
 //! In a full import every card is written through [`Job::write`], and the cards the import did
 //! not read are removed when it finishes (`store::finish_import`). In an update the file is read
 //! again, but only the cards that are new or whose content changed are written: each part's
 //! stored content hashes are read first, so an unchanged row is never touched. The update then
 //! removes the stored cards of its scope it did not read, unless they are more than a tenth of
-//! the scope's cards: such an update is refused ([`Finished::Refused`]), since a broken or cut
-//! file must never empty a catalogue. The importer then names the file in its position
-//! ([`REFUSED`], [`refusing`]) and abandons the run ([`refusal`]: the failure `removals` is
-//! recorded once, the run cleared). Its next updates find the same file refused and finish
-//! without reading it ([`refused`]) until a newer one appears, or a full import is asked for
-//! (`pinakesd catalogue import <name> --request`, which the update hands over to).
-use super::{failure::Failure, run::Job, store::WriteReport, Card, Catalogue};
+//! the scope's cards ([`too_many`]): such an update is refused ([`Finished::Refused`]), since a
+//! broken or cut file must never empty a catalogue. The importer then refuses the file
+//! ([`Job::refuse`]: it is named in the position, the run abandoned, `refused` recorded once);
+//! its next runs find the same file refused and read nothing ([`Job::refused_before`]) until a
+//! newer one appears, a full import is asked for (`pinakesd catalogue import <name> --request`,
+//! which the update hands over to) or the refusal is cleared (`pinakesd catalogue
+//! clear-refusal <name>`).
+use super::{run::Job, store::WriteReport, Card, Catalogue};
 use anyhow::Result;
 use sqlx::PgPool;
 
@@ -86,7 +87,7 @@ impl Sink {
                     // Its ID as far as a valid one goes, as `store::upsert` logs it.
                     let mut shown: String = card.source_id.chars().take(128).collect();
                     shown.retain(|c| !c.is_control());
-                    tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card refused");
+                    tracing::debug!(catalogue = catalogue.name(), source_id = %shown, ?reject, "catalogue card rejected");
                 }
             }
         }
@@ -145,7 +146,7 @@ impl Sink {
         let catalogue = job.catalogue();
         // First count, then remove: nothing is removed by an update that is refused.
         let (stored, gone) = self.unseen(&pool, catalogue).await?;
-        if gone > REMOVAL_FLOOR && gone.saturating_mul(REMOVAL_SHARE) > stored {
+        if too_many(gone, stored) {
             tracing::warn!(
                 catalogue = catalogue.name(),
                 source = self.source.as_deref().unwrap_or(""),
@@ -224,36 +225,19 @@ fn id_hash(id: &str) -> u64 {
     let hash = blake3::hash(id.as_bytes());
     u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("eight bytes"))
 }
-/// The key of a position that names the file an update refused (its version; for the software
-/// catalogue, each registry's), kept until a run reads a newer one or a full import finishes.
-pub const REFUSED: &str = "refused_file";
-/// `position` with the file `version` named refused ([`REFUSED`]); the rest of it (the version
-/// last read) is kept, so the next update still starts from there.
-pub fn refusing(
-    position: Option<&serde_json::Value>,
-    version: serde_json::Value,
-) -> serde_json::Value {
-    let mut position = match position {
-        Some(serde_json::Value::Object(map)) => map.clone(),
-        _ => serde_json::Map::new(),
-    };
-    position.insert(REFUSED.into(), version);
-    serde_json::Value::Object(position)
+/// Where `input` reads instead of the catalogue's own file at `official` (`Importer::source`):
+/// none when it is that file.
+pub fn source_of(input: &super::fetch::Input, official: &str) -> Option<String> {
+    match input {
+        super::fetch::Input::Url(url) if url.as_str() == official => None,
+        super::fetch::Input::Url(url) => Some(url.to_string()),
+        super::fetch::Input::File(file) => Some(file.display().to_string()),
+    }
 }
-/// The file version `position` names refused ([`REFUSED`]).
-pub fn refused_in(position: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
-    position.and_then(|p| p.get(REFUSED))
-}
-/// Whether the last update refused the file `version`: an update then finishes without reading
-/// it again (and without a failure: the refusal was recorded once).
-pub fn refused(job: &Job<'_>, version: &str) -> bool {
-    refused_in(job.position()).and_then(|v| v.as_str()) == Some(version)
-}
-/// The error that ends a refused update: abandoned ([`super::run::Abandoned`]), so the runner
-/// clears the run, keeps the position the importer set ([`refusing`]) and records `removals`
-/// once.
-pub fn refusal() -> anyhow::Error {
-    super::run::Abandoned(Failure::new("removals")).into()
+/// Whether removing `gone` of `stored` cards is more than an update may: more than
+/// [`REMOVAL_FLOOR`] cards and more than one in [`REMOVAL_SHARE`]. Such an update is refused.
+pub fn too_many(gone: u64, stored: u64) -> bool {
+    gone > REMOVAL_FLOOR && gone.saturating_mul(REMOVAL_SHARE) > stored
 }
 
 #[cfg(test)]

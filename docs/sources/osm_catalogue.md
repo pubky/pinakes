@@ -1,25 +1,25 @@
 # `osm` catalogue: OpenStreetMap places
 
-The OpenStreetMap catalogue imports named places and useful points from the planet file, or from
-one region's extract, into `catalogue_card` (catalogue `osm`), and keeps them current with
-OpenStreetMap's daily change files. Search lists them, a card nobody shared opens by its link,
-and a shared openstreetmap.org link is read from its card instead of Nominatim.
+This catalogue imports OpenStreetMap's named places and useful points, from the planet file or
+from one region's extract: one [catalogue card](../operations.md#catalogues) for each kept object
+([below](#what-it-reads)), with its place details, kept current with OpenStreetMap's daily change
+files. Search lists them, a card nobody shared opens by its link, and a shared openstreetmap.org
+link is read from its card instead of Nominatim.
 
 | | |
 | --- | --- |
-| Catalogue | `osm` |
+| Catalogue | `osm`, a large catalogue (one large full import at a time) |
 | Reads | `catalogues.osm.region = "planet"`: `https://planet.openstreetmap.org/pbf/planet-latest.osm.pbf`, updates from `https://planet.openstreetmap.org/replication/day/`. A region (`europe/switzerland`): `https://download.geofabrik.de/<region>/<name>-latest.osm.pbf`, updates from `https://download.geofabrik.de/<region>/updates/` |
-| Credentials | None. Downloads need `http.contact`, sent in the User-Agent: without it the importer waits, and `pinakesd catalogue status` says why |
-| Stores | One card per kept object (below), with its place details; `osm_successor`, `osm_rename` and `osm_removed` from updates |
+| Credentials | None |
+| Rate | The file once per full import, on one connection; each hour the change files' `state.txt`, then each new change file, one at a time, at most 30 a run |
+| Refresh | Looked for hourly; a new change file is applied when the server publishes one (daily). A full import every 30 days (the planet: every 90 days) |
+| Needs | `http.contact`, sent in the User-Agent: without it the importer waits, and `pinakesd catalogue status` says why. Free disk under `catalogues.dir/osm` for the file and its node index: 215 GB for the planet, for a region three times its file, checked once the file is in ([what it reads](#what-it-reads)); 1 GB for an update |
+| Card types | The category's type (`data/type-mappings.json`, `osm`: `amenity/restaurant` is `Restaurant`), else `Place` |
 | Keys | `osm:<type>/<id>` and the card's own link's `url:` key |
-| Canonical link | `https://www.openstreetmap.org/<type>/<id>` |
-| Related link | The object's `website` (or `contact:website`, `url`; one naming a credential is left out), stored on the card and in the ODbL dump. A shared website joins the place's group (it takes the place's `osm:` key, which the place's shared link carries) when exactly one imported place names it; a chain's website, named by several branches, joins none. An OSM card still backs no link, and no resource row holds a value read from OpenStreetMap |
-| Fame | The place's kind (`place=city` above `place=village`), its population, a `wikipedia` or `wikidata` tag; its Wikidata item's card's fame when that is higher. Unnamed points: 0 |
-| Credit | `© OpenStreetMap contributors (ODbL)` on every card; the places are in the [ODbL dump](../operations.md#odbl-dump) |
-| Updates | Looked for hourly; a new change file is applied when the server publishes one (daily). A full import every 30 days (the planet: every 90 days) |
+| Credit | `© OpenStreetMap contributors (ODbL)` (`attribution`) on every card; the card's link is `https://www.openstreetmap.org/<type>/<id>`; the places are in the [ODbL dump](../operations.md#odbl-dump) |
 | Switch | `[catalogues.osm] enabled`, on by default |
 
-## What becomes a card
+## What it reads
 
 A node, way or relation is kept when it has a `name` and a category tag: `amenity`, `shop`,
 `tourism`, `leisure`, `historic`, `natural`, `office`, `craft`, `place`, `public_transport`,
@@ -36,26 +36,6 @@ recycling and post boxes (`amenity=parking`, `atm`, `toilets`, `charging_station
 `post_box`). An unnamed one is named by its kind and its brand, else its operator (`ATM · UBS`),
 else by its kind (`Parking`). Benches, bike parking and shelters stay out.
 
-## Card
-
-| Field | From |
-| --- | --- |
-| `type` | The category (`data/type-mappings.json`, `osm`): `amenity/restaurant` is `Restaurant`; else `Place` |
-| `name`, `other_names` | `name`; `name:*`, `alt_name`, `official_name`, `short_name`, `old_name`, `int_name`, `loc_name`, `nat_name`, `reg_name` (`;` separates several) |
-| `description` | The category's value and the city: `Restaurant in Vaduz` |
-| `labels` | The category's value, `cuisine`, `sport`, `religion`, `denomination`, and `vegan`/`vegetarian` from `diet:*` |
-| `point` | A node's location; a way's mean node location; a relation's `label` or `admin_centre` node, else the centre of its members' box |
-| `details` | `category`, `address` (street, house number, postcode, city, country code), `tags` (opening hours, website, phone, email, cuisine, wheelchair, brand, operator, Wikidata and Wikipedia tags and the other tags the OSM route keeps), `bbox` for a way or relation, `unnamed` for a point named by its kind |
-
-A card nobody shared opens by its link (`GET /v1/resources/by-uri`, any spelling of an
-openstreetmap.org object link) and by its link's ID (`GET /v1/resources/{id}`) as an OSM link's
-card does: the same fields, built from the catalogue card; nothing is stored. A shared OSM link
-(`POST /v1/resolve`, a reference) of an imported object is read from its card into `osm_place`,
-with no Nominatim request; an object the catalogue does not hold is still read from Nominatim.
-When an update changes or removes a card, its shared links are read again at once.
-
-## Import and updates
-
 A full import downloads the file into `catalogues.dir/osm`, then reads it twice. The first pass
 writes every node's location into a node index on disk and writes the node and way cards; the
 second reads the kept relations' member ways for their boxes and writes the relation cards. The
@@ -65,10 +45,15 @@ IDs, a sparse file); a region's 16 bytes per node, about twice its file.
 The planet's file and change files come from `planet.openstreetmap.org`, which redirects them to
 OpenStreetMap's buckets (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amazonaws.com`,
 `osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com`); a region's from
-`download.geofabrik.de`. The importer follows at most 5 redirects, only to these names, over https.
+`download.geofabrik.de`. The importer follows at most 3 redirects, only to these names, over https.
 
 - Before the download, the importer checks the free disk for the file and its index (the file's
   length is known from the server), and waits while it is short (`waiting`), as before any run.
+- The file is checked against the MD5 its server publishes beside it (`<file>.md5`, for the dated
+  file a `-latest` name redirects to): one that differs, or a checksum file that names another
+  file, fails the run (`checksum`); the file is deleted and downloaded again by the next try. When
+  no `.md5` is published (a 404) the file is used unchecked, and the log says so (a warning). The change files have no published checksum: TLS, their
+  length and the gzip stream's own CRC check them.
 - A download broken within one attempt resumes where it broke, only from the same file (its
   `ETag`, sent as `If-Range`); a new attempt (a restart) downloads it again from its start. A
   finished download is used again by a later attempt for 7 days, so a failed import reads the same
@@ -83,16 +68,20 @@ OpenStreetMap's buckets (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amaz
   finishes without reading the file again, unless it was another region's: that one starts over.
 - At its end, the import removes the cards the file no longer holds, a part at a time, and marks
   their shared links due once they are gone. A named place swept so that someone shared keeps
-  its last card in `osm_removed`, for the deleted-place rule.
+  its last card in `osm_removed`, for the deleted-place rule (and the ODbL dump's removed
+  objects). A full import of another `region` than the last one's keeps none: the places it
+  sweeps are outside the new region, not deleted in OpenStreetMap.
 - The shrink floor applies first, as to any catalogue's full import: a re-import that read under
   half the cards held (a cut-off file, a smaller region) removes nothing and fails `shrunk`, its
   run kept, until `pinakesd catalogue allow-shrink osm` lets the next try through. The file and
   the node index are removed first: the run's end needs neither, so a run waiting there holds no
   disk.
-- A file that holds no place is refused (`empty_file`): it would empty the catalogue. The next
-  attempt starts over on another file (a new download, or another `--from` file).
-- A change file must end with its `</osmChange>`: one cut off between two actions is refused
-  (`parse`), so an update never moves past changes it did not read.
+- A file that holds no place is refused (`empty`): it would empty the catalogue, and a first
+  import never finishes on nothing. The file is not downloaded again while its version (its
+  `HEAD` answer's ETag or Last-Modified; a `--from` file's size and time) is the same: each try,
+  an hour apart, asks only for it ([a refused dump or file](../operations.md#a-refused-dump-or-file)).
+  A new file, another `--from` file, a full import asked for or `catalogue clear-refusal osm` reads
+  again.
 - The file and the index are removed once the import has finished.
 - A full import after the first marks due the shared links of each card whose content it changes
   (an unchanged card would read the same). It looks for no successors (only an update sees an
@@ -104,14 +93,66 @@ OpenStreetMap's buckets (`osm-planet-eu-central-1.s3.dualstack.eu-central-1.amaz
   value as the file is read; a value with a control character is left out. The zero-width
   non-joiner and joiner stay (Persian, Indic scripts).
 
+## Cards
+
+| Field | From |
+| --- | --- |
+| `type` | The category (`data/type-mappings.json`, `osm`): `amenity/restaurant` is `Restaurant`; else `Place` |
+| `name`, `other_names` | `name`; `name:*`, `alt_name`, `official_name`, `short_name`, `old_name`, `int_name`, `loc_name`, `nat_name`, `reg_name` (`;` separates several) |
+| `description` | The category's value and the city: `Restaurant in Vaduz` |
+| `labels` | The category's value, `cuisine`, `sport`, `religion`, `denomination`, and `vegan`/`vegetarian` from `diet:*` |
+| `point` | A node's location; a way's mean node location; a relation's `label` or `admin_centre` node, else the centre of its members' box |
+| `details` | `category`, `address` (street, house number, postcode, city, country code), `tags` (opening hours, website, phone, email, cuisine, wheelchair, brand, operator, Wikidata and Wikipedia tags and the other tags the OSM route keeps), `bbox` for a way or relation, `unnamed` for a point named by its kind |
+| `fame` | The place's kind (`place=city` above `place=village`), its population, a `wikipedia` or `wikidata` tag; its Wikidata item's card's fame when that is higher. Unnamed points: 0 |
+
+A card nobody shared opens by its link (`GET /v1/resources/by-uri`, any spelling of an
+openstreetmap.org object link) and by its link's ID (`GET /v1/resources/{id}`) as an OSM link's
+card does: the same fields, built from the catalogue card; nothing is stored. A shared OSM link
+(`POST /v1/resolve`, a reference) of an imported object is read from its card into `osm_place`,
+with no Nominatim request; an object the catalogue does not hold is still read from Nominatim.
+When an update changes or removes a card, its shared links are read again at once.
+
+Every card, and every OSM link's card read from one, carries `attribution`
+`© OpenStreetMap contributors (ODbL)`. The imported places are in the
+[ODbL dump](../api.md#osm-dump).
+
+For example:
+
+- `GET /v1/resources/by-uri?uri=https://www.openstreetmap.org/node/240079149`: Schaan, an
+  imported town, by its link.
+- `GET /v1/search?q=schaan&type=City`: the same town in search.
+- `GET /v1/map/clusters?bbox=9.47,47.04,9.64,47.27&zoom=11`: Liechtenstein's places per cell.
+
+## Keys and groups
+
+| Key | From |
+| --- | --- |
+| `osm:<type>/<id>` | The object (`node`, `way` or `relation`) |
+| `url:` of its own link | `https://www.openstreetmap.org/<type>/<id>` |
+
+The object's `website` (or `contact:website`, `url`; one naming a credential is left out) is
+stored on the card and in the ODbL dump. A shared website joins the place's group (it takes the
+place's `osm:` key, which the place's shared link carries) when exactly one imported place names
+it; a chain's website, named by several branches, joins none. An OSM card still backs no link,
+and no resource row holds a value read from OpenStreetMap.
+
+## Updates
+
 The import's replication sequence and time (from the file's header) are where the updates start.
 A header's sequence is used only when it names this region's replication stream; else the updates
 start at the last change file published before the file's time.
 
-An update reads the change files after that sequence, at most 30 a run. Each file is read to
-`catalogues.dir/osm` first (at most 4 GB, with room for twice its length), and an object it holds
+An update reads the change files after that sequence, at most 30 a run. A change file must end
+with its `</osmChange>`: one cut off between two actions is refused (`parse`), so an update never
+moves past changes it did not read. Each file is read to `catalogues.dir/osm` first (at most 4 GB,
+with room for twice its length), and an object it holds
 several edits of is read at its last one (a delete wins a tie). A file whose changes would hold
-more than 1 GiB in memory is refused (`too_large`). The update:
+more than 1 GiB in memory is refused (`size`). A change file whose removals would take the
+update's past a tenth of the cards (and more than ten) is refused before anything of it is applied
+(the files before it are)
+(`refused`, [a refused dump or file](../operations.md#a-refused-dump-or-file)): the updates wait
+at it, and a full import follows once the files are 60 behind (`pinakesd catalogue import osm
+--request` asks for one sooner). The update:
 
 - writes the cards of created and modified objects the filter keeps, and removes deleted ones and
   those that no longer pass the filter. A way's geometry comes from the nodes the file holds; when
@@ -121,10 +162,12 @@ more than 1 GiB in memory is refused (`too_large`). The update:
 - records a deleted object's successor (`osm_successor`) on evidence only: the one created or
   stored object tagged with the same Wikidata item within 1 km, or the one object created in the
   same changeset with the same name within 50 m. Geofabrik's change files name no changesets, so a
-  region's updates find successors by Wikidata only. Shared links of the deleted object become
-  aliases of the successor's link (also a link first read after the successor was found, once it
-  reads as missing). When the deleted object comes back (the deletion is reverted), its successor
-  is forgotten and its links answer for themselves again;
+  region's updates find successors by Wikidata only. While the catalogue is on, shared links of
+  the deleted object become aliases of the successor's link (also a link first read after the
+  successor was found, once it reads as missing). A link an operator placed in a curated group
+  hands its place there to the successor, unless the successor is in a curated group of its own.
+  When the deleted object comes back (the deletion is reverted), its successor is forgotten and
+  its links answer for themselves again;
 - records a named deleted object's last card (`osm_removed`: its name, category and point), which
   the deleted-place rule compares once the card is gone; gone again when the object comes back;
 - records a kept object's change to an unrelated name (`osm_rename`): a name whose words don't run
@@ -157,39 +200,32 @@ applies these rules ([API](../api.md#places)):
 
 Pinakes never rewrites a link and never edits OpenStreetMap.
 
-## Run it yourself
+## Run it by hand
 
 `pinakesd catalogue import osm [--from FILE]` runs one full import now, as the daemon's task
 runs it (the large-import turn, the disk check, the cursor), from a PBF file or from the
 configured region; an import cut off is taken up again (on its own file). `pinakesd catalogue
 import osm --update` runs one update from the region's change files, after a finished import.
 Both refuse while another process runs the importer ([operations](../operations.md#importer-rules)).
+There is no `--limit` or `--force` (`catalogues.osm.region` sets the scope): the command refuses
+them.
 
-`scripts/osm-catalogue-sample` imports a real extract a few days old (Liechtenstein by default)
+## Sample run
+
+`scripts/catalogue-sample osm` imports a real extract a few days old (Liechtenstein by default)
 into a new throwaway database, runs the update (the region's real change files since), and checks
 the cards, search, the reads, the map clusters, the ODbL dump and the off switch; it prints its
-measurements as JSON. It needs `DATABASE_URL` (a server it may create a database on),
-`PINAKES__HTTP__CONTACT` (or `~/.config/pinakes/contact.env`) and a built `pinakesd`;
-`--region`, `--days`, `--max-mb` (300 by default) and `--keep` change what it reads and keeps.
+measurements as JSON. `--region`, `--pbf`, `--days`, `--port` and `--max-mb` (300 by default)
+change what it reads; the server, the binary, the contact and `--keep` are those of every sample
+run ([sample runs](../operations.md#catalogue-sample-runs)).
 Measured (debug build, a busy host): Liechtenstein, 2,456 cards in 4.5 s; Switzerland, 400,838
 cards in 596 s, about 1.4 KB per card in PostgreSQL.
-
-## Credit
-
-Every card, and every OSM link's card read from one, carries `attribution`
-`© OpenStreetMap contributors (ODbL)`. The imported places are in the
-[ODbL dump](../api.md#osm-dump).
-
-## Examples
-
-- `GET /v1/resources/by-uri?uri=https://www.openstreetmap.org/node/240079149`: Schaan, an
-  imported town, by its link.
-- `GET /v1/search?q=schaan&type=City`: the same town in search.
-- `GET /v1/map/clusters?bbox=9.47,47.04,9.64,47.27&zoom=11`: Liechtenstein's places per cell.
 
 ## Turn it off
 
 `[catalogues.osm] enabled = false`: no import runs, the cards leave search at once, OSM links are
-read from Nominatim again, the place rules and the dump's imported places go. The cards stay until
-`pinakesd catalogue drop osm`, which also forgets the successors, renames and removed objects
-updates recorded, releasing the aliases the successors made.
+read from Nominatim again, the place rules and the dump's imported places go, no website joins a
+place and no deleted place's link follows its successor. A `catalogue import osm` run by hand
+meanwhile changes none of this. At the next start, websites that joined a place leave its group.
+The cards stay until `pinakesd catalogue drop osm`, which also forgets the successors, renames and
+removed objects updates recorded, releasing the aliases the successors made.

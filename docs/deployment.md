@@ -239,7 +239,7 @@ docker buildx imagetools inspect "ghcr.io/pubky/pinakes:$VERSION"
 | Nominatim | Venue geocoding and OpenStreetMap place details (`osm.nominatim_url`) | Self-hosted or hosted ([Nominatim](#nominatim)). For hardware, see [Nominatim's installation guide](https://nominatim.org/release-docs/5.2/admin/Installation/). |
 | Nexus | The reference feed and social and reach reads (`nexus_url`) | A Nexus that serves the `/v1` routes Pinakes reads ([README](../README.md)). It is a fixed, trusted upstream; optional authorization comes from the environment. |
 | Dump directory | `osm.dump_dir`, served at `/v1/dumps/osm_place.ndjson.gz` | Persistent and writable, with room for two copies of the file ([ODbL dump](operations.md#odbl-dump)). A CDN can cache the file by its `ETag`. |
-| Catalogue directory | `catalogues.dir`: downloads and temporary files of catalogue imports, one directory per catalogue | Writable by UID 10001, with room for the largest large catalogue's full import ([catalogues](#catalogues)). It need not be backed up. |
+| Catalogue directory | `catalogues.dir`: downloads and temporary files of catalogue imports, one directory per catalogue | Writable by UID 10001, with room for the largest large import and the runs beside it ([catalogues](#catalogues)). It need not be backed up. |
 | Text index directory | `search.index_dir`: the index text searches read ([text index](operations.md#text-index)) | Local disk, writable by UID 10001, with room for two copies during `reindex` (about 0.7 KB per searchable unit on the development data, and 360-380 B per catalogue card on the real cards of the [small regional profile](#small-regional-profile)). Derived data: a missing index is rebuilt from the database at start, so a volume only saves that rebuild. |
 | Prometheus and Alertmanager | Scraping the admin `/metrics` and evaluating the supplied alerts | A private scrape path. [ops/README.md](../ops/README.md) has the rules and a Grafana dashboard. |
 | MusicBrainz mirror (optional) | Music lookups, at `[also_on.sources.musicbrainz] base_url` | Optional. The mirror's host gets the shared per-host pace, and a mirror on a private address is refused ([operations](operations.md#also-on)). See the [MusicBrainz Server documentation](https://musicbrainz.org/doc/MusicBrainz_Server). |
@@ -385,15 +385,15 @@ for all of them (estimate).
 | --- | --- | --- | --- |
 | `wikidata` | 129 GB before it knows the dump's size, then the dump's size and 4 GB; a resumed download what is left of it and 4 GB; 1 GB with a `limit` and for an update | The dump until the import ends, and the label files (kept); nothing with a `limit` (read as a stream up to the limit) | Up to about 1 GB for the read (bounded queues; decoded text waiting to be cut is held near 512 MB), plus the labels of classes and genres, kept between updates (estimate: a few hundred MB; at most 16 million labels), and during an update one API answer at a time (up to 64 MB of JSON, a few hundred MB once parsed) |
 | `musicbrainz` | 40 GB (`DISK_NEED`), less what a cut-off run left; with a `limit`, 16 KiB a card of it | Sorted runs: 0.6 of the dump files' bytes on a sample, so about 16 GB for an import and 19 GB for an update (estimate; the stored cards' hashes too) | About 1.5 GB (estimate: 512 MiB of records being sorted, the xz decoder, the lines in flight); 158-229 MB measured on samples |
-| `osm` | The planet 215 GB (120 GB to resume); a region 2 GB, then three times its file once it is downloaded; an update 1 GB | The file, the node index (the planet's about 115 GB, dense: the import stops with `disk` past about 172 GB; a region's about twice its file, 16 bytes a node) and the set-aside relations (a few GB); removed once the import has finished | The planet up to about 4 GB: 2.5 GB for the relations' member ways, plus decoded blocks waiting (at most 2 per decoding thread, at most 8 threads, each at most about 250 MB; real blocks are a few MB); a region hundreds of MB (131-225 MB measured); an update about 1 GB (estimate), and a change file that would hold more than 1 GiB is refused (`too_large`) |
-| `openalex` | 32 GiB for a full import, 4 GiB for an update (the cards' database share; nothing is downloaded to disk) | Nothing | Up to 16 files' kept cards (50,000 cards each at most: 1-2 GB at worst, a few hundred MB as a rule) and the IDs with a card (64-bit numbers, about 250-500 MB at full size) |
-| `podcastindex` | 20 GiB, less what a cut-off run's unpacked database holds | The unpacked database (5 GB today) while a run reads it | Under 1 GB (54-83 MB measured) |
-| `software` | 1 GiB | Nothing (streamed) | The crates of the dump, without READMEs, and their downloads, categories and keywords: at most 1 GiB as counted (about 150 MB today) |
-| `tranco` | 1 GiB | Nothing | Up to about 250 MB while a list loads (195-219 MB measured); 16 reads after, and the robots.txt rules kept for deferred pages (about 33 MiB at most: 2,000 origins, 16 KiB each counted with every rule's own memory) |
+| `osm` | The planet 215 GB (120 GB to resume); a region 2 GB, then three times its file once it is downloaded; an update 1 GB | The file, the node index (the planet's about 115 GB, dense: the import stops with `disk` past about 172 GB; a region's about twice its file, 16 bytes a node) and the set-aside relations (a few GB); removed once the import has finished | The planet up to about 4 GB: 2.5 GB for the relations' member ways, plus decoded blocks waiting (at most 2 per decoding thread, at most 8 threads, each at most about 250 MB; real blocks are a few MB); a region hundreds of MB (131-225 MB measured); an update about 1 GB (estimate), and a change file that would hold more than 1 GiB is refused (`size`) |
+| `openalex` | Nothing (nothing is downloaded to disk; the cards' database share is sized apart) | Nothing | Up to 16 files' kept cards (50,000 cards each at most, the IDs that don't qualify counted 32 to a card: 1-2 GB at worst, a few hundred MB as a rule) and the IDs with a card (64-bit numbers, about 250-500 MB at full size) |
+| `podcastindex` | 12 GiB (the database's cap), less what a cut-off run's unpacked database holds | The unpacked database (5 GB today) while a run reads it | Under 1 GB (54-83 MB measured) |
+| `software` | 512 MiB | F-Droid's index (at most 512 MiB) while it is hashed; the rest is streamed | The crates of the dump, without READMEs, and their downloads, categories and keywords: at most 1 GiB as counted (about 150 MB today) |
+| `tranco` | Nothing | Nothing | Up to about 250 MB while a list loads (195-219 MB measured); 16 reads after, and the robots.txt rules kept for deferred pages (about 33 MiB at most: 2,000 origins, 16 KiB each counted with every rule's own memory) |
 
 ### Notes per catalogue
 
-- **Wikidata** ([catalogue page](sources/catalogue_wikidata.md)). Catalogues are on by default: a
+- **Wikidata** ([catalogue page](sources/wikidata_catalogue.md)). Catalogues are on by default: a
   daemon whose configuration has no `[catalogues]` section and sets `http.contact` starts the
   Wikidata importer, which downloads the 104 GB dump once the disk is free. An instance that
   should import nothing sets `[catalogues] enabled = false`; one that should import other
@@ -493,7 +493,7 @@ run imported samples of OpenAlex and Podcast Index too.
 | `podcastindex` | 315 MB of the archive | 845,813 | 215 s | 58 MB | 1.84 GB | The database again: 312 s |
 | `software` | 348 MB (262 MB of the crates.io dump) | 262,236 | 86 s | 150 MB | 386 MB | The files again: 86 s |
 | `tranco` | The list (22 MB) and 45 homepages | 10 | 23 s | 133 MB | 154 MB (the list's million sites) | 5 homepages: 1.2 s |
-| All | 1.47 GB | 1,332,178 | 530 s | | 2.95 GB at the end | |
+| All | 1.47 GB | 1,332,178 | 530 s | | 2.93 GB (a 2.95 GB database after the imports) | |
 
 | Measure | Value |
 | --- | --- |
@@ -517,7 +517,7 @@ at 891 MB with the importers in their own processes; with one running in it, abo
 (estimate). The rest of the RAM holds the catalogue indexes and the text index. The disk holds the
 database with room for updates, the text index twice during `reindex`, and the importers'
 free-disk checks (1-2 GB each). OpenAlex and Podcast Index switched on and imported whole add
-36-42 GB of database, 7.5 GB of text index and their own disk checks (32 GiB and 20 GiB under
+36-42 GB of database, 7.5 GB of text index and Podcast Index's disk check (12 GiB under
 `catalogues.dir`): about 4 vCPU, 32 GB of RAM (about 20 GB of catalogue indexes and 8 GB of text
 index) and 140 GB of disk (estimate).
 
@@ -597,10 +597,10 @@ for updates, a full import's rewrites and WAL; shared links add to it
 | --- | --- | --- |
 | PostgreSQL | About 40-50 GB: OpenAlex 28-32 GB, Podcast Index 8-10.5 GB, Wikidata 2-4 GB (its first million items are the best known, between the 1.6-2.1 KB average and 3.9 KB a card), MusicBrainz 1.4-1.8 GB, Tranco 1.25 GB, OpenStreetMap 0.6 GB, software 0.5 GB | About 190-230 GB: MusicBrainz 70-90 GB, OpenStreetMap 49 GB, Wikidata 35-45 GB, OpenAlex 28-32 GB, Podcast Index 8-10.5 GB, Tranco 1.25 GB, software 0.5 GB |
 | Text index (`search.index_dir`) | About 9 GB; 18 GB during `reindex` | About 48 GB; 95 GB during `reindex` |
-| `catalogues.dir` | About 75-80 GB: OpenAlex's full import waits for 32 GiB free; beside it Podcast Index's run waits for 20 GiB, a MusicBrainz update for 16 GB (16 KiB a card of its limit), the Wikidata and OpenStreetMap updates for 1 GB each, and software and Tranco for 1 GiB each | About 285 GB: the planet's import waits for 215 GB (the 96 GB file and the 115 GB node index), Wikidata's for 129 GB (its 104 GB dump), one at a time; beside it a MusicBrainz update waits for 40 GB, Podcast Index's run for 20 GiB, an OpenAlex update for 4 GiB, a Wikidata update for 1 GB, and software and Tranco for 1 GiB each |
+| `catalogues.dir` | About 30-35 GB: a MusicBrainz update waits for 16 GB (16 KiB a card of its limit); beside it Podcast Index's run waits for 12 GiB, the Wikidata and OpenStreetMap updates for 1 GB each, and software for 512 MiB (OpenAlex and Tranco need none) | About 270 GB: the planet's import waits for 215 GB (the 96 GB file and the 115 GB node index), Wikidata's for 129 GB (its 104 GB dump), one at a time; beside it a MusicBrainz update waits for 40 GB, Podcast Index's run for 12 GiB, a Wikidata update for 1 GB, and software for 512 MiB (OpenAlex and Tranco need none) |
 | Dump directory (`osm.dump_dir`) | About 50 MB (two copies) | About 4 GB (two copies) |
 | Downloads | OpenAlex 675 GB from S3 for each full import; Switzerland's 552 MB extract every 30 days and a change file a day (kilobytes to a few MB); Wikidata 3.4 GB streamed once; MusicBrainz up to 4 GB streamed for each dump (a limit still reads most of the release-group and artist files); Podcast Index 1.9 GB a week; software 0.6 GB a day; Tranco's 22 MB list a day and its homepages (about 140 GB in the first pass) | OpenStreetMap 96 GB every 90 days and a change file a day (about 130 MB); Wikidata 104 GB once; MusicBrainz 26 GB for each dump; OpenAlex 675 GB for each full import; Podcast Index 1.9 GB a week; software 0.6 GB a day; Tranco 22 MB a day and its homepages (about 140 GB in the first pass) |
-| RAM | 48 GB: about 25 GB of catalogue indexes, 9 GB of text index, up to 6 GB for the importers that run at once, 1-2 GB for the daemon | 256 GB: about 95-115 GB of catalogue indexes, 48 GB of text index, up to 10 GB for the importers that run at once (the planet's import up to 4 GB), the daemon; the rest caches card data. 192 GB holds the indexes alone |
+| RAM | 48 GB: about 25 GB of catalogue indexes, 9 GB of text index, up to 8 GB for the importers that run at once, 1-2 GB for the daemon | 256 GB: about 95-115 GB of catalogue indexes, 48 GB of text index, up to 10 GB for the importers that run at once (the planet's import up to 4 GB), the daemon; the rest caches card data. 192 GB holds the indexes alone |
 | vCPU | 8 | 16 |
 | First import | About 3-3.5 hours: OpenAlex about 2 hours (bound by the read from S3), Wikidata 30-45 minutes, MusicBrainz 10-20 minutes, OpenStreetMap a few minutes, one at a time; Podcast Index and software beside them | 15-25 hours: OpenStreetMap up to 15 hours plus the download, Wikidata 4-5 hours, OpenAlex about 2 hours, MusicBrainz about an hour, one at a time |
 

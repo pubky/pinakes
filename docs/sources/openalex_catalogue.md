@@ -1,9 +1,9 @@
 # `openalex` catalogue: papers cited more than 50 times
 
 This catalogue imports OpenAlex's snapshot: one [catalogue card](../operations.md#catalogues) for
-each work cited more than `openalex.min_citations` times (50 by default, about 15 million
-works). A shared DOI, arXiv, PubMed or OpenAlex link of such a paper gets its card from the
-catalogue without a fetch.
+each work cited more than `catalogues.openalex.min_citations` times (50 by default, about 15
+million works). A shared DOI, arXiv, PubMed or OpenAlex link of such a paper gets its card from
+the catalogue without a fetch.
 
 | | |
 | --- | --- |
@@ -31,10 +31,12 @@ names every file; a file outside the bucket's works tree is refused (`manifest`)
   passed over without being parsed. A work that does not qualify removes its card if there is
   one, so a card written from an older copy goes when the newest copy no longer qualifies.
 - **Bounds.** A line longer than 8 MiB is skipped and counted in the log; a card takes at most
-  512 bytes of each text (title, venue, author). A file may hold at
-  most 16 GiB, the manifest 64 MiB and at most 100,000 files.
+  512 bytes of each text (title, venue, author). A file waiting for an earlier date holds at most
+  50,000 cards back, the IDs of its works that don't qualify counting 32 to a card; past that its
+  reader waits. A file may hold at most 16 GiB, the manifest 64 MiB and at most 100,000 files.
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range` with
-  `If-Range`), up to five times in a row. A file may take 12 hours.
+  `If-Range`), up to five times in a row. A file may take 12 hours. The manifest lists no checksum
+  of a works file; each is read as it arrives, and its gzip members' own CRC and length check it.
 
 ## Cards
 
@@ -68,7 +70,8 @@ holding one DOI would tie, and a shared DOI link would join neither, so one card
 cited (then the lowest ID). Each other one links its openalex.org page and drops the DOI's keys,
 remembering them in `details.shared_doi`; it takes them back when it is the best holder left (the
 holder removed, or cited less). This is decided at the end of each run, for the DOIs the run
-wrote or removed a holder of (a full import: for all its cards). A card that moves counts as
+wrote or removed a holder of (a full import, and an update taken up after it was cut off during
+or after its removals: for all its cards). A card that moves counts as
 changed, so the links already stored on its DOI are checked again and search reads it again.
 
 ## Updates
@@ -77,12 +80,15 @@ Each day the importer reads the manifest. When its date is new, it reads the wor
 dates after the last date it read, and that last date's files again when their list changed.
 Changed cards are written, unchanged ones are not touched, and the works in those files that no
 longer qualify are removed at the update's end. An update that would remove more than a tenth of
-the cards (and more than ten) is refused, `removals`: nothing is removed, and the failure is
-recorded once (`catalogue status` shows `file … refused`, and
-`pinakes_catalogue_refused{catalogue="openalex"}` is 1). The daily updates then finish without
-reading that snapshot again until a newer one appears, or until a full import is asked for
+the cards (and more than ten) is refused, `refused`: nothing is removed, and the failure is
+recorded once (`catalogue status` shows `refused: <snapshot>`, and
+`pinakes_catalogue_refused{catalogue="openalex"}` is 1). The daily updates then end at once
+without reading that snapshot again until a newer one appears, until a full import is asked for
 (`pinakesd catalogue import openalex --request` with the daemon running, or
-`catalogue import openalex` with it stopped). A line that may qualify but does not parse removes
+`catalogue import openalex` with it stopped), or until `pinakesd catalogue clear-refusal
+openalex` clears it ([a refused dump or file](../operations.md#a-refused-dump-or-file)). A full
+import whose snapshot holds no work (a manifest that lists no works file) is refused the same way
+(`empty`). A line that may qualify but does not parse removes
 nothing (its card stays); more than 100 such lines, and more than one in a thousand of a file's
 lines, stop the run (`parse`). A line without a citation count is passed over.
 
@@ -90,14 +96,15 @@ OpenAlex's snapshot lists no merged or deleted works (its `merged_ids` lists end
 are no longer in `data/`), so an update can't see that a work went. A new snapshot that comes
 180 days or more after the last full import is read by a full import instead of an update: the
 works it no longer lists lose their cards. A changed `min_citations` also makes the next update
-a full import. A full import whose manifest lists no works file fails (`manifest`) and removes
+a full import. A full import whose manifest lists no works file is refused (`empty`) and removes
 nothing. `current_as_of` is the snapshot's date; the
 allowed lag is 100 days.
 
 ## Sample run
 
-`scripts/catalogue-sample openalex` imports a few real works files (their first 100 MB each) into
-a throwaway database, checks the cards, a search, a join and an update, and drops the database
+`scripts/catalogue-sample openalex` imports the first 80 MB of three real works files (of two
+dates) into a throwaway database, checks the cards, a search and a join, updates them with the
+first 40 MB of a file of a later date, and drops the database
 ([sample runs](../operations.md#catalogue-sample-runs)).
 
 ## Turn it off

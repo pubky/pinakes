@@ -12,7 +12,7 @@ Podcasts, Podcast Index or site link of a podcast joins the card's group.
 | Credentials | None |
 | Rate | The archive's version (`HEAD`) once a day; the archive once a week, when it is new |
 | Refresh | Weekly, as Podcast Index publishes it |
-| Needs | `http.contact`; 20 GB free under `catalogues.dir/podcastindex` while a run reads the unpacked database (5 GB today; a resumed run counts what its kept database holds) |
+| Needs | `http.contact`; 12 GiB free under `catalogues.dir/podcastindex` for the unpacked database (its cap; 5 GB today; a resumed run counts what its kept database holds; a local `.db` file needs none) |
 | Card type | `PodcastSeries` |
 | Keys | `podcast:guid:…`, `podcast:apple:…`, `url:…` |
 | Credit | `from: "podcastindex"`; the card's link is the feed |
@@ -25,16 +25,25 @@ A run downloads the archive and unpacks its `podcastindex_feeds.db` into
 the `podcasts` table's feeds with `dead = 0` in ID order, and deletes the file when it is done.
 A table without the columns read, a virtual table, a generated column, or a view or trigger in
 the file is refused (`schema`). The file is opened read only, with SQLite in defensive mode,
-its schema untrusted, and no value over 64 MiB; texts are read cut (links 2,048 bytes, the
-description 4,096, the rest 512). The archive may hold 8 GiB and the database 12 GiB; each of
+its schema untrusted, and no value over 64 MiB; texts are read cut (links to 2,048
+characters, the description to 4,096, the title and author to 512, the language, GUID and
+categories to 64). The archive may hold 8 GiB and the database 12 GiB; each of
 the read's two passes over the table at most 50 million rows (`size`), and the reading at most
 six hours. Podcast Index's server does not answer ranged requests, so a broken download starts
 again; each attempt writes a part file of its own, and a run that is cut off stops its download
-within a megabyte. A full import that finds no live feed fails (`parse`) and removes nothing.
+within a megabyte. A full import that finds no live feed is refused (`empty`) and removes nothing.
+Podcast Index publishes no checksum of the archive: its integrity rests on TLS, the archive's
+length and the gzip stream's own CRC.
 
 Private feeds are never imported: a feed on a host that serves paid subscribers' feeds
 (`patreon.com`, `supercast.com`, `supercast.tech`, `supportingcast.fm`, `glow.fm`,
-`memberful.com`, `steadyhq.com`, and their subdomains), or whose URL's query carries a credential
+`memberful.com`, `steadyhq.com`, and their subdomains), whose path has a `private` segment (as in
+a subscriber's `/private/<token>.rss`), whose path has an opaque token (a run of letters and digits
+of at least 32 characters with both, or of at least 20 mixing lower case, upper case and digits, or
+a UUID: a run of hex digits and dashes holding at least 32 hex digits) and whose host or path names
+a subscription (`private`, `premium`, `member(s)`, `subscriber(s)`, `subscription(s)`,
+`supporter(s)`, `patron(s)`, `vip`, `exclusive`, `paid`; a long ID or a UUID alone is public, as
+Castbox, Fountain and Omny name shows by one), or whose URL's query carries a credential
 (`token`, `key`, `auth`, `access`, `secret`, `sig`, `signature`, `password`, a name ending in one
 such as `access_token` or `api_key`, or a `uid` with a `hash`), makes no card; so does a capability
 link. A subscriber's token in a public index still opens their subscription. Every other live feed
@@ -74,12 +83,15 @@ its next refresh, or the next time it is shared, not when the card is written.
 Each day the importer asks for the archive's version (its ETag). When it is new, the whole
 database is read again: changed cards are written, unchanged ones are not touched, and feeds no
 longer listed are removed. An update that would remove more than a tenth of the cards (and more
-than ten) is refused, `removals`: nothing is removed, the unpacked database is deleted, and the
-failure is recorded once (`catalogue status` shows `file … refused`, and
-`pinakes_catalogue_refused{catalogue="podcastindex"}` is 1). The daily updates then finish
-without reading that archive again until a newer one appears, or until a full import is asked
-for (`pinakesd catalogue import podcastindex --request` with the daemon running, or
-`catalogue import podcastindex` with it stopped). The allowed lag is 9 days.
+than ten) is refused, `refused`: nothing is removed, the unpacked database is deleted, and the
+failure is recorded once (`catalogue status` shows `refused: <version>`, and
+`pinakes_catalogue_refused{catalogue="podcastindex"}` is 1). So is an archive that can't be read
+as it is (`archive`, `size`: broken or over its cap; `database`, `schema`: no Podcast Index
+database in it), and a full import that reads no live feed (`empty`). The daily runs then end at
+once without downloading that archive again until a newer one appears, until a full import is
+asked for (`pinakesd catalogue import podcastindex --request` with the daemon running, or
+`catalogue import podcastindex` with it stopped), or until `pinakesd catalogue clear-refusal
+podcastindex` clears it ([a refused dump or file](../operations.md#a-refused-dump-or-file)). The allowed lag is 9 days.
 
 ## Sample run
 

@@ -11,10 +11,11 @@
 //! fetched for its episodes, and every link of the podcast joins the card's group (`join`).
 //!
 //! The database is new each week: an update checks the archive's version, and when it is new,
-//! reads it whole and writes only the changed cards ([`diff::Sink`]). An update refused for
-//! what it would remove deletes the unpacked database and waits for the next week's
-//! ([`diff::refusal`]); a full import that reads no live feed fails (`parse`) and removes
-//! nothing.
+//! reads it whole and writes only the changed cards ([`diff::Sink`]). A database that can't be
+//! read as it is (a broken archive, no Podcast Index table), an update that would remove more
+//! than a tenth of the cards, and a full import that reads no live feed (the runner's `empty`)
+//! are refused ([`Job::refuse`]): the unpacked database is deleted, nothing is removed for it,
+//! and that version is not downloaded again; the importer waits for the next week's.
 use super::{
     bulk,
     diff::{self, Sink},
@@ -45,9 +46,10 @@ const FILE: &str = "podcastindex_feeds.db";
 /// The most bytes read of the archive (1.85 GB today) and of the database in it (5.1 GB).
 const ARCHIVE_MAX: u64 = 8 << 30;
 const DATABASE_MAX: u64 = 12 << 30;
-/// What a run needs free in the catalogue's directory: the unpacked database, room for it to
-/// grow, and the cards' 5 GB of the database (on one disk with it).
-const DISK_NEED: u64 = 20 << 30;
+/// What a run needs free in the catalogue's directory: room for the unpacked database at its cap
+/// ([`DATABASE_MAX`]; 5.1 GB today). The cards' share of the database is sized apart (it may be
+/// on another disk).
+const DISK_NEED: u64 = DATABASE_MAX;
 /// The most feeds read (4.8M today).
 pub const FEEDS_CAP: u64 = 50_000_000;
 /// The most distinct site links counted while reading (4.7M feeds name one today); past it,
@@ -73,7 +75,7 @@ impl Drop for StopOnDrop {
 
 /// The importer.
 pub struct PodcastIndex {
-    client: reqwest::Client,
+    client: fetch::Client,
     input: Input,
     /// The catalogue's directory (`catalogues.dir/podcastindex`): what its unpacked database
     /// already holds counts toward a run's disk need.
@@ -163,10 +165,19 @@ impl PodcastIndex {
             .and_then(|c| c.get("after"))
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        // A database refused before is not downloaded again (a full import asked for reads it).
+        job.reading(json!(version));
+        if job.refused_before(&json!(version)) {
+            let shown = super::run::shown_version(&json!(version));
+            return Err(job.still_refused(format!("database {shown}")));
+        }
         // The download's and the read's threads stop when this run is over, however it ends.
         let stop = Stop::default();
         let _stop = StopOnDrop(stop.clone());
-        let db = self.database(job.dir(), &version, &stop).await?;
+        let db = match self.database(job.dir(), &version, &stop).await {
+            Ok(db) => db,
+            Err(error) => return Err(self.broken(job, &version, error).await),
+        };
         let mut sink = Sink::new(job, None);
         // An update reads the whole file again (its removals are the cards it did not read);
         // a full import resumes after the last feed it wrote.
@@ -180,10 +191,11 @@ impl PodcastIndex {
         let reading = stop.clone();
         let mut parts =
             fetch::batches(move |sink| read(&path, after, &at_text, &reading, FEEDS_CAP, sink));
-        let mut cards = 0u64;
         while let Some(part) = parts.recv().await {
-            let part = part?;
-            cards += part.len() as u64;
+            let part = match part {
+                Ok(part) => part,
+                Err(error) => return Err(self.broken(job, &version, error).await),
+            };
             let last = part
                 .last()
                 .and_then(|c| c.source_id.parse::<i64>().ok())
@@ -191,19 +203,14 @@ impl PodcastIndex {
             sink.write(job, part, json!({"version": version, "after": last}))
                 .await?;
         }
-        // A full import that read no live feed (an empty or emptied database) would remove every
-        // card when it finishes: it fails instead.
-        if job.run() == Run::Import && after == 0 && cards == 0 {
-            self.cleanup(job.dir()).await;
-            anyhow::bail!(Failure::new("parse").at(self.input.at()));
-        }
         let finished = sink
             .finish(job, json!({"version": version, "phase": "removing"}))
             .await?;
         self.cleanup(job.dir()).await;
         if finished == diff::Finished::Refused {
-            job.set_position(diff::refusing(job.position(), json!(version)));
-            return Err(diff::refusal());
+            let shown = super::run::shown_version(&json!(version));
+            let note = format!("database {shown} would remove more than a tenth of the cards");
+            return Err(job.refuse(json!(version), "refused", note));
         }
         job.upstream_version(
             &at.map_or_else(|| version.clone(), |a| a.format("%Y-%m-%d").to_string()),
@@ -214,6 +221,30 @@ impl PodcastIndex {
             job.set_current_as_of(at);
         }
         Ok(())
+    }
+    /// The end of a run whose database can't be read as it is (a broken archive, one over a cap,
+    /// a database that is no Podcast Index database: `archive`, `size`, `database`, `schema`):
+    /// its file is removed and the version refused ([`Job::refuse`]), so it is not downloaded
+    /// again. Any other failure (a download that broke off, the disk) is the run's own, tried
+    /// again.
+    async fn broken(
+        &self,
+        job: &mut Job<'_>,
+        version: &str,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        let class = error
+            .downcast_ref::<Failure>()
+            .or_else(|| error.chain().find_map(|c| c.downcast_ref::<Failure>()))
+            .map(|f| f.class);
+        match class {
+            Some(class @ ("archive" | "size" | "database" | "schema")) => {
+                self.cleanup(job.dir()).await;
+                let shown = super::run::shown_version(&json!(version));
+                job.refuse(json!(version), class, format!("database {shown}"))
+            }
+            _ => error,
+        }
     }
     /// The unpacked database and its marker, once a run has read it.
     async fn cleanup(&self, dir: &Path) {
@@ -230,11 +261,14 @@ impl Importer for PodcastIndex {
     fn catalogue(&self) -> Catalogue {
         Catalogue::Podcastindex
     }
+    fn source(&self) -> Option<String> {
+        diff::source_of(&self.input, DATABASE)
+    }
     /// [`DISK_NEED`], less what an unpacked database a cut-off run kept already holds; for a local
-    /// database (`--from FILE.db`, a sample), 1 GB for the cards.
+    /// database (`--from FILE.db`, a sample), none: nothing is unpacked.
     fn disk_need(&self, _run: Run, _state: &State) -> u64 {
         if matches!(&self.input, Input::File(f) if f.extension().is_some_and(|e| e == "db")) {
-            return 1 << 30;
+            return 0;
         }
         let kept = self
             .dir
@@ -248,10 +282,11 @@ impl Importer for PodcastIndex {
         self.run(job, version, at).await
     }
     /// An update; a full import instead when one was asked for (`--request`). The version read
-    /// last, or one refused, is not read again: the update finishes without a change.
+    /// last is not read again: the update finishes without a change; one refused ends it at once
+    /// ([`Job::still_refused`]).
     async fn update(&self, job: &mut Job<'_>) -> Result<UpdateEnd> {
         if job.state().import_requested.is_some() {
-            return Ok(UpdateEnd::NeedsImport(super::musicbrainz::REQUESTED));
+            return Ok(UpdateEnd::NeedsImport(super::run::REQUESTED));
         }
         let (version, at) = self.input.version(&self.client).await?;
         if job
@@ -260,10 +295,6 @@ impl Importer for PodcastIndex {
             .and_then(Value::as_str)
             == Some(version.as_str())
         {
-            return Ok(UpdateEnd::Done);
-        }
-        if diff::refused(job, &version) {
-            tracing::info!(catalogue = "podcastindex", "the database's update was refused before: it waits for the next one, or a full import (--request)");
             return Ok(UpdateEnd::Done);
         }
         self.run(job, version, at).await?;
@@ -334,8 +365,8 @@ fn unpack<R: Read>(stream: R, to: &Path, at: &str, stop: &Stop) -> Result<()> {
 
 /// The columns a card reads.
 const COLUMNS: &str = "id,url,title,link,itunesId,originalUrl,itunesAuthor,language,episodeCount,popularityScore,podcastGuid,description,category1,category2,category3,category4,category5,category6,category7,category8,category9,category10,newestItemPubdate,explicit";
-/// What is read of each, texts cut: links to 2,048 bytes, the description to 4,096, the rest to
-/// 512.
+/// What is read of each, texts cut (SQLite counts characters): links to 2,048, the description to
+/// 4,096, the title and author to 512, the language, GUID and categories to 64.
 const SELECT: &str = "id,substr(url,1,2048),substr(title,1,512),substr(link,1,2048),itunesId,substr(originalUrl,1,2048),substr(itunesAuthor,1,512),substr(language,1,64),episodeCount,popularityScore,substr(podcastGuid,1,64),substr(description,1,4096),substr(category1,1,64),substr(category2,1,64),substr(category3,1,64),substr(category4,1,64),substr(category5,1,64),substr(category6,1,64),substr(category7,1,64),substr(category8,1,64),substr(category9,1,64),substr(category10,1,64),newestItemPubdate,explicit";
 
 /// A hostile database file can do little: SQLite in defensive mode, no trust in its schema, and
@@ -562,10 +593,78 @@ pub const PRIVATE_FEED_HOSTS: &[&str] = &[
     "memberful.com",
     "steadyhq.com",
 ];
-/// Whether a feed URL is a private feed: on a host of [`PRIVATE_FEED_HOSTS`], or with a query
-/// key that carries a credential (`token`, `key`, `auth`, `access`, `secret`, `sig`,
-/// `signature`, `password`, and names ending in one, such as `access_token` or `api_key`; or a
-/// `uid` with a `hash`). A subscriber's token in a public index still opens their subscription.
+/// Whether a feed path segment marks a private feed: `private` (in any case, with or without a
+/// file extension, as in a subscriber's `/private/<token>.rss`).
+fn private_segment(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or_default();
+    stem.eq_ignore_ascii_case("private")
+}
+/// Words of a feed URL's host or path that say the feed is someone's subscription: beside an
+/// opaque token ([`token_segment`]) they make the feed private.
+pub const SUBSCRIPTION_WORDS: &[&str] = &[
+    "private",
+    "premium",
+    "member",
+    "members",
+    "subscriber",
+    "subscribers",
+    "subscription",
+    "subscriptions",
+    "supporter",
+    "supporters",
+    "patron",
+    "patrons",
+    "vip",
+    "exclusive",
+    "paid",
+];
+fn subscription_word(word: &str) -> bool {
+    SUBSCRIPTION_WORDS
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+}
+/// The words of a URL's host and path: its runs of ASCII letters and digits.
+fn url_words(url: &url::Url) -> Vec<String> {
+    let host = url.host_str().unwrap_or_default();
+    host.split(|c: char| !c.is_ascii_alphanumeric())
+        .chain(url.path().split(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+/// Whether a path segment holds an opaque token: a run of letters and digits (no `-`, `_` or
+/// `.` between them) of at least 32 characters with both a letter and a digit, or of at least 20
+/// with a lower-case letter, an upper-case letter and a digit; or a run of hex digits and dashes
+/// (a UUID) with at least 32 hex digits, a letter and a digit among them. Public hosts name
+/// shows by such IDs too (Castbox, Fountain, Omny's UUIDs): a token makes a feed private only
+/// beside a [`SUBSCRIPTION_WORDS`] word.
+fn token_segment(segment: &str) -> bool {
+    let dashed_hex = segment
+        .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+        .any(|run| {
+            run.bytes().filter(u8::is_ascii_hexdigit).count() >= 32
+                && run.bytes().any(|b| b.is_ascii_digit())
+                && run.bytes().any(|b| b.is_ascii_alphabetic())
+        });
+    dashed_hex
+        || segment
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|run| {
+                let (lower, upper, digit) = (
+                    run.bytes().any(|b| b.is_ascii_lowercase()),
+                    run.bytes().any(|b| b.is_ascii_uppercase()),
+                    run.bytes().any(|b| b.is_ascii_digit()),
+                );
+                (run.len() >= 32 && (lower || upper) && digit)
+                    || (run.len() >= 20 && lower && upper && digit)
+            })
+}
+/// Whether a feed URL is a private feed: on a host of [`PRIVATE_FEED_HOSTS`], with a path
+/// segment `private` ([`private_segment`]) or an opaque token ([`token_segment`]) beside a word
+/// of a subscription in its host or path ([`SUBSCRIPTION_WORDS`]), or with a query key that
+/// carries a credential (`token`, `key`, `auth`, `access`, `secret`, `sig`, `signature`, `password`, and
+/// names ending in one, such as `access_token` or `api_key`; or a `uid` with a `hash`). A
+/// subscriber's token in a public index still opens their subscription.
 pub fn private_feed(link: &str) -> bool {
     let Ok(url) = url::Url::parse(link.trim()) else {
         return false;
@@ -578,6 +677,13 @@ pub fn private_feed(link: &str) -> bool {
     if PRIVATE_FEED_HOSTS
         .iter()
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+    {
+        return true;
+    }
+    let segments: Vec<&str> = url.path_segments().into_iter().flatten().collect();
+    if segments.iter().any(|s| private_segment(s))
+        || (segments.iter().any(|s| token_segment(s))
+            && url_words(&url).iter().any(|w| subscription_word(w)))
     {
         return true;
     }
@@ -843,6 +949,26 @@ mod tests {
     }
 
     #[test]
+    fn a_feed_whose_link_the_table_refuses_is_a_refused_card() {
+        // Found by `any_row_gives_a_valid_card_or_none`: links that read as a profile (`…/@a`),
+        // which no card may hold. The card is counted `rejected` and a stored copy stays
+        // (`an_update_counts_its_refused_and_unchanged_cards`), never removed for it.
+        let at = |url: &str| Feed {
+            url: url.into(),
+            ..feed()
+        };
+        for link in ["https://a.aa/a/a@a", "https://a.aa/a/$@a"] {
+            let refused = card(&at(link), |_| false).expect("a card");
+            assert_eq!(
+                refused.checked(Catalogue::Podcastindex).err(),
+                Some(crate::catalogue::Reject::Uri),
+                "{link}"
+            );
+        }
+        let plain = card(&at("https://a.aa/a/a"), |_| false).expect("a card");
+        assert!(plain.checked(Catalogue::Podcastindex).is_ok());
+    }
+    #[test]
     fn private_feeds_are_never_imported() {
         let feed = |url: &str| Feed {
             id: 7,
@@ -865,6 +991,24 @@ mod tests {
             "https://example.org/feed.xml?password=x",
             "https://example.org/feed.xml?authkey=x",
             "https://example.org/feed.xml?Authorization=x",
+            // A subscriber's feed whose token is in its path, on a host that also serves public
+            // feeds.
+            "https://api.substack.com/feed/podcast/1234/s/5678/private/8f1c2d3e-4b5a-6789-abcd-ef0123456789.rss",
+            "https://example.org/feed/private/abc.rss",
+            "https://example.org/PRIVATE/feed.xml",
+            "https://example.org/feeds/private.rss",
+            // A long opaque token beside a word that says the feed is someone's subscription.
+            "https://feeds.example.org/subscriber/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c.rss",
+            "https://example.org/premium/rss/aB3dE5fG7hJ9kL1mN3pQ",
+            "https://members.example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
+            "https://example.org/supporters-feed/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c",
+            "https://vip.example.fm/rss/aB3dE5fG7hJ9kL1mN3pQ.xml",
+            // A UUID (or other long hex with dashes) beside a subscription word.
+            "https://example.org/subscriber/8f1c2d3e-4b5a-6789-abcd-ef0123456789.rss",
+            "https://example.org/subscription/8F1C2D3E-4B5A-6789-ABCD-EF0123456789",
+            "https://example.org/subscriptions/feed/8f1c2d3e4b5a-6789abcd-ef0123456789-0a1b2c3d",
+            "https://members.example.org/feed/8f1c2d3e-4b5a-6789-abcd-ef0123456789/podcast.xml",
+            "https://subscriptions.example.org/feed/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c",
         ] {
             assert!(private_feed(private), "{private}");
             assert!(card(&feed(private), |_| false).is_none(), "{private}");
@@ -875,6 +1019,26 @@ mod tests {
             "https://example.org/feed.xml?uid=12",
             "https://example.org/?feed=podcast&author=3",
             "https://anchor.fm/s/abc/podcast/rss",
+            "https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/a91018a4-ea4f-4130-bf55-ae270180c327/44710ecc-10bb-48d1-93c7-ae270180c33e/podcast.rss",
+            "https://feeds.megaphone.fm/ADL9840290619",
+            "https://feeds.simplecast.com/54nAGcIl",
+            "https://feeds.acast.com/public/shows/5e7b7a1f2f4e8b0012345678",
+            "https://feeds.soundcloud.com/users/soundcloud:users:123456789/sounds.rss",
+            "https://feeds.example.org/the-very-long-history-of-rome-podcast-2024-edition.xml",
+            "https://example.org/privateer/feed.xml",
+            "https://example.org/shows/private-eye.rss",
+            // Long IDs public hosts give their shows, with no word of a subscription beside them.
+            "https://rss.castbox.fm/everest/3f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c.xml",
+            "https://feeds.fountain.fm/aB3dE5fG7hJ9kL1mN3pQ",
+            "https://feeds.feedburner.com/TheHistoryOfRome2024",
+            "https://anchor.fm/s/3f9a8b7c/podcast/rss",
+            "https://feeds.buzzsprout.com/1234567.rss",
+            "https://example.org/rss/aB3dE5fG7hJ9kL1mN3pQ",
+            "https://example.org/feed/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2ln",
+            // A UUID alone names a show on public hosts.
+            "https://feeds.redcircle.com/8f1c2d3e-4b5a-6789-abcd-ef0123456789",
+            "https://example.org/feeds/8f1c2d3e-4b5a-6789-abcd-ef0123456789.rss",
+            "https://example.org/subscribe-to-the-show/feed.xml",
         ] {
             assert!(!private_feed(public), "{public}");
             assert!(card(&feed(public), |_| false).is_some(), "{public}");
@@ -945,19 +1109,80 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
-        /// Property: any row gives no card or a card the table takes, whose link is the feed's.
+        /// Property: any row gives no card, or a card the table takes, whose link is the feed's; or
+        /// one it refuses for that link alone (a link that reads as a post or a profile: counted
+        /// `rejected`, a stored copy kept), every other field of it valid.
         #[test]
         fn any_row_gives_a_valid_card_or_none(url in "(https?://[a-z]{1,8}\\.[a-z]{2,3}/[ -~]{0,30})|[ -~]{0,20}",
             title in "\\PC{0,80}", guid in "[0-9a-fA-F-]{0,40}", link in "[ -~]{0,40}", cats in proptest::collection::vec("\\PC{0,25}", 0..10),
             popularity in -5i64..40, id in -2i64..1_000_000_000) {
             let feed = Feed { id, url: url.clone(), title, guid, link, categories: cats, popularity, ..Feed::default() };
             if let Some(card) = card(&feed, |_| false) {
-                let checked = card.checked(Catalogue::Podcastindex);
+                let checked = match card.checked(Catalogue::Podcastindex) {
+                    Err(crate::catalogue::Reject::Uri) => {
+                        let mut plain = card.clone();
+                        plain.uri = "https://a.aa/feed".into();
+                        plain.checked(Catalogue::Podcastindex)
+                    }
+                    checked => checked,
+                };
                 prop_assert!(checked.is_ok(), "{:?}: {:?}", card, checked.as_ref().err());
                 let row = checked.unwrap();
                 prop_assert!((0.0..=1.0).contains(&row.fame));
                 prop_assert!(row.labels.iter().all(|l| super::super::label(l).as_deref() == Some(l.as_str())));
                 prop_assert!(row.keys.iter().all(|k| super::super::valid_key(k)));
+            }
+        }
+        /// Property: a feed URL of public shapes (slugs, numbers, UUIDs, short IDs, the long IDs
+        /// public hosts use: 32 hex, 20 base62, a CamelCase name with a year) on a host that is not
+        /// listed is public, whatever opaque token it holds, unless a word of a subscription is in
+        /// its host or path; the same URL with a `private` segment anywhere is private, and so is
+        /// one with an opaque token and a subscription word anywhere; neither makes a card.
+        #[test]
+        fn a_private_segment_or_a_token_with_a_subscription_word_makes_any_feed_private(
+            host in "[a-z]{3,10}\\.example\\.(org|com|fm)",
+            segments in proptest::collection::vec(prop_oneof![
+                "[a-z]{1,12}(-[a-z0-9]{1,12}){0,8}",
+                "[0-9]{1,19}",
+                "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                "[A-Za-z0-9]{1,12}",
+                "[0-9a-f]{32}",
+                "[A-Za-z0-9]{20}",
+                "[A-Z][a-z]{3,8}[A-Z][a-z]{3,8}[0-9]{4}",
+            ], 0..6),
+            ext in "(\\.rss|\\.xml)?",
+            word in prop::sample::select(SUBSCRIPTION_WORDS.to_vec()),
+            token in prop_oneof![
+                "[a-z][A-Z][0-9][A-Za-z0-9]{17,60}(\\.rss)?",
+                "[0-9][a-f][0-9a-f]{30,62}(\\.rss)?",
+                "[0-9][a-f][0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\\.rss)?",
+                "[0-9][A-F][0-9A-F]{6}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
+                "[0-9][a-f][0-9a-f]{10}(-[0-9a-f]{12}){2}(-[0-9a-f]{4,12}){0,4}",
+            ],
+            at in any::<proptest::sample::Index>(),
+            word_at in any::<proptest::sample::Index>(),
+        ) {
+            let url = |segments: &[String]| format!("https://{host}/{}{ext}", segments.join("/"));
+            let worded = |u: &str| url_words(&url::Url::parse(u).unwrap()).iter().any(|w| subscription_word(w));
+            let public = url(&segments);
+            prop_assume!(!worded(&public));
+            prop_assert!(!private_feed(&public), "{}", public);
+            // A token alone stays public.
+            let mut with = segments.clone();
+            with.insert(at.index(segments.len() + 1), token.clone());
+            let alone = url(&with);
+            prop_assert!(!private_feed(&alone), "{}", alone);
+            // With a subscription word as a segment of its own anywhere, it is private.
+            with.insert(word_at.index(with.len() + 1), word.to_owned());
+            let private = url(&with);
+            prop_assert!(private_feed(&private), "{}", private);
+            // So is a `private` segment, with or without a token.
+            let mut marked = segments.clone();
+            marked.insert(at.index(segments.len() + 1), "private".into());
+            prop_assert!(private_feed(&url(&marked)), "{}", url(&marked));
+            for private in [private, url(&marked)] {
+                let feed = Feed { id: 7, url: private, title: "A show".into(), ..Feed::default() };
+                prop_assert!(card(&feed, |_| false).is_none());
             }
         }
         /// Fuzz: any bytes as an archive unpack to nothing or fail, never panic.

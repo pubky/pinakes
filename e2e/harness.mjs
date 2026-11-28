@@ -282,6 +282,42 @@ export async function findsEvery(label, query, tags, docs, reread, timeout, sign
     return missing.length === 0 && result;
   }, timeout, signal);
 }
+/** The links the cards answer for, as a client combines Pinakes with Nexus: each card's own `uri`
+ * and its `aliases`, and `extra` (an occurrence's feed). An alias can land after its card was
+ * read (an OSM spelling's alias is joined in the background): while a tagged link in `uris` is
+ * not among them, every card's `aliases` are read again (`readById(id, signal)`), for at most
+ * `timeout` ms in all. Each read is given a signal that ends at that bound, and is not waited for
+ * past it; a read that fails or is cut off counts as no answer. Only `signal` (the run
+ * interrupted) throws. The links; the caller asserts the cover. */
+export async function coveringLinks(docs, uris, extra, readById, timeout = 10000, signal) {
+  const links = () => [...new Set([...docs.values()].flatMap(d => [d.uri, ...(d.aliases ?? [])]).concat(extra))];
+  const end = Date.now() + timeout;
+  const left = () => end - Date.now();
+  let asked = links();
+  while (!uris.every(uri => asked.includes(uri)) && left() > 0) {
+    await sleep(Math.min(250, left()), undefined, { signal });
+    for (const [kind, doc] of docs) {
+      if (left() <= 0) break;
+      // The bound is a plain timer, which holds the process open until it fires (a timer of
+      // `AbortSignal.timeout` does not: a read that never answers would leave the wait pending),
+      // cleared as soon as the read settles.
+      const bound = new AbortController();
+      const timer = setTimeout(() => bound.abort(new Error('the wait for aliases reached its bound')), left());
+      const read = signal ? AbortSignal.any([signal, bound.signal]) : bound.signal;
+      const cutOff = new Promise(resolve => read.addEventListener('abort', () => resolve(null), { once: true }));
+      let fresh;
+      try {
+        fresh = await Promise.race([Promise.resolve().then(() => readById(doc.id, read)), cutOff]).catch(() => null);
+      } finally {
+        clearTimeout(timer);
+      }
+      signal?.throwIfAborted();
+      if (fresh?.id === doc.id && Array.isArray(fresh.aliases)) docs.set(kind, { ...doc, aliases: fresh.aliases });
+    }
+    asked = links();
+  }
+  return asked;
+}
 export async function runFlow({ storage, author, samples, pinakes, nexus, positiveVenue = false, timeout = 120000, journal, signal }) {
   const report = { at: new Date().toISOString(), run: randomUUID(), author, samples: [], assertions: [], cleanup: [] };
   const label = `e2e-${report.run.replaceAll("-", "").slice(0, 16)}`;
@@ -449,7 +485,11 @@ export async function runFlow({ storage, author, samples, pinakes, nexus, positi
       // tagged). Those links cover every tagged one, and Nexus hydrates each.
       const occurrence = occurrences.items[0];
       assert.equal(occurrence.occurrence.feed_uri, docs.get('ics').uri, 'an occurrence names its feed\'s URI');
-      const asked = [...new Set([...docs.values()].flatMap(d => [d.uri, ...d.aliases]).concat(occurrence.occurrence.feed_uri))];
+      const readById = async (id, bound) => {
+        const r = await fetch(`${pinakes}/v1/resources/${id}`, { signal: bound });
+        return r.ok ? r.json() : null;
+      };
+      const asked = await coveringLinks(docs, uris, [occurrence.occurrence.feed_uri], readById, 10000, signal);
       for (const uri of uris) assert(asked.includes(uri), `A card's links must cover the tagged link ${uri}`);
       const hydrated = [];
       for (let i = 0; i < asked.length; i += 100) {

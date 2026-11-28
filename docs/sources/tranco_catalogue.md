@@ -24,6 +24,7 @@ without a fetch.
   site goes into `catalogue_site` with its rank and the day of the last list that named it (both
   moved at most weekly, so a daily list rewrites few rows). A rank past 2,000,000 is passed over,
   and a list's day is never later than the time it is read. A new site is due at once.
+  Tranco publishes no checksum of a list: its integrity rests on TLS and the lines' own checks.
 - **Homepages.** Sites are read best ranked first, 16 at a time (a new read starts as one ends),
   through the same egress as every fetch: pinned DNS, no private address, each host's pace, the
   body caps. First `https://<site>/robots.txt` (RFC 9309): when its rules for `pinakes`, else for
@@ -36,7 +37,9 @@ without a fetch.
   the page without asking the file again. Then the homepage: a
   2xx HTML page that is no bot wall (the web route's own wall check) and that ends on the same
   site makes the card. Redirects are followed by hand, at most five, each on the same site
-  (registrable domain), and each new host's robots.txt is asked before its page is read. A list entry that is an address, not a name, is passed over. A read waits at most two seconds for its host's or address's turn at the
+  (registrable domain; for a listed site that is itself a public suffix, such as `github.io` or
+  `blogspot.com`, that host only, since its subdomains are other people's sites), and each new
+  host's robots.txt is asked before its page is read. A list entry that is an address, not a name, is passed over. A read waits at most two seconds for its host's or address's turn at the
   egress, so it gives way to the daemon's other fetches; one not given its turn is tried again
   an hour later (or when the egress's pause for that site ends, if later), without counting as a
   failure. A 429, a 408 or a 5xx is tried again the next day or after its `Retry-After`,
@@ -44,7 +47,7 @@ without a fetch.
   failure.
 - **When.** Reads run after the bulk imports: they wait while a large catalogue's full import
   (Wikidata, MusicBrainz, OpenStreetMap, OpenAlex) runs, and while a large catalogue that is on
-  and has an importer in this build (all four) has not finished its first full
+  (its importer started with `http.contact`) has not finished its first full
   import. Meanwhile the day's list ID is asked at most once a day, the run waits ten minutes,
   `catalogue status` says which catalogue the reads wait for, and
   `pinakes_catalogue_homepage_reads_waiting` is 1. A run reads for at most an hour; while
@@ -61,13 +64,16 @@ without a fetch.
 | `other` (a redirect off the site, more than five redirects, or a page without a name) | Removed | 90 days |
 | `deferred` (the egress gave the read no turn within two seconds, or the site's pause runs: nothing was read) | Kept, outcome unchanged | An hour later, or when the egress's wait ends |
 
-`pinakes_catalogue_homepage_reads_total{result}` counts the reads by outcome;
+`pinakes_catalogue_homepage_reads_total{outcome}` counts the reads by outcome;
 `pinakes_catalogue_backlog{queue="homepages"}` the sites due now, and
 `pinakes_catalogue_backlog_age_seconds{queue="homepages"}` how long the oldest has been due (a
 backlog that only grows: reads waiting for a large import, or every read deferred; the count
 stops at 100,000). Alert `CatalogueHomepageReadsStalled` fires when no read has found a page for
 six hours while sites are due and the reads do not wait for a large import.
-`catalogue status` shows the list and how many sites have been read (`upstream_version`).
+`catalogue status` shows the list and how many sites have been read (`upstream_version`): counted
+when a list is loaded, and in between carried from run to run with each run's first reads. An
+update's start and end (`catalogue run starts`, `catalogue run finished`) are debug log lines, since
+updates run each time homepages fall due.
 
 ## Cards
 
@@ -88,16 +94,29 @@ with or without `www.`, path `/` and no query) joins its card
 
 Once a day a run asks for the day's list ID (the runs in between read what fell due from the
 list it has); a new list is loaded, and sites off the list for a month
-(30 days after the last weekly move of their day) lose their card and their row. When the list
-can't be looked up (tranco-list.eu down), an update logs it and reads the homepages due on the
-list it has; the list is asked again at the next run. The cards are
+(30 days after the last weekly move of their day) lose their card and their row. A list that
+names no site (an empty or garbage body) is refused (`empty`) in every run, a full import asked
+for too: nothing moves. A run never removes more than a tenth of the cards: a list that would
+leave more than that (and more than ten) off it, or a round of homepage reads that would take the
+run's removals past it (and past 100 cards: a small instance's sites that stopped answering go,
+each read again once within a week when the run's removals pass a tenth and ten: after a blanket
+non-page answer their cards come back at that read, and a site that still fails then waits the
+usual 90 days; every read failing on a larger catalogue does not), is refused (`refused`, nothing of the list's removals or of that round written, its sites
+due again,
+[a refused dump or file](../operations.md#a-refused-dump-or-file)), and nothing is read until the
+next day's list, or `pinakesd catalogue clear-refusal tranco` (which checks again). A full import
+asked for (`pinakesd catalogue import tranco --request`) has no such cap: it removes what its list
+and reads say, however many, so a list that stays short (the sites off it for good) goes through
+that way. When the list can't be looked up (tranco-list.eu down), an update logs it and reads the
+homepages due on the list it has (nothing while a refusal stands); the list is asked again at the
+next run. The cards are
 as current as the last list loaded (its `Last-Modified` time); the allowed lag is 2 days. `pinakesd catalogue drop tranco`
 also deletes `catalogue_site`.
 
 ## Run it by hand
 
-`pinakesd catalogue import tranco [--from FILE] [--limit N] [--update]` runs one import or
-update now. It reads homepages through an egress of its own, which does not share the running
+`pinakesd catalogue import tranco [--from FILE] [--reads N] [--update]` runs one import or
+update now; `--reads N` reads at most N homepages. It reads homepages through an egress of its own, which does not share the running
 daemon's per-host pace: stop the daemon (or switch Tranco off in it) first, so no host is asked
 twice as fast from one address.
 

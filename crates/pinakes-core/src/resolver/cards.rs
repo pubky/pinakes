@@ -1425,6 +1425,18 @@ pub fn social(doc: &ResourceMeta) -> bool {
         name => crate::sources::by_name(name).is_some_and(|s| s.social(doc)),
     }
 }
+/// A profile read on the Nostr or ActivityPub route (a `Person` or `Organization` card), or a link
+/// of those routes found gone (a deleted profile answers with no type): its author edits or
+/// deletes it as they do their posts, so it keeps its schedule and never waits longer for
+/// answering the same or for being gone (`scheduler::Backoff`).
+pub fn social_profile(route: &str, doc: &ResourceMeta) -> bool {
+    matches!(route, "nostr" | "activitypub")
+        && (doc.status == Status::Missing
+            || doc
+                .type_path
+                .iter()
+                .any(|t| matches!(t.as_str(), "Person" | "Organization")))
+}
 /// The longest a social card (`social`) goes before it is read again: an hour, or its official
 /// source's own (`Source::social_refresh_secs`).
 pub fn social_refresh_secs(doc: &ResourceMeta) -> u64 {

@@ -50,7 +50,7 @@ past either, the read stops (`disk`).
   100 bad lines, and more than one in a thousand of the lines read, stop the run (`parse`). A file
   whose xz stream or archive is broken stops it as `archive`.
 - **Downloads.** A broken connection is asked for again from the byte where it broke (`Range`
-  with `If-Range`, so a file replaced meanwhile is refused, never spliced), up to five times in a
+  with `If-Range`, so a file replaced meanwhile is refused as `dump_changed`, never spliced), up to five times in a
   row (renewed after every 64 MiB read), and not at all when the mirror names no ETag or
   Last-Modified. A body that ends cleanly before the file's length (its first answer's
   `Content-Length`) is a break too; an answer that names no length is refused (`download`), as its
@@ -128,32 +128,34 @@ A dump is refused, and no card is removed for it, when:
 - a full import of the importer's own (not asked for by hand, nor by an update handing over for a
   changed `limit`) would remove more than a tenth of one kind of card (one whose cards are mostly
   refused);
-- a run (an update or a full import, even one asked for, with or without a `limit`) reads no
-  record at all, or none from one file whose kind of card is stored (artists, release groups,
-  recordings), while cards are stored (`empty`; `catalogue drop` empties a catalogue): one kind is
-  a small share of the cards, below the removal check's tenth;
+- a run (an update or a full import, even one asked for, with or without a `limit`, a first
+  import too) reads no record at all, or none from one file whose kind of card is stored
+  (artists, release groups, recordings) (`empty`; `catalogue drop` empties a catalogue): one kind
+  is a small share of the cards, below the removal check's tenth;
 - its files don't match their checksums, don't parse, or hold more than a file may (`checksum`,
   `parse`, `archive`, `size`, `record_size`, `isrc_shared`).
 
-The run then ends as a failure: `catalogue status` shows the phase `failed` and the reason with its
-counts and the dump (`last_error`), `waiting` shows `dump <version> refused`,
+The run then ends as a failure, recorded once: `catalogue status` shows the phase `failed` and the
+reason with its counts and the dump (`last_error`), `waiting` shows `refused: <version>`,
 `CatalogueImportFailed` fires for the hour after it, and `CatalogueDumpRefused` (from
-`pinakes_catalogue_refused`) as long as the refusal stands, an hour on. The run is abandoned rather than resumed: its cursor and its sorted
-runs go. The refused dump is not read again from the same source with the same `limit` (`refused`,
-`refused_source` and `refused_limit` in the state's position): the importer waits for `LATEST` to
-name another dump, which it reads after the usual disk check; another `limit` reads it again, as a
-new subset. An update by hand (`--update`) of the refused dump fails at once (`refused`), and so
-does a run whose `LATEST` names the refused dump again by the time it starts, unless a full import
-was asked for. A full import refused at its end has written its new and changed cards by then, as
-an update has; they stay until the next update corrects them. To read the refused dump again as
-an update (a checksum failure while the mirror was still copying a file, say), clear the refusal
-with the daemon stopped: `UPDATE catalogue_state SET position = position - 'refused' -
-'refused_source' - 'refused_limit' WHERE catalogue = 'musicbrainz'`. If the dump is right, ask for a full import
-of it, which removes every card it does not read: `pinakesd catalogue import musicbrainz --request`
-beside the running daemon, or `pinakesd catalogue import musicbrainz` with the daemon stopped.
+`pinakes_catalogue_refused`) as long as the refusal stands, an hour on. The run is abandoned rather
+than resumed: its cursor and its sorted runs go, and the large-import turn is free. The refused
+dump is not read again from the same source with the same `limit` (`refused`, `refused_source` and
+`refused_limit` in the state's position, [the importer rules](../operations.md#a-refused-dump-or-file)):
+the importer waits for `LATEST` to name another dump, which it reads after the usual disk check;
+another `limit` reads it again, as a new subset. An update by hand (`--update`) of the refused dump
+ends at once, saying so and recording nothing, and so does a run whose `LATEST` names the refused
+dump again by the time it starts, unless a full import was asked for. A full import refused at its
+end has written its new and changed cards by then, as an update has; they stay until the next
+update corrects them. To read the refused dump again as an update (a checksum failure while the
+mirror was still copying a file, say), clear the refusal: `pinakesd catalogue clear-refusal
+musicbrainz`, beside the running daemon. If the dump is right, ask for a full import of it, which
+removes every card it does not read: `pinakesd catalogue import musicbrainz --request` beside the
+running daemon, or `pinakesd catalogue import musicbrainz` with the daemon stopped.
 There is no removal check under a `limit`, nor for a full import asked for; one asked for and cut
-off is still the one asked for when it resumes (`forced` in its cursor). A finished full import
-clears the request. A `LATEST`
+off is still the one asked for when it resumes (`forced` in its cursor), and one of the importer's
+own resumes as asked for once a request has come meanwhile. A finished full import clears the
+request. A `LATEST`
 naming a dump dated after tomorrow is refused as no dump (`version`): a host clock more than a day
 behind refuses every dump so (a first import fails on it at every try; once cards are stored, the
 hourly poll logs it and `CatalogueUpdateLag` fires in time).
@@ -206,8 +208,9 @@ started by hand takes up one that was cut off, else begins a new one.
 
 `--request` only asks for a full import: the process running the importer starts it, with its
 turn and disk checks, after an update under way or at its next step (within the hour when idle); a
-full import under way is the one asked for, and its end (or its abandonment, for a refused dump)
-clears the request: a try that fails or is cut off before its first cursor is still the one asked
+full import under way is the one asked for, and its end clears the request, as does its
+abandonment (a refused dump) when it ran as the one asked for (a request that came while it ran
+stands): a try that fails or is cut off before its first cursor is still the one asked
 for when it is tried again. The command says when
 no process holds the catalogue.
 

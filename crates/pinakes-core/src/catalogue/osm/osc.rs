@@ -39,13 +39,14 @@ pub struct Change {
 /// Counts the bytes pulled from the stream since the reader's last finished event (the read
 /// loop resets it after each one), and fails a read past [`MAX_TAG_BYTES`]: one XML event of any
 /// kind (a tag, however its attributes quote `<` or `>`, text, a comment) never grows the event
-/// buffer past that and the one read buffer pulled before the count started.
-struct Bounded<R> {
+/// buffer past that and the one read buffer pulled before the count started. The software
+/// catalogue reads Flathub's AppStream XML through it too ([`bounded`]).
+pub(crate) struct Bounded<R> {
     inner: R,
     pulled: std::rc::Rc<std::cell::Cell<usize>>,
 }
 /// The read buffer between the stream and the XML reader.
-const READ_BUFFER: usize = 64 * 1024;
+pub(crate) const READ_BUFFER: usize = 64 * 1024;
 impl<R: Read> Read for Bounded<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
@@ -59,6 +60,24 @@ impl<R: Read> Read for Bounded<R> {
         }
         Ok(n)
     }
+}
+/// `input` buffered for an XML reader whose events are each at most [`MAX_TAG_BYTES`] (and one
+/// read buffer): set the count it returns to 0 after each event the reader gives.
+pub(crate) fn bounded<R: Read>(
+    input: R,
+) -> (
+    std::io::BufReader<Bounded<R>>,
+    std::rc::Rc<std::cell::Cell<usize>>,
+) {
+    let pulled = std::rc::Rc::new(std::cell::Cell::new(0));
+    let reader = std::io::BufReader::with_capacity(
+        READ_BUFFER,
+        Bounded {
+            inner: input,
+            pulled: pulled.clone(),
+        },
+    );
+    (reader, pulled)
 }
 
 fn coordinate(value: &str, max: i64) -> Option<i32> {
@@ -112,14 +131,8 @@ pub const MAX_DECOMPRESSED: u64 = 16 << 30;
 
 /// Read a change file, passing each change to `each` in file order.
 pub fn read(input: impl BufRead, mut each: impl FnMut(Change) -> Result<()>) -> Result<()> {
-    let pulled = std::rc::Rc::new(std::cell::Cell::new(0));
-    let mut reader = quick_xml::Reader::from_reader(std::io::BufReader::with_capacity(
-        READ_BUFFER,
-        Bounded {
-            inner: input,
-            pulled: pulled.clone(),
-        },
-    ));
+    let (input, pulled) = bounded(input);
+    let mut reader = quick_xml::Reader::from_reader(input);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut action = None;

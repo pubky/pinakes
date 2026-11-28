@@ -1,19 +1,56 @@
 #!/usr/bin/env bash
 # Import a small real sample of a catalogue into a throwaway database and check it end to end:
 # the real `pinakesd catalogue import` path, row counts, keys, labels, canonical links, a text
-# search through `/v1/search`, shared links joining their cards through `POST /v1/resolve`, an
-# update that rewrites only the changed rows, and the catalogue switched off leaving search at once.
+# search through `/v1/search`, shared links joining their cards, an update that rewrites only the
+# changed rows, and the catalogue switched off leaving search at once.
 #
-# usage: scripts/catalogue-sample musicbrainz [--keep] [--import-only] [--bytes ENTITY=N]...
-#        scripts/catalogue-sample openalex|podcastindex|software|tranco [--keep]
+# usage: scripts/catalogue-sample NAME [--keep] [options]
+#   musicbrainz   [--import-only] [--bytes ENTITY=N]...   (scripts/catalogue/sample-musicbrainz)
+#   wikidata      [--limit N] [--window MINUTES] [--report FILE]   (scripts/catalogue/sample-wikidata)
+#   osm           [--region R] [--pbf FILE] [--days N] [--port N] [--max-mb N]
+#                 (scripts/catalogue/sample-osm)
+#   openalex, podcastindex, software, tranco   (scripts/catalogue/sample-files)
+# `scripts/catalogue-sample NAME --help` describes a catalogue's sample and its options.
 #
-# Each catalogue's sample and its options: scripts/catalogue/sample-musicbrainz (MusicBrainz's
-# dumps) and scripts/catalogue/sample-files (the catalogues that read files). Both take the same
-# environment (PINAKESD, PGHOST, PGPORT, SAMPLE_DB, SAMPLE_DIR, PINAKES__HTTP__CONTACT).
+# Every catalogue takes the same flag and environment:
+#   --keep          keep the database and the downloads
+#   PINAKESD        the pinakesd binary (default: target/release/pinakesd)
+#   PGHOST, PGPORT  the PostgreSQL server the database is created on (libpq's own variables)
+#   SAMPLE_DB       the database name (default: catalogue_sample_NAME); it must not exist
+#   SAMPLE_DIR      where the downloads and the daemon's files go (default: a new temporary dir)
+#   PINAKES__HTTP__CONTACT  the operator's contact, sent in the User-Agent; when unset, read from
+#                   ~/.config/pinakes/contact.env (never printed)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+usage() {
+  cat <<EOF
+usage: $0 NAME [--keep] [options]
+  musicbrainz   [--import-only] [--bytes ENTITY=N]...
+  wikidata      [--limit N] [--window MINUTES] [--report FILE]
+  osm           [--region R] [--pbf FILE] [--days N] [--port N] [--max-mb N]
+  openalex | podcastindex | software | tranco
+$0 NAME --help describes NAME's sample and its options.
+Environment: PINAKESD (default target/release/pinakesd), PGHOST, PGPORT, SAMPLE_DB (default
+catalogue_sample_NAME, must not exist), SAMPLE_DIR, PINAKES__HTTP__CONTACT (else read from
+~/.config/pinakes/contact.env).
+EOF
+}
 case ${1:-} in
-  musicbrainz) exec "$here/catalogue/sample-musicbrainz" "$@" ;;
-  openalex|podcastindex|software|tranco) exec "$here/catalogue/sample-files" "$@" ;;
-  *) echo "usage: $0 musicbrainz|openalex|podcastindex|software|tranco [options]" >&2; exit 2 ;;
+  musicbrainz) script=sample-musicbrainz ;;
+  wikidata) script=sample-wikidata ;;
+  osm) script=sample-osm ;;
+  openalex|podcastindex|software|tranco) script=sample-files ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
 esac
+# The operator's contact file (`[export] PINAKES__HTTP__CONTACT=...`), read, never run or printed.
+contact_file=$HOME/.config/pinakes/contact.env
+if [ -z "${PINAKES__HTTP__CONTACT:-}" ] && [ -r "$contact_file" ]; then
+  contact=$(python3 -I -c 'import re, sys
+for line in open(sys.argv[1]):
+    m = re.match(r"\s*(?:export\s+)?PINAKES__HTTP__CONTACT=(.*)", line)
+    if m:
+        print(m.group(1).strip().strip("\x27\""))' "$contact_file" | tail -n 1)
+  [ -z "$contact" ] || export PINAKES__HTTP__CONTACT="$contact"
+fi
+exec "$here/catalogue/$script" "$@"

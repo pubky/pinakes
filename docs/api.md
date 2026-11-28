@@ -140,7 +140,7 @@ A link a catalogue holds ([operations](operations.md#shared-links-a-catalogue-ho
 card built from the catalogue card, with `labels` and `from` naming the catalogue. It is never
 fetched and changes with its card.
 
-A catalogue card nobody shared opens like a shared card, by its own link
+A catalogue card nobody referenced opens like a referenced card, by its own link
 (`GET /v1/resources/by-uri?uri=<its link>`) and by that link's resource ID
 (`GET /v1/resources/{id}`). The answer has `labels`, `refs: []`,
 `collections: 0`, the card's `keys` and `updated_at: null`. Its `group` and `also_on` are those of
@@ -154,10 +154,10 @@ a moment later shows them. With its catalogue off, the link is unknown again.
 A card whose root is no web link (an OpenAlex work, stored under its `doi:` root for its
 `doi.org` link) carries the root's web page ([Identifier pages](#identifier-pages)): in `open_in`
 named by the page's host (`[{"client": "doi.org", "url": "https://doi.org/…"}]`), wherever it is
-read, among an unshared card's `aliases`, and as its host for `host=` (`host=doi.org`).
+read, among the `aliases` of a card nobody referenced, and as its host for `host=` (`host=doi.org`).
 
-An OpenStreetMap card nobody shared opens the same way, by any spelling of its openstreetmap.org
-link and by that link's ID, as the card a shared OSM link has ([OpenStreetMap and
+An OpenStreetMap card nobody referenced opens the same way, by any spelling of its openstreetmap.org
+link and by that link's ID, as the card a referenced OSM link has ([OpenStreetMap and
 locations](#openstreetmap-and-locations)): with `attribution`, the category, address and bbox,
 and no `labels` or `from`.
 
@@ -168,7 +168,7 @@ and no `labels` or `from`.
 - `ids` (or `resource_ids`): resource IDs. An alias's ID answers with its root's card.
 - `uris`: links, each read as `by-uri` reads it, static alias rules included.
 
-A catalogue card nobody shared is answered by either list, as `by-uri` and
+A catalogue card nobody referenced is answered by either list, as `by-uri` and
 `GET /v1/resources/{id}` answer it ([Catalogue cards](#catalogue-cards)), with a lookup card's
 `also_on` and `maybe_same`; one request answers at most 8 of them, and the entries past those
 are skipped. The answer lists the cards in request order. Duplicates are kept and unknown entries are skipped. Sending both lists, or neither, is a 400.
@@ -1190,15 +1190,17 @@ binds `or` looser: `x a` or `b`); a word left out with `-` is left out of every 
 items end inside a list of `or`s (the next item is `or`, also right after a closing quote, or the
 32nd is `or`), the whole list leaves the index's query: the index finds what the rest of the text
 finds, and Postgres checks every candidate against the whole text. A text that is one list of
-`or`s is read whole instead, as before, up to 64 words; a longer one finds the names similar to
-it. A search waits for a free turn; one client address (an IPv6 address by its /64) that
+`or`s (after any `-word`s or `""` before it) is read whole instead, up to 64 words; a longer one
+finds the names similar to it. A `-word` or `""` between the 32nd item and an `or` past it does
+not end the list: the cut still falls inside it. A search waits for a free turn; one client address (an IPv6 address by its /64) that
 already runs half the turns waits while another client's search does, and alone it takes every
 free turn. A search that gets no turn within its budget, or runs past it, answers `503` with
 `Retry-After: 1`: the index stops it at its next check (between the posting steps of a word or
 phrase, and before each word set, which reads its words' lists in one go). A text of one character
-found inside names, which Postgres reads alone, takes a turn too, and that read stops with the
-search's budget (what is left of `limits.search_index_budget_ms`, not the 5 s of every other read):
-past it the search answers `503` with `Retry-After: 1`.
+found inside names, which Postgres reads alone, takes a turn too, and so does a search without text
+while it may list catalogue cards; their reads stop with the search's budget (what is left of
+`limits.search_index_budget_ms`, not the 5 s of every other read, each statement cancelled in
+Postgres past it): past it the search answers `503` with `Retry-After: 1`.
 
 People's tags and catalogue labels add to a card's relevance but never match `q` alone. A post
 whose author has not opted in to search never matches: a read's `facts.opted_out` (Mastodon's
@@ -1254,16 +1256,31 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   `in_collection`), `key`, `venue`, `category`, `remote`, `ingredient`, `from` or `to`, nor with
   `sort=recent`, `start` or `trending`, which rank by references or starts it has none of;
 - without text, the best known first (by its source's fame) after every referenced unit, at most
-  `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near` or
-  `bbox`, those of the twice `limits.search_text_candidates` best known cards that are inside it;
-  when they are fewer, also the best known of the twice `limits.search_text_candidates` cards
-  nearest to the circle's centre (or to each box's centre) inside it, so a large area reads a
-  bounded number of cards. A filter (`type`, `tags`, `host`, `exclude_type`) is checked as the
-  nearest are read: when few cards of the area pass it, that read goes through the area's cards
-  of each catalogue until it has its twice `limits.search_text_candidates`, so its bound is then
-  the area, as for every place search on Postgres. With `host`, each catalogue's best known of each host; with `type` (no
-  `tags`), each catalogue's best known of each type and subtype; both merged. A catalogue switched
-  off but not dropped costs these reads nothing;
+  `limits.search_text_candidates` per search (by distance with `sort=distance`). With `near`,
+  `bbox` or `tags`, those of the twice `limits.search_text_candidates` best known cards that pass
+  every filter; when they are fewer, with `tags` also those holding the labels among each
+  catalogue's best known (a common label), and the best known of the first 20 times
+  `limits.search_text_candidates` cards holding the labels that the labels index gives, the place
+  and every other filter checked on those alone (every card of a rare label; of a label on more
+  cards, those read first); with `near` or `bbox` also the best known of the twice
+  `limits.search_text_candidates` cards nearest to the circle's centre (or to each box's centre)
+  inside it; and with `type`, `host` or `exclude_type` also the best known of each type (or host)
+  let in that are inside it. With `exclude_type`, or when the types asked, each with its
+  subtypes, times the catalogues that are on are more than 64, a catalogue none of whose cards'
+  types the filter lets in is not read at all (`exclude_type=Thing` lists no card), and the others are read by the types let
+  in; a few `type` values are read type by type in every catalogue that is on. With `type` or `exclude_type`, each catalogue's
+  best known of each type let in (a host is checked on them); with `host` alone, each
+  catalogue's best known of each host. A read whose index does not serve every filter looks at
+  no more than 20 times `limits.search_text_candidates` cards in all (at least twice it per
+  type, host or catalogue, but for the reads by type or host that follow the others, which run
+  only while the page is not full and share it), the best known first, or the nearest first near a place: a card past
+  them is not listed. So a large area or a large catalogue reads a bounded number of cards. A
+  catalogue switched off but not dropped costs these reads nothing, but for the labels index's:
+  its cards holding the labels count toward those 20 times `limits.search_text_candidates` like
+  any other, so a rare label's cards in the catalogues that are on may be listed only once it is
+  dropped (`pinakesd catalogue drop`). These reads take a turn of
+  the text searches and stop with its budget, as a text search does ([Text search](#text-search)):
+  with no turn in time or past the budget the search answers `503` with `Retry-After: 1`;
 - a catalogue switched off leaves every search at once.
 
 ### Search by key
@@ -1656,7 +1673,7 @@ An undated card that answers the same at a refresh waits twice as long the next 
 `limits.refresh_max_secs` (90 days); a change starts it over at the interval above. Such a link
 whose page two fresh fetches found gone for good (404, 410) is read again every
 `limits.refresh_max_secs` until it answers again. Events, calendars, podcast shows, Pubky objects,
-dated and social cards keep the intervals above ([backoff](operations.md#refresh-backoff)). Opening
+Nostr and ActivityPub profiles, dated and social cards keep the intervals above ([backoff](operations.md#refresh-backoff)). Opening
 a card whose refresh is due reads it again in the background.
 
 One fetch at the end plus 24 hours (the start plus 24 hours without an end) makes a resource
@@ -1708,8 +1725,10 @@ Aliases follow these rules:
 - **Wikidata items**: `wikidata.org`, `m.wikidata.org`, `/entity/Q…` and
   `/wiki/Special:EntityPage/Q…` are aliases of `https://www.wikidata.org/wiki/{Q-id}`.
 - **Wikipedia articles**: the mobile host, `index.php?title=…` (a revision with `oldid` too),
-  spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}`. A
-  redirect's title stays its own link.
+  spaces and percent-encoding are aliases of `https://{lang}.wikipedia.org/wiki/{Title}` (a `?` in
+  the title written `%3F`, a `\` `%5C`). A redirect's title stays its own link. A title MediaWiki
+  refuses because a URL reads it otherwise (`.`, `..`, a `./` or `../` part, a percent-escape) is
+  no article.
 - **MusicBrainz pages**: a recording, release, release group or artist page, or an ISRC's page,
   on `musicbrainz.org`, `www.` or `beta.`, over http or https, its web service record
   (`/ws/2/…`), the MBID in any letter case, a trailing slash and parameters are aliases of

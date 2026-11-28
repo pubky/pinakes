@@ -1591,9 +1591,11 @@ async fn a_shared_key_is_checked_through_the_key_index(pool: PgPool) {
 
 /// Every read a one-character search makes while it holds its turn stops with the turn's budget,
 /// the catalogue cards' too: held up past it (here by a lock on `catalogue_card`), the search
-/// answers 503 with `Retry-After: 1`, counted as `budget`.
+/// answers 503 with `Retry-After: 1`, counted once as `budget`, and the statement is cancelled
+/// in Postgres (it no longer waits for the lock).
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_one_character_card_read_stops_with_the_budget(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
     import(
         &pool,
         Catalogue::Wikidata,
@@ -1624,15 +1626,20 @@ async fn a_one_character_card_read_stops_with_the_budget(pool: PgPool) {
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let (status, _) = common::get_from(&app, "127.0.0.2:1234", "/v1/search?q=%E6%9D%B1").await;
+    let answer = status_of(&app, "/v1/search?q=%E6%9D%B1").await;
     let took = started.elapsed();
+    let cancelled = no_statement_waits(&pool).await;
     lock.rollback().await.unwrap();
-    assert_eq!(status, 503);
+    assert_eq!(answer, (503, Some("1".into())));
     assert!(
         took < std::time::Duration::from_secs(4),
         "{took:?}: the budget, not the pool's 5 s"
     );
-    assert!(pinakes_core::telemetry::search_index_busy_count("budget") > spent);
+    assert!(cancelled, "the card read still waits for the lock");
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("budget"),
+        spent + 1
+    );
 }
 
 /// Each catalogue has its own two `point` indexes (geometry and geography, partial on it), which
@@ -1655,4 +1662,616 @@ async fn every_catalogue_has_its_own_point_indexes(pool: PgPool) {
             );
         }
     }
+}
+
+/// The tests that count busy searches (`pinakes_search_index_busy_total`, one counter for the
+/// whole binary) run one at a time, so each asserts its own count.
+static BUSY_COUNTED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A search's status and `Retry-After` header, asked by the client `127.0.0.2`.
+async fn status_of(app: &axum::Router, path: &str) -> (u16, Option<String>) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .uri(path)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.2:1234".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let retry = response
+        .headers()
+        .get("retry-after")
+        .map(|v| v.to_str().unwrap().to_owned());
+    (response.status().as_u16(), retry)
+}
+/// Whether no backend of this database waits for a lock within two seconds: a statement held up
+/// by a lock was cancelled, not left waiting after its search answered.
+async fn no_statement_waits(pool: &PgPool) -> bool {
+    for _ in 0..200 {
+        if common::lock_waiters(pool).await == 0 {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Excluded types, labels and a wide box with a type are served from index branches, never by a
+/// walk of a catalogue's cards in fame order or of every point in the box: `exclude_type` that
+/// covers every type a catalogue's cards have reads none of its cards, other excluded types read
+/// the types let in each in its index's order, a rare label is read through the labels index
+/// (in a box too), a rare type in a place dense with other cards is read in the type's index
+/// order kept in the place (beside the nearest, which look at a bounded number of cards), and a
+/// host with a type is read by the type.
+#[sqlx::test(migrations = "../../migrations")]
+async fn card_reads_without_text_stay_bounded_for_excluded_types_labels_and_wide_boxes(
+    pool: PgPool,
+) {
+    // 3,000 well known people near 46,7 and 20 little known labelled mountains a bit further out.
+    let mut cards: Vec<Card> = (0..3000)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Person {n}"),
+                "Person",
+                &[],
+                Some((46.0 + 0.0001 * n as f64, 7.0)),
+                0.5 + n as f32 / 10_000.0,
+            )
+        })
+        .collect();
+    cards.extend((0..20).map(|n| {
+        card(
+            5000 + n,
+            &format!("Peak {n}"),
+            "Mountain",
+            &["rare-peak"],
+            Some((46.4 + 0.001 * n as f64, 7.4)),
+            0.01 + n as f32 / 1000.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    for (path, peaks) in [
+        ("/v1/search?exclude_type=Thing&limit=20", 0),
+        ("/v1/search?exclude_type=Person&limit=20", 20),
+        ("/v1/search?tags=rare-peak&limit=20", 20),
+        (
+            "/v1/search?bbox=6.5,45.5,7.5,46.5&tags=rare-peak&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?bbox=-20.0,30.0,20.0,60.0&type=Mountain&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?bbox=6.9,45.9,7.5,46.5&type=Mountain&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?near=46.0,7.0&radius=100000&type=Mountain&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?host=en.wikipedia.org&type=Mountain&limit=20",
+            20,
+        ),
+        (
+            "/v1/search?host=en.wikipedia.org&exclude_type=Person&limit=20",
+            20,
+        ),
+    ] {
+        api::record_card_read_plans();
+        let page = names(&common::get(&app, path).await);
+        let read = card_rows_read(&api::card_read_plans());
+        assert_eq!(page.len(), peaks, "{path}: {page:?}");
+        assert!(
+            page.iter().all(|n| n.starts_with("Peak")),
+            "{path}: {page:?}"
+        );
+        // CARD_SCAN (20) times the 20 candidates at most for a filtered nearest read, and a
+        // few probes: never the 3,020 cards.
+        assert!(read <= 600, "{path}: {read} card rows read");
+    }
+}
+
+/// More types let in than one read has branches (64) are read in several reads, merged by fame:
+/// the best known of the types past the first 64 are listed too, not left to a read of the
+/// catalogue in fame order that the excluded, better known cards fill.
+#[sqlx::test(migrations = "../../migrations")]
+async fn more_types_than_branches_are_read_in_several_reads(pool: PgPool) {
+    let mut types: Vec<String> = pinakes_core::model::subtypes(&["Thing".to_string()])
+        .into_iter()
+        .filter(|t| t != "Person" && t != "Thing")
+        .collect();
+    types.sort();
+    types.truncate(80);
+    // 2,000 well known people, then one card of each of 80 types, better known the later its
+    // type sorts: the best known 20 are of types past the first 64.
+    let mut cards: Vec<Card> = (0..2000)
+        .map(|n| card(n + 1, &format!("Person {n}"), "Person", &[], None, 0.9))
+        .collect();
+    cards.extend(types.iter().enumerate().map(|(i, t)| {
+        card(
+            5000 + i,
+            &format!("Kind {i:02}"),
+            t,
+            &[],
+            None,
+            0.1 + i as f32 / 1000.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    let mut page = names(&common::get(&app, "/v1/search?exclude_type=Person&limit=20").await);
+    page.sort();
+    let best: Vec<String> = (60..80).map(|i| format!("Kind {i:02}")).collect();
+    assert_eq!(page, best);
+}
+
+/// A search without text that may list catalogue cards takes a turn of the text searches (their
+/// share per client and their budget): with none free within the budget it answers 503 with
+/// `Retry-After: 1`, counted as `turn`. With every catalogue off it reads no card and waits for
+/// no turn.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_search_without_text_takes_a_turn_of_the_text_searches(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Mont Blanc", "Mountain", &[], None, 0.9)],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    let mut off = Config::default();
+    off.catalogues.enabled = false;
+    let mut state = AppState::new(pool.clone(), off).unwrap();
+    state.search_index = index.clone();
+    let off = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search").await),
+        ["Mont Blanc"]
+    );
+    index.set_bounds(1, std::time::Duration::from_millis(300));
+    let turns = pinakes_core::telemetry::search_index_busy_count("turn");
+    let held = index.hold_turn().unwrap();
+    assert_eq!(status_of(&app, "/v1/search").await, (503, Some("1".into())));
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("turn"),
+        turns + 1
+    );
+    assert_eq!(status_of(&off, "/v1/search").await.0, 200);
+    drop(held);
+    index.set_bounds(1, std::time::Duration::from_secs(30));
+    assert_eq!(status_of(&app, "/v1/search").await.0, 200);
+}
+
+/// A search without text reads the cards within its turn's budget, and the read held up past it
+/// (here by a lock on `catalogue_card`) is cancelled in Postgres: the search answers 503 with
+/// `Retry-After: 1`, counted once as `budget`, and no statement keeps waiting for the lock.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_card_read_without_text_stops_with_the_budget(pool: PgPool) {
+    let _counted = BUSY_COUNTED.lock().await;
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Mont Blanc", "Mountain", &[], None, 0.9)],
+    )
+    .await;
+    let index = search_index::SearchIndex::in_memory();
+    index.set_catalogues(&Catalogue::ALL.map(|c| c.name()));
+    let mut state = AppState::new(pool.clone(), Config::default()).unwrap();
+    state.search_index = index.clone();
+    let app = api::router(state);
+    assert_eq!(
+        names(&common::get(&app, "/v1/search").await),
+        ["Mont Blanc"]
+    );
+    index.set_bounds(1, std::time::Duration::from_millis(500));
+    let spent = pinakes_core::telemetry::search_index_busy_count("budget");
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE catalogue_card IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let answer = status_of(&app, "/v1/search").await;
+    let took = started.elapsed();
+    let cancelled = no_statement_waits(&pool).await;
+    lock.rollback().await.unwrap();
+    assert_eq!(answer, (503, Some("1".into())));
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "{took:?}: the budget, not the pool's 5 s"
+    );
+    assert!(cancelled, "the card read still waits for the lock");
+    assert_eq!(
+        pinakes_core::telemetry::search_index_busy_count("budget"),
+        spent + 1
+    );
+}
+
+/// A label on many little-known cards, behind many better-known cards without it, is read from a
+/// bounded number of cards: those holding it among the best known, and at most `CARD_SCAN` times
+/// the candidates that the labels index gives, never every card holding it. Its cards are listed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_common_label_without_text_reads_a_bounded_number_of_cards(pool: PgPool) {
+    // 3,000 well known people without the label, 4,000 little-known songs with it.
+    let mut cards: Vec<Card> = (0..3000)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("Person {n}"),
+                "Person",
+                &[],
+                None,
+                0.5 + n as f32 / 10_000.0,
+            )
+        })
+        .collect();
+    cards.extend((0..4000).map(|n| {
+        card(
+            10_000 + n,
+            &format!("Song {n}"),
+            "MusicRecording",
+            &["common-tag"],
+            None,
+            0.01 + n as f32 / 1_000_000.0,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    let read = card_heap_rows_read(&api::card_read_plans());
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("Song")), "{page:?}");
+    // The probe (40), the fame-ordered scan (20 x 20) and the labels index's first 400: never
+    // the 4,000 songs.
+    assert!(read <= 1_200, "{read} card rows read from the table");
+}
+
+/// Excluded types are read from the types each catalogue's cards have, kept until its cards
+/// change: a card of a new type written after a search is listed by the next one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_types_read_follow_a_write_of_the_catalogue(pool: PgPool) {
+    store::ensure_state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap();
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[card(1, "Ada", "Person", &[], None, 0.9)],
+    )
+    .await;
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    assert!(names(&common::get(&app, "/v1/search?exclude_type=Person").await).is_empty());
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        1,
+        &[card(2, "Mont Blanc", "Mountain", &[], None, 0.8)],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        names(&common::get(&app, "/v1/search?exclude_type=Person").await),
+        ["Mont Blanc"]
+    );
+}
+
+/// A common label lists its best known cards: those holding it among each catalogue's best known
+/// are read in fame order, whatever cards the labels index gives first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_common_label_lists_its_best_known_cards(pool: PgPool) {
+    // Written first, so the labels index gives them first: 4,000 little-known songs with the
+    // label. Then 30 well known people without it, and 20 stars with it, a little less known
+    // than the people: half of them past the first 40 best known the search reads first, all
+    // within the 57 best known each of the seven catalogues looks at (20 times 20, shared).
+    let mut cards: Vec<Card> = (0..4000)
+        .map(|n| {
+            card(
+                10_000 + n,
+                &format!("Song {n}"),
+                "MusicRecording",
+                &["common-tag"],
+                None,
+                0.01,
+            )
+        })
+        .collect();
+    cards.extend((0..30).map(|n| card(n + 1, &format!("Person {n}"), "Person", &[], None, 0.9)));
+    cards.extend((0..20).map(|n| {
+        card(
+            1_000 + n,
+            &format!("Star {n}"),
+            "MusicGroup",
+            &["common-tag"],
+            None,
+            0.8,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("Star")), "{page:?}");
+}
+
+/// A common label in a small place is read from a bounded number of cards: the labels index's
+/// first cards holding it are checked against the place, and the nearest cards to the place are
+/// read too, so the label's cards in the place are listed without reading every card holding it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_common_label_in_a_small_place_reads_a_bounded_number_of_cards(pool: PgPool) {
+    // 4,000 cards with the label far away (written first, so the labels index gives them first),
+    // then 20 with it in a small box near 46,7.
+    let mut cards: Vec<Card> = (0..4000)
+        .map(|n| {
+            card(
+                10_000 + n,
+                &format!("Far {n}"),
+                "Restaurant",
+                &["common-tag"],
+                Some((-30.0 + (n % 50) as f64, 100.0 + (n / 50) as f64 * 0.1)),
+                0.5,
+            )
+        })
+        .collect();
+    cards.extend((0..20).map(|n| {
+        card(
+            n + 1,
+            &format!("Near {n}"),
+            "Restaurant",
+            &["common-tag"],
+            Some((46.0 + 0.001 * n as f64, 7.0)),
+            0.01,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(
+        &common::get(
+            &app,
+            "/v1/search?tags=common-tag&bbox=6.9,45.9,7.1,46.1&limit=20",
+        )
+        .await,
+    );
+    let read = card_heap_rows_read(&api::card_read_plans());
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("Near")), "{page:?}");
+    assert!(read <= 1_200, "{read} card rows read from the table");
+}
+
+/// The types a catalogue's cards have are read once and kept: a second search with excluded
+/// types reads no type again; while a run writes the catalogue, its batches don't make the next
+/// search read them again either.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_types_read_are_kept_between_searches_and_a_run_s_batches(pool: PgPool) {
+    // The catalogue's state row, as a daemon keeps one for each catalogue.
+    store::ensure_state(&pool, Catalogue::Wikidata)
+        .await
+        .unwrap();
+    import(
+        &pool,
+        Catalogue::Wikidata,
+        &[
+            card(1, "Ada", "Person", &[], None, 0.9),
+            card(2, "Mont Blanc", "Mountain", &[], None, 0.8),
+        ],
+    )
+    .await;
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    // A probe of the types is the recursive read of the type index.
+    let probes = || {
+        api::card_read_plans()
+            .iter()
+            .filter(|p| p.to_string().contains("Recursive Union"))
+            .count()
+    };
+    api::record_card_read_plans();
+    common::get(&app, "/v1/search?exclude_type=Person").await;
+    assert_eq!(probes(), 1);
+    api::record_card_read_plans();
+    common::get(&app, "/v1/search?exclude_type=Person").await;
+    assert_eq!(probes(), 0, "a second search reads the types again");
+    // A run's batch moves the state row; the types read stay.
+    sqlx::query("UPDATE catalogue_state SET run='update' WHERE catalogue='wikidata'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store::upsert(
+        &pool,
+        Catalogue::Wikidata,
+        1,
+        &[card(3, "Matterhorn", "Mountain", &[], None, 0.7)],
+        None,
+    )
+    .await
+    .unwrap();
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?exclude_type=Person").await);
+    assert_eq!(
+        probes(),
+        0,
+        "a run's batch makes the next search read the types again"
+    );
+    assert_eq!(page, ["Mont Blanc", "Matterhorn"]);
+}
+
+/// A rare label with excluded types (or a type) reads a bounded number of cards: the reads by
+/// type that follow the others share `CARD_SCAN` times the candidates over the types let in, and
+/// run only while the page is not full.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_rare_label_with_excluded_types_reads_a_bounded_number_of_cards(pool: PgPool) {
+    let mut types: Vec<String> = pinakes_core::model::subtypes(&["Thing".to_string()])
+        .into_iter()
+        .filter(|t| t != "Person" && t != "Thing" && t != "Mountain")
+        .collect();
+    types.sort();
+    types.truncate(80);
+    // 80 types of 50 well known cards each without the label, and 10 little-known mountains
+    // with it.
+    let mut cards: Vec<Card> = types
+        .iter()
+        .enumerate()
+        .flat_map(|(i, t)| {
+            (0..50).map(move |n| {
+                card(
+                    1 + i * 50 + n,
+                    &format!("Kind {i} {n}"),
+                    t,
+                    &[],
+                    None,
+                    0.5 + n as f32 / 1000.0,
+                )
+            })
+        })
+        .collect();
+    cards.extend((0..10).map(|n| {
+        card(
+            9_000 + n,
+            &format!("Peak {n}"),
+            "Mountain",
+            &["rare-peak"],
+            None,
+            0.01,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    for path in [
+        "/v1/search?tags=rare-peak&exclude_type=Person&limit=20",
+        "/v1/search?tags=rare-peak&type=Mountain&limit=20",
+    ] {
+        api::record_card_read_plans();
+        let mut page = names(&common::get(&app, path).await);
+        let read = card_heap_rows_read(&api::card_read_plans());
+        page.sort();
+        assert_eq!(page.len(), 10, "{path}: {page:?}");
+        assert!(
+            page.iter().all(|n| n.starts_with("Peak")),
+            "{path}: {page:?}"
+        );
+        // The probe (40), the fame-ordered scan (400), the labels index (10) and the reads by
+        // type sharing 400: never 40 for each of 80 types.
+        assert!(
+            read <= 1_200,
+            "{path}: {read} card rows read from the table"
+        );
+    }
+}
+
+/// The cards of a catalogue switched off but not dropped count toward the labels index's read
+/// like any other card, so they never make it read every card holding the label: here they use
+/// up the read, and the label's cards of a catalogue that is on are listed again once the
+/// catalogue switched off is dropped.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_catalogue_switched_off_adds_nothing_to_the_labels_read(pool: PgPool) {
+    // Off (written first, so the labels index gives them first): 4,000 MusicBrainz cards with
+    // the label.
+    let off: Vec<Card> = (0..4000)
+        .map(|n| {
+            let mut c = card(
+                10_000 + n,
+                &format!("Off {n}"),
+                "MusicRecording",
+                &["common-tag"],
+                None,
+                0.9,
+            );
+            c.source_id = format!("recording/{n}");
+            c
+        })
+        .collect();
+    import(&pool, Catalogue::Musicbrainz, &off).await;
+    // On: 20,000 well known Wikidata cards without the label (far more than the best known the
+    // search reads first, and more than the label's holders, so a read of the catalogues that
+    // are on through their own index costs more than the label's), then 20 little-known ones
+    // with it: only the labels read finds them.
+    let mut on: Vec<Card> = (0..20_000)
+        .map(|n| card(100_000 + n, &format!("Known {n}"), "Person", &[], None, 0.5))
+        .collect();
+    on.extend((0..20).map(|n| {
+        card(
+            n + 1,
+            &format!("On {n}"),
+            "Person",
+            &["common-tag"],
+            None,
+            0.01,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &on).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.catalogues.musicbrainz.enabled = false;
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    let read = card_heap_rows_read(&api::card_read_plans());
+    // The switched-off catalogue's cards are never listed, and its 4,000 holders are not read.
+    assert!(page.iter().all(|n| n.starts_with("On")), "{page:?}");
+    assert!(read <= 1_200, "{read} card rows read from the table");
+    // Dropped, they no longer count: the labels read finds the 20.
+    sqlx::query("DELETE FROM catalogue_card WHERE catalogue='musicbrainz'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("On")), "{page:?}");
 }
