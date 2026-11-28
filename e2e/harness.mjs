@@ -298,10 +298,19 @@ export async function coveringLinks(docs, uris, extra, readById, timeout = 10000
     await sleep(Math.min(250, left()), undefined, { signal });
     for (const [kind, doc] of docs) {
       if (left() <= 0) break;
-      const bound = AbortSignal.timeout(left());
-      const read = signal ? AbortSignal.any([signal, bound]) : bound;
+      // The bound is a plain timer, which holds the process open until it fires (a timer of
+      // `AbortSignal.timeout` does not: a read that never answers would leave the wait pending),
+      // cleared as soon as the read settles.
+      const bound = new AbortController();
+      const timer = setTimeout(() => bound.abort(new Error('the wait for aliases reached its bound')), left());
+      const read = signal ? AbortSignal.any([signal, bound.signal]) : bound.signal;
       const cutOff = new Promise(resolve => read.addEventListener('abort', () => resolve(null), { once: true }));
-      const fresh = await Promise.race([Promise.resolve().then(() => readById(doc.id, read)), cutOff]).catch(() => null);
+      let fresh;
+      try {
+        fresh = await Promise.race([Promise.resolve().then(() => readById(doc.id, read)), cutOff]).catch(() => null);
+      } finally {
+        clearTimeout(timer);
+      }
       signal?.throwIfAborted();
       if (fresh?.id === doc.id && Array.isArray(fresh.aliases)) docs.set(kind, { ...doc, aliases: fresh.aliases });
     }

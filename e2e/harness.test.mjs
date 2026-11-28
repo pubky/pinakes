@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { execFile } from 'node:child_process';
 import { operatorContact, coveringLinks, dropRefusedPages, expectCard, findsEvery, freshen, instanceAgent, judgeRecipes, liveRecipes, mcpAnswer, newestLink, ownTags, psql, rereadMoved, socialAgrees, userAgent, withTags, withoutStackSkipped } from './harness.mjs';
 test('an interrupted run starts no recipe stack, and one interrupted while it runs is stopped', { timeout: 5000 }, async () => {
   // A stand-in for `e2e_stack --live-recipes`: it prints its line and closes when told to, and
@@ -346,4 +347,34 @@ test('the links the cards cover wait, bounded, for an alias that lands after the
   const interrupt = new AbortController();
   setTimeout(() => interrupt.abort(new Error('Interrupted')), 400);
   await assert.rejects(coveringLinks(new Map([['osm', place]]), uris, [], (id, bound) => new Promise(() => {}), 5000, interrupt.signal), /Interrupted/);
+});
+/** `script` (an ES module importing `coveringLinks`) run by a Node process of its own: its exit
+ * code, its output and how long it ran. No test runner keeps that process alive. */
+const alone = script => new Promise(resolve => {
+  const at = Date.now();
+  const child = execFile(process.execPath, ['--input-type=module', '-e', script],
+    { cwd: new URL('.', import.meta.url), timeout: 30000 },
+    (error, stdout) => resolve({ code: error ? (error.code ?? error.signal) : 0, stdout, ms: Date.now() - at }));
+  child.stdin?.end();
+});
+test('the alias wait keeps the process alive until its bound, and leaves no timer behind', { timeout: 60000 }, async () => {
+  const setup = `import { coveringLinks } from './harness.mjs';
+    const place = { id: 'a', uri: 'https://www.openstreetmap.org/node/501', aliases: [] };
+    const uris = [place.uri, place.uri + '/history'];`;
+  // A read that never answers and ignores its signal: only the wait's own bound ends it. A timer
+  // that does not hold the process open would leave the wait pending and the process would exit
+  // early (13: an unsettled top-level await).
+  const hung = await alone(`${setup}
+    const got = await coveringLinks(new Map([['osm', place]]), uris, [], () => new Promise(() => {}), 300);
+    console.log('done', got.includes(uris[1]));`);
+  assert.equal(hung.code, 0, `exit ${hung.code}: ${hung.stdout}`);
+  assert.equal(hung.stdout.trim(), 'done false');
+  // A read that answers at once with the alias: the wait returns, and no timer of its bound (a
+  // minute) keeps the process running after it.
+  const quick = await alone(`${setup}
+    const got = await coveringLinks(new Map([['osm', place]]), uris, [], async id => ({ id, aliases: [uris[1]] }), 60000);
+    console.log('done', got.includes(uris[1]));`);
+  assert.equal(quick.code, 0, `exit ${quick.code}: ${quick.stdout}`);
+  assert.equal(quick.stdout.trim(), 'done true');
+  assert(quick.ms < 15000, `the process ended once the wait returned (${quick.ms} ms)`);
 });
