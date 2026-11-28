@@ -19,8 +19,8 @@ fn class(error: &anyhow::Error) -> &'static str {
         .map_or("none", |f| f.class)
 }
 
-/// Proxies named in the environment are never asked: a proxy listener sees no connection, for an
-/// `https` host (which only a proxy could reach here) nor for a loopback one.
+/// Proxies named in the environment are never asked: a proxy listener sees no connection, for a
+/// loopback server that answers nor for a closed https port (which only a proxy could answer).
 #[tokio::test]
 async fn proxies_named_in_the_environment_are_ignored() {
     let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -54,24 +54,18 @@ async fn proxies_named_in_the_environment_are_ignored() {
         .first_wait(Duration::from_millis(1));
     let direct = client.small(&format!("{origin}/x"), 100).await.unwrap();
     assert_eq!(direct.as_deref(), Some(&b"direct"[..]));
-    // A name that resolves nowhere: only a proxy would take the request.
-    let far = client
-        .small("https://pinakes-proxy-test.invalid/x", 100)
-        .await
-        .unwrap_err();
-    // No address for the name: refused at once, or a black-holed lookup that times out.
-    assert!(
-        matches!(class(&far), "connect" | "timeout"),
-        "{}",
-        class(&far)
-    );
+    // A closed https port on the loopback address: asked directly, the connection is refused
+    // (no name to look up); only a proxy would take the request.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let far = format!("https://{}/x", closed.local_addr().unwrap());
+    drop(closed);
+    let failed = client.small(&far, 100).await.unwrap_err();
+    assert_eq!(class(&failed), "connect");
     let api = fetch::api_client("ops@example.org", &[])
         .unwrap()
         .first_wait(Duration::from_millis(1));
-    assert!(api
-        .small("https://pinakes-proxy-test.invalid/w/api.php", 100)
-        .await
-        .is_err());
+    let failed = api.small(&far, 100).await.unwrap_err();
+    assert_eq!(class(&failed), "connect");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(connections.load(Ordering::SeqCst), 0);
 }

@@ -332,7 +332,7 @@ async fn the_client_names_its_contact_and_takes_bytes_as_served() {
 }
 
 /// A server that asks to wait half a minute, counting what it is asked.
-async fn busy() -> (String, Arc<AtomicUsize>) {
+async fn busy() -> Busy {
     let hits = Arc::new(AtomicUsize::new(0));
     let counted = hits.clone();
     let base = serve(Router::new().route(
@@ -350,13 +350,38 @@ async fn busy() -> (String, Arc<AtomicUsize>) {
         }),
     ))
     .await;
-    (format!("{base}/busy"), hits)
+    Busy {
+        url: format!("{base}/busy"),
+        hits,
+    }
+}
+/// [`busy`]'s server. Half a minute is under the five minutes past which a host is held, so it
+/// leaves no hold on its port; each test checks that ([`Busy::no_hold`]), and dropping it
+/// forgets any hold all the same, so a later test handed the port never waits for it.
+struct Busy {
+    url: String,
+    hits: Arc<AtomicUsize>,
+}
+impl Busy {
+    fn no_hold(&self) {
+        assert!(
+            !fetch::too_early(&self.url),
+            "a hold is left on {}",
+            self.url
+        );
+    }
+}
+impl Drop for Busy {
+    fn drop(&mut self) {
+        fetch::forget_hold(&self.url);
+    }
 }
 
 /// A known file read from its end asks nothing (a range already read whole).
 #[tokio::test]
 async fn a_range_read_whole_asks_nothing() {
-    let (url, hits) = busy().await;
+    let server = busy().await;
+    let (url, hits) = (server.url.clone(), server.hits.clone());
     let client = fetch::client("ops@example.org", &[]).unwrap();
     let handle = tokio::runtime::Handle::current();
     let url = url::Url::parse(&url).unwrap();
@@ -378,6 +403,7 @@ async fn a_range_read_whole_asks_nothing() {
     .unwrap();
     assert_eq!(read, 0);
     assert_eq!(hits.load(Ordering::SeqCst), 0);
+    server.no_hold();
 }
 
 /// A download that waits is stopped within about a second once `flag` is set (`stopped`).
@@ -402,7 +428,8 @@ async fn stopped_soon(
 async fn a_stop_is_heard_in_a_retry_after() {
     let handle = tokio::runtime::Handle::current();
     let client = fetch::client("ops@example.org", &[]).unwrap();
-    let (busy_url, _) = busy().await;
+    let server = busy().await;
+    let (busy_url, _) = (server.url.clone(), server.hits.clone());
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (c, h, u, f) = (
         client.clone(),
@@ -414,6 +441,7 @@ async fn a_stop_is_heard_in_a_retry_after() {
         Download::new(c, h, u, 100).stop(f).read_to_end(&mut vec![])
     });
     stopped_soon(flag, read).await;
+    server.no_hold();
 }
 
 /// A stop is heard within about a second in the pause before a resume: a body that breaks off,
@@ -459,7 +487,8 @@ async fn a_stop_is_heard_in_the_pause_before_a_resume() {
 async fn a_dropped_read_ahead_stops_its_thread() {
     let handle = tokio::runtime::Handle::current();
     let client = fetch::client("ops@example.org", &[]).unwrap();
-    let (busy_url, hits) = busy().await;
+    let server = busy().await;
+    let (busy_url, hits) = (server.url.clone(), server.hits.clone());
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (c, h, u, f) = (
         client.clone(),
@@ -491,6 +520,7 @@ async fn a_dropped_read_ahead_stops_its_thread() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    server.no_hold();
 }
 
 /// A file catalogue's reader whose run is gone (its receiver dropped) while its download waits
@@ -498,7 +528,8 @@ async fn a_dropped_read_ahead_stops_its_thread() {
 #[tokio::test]
 async fn a_file_reader_whose_run_is_gone_ends() {
     let client = fetch::client("ops@example.org", &[]).unwrap();
-    let (busy_url, _) = busy().await;
+    let server = busy().await;
+    let (busy_url, _) = (server.url.clone(), server.hits.clone());
     let (ended_tx, ended_rx) = std::sync::mpsc::channel();
     let (c, u) = (client.clone(), busy_url.clone());
     let parts = fetch::batches(move |_sink| {
@@ -521,6 +552,7 @@ async fn a_file_reader_whose_run_is_gone_ends() {
         .unwrap()
         .expect("the reader ended");
     assert!(ended.duration_since(dropped) < Duration::from_secs(3));
+    server.no_hold();
 }
 
 /// A download read ahead gives its bytes in order and whole.
