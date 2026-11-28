@@ -2863,7 +2863,9 @@ fn each_by_fame(
 ///   the labels index gives, the place and the other filters checked on those alone (a rare
 ///   label's every card); with a place, the [`NEAREST_CARDS`] times `cap` cards nearest to the
 ///   circle's or each box's centre in it (the `point` indexes); with a type or host filter, the
-///   best known of each type (or host) let in, kept in the place; the best known of all. With `sort=distance` and `near`, the `cap` nearest.
+///   best known of each type (or host) let in, kept in the place (the types or hosts sharing
+///   [`CARD_SCAN`] times `cap` cards); the best known of all. Each of these follow-up reads runs
+///   only while fewer than `cap` cards were found. With `sort=distance` and `near`, the `cap` nearest.
 /// - With types (or excluded types): each catalogue's type let in, in the `(catalogue, type,
 ///   fame, id)` index's order, [`CARD_BRANCHES`] branches a read.
 /// - With hosts: each catalogue's host in the `(catalogue, catalogue_card_host(uri), fame, id)`
@@ -3099,10 +3101,21 @@ async fn best_known_cards(
     });
     // The best known of `branches` through every filter (and the place when `in_place`), each
     // branch in its index's order looking at a bounded number of cards, [`CARD_BRANCHES`] a read.
-    let branch_reads = |branches: Vec<Branch>, one_type: bool, one_host: bool, in_place: bool| async move {
+    // `shared`: the branches share [`CARD_SCAN`] times `cap` cards strictly (a follow-up read of
+    // many types or hosts after other reads, looking at a few cards of each), else each looks at
+    // its share and at least [`FAMOUS_PROBE`] times `cap`.
+    let branch_reads = |branches: Vec<Branch>,
+                        one_type: bool,
+                        one_host: bool,
+                        in_place: bool,
+                        shared: bool| async move {
         let mut rows: Vec<FamedCard> = vec![];
         for part in branches.chunks(CARD_BRANCHES) {
-            let scan = scan_per_branch(cap, branches.len());
+            let scan = if shared {
+                (CARD_SCAN * cap / branches.len().max(1)).max(1)
+            } else {
+                scan_per_branch(cap, branches.len())
+            };
             rows.extend(
                 read_cards::<FamedCard>(pool, Plan::Ordered, deadline, |sql| {
                     by_fame(
@@ -3174,7 +3187,7 @@ async fn best_known_cards(
                 if !tags.is_empty() {
                     // Fewer: a common label's cards among each catalogue's best known (its fame
                     // index in order, looking at a bounded number of cards), in the place.
-                    rows.extend(branch_reads(each.clone(), false, false, true).await?);
+                    rows.extend(branch_reads(each.clone(), false, false, true, false).await?);
                     // And a rare label's cards, through the labels index alone: the first
                     // [`CARD_SCAN`] times `cap` cards holding the labels it gives, the place and
                     // every other filter checked on those alone, so a common label in a small place
@@ -3187,18 +3200,21 @@ async fn best_known_cards(
                                 .push(CARD_READ_COLUMNS)
                                 .push(" FROM (SELECT ")
                                 .push(SCAN_COLUMNS)
-                                .push(" FROM catalogue_card c WHERE c.catalogue=ANY(")
-                                .push_bind(read_from.clone())
-                                .push(")")
+                                .push(" FROM catalogue_card c WHERE ")
                                 .push(if all_labels {
-                                    " AND c.labels@>"
+                                    "c.labels@>"
                                 } else {
-                                    " AND c.labels&&"
+                                    "c.labels&&"
                                 })
                                 .push_bind(tags.to_vec())
                                 .push(" LIMIT ")
                                 .push_bind((CARD_SCAN * cap) as i64)
-                                .push(") c WHERE true");
+                                // The catalogues that are on are kept among those read, so the
+                                // cards of one switched off but not dropped count toward the
+                                // limit: they cost the read no more than any other card.
+                                .push(") c WHERE c.catalogue=ANY(")
+                                .push_bind(read_from.clone())
+                                .push(")");
                             filters(sql, false, false);
                             place(sql);
                             sql.push(" ORDER BY c.fame DESC,c.id LIMIT ")
@@ -3207,7 +3223,14 @@ async fn best_known_cards(
                         .await?,
                     );
                 }
-                if spatial.near.is_some() || spatial.bbox.is_some() {
+                // The rows so far, each card once: the reads below run only while they are fewer
+                // than `cap`.
+                let full = |rows: &mut Vec<FamedCard>| {
+                    rows.sort_by(|a, b| b.5.total_cmp(&a.5).then(a.0.cmp(&b.0)));
+                    rows.dedup_by_key(|r| r.0);
+                    rows.len() >= cap
+                };
+                if (spatial.near.is_some() || spatial.bbox.is_some()) && !full(&mut rows) {
                     // Fewer: the nearest to the circle's centre, or to each box's, in it too (in the
                     // index's nearest-first order: at equal distances at the end, either may be
                     // read), those through every filter among a bounded number of them.
@@ -3221,20 +3244,23 @@ async fn best_known_cards(
                         .await?,
                     );
                 }
-                // With a type or host filter, also the best known of each type (or host) let in,
-                // kept in the place: a rare type in an area dense with others.
+                // Still fewer, with a type or host filter: also the best known of each type (or
+                // host) let in, kept in the place and through the labels: a rare type in an area
+                // dense with others. The branches share [`CARD_SCAN`] times `cap` cards.
                 if let Some(branches) = typed.clone().or_else(|| host_branches.clone()) {
-                    rows.extend(branch_reads(branches, false, false, true).await?);
+                    if !full(&mut rows) {
+                        rows.extend(branch_reads(branches, false, false, true, true).await?);
+                    }
                 }
             }
             rows
         } else if let Some(branches) = typed.clone() {
             // Types (with a host as a filter of each type's branch).
-            branch_reads(branches, true, false, false).await?
+            branch_reads(branches, true, false, false, false).await?
         } else if let Some(branches) = host_branches.clone() {
-            branch_reads(branches, false, true, false).await?
+            branch_reads(branches, false, true, false, false).await?
         } else {
-            branch_reads(each.clone(), false, false, false).await?
+            branch_reads(each.clone(), false, false, false, false).await?
         };
     rows.sort_by(|a, b| b.5.total_cmp(&a.5).then(a.0.cmp(&b.0)));
     rows.dedup_by_key(|r| r.0);

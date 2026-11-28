@@ -2137,3 +2137,122 @@ async fn the_types_read_are_kept_between_searches_and_a_run_s_batches(pool: PgPo
     );
     assert_eq!(page, ["Mont Blanc", "Matterhorn"]);
 }
+
+/// A rare label with excluded types (or a type) reads a bounded number of cards: the reads by
+/// type that follow the others share `CARD_SCAN` times the candidates over the types let in, and
+/// run only while the page is not full.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_rare_label_with_excluded_types_reads_a_bounded_number_of_cards(pool: PgPool) {
+    let mut types: Vec<String> = pinakes_core::model::subtypes(&["Thing".to_string()])
+        .into_iter()
+        .filter(|t| t != "Person" && t != "Thing" && t != "Mountain")
+        .collect();
+    types.sort();
+    types.truncate(80);
+    // 80 types of 50 well known cards each without the label, and 10 little-known mountains
+    // with it.
+    let mut cards: Vec<Card> = types
+        .iter()
+        .enumerate()
+        .flat_map(|(i, t)| {
+            (0..50).map(move |n| {
+                card(
+                    1 + i * 50 + n,
+                    &format!("Kind {i} {n}"),
+                    t,
+                    &[],
+                    None,
+                    0.5 + n as f32 / 1000.0,
+                )
+            })
+        })
+        .collect();
+    cards.extend((0..10).map(|n| {
+        card(
+            9_000 + n,
+            &format!("Peak {n}"),
+            "Mountain",
+            &["rare-peak"],
+            None,
+            0.01,
+        )
+    }));
+    import(&pool, Catalogue::Wikidata, &cards).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    for path in [
+        "/v1/search?tags=rare-peak&exclude_type=Person&limit=20",
+        "/v1/search?tags=rare-peak&type=Mountain&limit=20",
+    ] {
+        api::record_card_read_plans();
+        let mut page = names(&common::get(&app, path).await);
+        let read = card_heap_rows_read(&api::card_read_plans());
+        page.sort();
+        assert_eq!(page.len(), 10, "{path}: {page:?}");
+        assert!(
+            page.iter().all(|n| n.starts_with("Peak")),
+            "{path}: {page:?}"
+        );
+        // The probe (40), the fame-ordered scan (400), the labels index (10) and the reads by
+        // type sharing 400: never 40 for each of 80 types.
+        assert!(
+            read <= 1_200,
+            "{path}: {read} card rows read from the table"
+        );
+    }
+}
+
+/// The cards of a catalogue switched off but not dropped count toward the labels index's read
+/// like any other, so they never make it read every card holding the label.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_catalogue_switched_off_adds_nothing_to_the_labels_read(pool: PgPool) {
+    // Off (written first, so the labels index gives them first): 4,000 MusicBrainz cards with
+    // the label. On: 20 Wikidata cards with it.
+    let off: Vec<Card> = (0..4000)
+        .map(|n| {
+            let mut c = card(
+                10_000 + n,
+                &format!("Off {n}"),
+                "MusicRecording",
+                &["common-tag"],
+                None,
+                0.9,
+            );
+            c.source_id = format!("recording/{n}");
+            c
+        })
+        .collect();
+    import(&pool, Catalogue::Musicbrainz, &off).await;
+    let on: Vec<Card> = (0..20)
+        .map(|n| {
+            card(
+                n + 1,
+                &format!("On {n}"),
+                "Person",
+                &["common-tag"],
+                None,
+                0.01,
+            )
+        })
+        .collect();
+    import(&pool, Catalogue::Wikidata, &on).await;
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut config = Config::default();
+    config.catalogues.musicbrainz.enabled = false;
+    config.search.text_candidates = 20;
+    let app = app(&pool, config);
+    api::record_card_read_plans();
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    let read = card_heap_rows_read(&api::card_read_plans());
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("On")), "{page:?}");
+    assert!(read <= 1_200, "{read} card rows read from the table");
+}

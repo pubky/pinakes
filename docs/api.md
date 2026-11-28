@@ -1265,14 +1265,15 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   cards, those read first); with `near` or `bbox` also the best known of the twice
   `limits.search_text_candidates` cards nearest to the circle's centre (or to each box's centre)
   inside it; and with `type`, `host` or `exclude_type` also the best known of each type (or host)
-  let in that are inside it. With `exclude_type`, or with more `type` values than 64 type
-  branches across the catalogues, a catalogue none of whose cards' types the filter lets in is
-  not read at all (`exclude_type=Thing` lists no card), and the others are read by the types let
+  let in that are inside it. With `exclude_type`, or when the types asked, each with its
+  subtypes, times the catalogues that are on are more than 64, a catalogue none of whose cards'
+  types the filter lets in is not read at all (`exclude_type=Thing` lists no card), and the others are read by the types let
   in; a few `type` values are read type by type in every catalogue that is on. With `type` or `exclude_type`, each catalogue's
   best known of each type let in (a host is checked on them); with `host` alone, each
   catalogue's best known of each host. A read whose index does not serve every filter looks at
   no more than 20 times `limits.search_text_candidates` cards in all (at least twice it per
-  type, host or catalogue), the best known first, or the nearest first near a place: a card past
+  type, host or catalogue, but for the reads by type or host that follow the others, which run
+  only while the page is not full and share it), the best known first, or the nearest first near a place: a card past
   them is not listed. So a large area or a large catalogue reads a bounded number of cards. A
   catalogue switched off but not dropped costs these reads nothing. These reads take a turn of
   the text searches and stop with its budget, as a text search does ([Text search](#text-search)):
