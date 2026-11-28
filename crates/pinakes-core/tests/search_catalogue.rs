@@ -2208,11 +2208,13 @@ async fn a_rare_label_with_excluded_types_reads_a_bounded_number_of_cards(pool: 
 }
 
 /// The cards of a catalogue switched off but not dropped count toward the labels index's read
-/// like any other, so they never make it read every card holding the label.
+/// like any other card, so they never make it read every card holding the label: here they use
+/// up the read, and the label's cards of a catalogue that is on are listed again once the
+/// catalogue switched off is dropped.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_catalogue_switched_off_adds_nothing_to_the_labels_read(pool: PgPool) {
     // Off (written first, so the labels index gives them first): 4,000 MusicBrainz cards with
-    // the label. On: 20 Wikidata cards with it.
+    // the label.
     let off: Vec<Card> = (0..4000)
         .map(|n| {
             let mut c = card(
@@ -2228,18 +2230,23 @@ async fn a_catalogue_switched_off_adds_nothing_to_the_labels_read(pool: PgPool) 
         })
         .collect();
     import(&pool, Catalogue::Musicbrainz, &off).await;
-    let on: Vec<Card> = (0..20)
-        .map(|n| {
-            card(
-                n + 1,
-                &format!("On {n}"),
-                "Person",
-                &["common-tag"],
-                None,
-                0.01,
-            )
-        })
+    // On: 20,000 well known Wikidata cards without the label (far more than the best known the
+    // search reads first, and more than the label's holders, so a read of the catalogues that
+    // are on through their own index costs more than the label's), then 20 little-known ones
+    // with it: only the labels read finds them.
+    let mut on: Vec<Card> = (0..20_000)
+        .map(|n| card(100_000 + n, &format!("Known {n}"), "Person", &[], None, 0.5))
         .collect();
+    on.extend((0..20).map(|n| {
+        card(
+            n + 1,
+            &format!("On {n}"),
+            "Person",
+            &["common-tag"],
+            None,
+            0.01,
+        )
+    }));
     import(&pool, Catalogue::Wikidata, &on).await;
     sqlx::query("ANALYZE catalogue_card")
         .execute(&pool)
@@ -2252,7 +2259,19 @@ async fn a_catalogue_switched_off_adds_nothing_to_the_labels_read(pool: PgPool) 
     api::record_card_read_plans();
     let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
     let read = card_heap_rows_read(&api::card_read_plans());
-    assert_eq!(page.len(), 20, "{page:?}");
+    // The switched-off catalogue's cards are never listed, and its 4,000 holders are not read.
     assert!(page.iter().all(|n| n.starts_with("On")), "{page:?}");
     assert!(read <= 1_200, "{read} card rows read from the table");
+    // Dropped, they no longer count: the labels read finds the 20.
+    sqlx::query("DELETE FROM catalogue_card WHERE catalogue='musicbrainz'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE catalogue_card")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let page = names(&common::get(&app, "/v1/search?tags=common-tag&limit=20").await);
+    assert_eq!(page.len(), 20, "{page:?}");
+    assert!(page.iter().all(|n| n.starts_with("On")), "{page:?}");
 }

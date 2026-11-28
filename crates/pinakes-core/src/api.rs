@@ -2849,7 +2849,9 @@ fn each_by_fame(
 /// Without text: the best known catalogue cards (by `fame`; by distance with `sort=distance`)
 /// the filters let in, at most `cap`. Each read stops after a bounded number of rows, and reads
 /// catalogue by catalogue, so the cards of a catalogue switched off but not dropped are never
-/// read:
+/// read, but for the labels index's read: there that catalogue's cards holding the labels count
+/// toward its [`CARD_SCAN`] times `cap` like any other (so dropping the catalogue, `pinakesd
+/// catalogue drop`, gives a rare label's cards that room back):
 /// - With excluded types, or more types than one read has branches across the catalogues: first
 ///   the types each catalogue's cards have (one probe of the `(catalogue, type, fame, id)` index
 ///   per type, [`catalogue_types`]); a catalogue none of whose types the filters let in is not

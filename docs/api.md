@@ -1275,7 +1275,10 @@ A catalogue card nobody referenced is a search row like any other, of a catalogu
   type, host or catalogue, but for the reads by type or host that follow the others, which run
   only while the page is not full and share it), the best known first, or the nearest first near a place: a card past
   them is not listed. So a large area or a large catalogue reads a bounded number of cards. A
-  catalogue switched off but not dropped costs these reads nothing. These reads take a turn of
+  catalogue switched off but not dropped costs these reads nothing, but for the labels index's:
+  its cards holding the labels count toward those 20 times `limits.search_text_candidates` like
+  any other, so a rare label's cards in the catalogues that are on may be listed only once it is
+  dropped (`pinakesd catalogue drop`). These reads take a turn of
   the text searches and stop with its budget, as a text search does ([Text search](#text-search)):
   with no turn in time or past the budget the search answers `503` with `Retry-After: 1`;
 - a catalogue switched off leaves every search at once.
