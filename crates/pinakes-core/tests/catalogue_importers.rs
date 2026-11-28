@@ -2679,8 +2679,8 @@ async fn a_tranco_list_with_no_site_is_refused(pool: PgPool) {
 }
 
 /// A site whose card a run's reads remove past a tenth of the cards and past ten (under the floor
-/// of 100) is read again within a week, so a blanket non-page answer costs a small instance its
-/// cards for a week at most; one removed within them waits for the usual re-read.
+/// of 100) is read again once within a week, so after a blanket non-page answer its card can come
+/// back at that read; one removed within them waits for the usual re-read.
 #[sqlx::test(migrations = "../../migrations")]
 async fn tranco_sites_removed_past_a_tenth_are_read_again_within_a_week(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();

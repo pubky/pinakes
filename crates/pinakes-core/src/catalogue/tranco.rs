@@ -63,9 +63,10 @@ pub const SITES_CAP: usize = 2_000_000;
 /// The sites whose cards go past the tenth are read again within [`REMOVED_REREAD`].
 pub const READ_REMOVAL_FLOOR: u64 = 100;
 /// How soon a site is read again whose card a run's reads removed past a tenth of the cards and
-/// past ten (`diff::too_many`), which only [`READ_REMOVAL_FLOOR`] let through: a blanket non-page
-/// answer (a captive portal, a blanket 403) costs a
-/// small instance those cards for a week at most, not until the next re-read.
+/// past ten (`diff::too_many`), which only [`READ_REMOVAL_FLOOR`] let through: after a blanket
+/// non-page answer (a captive portal, a blanket 403) the cards come back at that read once the
+/// sites answer again. It is one read: a site that still fails then has no card, and waits the
+/// usual [`REREAD`].
 pub const REMOVED_REREAD: Duration = Duration::from_secs(7 * 86400);
 /// Reads that failed in a row (no answer, a server error) before the card goes.
 const FAILURES: i32 = 3;
@@ -466,19 +467,22 @@ impl Tranco {
             .bind(&gone)
             .fetch_all(&pool)
             .await?;
-            job.remove(&gone, json!({"phase": "reading"})).await?;
             // Past what an update may remove (a tenth and ten, `diff::too_many`), which only the
-            // floor let through, the sites that lost their card are read again within a week: the
-            // cards come back once the reads answer again.
+            // floor lets through, the sites about to lose their card are read again once within a
+            // week: their cards come back if they answer again. Set before the removal, so a run
+            // cut off between the two never leaves them at the usual re-read.
             let report = job.report();
             let held = job.state().cards.max(0) as u64 + report.inserted;
-            if !carded.is_empty() && super::diff::too_many(report.removed, held) {
+            if !carded.is_empty()
+                && super::diff::too_many(report.removed + carded.len() as u64, held)
+            {
                 sqlx::query("UPDATE catalogue_site SET due_at=least(due_at,now()+make_interval(secs=>$2)) WHERE host=ANY($1)")
                     .bind(&carded)
                     .bind(REMOVED_REREAD.as_secs_f64())
                     .execute(&pool)
                     .await?;
             }
+            job.remove(&gone, json!({"phase": "reading"})).await?;
         }
         if !deferred.is_empty() {
             sqlx::query(

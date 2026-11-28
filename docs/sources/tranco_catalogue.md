@@ -99,9 +99,9 @@ names no site (an empty or garbage body) is refused (`empty`) in every run, a fu
 for too: nothing moves. A run never removes more than a tenth of the cards: a list that would
 leave more than that (and more than ten) off it, or a round of homepage reads that would take the
 run's removals past it (and past 100 cards: a small instance's sites that stopped answering go,
-each read again within a week once the run's removals pass a tenth and ten, so a blanket
-non-page answer costs those cards a week at most; every read failing on a larger catalogue does
-not), is refused (`refused`, nothing of the list's removals or of that round written, its sites
+each read again once within a week when the run's removals pass a tenth and ten: after a blanket
+non-page answer their cards come back at that read, and a site that still fails then waits the
+usual 90 days; every read failing on a larger catalogue does not), is refused (`refused`, nothing of the list's removals or of that round written, its sites
 due again,
 [a refused dump or file](../operations.md#a-refused-dump-or-file)), and nothing is read until the
 next day's list, or `pinakesd catalogue clear-refusal tranco` (which checks again). A full import
