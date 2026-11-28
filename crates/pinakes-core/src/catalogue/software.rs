@@ -236,7 +236,8 @@ impl Software {
                 };
                 let (newest, _) = self.version(registry).await?;
                 if version.as_str() == Some(newest.as_str()) {
-                    return Err(job.still_refused(format!("the {name} file {newest}")));
+                    let shown = run::shown_version(&json!(newest));
+                    return Err(job.still_refused(format!("the {name} file {shown}")));
                 }
             }
         }

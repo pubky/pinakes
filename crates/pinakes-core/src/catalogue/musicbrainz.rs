@@ -367,7 +367,8 @@ impl MusicBrainz {
         // `LATEST` may name another dump than the one the run was planned on: a refused one is
         // read again only when a full import is asked for.
         if resumed.is_none() && job.refused_before(&serde_json::json!(version)) {
-            return Err(job.still_refused(format!("dump {version}")));
+            let shown = super::run::shown_version(&serde_json::json!(version));
+            return Err(job.still_refused(format!("dump {shown}")));
         }
         // A run cut off whose dump the mirror no longer has, and that must read it again, starts
         // over on the newest dump.
@@ -2160,7 +2161,8 @@ impl Importer for MusicBrainz {
             let latest = self.latest().await?;
             if self.refused(job.state(), &latest) {
                 // Only a run by hand asks for it (the task's plan waits): it reads nothing.
-                return Err(job.still_refused(format!("dump {latest}")));
+                let shown = super::run::shown_version(&serde_json::json!(latest));
+                return Err(job.still_refused(format!("dump {shown}")));
             }
             if position_limit(job.state()) != job.limit() {
                 return Ok(UpdateEnd::NeedsImport("the limit changed"));

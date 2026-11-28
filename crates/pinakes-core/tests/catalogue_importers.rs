@@ -487,20 +487,38 @@ async fn a_software_import_that_reads_no_card_fails(pool: PgPool) {
         gzip(
             b"<?xml version=\"1.0\"?><components version=\"0.16\" origin=\"flathub\"></components>",
         ),
-        "f2",
+        "f2 CANARY-etag-text",
     );
     let failed = run::run_once(importer.clone(), &ctx, Run::Import, |_| {})
         .await
         .unwrap_err();
     assert!(
-        failed.to_string().contains("empty (flathub file"),
+        failed.to_string().contains("empty (flathub file #")
+            && !failed.to_string().contains("CANARY"),
         "{failed}"
     );
     assert_eq!(count(&pool, "software", Some("flathub")).await, 3);
     // Refused: the file is named in the position, with the others' versions.
     let position = state_of(&pool, Catalogue::Software).await.position.unwrap();
-    assert_eq!(position["refused"]["flathub"], "\"f2\"", "{position}");
+    assert_eq!(
+        position["refused"]["flathub"], "\"f2 CANARY-etag-text\"",
+        "{position}"
+    );
     assert!(position.get("crates.io").is_some(), "{position}");
+    // A full import of the importer's own (none finished, as the task plans one) finds the refused
+    // file still the newest and ends at once: its text, which the CLI and the log show, names the
+    // file by a digest, never by the server's ETag.
+    sqlx::query("UPDATE catalogue_state SET last_import_at=NULL,last_update_at=NULL WHERE catalogue='software'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let again = run::step(&*importer, &ctx).await.unwrap_err();
+    assert!(again.is::<run::StillRefused>(), "{again}");
+    let text = again.to_string();
+    assert!(
+        text.contains("the flathub file #") && !text.contains("CANARY"),
+        "{text}"
+    );
 }
 
 // --- Podcast Index -------------------------------------------------------------------------------
